@@ -767,6 +767,9 @@ async function compile(L, opts = {}, emit = () => {}) {
 		// (the executor's exact end search from a near start, when it ran: tier 0b)
 		const nearT = Array.isArray(res.tiers) ? res.tiers.find((x) => x && x.tier === 'near') : null;
 		if (nearT) rec.near = { ok: nearT.ok, runs: nearT.runs, ms: nearT.ms, nearest: nearT.nearest };
+		// (the move solver's tier, when it ran: EEAT_MSOLVE=1)
+		const msT = Array.isArray(res.tiers) ? res.tiers.find((x) => x && x.tier === 'msolve') : null;
+		if (msT) rec.msolve = { found: msT.found, legs: msT.legs, chains: msT.chains, expanded: msT.expanded, rejected: msT.rejected, ms: msT.ms, error: msT.error || undefined };
 		// (EEAT_STEP_CLOSEST=1: the closest state's inputs too, for the near-miss diagnoses)
 		if (fail && fail.closest && fail.closest.masks && process.env.EEAT_STEP_CLOSEST === '1') rec.closest.inputs = typeof fail.closest.masks === 'string' ? fail.closest.masks : T.strOf(fail.closest.masks);
 		if (fail && Array.isArray(fail.blockedBy) && fail.blockedBy.length) rec.blockedBy = fail.blockedBy.slice(0, 4);

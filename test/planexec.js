@@ -11,7 +11,7 @@
 //   --truth (EEAT_TRUTH_ROOT: the main checkout or a copy on a box) adds:
 //   legs   T-EXEC-LEGS: the known routes cut at their trigger events, reach() from the route's exact state at event k to
 //          event k + 1's trigger (budget --budget ms): success % of the legs of <= 300 route ticks, the ticks ratio to the
-//          route's own leg, proven %, the tiers, the worst cases (--limit routes; --par processes)
+//          route's own leg, proven %, the tiers, the worst cases (--limit routes; --par processes; --minLegTicks / --maxLegTicks: the route legs measured, default 1-300)
 //   polish T-POLISH: 10 AutoTAS routes (god runs' best.eetas): never slower, every output finishes, the ticks saved
 //   chain  T-EXEC-CHAIN (informational, only with --only=chain): the executor alone compiling known routes from their
 //          waypoints, each leg from the leg before's arrivals, then the polish (--chainN routes, --polishMs, --out rows)
@@ -309,7 +309,7 @@ async function legsOfRoute(e, budget, maxLegs) {
 		const legTicks = o.tick - prevTick;
 		const startMasks = tr.masks.subarray(0, prevTick);
 		prevTick = o.tick;
-		if (legTicks > 300 || legTicks < 1) { out.push({ name: e.name, k, tick: o.tick, legTicks, skipped: true }); continue; }
+		if (legTicks > (+args.maxLegTicks || 300) || legTicks < (+args.minLegTicks || 1)) { out.push({ name: e.name, k, tick: o.tick, legTicks, skipped: true }); continue; }
 		// (a key running out is the clock's, no trigger: no waypoint a plan would give; the next leg starts there)
 		if (/^key\d$/.test(o.feat) && !o.value) { out.push({ name: e.name, k, tick: o.tick, legTicks, skipped: true, why: 'clock (a key ran out)' }); continue; }
 		const wp = o.feat === 'silver' ? { kind: 'trophy', label: 'trophy' } : { kind: 'trigger', tiles: triggerTiles(L, o.tile, o.feat), expect: { feat: o.feat, value: o.value }, label: `${o.feat}=${o.value}` };
@@ -345,7 +345,7 @@ async function legsTruth() {
 		const runs = [];
 		for (let i = 0; i < par; i++) {
 			runs.push(new Promise((resolve) => {
-				const p = spawn(process.execPath, [__filename, '--only=legs', '--truth', `--limit=${limit}`, `--budget=${budget}`, `--shard=${i}/${par}`, '--json', `--maxLegs=${args.maxLegs || 40}`,
+				const p = spawn(process.execPath, [__filename, '--only=legs', '--truth', `--limit=${limit}`, `--budget=${budget}`, `--shard=${i}/${par}`, '--json', `--maxLegs=${args.maxLegs || 40}`, `--maxLegTicks=${args.maxLegTicks || 300}`, `--minLegTicks=${args.minLegTicks || 1}`,
 					...(args.parts ? [`--parts=${args.parts}`] : []), ...(args.noPrims ? ['--noPrims'] : [])], { stdio: ['ignore', 'pipe', 'inherit'] });
 				let s = '';
 				p.stdout.on('data', (d) => { s += d; });
@@ -370,7 +370,7 @@ async function legsTruth() {
 	const proven = okL.filter((x) => x.proven).length;
 	const routes = new Set(rows.map((x) => x.name)).size;
 	const succ = legs.length ? okL.length / legs.length : 0;
-	console.log(`T-EXEC-LEGS ${routes} routes, ${legs.length} legs <= 300 ticks (${rows.length - legs.length} skipped): success ${(succ * 100).toFixed(1)}%, ` +
+	console.log(`T-EXEC-LEGS ${routes} routes, ${legs.length} legs of ${+args.minLegTicks || 1}-${+args.maxLegTicks || 300} ticks (${rows.length - legs.length} skipped): success ${(succ * 100).toFixed(1)}%, ` +
 		`ticks / the route's median ${med.toFixed(3)}, <= 1.0 ${(le1 / Math.max(1, okL.length) * 100).toFixed(1)}%, proven ${(proven / Math.max(1, okL.length) * 100).toFixed(1)}%, tiers ${JSON.stringify(byTool)}`);
 	const worst = legs.filter((x) => !x.ok).sort((a, b) => a.legTicks - b.legTicks).slice(0, 12);
 	for (const w of worst) console.log(`  fail ${w.name} leg ${w.k} (${w.feat}, ${w.legTicks} route ticks at ${w.tick}): ${w.why} ${w.ms} ms`);

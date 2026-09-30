@@ -1077,7 +1077,9 @@ function createSolver(L, opts = {}) {
 			for (const x of heap) x.f = x.g + W8 * x.h;
 			for (let i = (heap.length >> 1) - 1; i >= 0; i--) down(i);
 		};
-		const rf = o.reach === false ? null : reachFieldOf(tg.tiles);
+		// (o.field: the caller's own ordering field to the target (the compiler's executor passes its goal field of the level as
+		// the doors stand, memoized there): the same use as the reach field here, no build)
+		const rf = o.field !== undefined ? o.field : o.reach === false ? null : reachFieldOf(tg.tiles);
 		const KAPPA = o.kappa || 16 / 6.776552880470027;
 		const hOf = () => {
 			let b = 0;
@@ -1112,7 +1114,7 @@ function createSolver(L, opts = {}) {
 			sim.restore(n.snap);
 			const plainNode = !!plainStart(sim);
 			if (n.g > 0 || o.rootLeg !== false) {
-				const r = leg(n.snap, target, { Tmax: lim, K: o.K, chain: false, fields: !plainNode, coupled: !plainNode && o.coupledDirect !== false, nodes: o.legNodes || 40000, coupledTicks: o.coupledTicks || 300000 });
+				const r = leg(n.snap, target, { Tmax: lim, K: o.K, chain: false, fields: !plainNode, coupled: !plainNode && o.coupledDirect !== false, nodes: o.legNodes || 40000, coupledTicks: o.coupledTicks || 300000, fieldMs: o.fieldMs });
 				legs++;
 				if (r.ok && (!best || n.g + r.T < best.T)) { if (!best) firstAt = Date.now() - t0; best = { T: n.g + r.T, masks: cat(n.masks, r.masks) }; }
 			}

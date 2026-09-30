@@ -64,6 +64,23 @@ const WORKER_KEEP = process.env.EEAT_WORKER_KEEP !== '0';
 // the primitives tier's share of a reach window (rung 0 / rung 1 on; env: measurements)
 const PRIMS_SHARE = process.env.EEAT_PRIMS_SHARE !== undefined ? +process.env.EEAT_PRIMS_SHARE : 0.5;
 const PRIMS_SHARE_HI = process.env.EEAT_PRIMS_SHARE_HI !== undefined ? +process.env.EEAT_PRIMS_SHARE_HI : 0.2;
+// ---- THE MOVE SOLVER TIER (tier M, OPT-IN EEAT_MSOLVE=1; the compiler side of the MATH program's Wire): the leg COMPUTED
+// by n4-math's src/plan/msolve.js (docs/ee_math.md section 4: the exact per-axis recurrences, the landing ticks in closed
+// form, the x axis by branch and bound on the hold tables, every candidate replayed by the engine) instead of searched:
+// from each live start the direct leg (S.leg: plain -> field -> coupled, short horizon), then the chain (S.chain: A* over
+// support states with solved legs as edges, ordered by this call's goal field (the level as the doors stand, the walls)),
+// the target = the waypoint's tiles (a trigger's tiles, a skeleton sub-level set, the trophies). Every leg it returns is
+// replayed HERE from the start's state by this executor's own goal test (X.goalAt: the Expect, the touch that reads the
+// tile a tick after the centre reaches it), so a leg is the engine's; a leg that does not meet the goal is dropped. No
+// proof and no claim from this tier (its failure is the other tiers' to settle). Its share of the window MSOLVE_SHARE
+// (env: measurements); off = the executor byte for byte as before.
+const MSOLVE_ON = () => process.env.EEAT_MSOLVE === '1';
+const MSOLVE_SHARE = process.env.EEAT_MSOLVE_SHARE !== undefined ? +process.env.EEAT_MSOLVE_SHARE : 0.2;        // the direct legs' cap
+const MSOLVE_CHAIN_SHARE = process.env.EEAT_MSOLVE_CHAIN !== undefined ? +process.env.EEAT_MSOLVE_CHAIN : 0.3;   // the chains' share, after the primitives
+const MSOLVE_LEGT = +process.env.EEAT_MSOLVE_LEGT || 150;       // the direct leg's horizon (ticks)
+const MSOLVE_TMAX = +process.env.EEAT_MSOLVE_TMAX || 4000;      // the chain's horizon (ticks)
+const MSOLVE_STARTS = +process.env.EEAT_MSOLVE_STARTS || 3;     // the live starts it computes from (the earliest first)
+const MSOLVE_TAIL = 3;                                          // ticks played on past a solved leg for the goal's touch
 const REPLAY_CACHE = 64;
 const K_DEFAULT = 4;
 // the best-first search's cells after one that ran out of open states: finer vy, then everything 2x, then 4x
@@ -241,6 +258,9 @@ function makeCore(L, co) {
 	}
 	/** a field build expected to fit the time left (an unknown level: yes) */
 	const fieldFits = (left) => fieldMs.n === 0 || fieldMs.perTile * N < 0.4 * left;
+	/** the move solver of this thread (n4-math msolve.js), made on first use */
+	let msol = null;
+	function msolver() { return msol || (msol = require('./msolve.js').createSolver(L, {})); }
 	function steerA() {
 		if (analysis) return analysis;
 		try { analysis = require('../steer.js').analyze(L); } catch (e) { analysis = { cls: new Uint8Array(N), gateFeat: [] }; }
@@ -388,6 +408,81 @@ function makeCore(L, co) {
 				if (r) return out(r);
 			}
 		}
+		// -------- tier M: the move solver (OPT-IN EEAT_MSOLVE=1; the header's MSOLVE_*): the DIRECT legs here, before the
+		// primitives (a solved move costs 20-500 ms); the CHAINS after them (below), only from rung 1 on and only when the
+		// primitives found nothing (a chain costs 20-60 ms an expansion: at 35% of every window before the primitives the lane's
+		// levels lost first legs, gain sum 140 vs the base's 153 / 139)
+		const msolveTier = (phase, mEnd) => {
+			const tM = Date.now();
+			const mst = { tier: 'msolve', phase, legs: 0, chains: 0, found: 0, rejected: 0, expanded: 0, error: null };
+			try {
+				const S = msolver();
+				const target = { tiles: Array.from(goal.tiles), cls: 'any' };
+				const order = [];
+				starts.forEach((s, i) => { if (!s.dead) order.push(i); });
+				order.sort((a, b) => starts[a].tick - starts[b].tick);
+				// (rung r: the r + 1 earliest starts, at most MSOLVE_STARTS: a failed direct leg costs 100-400 ms, the whole share of
+				// a 1.5-s rung-0 window)
+				const use = order.slice(0, Math.min(MSOLVE_STARTS, rung + 1));
+				const cands = [];
+				const horizon = beforeTick >= 0 ? beforeTick : Infinity;
+				for (let q = 0; q < use.length && Date.now() < mEnd - 5 && !stopFn(); q++) {
+					const i = use[q], s = starts[i];
+					const tmax = Math.max(1, Math.min(MSOLVE_TMAX, horizon - s.tick));
+					let r = null;
+					if (phase === 'direct') {
+						r = S.leg(s.snap, target, { Tmax: Math.min(MSOLVE_LEGT, tmax), chain: false, nodes: 100000, fieldMs: 100, coupledTicks: 300000, prove: true, proveMs: 30 });
+						mst.legs++;
+					} else if (tmax > 40) {
+						// (the chain's clock: this start's share of what is left; ordered by this call's goal field)
+						const ms = Math.max(5, (mEnd - Date.now()) / (use.length - q));
+						const f = fields.get(s.disc);
+						r = S.chain(s.snap, target, { ms, Tmax: tmax, legT: 80, fieldMs: 100, field: f ? f : undefined });
+						mst.chains++;
+						mst.expanded += (r && r.expanded) || 0;
+					}
+					if (!(r && r.ok && r.masks && r.masks.length)) continue;
+					// (the leg replayed here by the executor's own goal test, a few ticks past its end for the touch; its landing
+					// hop too when the solver verified one: the same leg with the jump on its last tick, another arrival state)
+					for (const ms0 of r.hop ? [r.masks, r.hop] : [r.masks]) {
+						sim.restore(s.snap);
+						const n = ms0.length;
+						const tail = [];
+						let hit = -1;
+						for (let t = 0; t < n + MSOLVE_TAIL; t++) {
+							const m = t < n ? ms0[t] : (ms0[n - 1] & 30);
+							E.applyMask(inp, m); sim.tick(inp); tail.push(m);
+							sims++;
+							if (sim.is_dead) break;
+							if (X.goalAt(goal, sim, s.tick + t + 1, beforeTick)) { hit = t + 1; break; }
+						}
+						if (hit < 0) { mst.rejected++; continue; }
+						mst.found++;
+						// (PROVEN when the solver proved its T (no input sequence puts the centre in the target's tiles sooner from this
+						// state: its certified plain bound or the event-graph bound, docs/ee_math.md 3.2 / 5) and the goal held at that
+						// very tick: the goal needs the centre there at t or t - 1 (the touch), and the Expect only adds conditions)
+						const proven = !!(r.proven && hit === r.T && ms0.length === r.T);
+						if (proven) mst.proven = (mst.proven | 0) + 1;
+						cands.push({ start: i, tail: Uint8Array.from(tail.slice(0, hit)), depth: s.tick + hit - t0, proven });
+					}
+				}
+				mst.ms = Date.now() - tM;
+				tiers.push(mst);
+				if (cands.length) {
+					// (the leg's claim is its own start's: lb and proven per leg; the result's lb over every start stays 0)
+					cands.sort((a, b) => a.depth - b.depth);
+					const c0 = cands[0];
+					const legsM = [{ start: c0.start, ticks: c0.tail.length, lb: c0.proven ? c0.tail.length : 0, proven: !!c0.proven, tool: 'msolve' }];
+					const rM = finishFound(cands, 'msolve', legsM, 0);
+					if (rM) { delete rM.arrivalsRaw; return rM; }
+				}
+			} catch (e) { mst.error = String(e && e.message || e); mst.ms = Date.now() - tM; tiers.push(mst); }
+			return null;
+		};
+		if (MSOLVE_ON() && !allowDeath && Date.now() < wEnd - 20) {
+			const rM = msolveTier('direct', Date.now() + MSOLVE_SHARE * (wEnd - Date.now()));
+			if (rM) return out(rM);
+		}
 		// -------- tier 1: the primitives
 		if (co.prims && typeof co.prims.route === 'function' && Date.now() < wEnd) {
 			const t1 = Date.now();
@@ -422,6 +517,11 @@ function makeCore(L, co) {
 					if (d >= 0 && (closest.dist < 0 || d < closest.dist)) closest = { dist: d, masks: m };
 				}
 			} catch (e) { tiers.push({ tier: 'prims', error: String(e && e.message || e) }); }
+		}
+		// -------- tier M, the chains (OPT-IN EEAT_MSOLVE=1, from rung 1 on: the primitives found nothing)
+		if (MSOLVE_ON() && !allowDeath && rung >= 1 && Date.now() < wEnd - 50) {
+			const rM = msolveTier('chain', Date.now() + MSOLVE_CHAIN_SHARE * (wEnd - Date.now()));
+			if (rM) return out(rM);
 		}
 		// -------- tier 2: the exact search, short (iterative deepening)
 		const cap = rung <= 0 ? 150000 : rung === 1 ? 250000 : 300000;
