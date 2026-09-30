@@ -337,6 +337,11 @@ async function compile(L, opts = {}, emit = () => {}) {
 	// ---- anchors
 	const anchors = new Map();   // S.key -> anchor
 	let anchorSeq = 0, lastProgress = Date.now(), progressVer = factsVer(facts), steps = 0, okSteps = 0, failSteps = 0, picksN = 0, bnbPlans = 0, bnbArrivals = 0, lateArrivals = 0;
+	// (the relay starts: per (anchor id, edge) the nearest state its failed rungs reached, a start of its next rung;
+	// EEAT_RELAY=0: off)
+	const RELAY = process.env.EEAT_RELAY !== '0', RELAY_GAIN = 1;
+	const relays = new Map(), relayFloor = new Map();
+	let relayRuns = 0, relaySet = 0, relayDrop = 0;
 	const runMinOf = (A) => A.arrivals.reduce((m, a) => Math.min(m, a.run > 0 ? a.run : 0), Infinity);
 	const startedOf = (A) => A.arrivals.every((a) => a.run > 0);
 	const gainOf = (S, parent) => {
@@ -663,6 +668,12 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const budget = budgetOf(step.rung);
 		const wp = waypointOf(step, A);
 		const starts = A.arrivals.slice();
+		// (the relay start: this (anchor, edge)'s nearest state from its failed rungs, a start too: the next rung goes on from
+		// the frontier the last one reached instead of only from the anchor; before a route only: no bound to keep)
+		const rk = `${A.id}|${ek}`;
+		const rl = RELAY ? relays.get(rk) : null;
+		let rlUsed = false;
+		if (rl && !Number.isFinite(runBound()) && rl.arrival.masks.length < tickBound && !starts.some((s) => s.hash === rl.arrival.hash)) { starts.push(rl.arrival); relayRuns++; rlUsed = true; }
 		const t1 = Date.now();
 		steps++;
 		const verBefore = factsVer(facts), anchorsBefore = anchors.size;
@@ -695,6 +706,27 @@ async function compile(L, opts = {}, emit = () => {}) {
 		learnFrom(step, res, A);
 		const ms = Date.now() - t1;
 		const fail = res.ok ? null : res.fail || null;
+		// (a relay that got its rung no nearer by RELAY_GAIN tiles is dropped (a false near: the next rung from the anchor
+		// alone), and a new one must beat it by as much)
+		if (RELAY && rlUsed && !res.ok) {
+			const nd = fail && fail.closest && fail.closest.dist >= 0 ? fail.closest.dist : Infinity;
+			if (!(nd < rl.dist - RELAY_GAIN)) { relays.delete(rk); relayFloor.set(rk, rl.dist - RELAY_GAIN); relayDrop++; }
+		}
+		if (RELAY && fail && fail.closest && fail.closest.masks && !fail.closest.dead && fail.closest.dist >= 0 && !Number.isFinite(runBound())) {
+			const prev = relays.get(rk);
+			const floor = relayFloor.has(rk) ? relayFloor.get(rk) : Infinity;
+			if ((!prev || fail.closest.dist < prev.dist) && fail.closest.dist < floor) {
+				const m = fail.closest.masks instanceof Uint8Array ? fail.closest.masks : T.masksOf(fail.closest.masks);
+				const r = replay(m, null, false);
+				const h = r.sim.stateHash();
+				if (r.dead < 0 && r.finished < 0 && !starts.some((s) => s.hash === h)) {
+					const { s } = startOf(starts, m, -1, {});
+					const leg = addLeg({ label: `relay ${labelOf(step)}`, fromTick: s ? s.tick : 0, ticks: m.length - (s ? s.tick : 0), lb: null, proven: false, tool: 'relay', prev: s && s.leg ? s.leg : null });
+					relays.set(rk, { arrival: Object.assign(T.arrivalOf(L, r.sim, m, RM), { run: r.run, leg, relay: true }), dist: fail.closest.dist });
+					relaySet++;
+				}
+			}
+		}
 		const rec = { ev: 'step', n: steps, anchor: A.id, label: labelOf(step), edge: step.edge, nodeClass: step.nodeClass, rung: step.rung, epoch, tool: res.tool || null, ok: !!res.ok, ms, budgetMs: Math.round(budget.ms),
 			why: res.ok ? '' : (fail && fail.why) || '', arrivals: arr.length, news, routes: routes.length };
 		if (fail && fail.closest) rec.closest = { tile: fail.closest.tile, dist: fail.closest.dist };
@@ -1078,7 +1110,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		bugs, deepenings, stalls, bnbPlans, bnbArrivals, layers: Math.max(0, ...[...anchors.values()].map((A) => A.firstTick)), ...(why ? { why } : {}) });
 	saveFiles();
 	return { ok: !!best, masks: best ? best.masks : null, route: best ? best.masks : null, runTicks: best ? best.runTicks : null, ticks: best ? best.ticks : null, deaths: best ? best.deaths : null, chance: best ? best.chance : null,
-		lb: LB, lbComplete, lbProof, gap: best ? gapOf(best.runTicks) : null, legs: best ? best.legs : [], stages, known, why, end, anchors: anchors.size, steps, okSteps, bugs, deepenings, stalls, bnbPlans, bnbArrivals };
+		lb: LB, lbComplete, lbProof, gap: best ? gapOf(best.runTicks) : null, legs: best ? best.legs : [], stages, known, why, end, anchors: anchors.size, steps, okSteps, bugs, deepenings, stalls, bnbPlans, bnbArrivals, relayRuns, relaySet, relayDrop };
 }
 
 /** run(L, opts, emit): the compile loop as a Find a route strategy (src/plan.js): 300 s by default, the source events'
