@@ -34,6 +34,36 @@ function parse(argv) {
 	}
 	return a;
 }
+// The hard watchdog (a worker thread: it runs while this thread is blocked in a part's synchronous call). Past its
+// limit it prints why (the budget, the last stage and step this thread passed it) and ends the process (exit 1).
+const WATCHDOG_MIN_S = 30, WATCHDOG_F = 0.5;
+// (the watchdog thread's code: its own isolate, so it runs while the compile's thread is blocked)
+function watchdogThread() {
+	const { parentPort, workerData } = require('worker_threads');
+	const fs = require('fs');
+	let last = null;
+	parentPort.on('message', (m) => { if (m && m.stop) process.exit(0); else last = m; });
+	setTimeout(() => {
+		const at = !last ? 'before the first stage' : last.ev === 'stage' ? `after the stage ${last.name}`
+			: `in the moves (the last ${last.ev} at ${last.sec || 0} s${last.label ? `: ${last.label}` : ''})`;
+		const why = `the watchdog: the compile passed its hard limit of ${Math.round(workerData.ms / 1000)} s, blocked ${at} (a part's call that ignores its budget); the process ends`;
+		try { fs.writeSync(1, workerData.json ? JSON.stringify({ ev: 'error', error: why, watchdog: true }) + '\n' : `error    ${why}\n`); } catch (e) { /* closed */ }
+		try { process.kill(process.pid, 'SIGKILL'); } catch (e) { process.exit(1); }
+	}, workerData.ms);
+}
+function watchdog(ms, json) {
+	let W = null;
+	try {
+		const { Worker } = require('worker_threads');
+		W = new Worker(`(${watchdogThread.toString()})();`, { eval: true, workerData: { ms, json } });
+		W.unref();
+		W.on('error', () => { W = null; });
+	} catch (e) { W = null; }
+	return {
+		note(ev) { if (W) try { W.postMessage({ ev: ev.ev, name: ev.name, sec: ev.sec, label: ev.label || (ev.step && ev.step.label) || '' }); } catch (e) { /* gone */ } },
+		stop() { if (W) { try { W.postMessage({ stop: true }); } catch (e) { /* gone */ } try { W.terminate(); } catch (e) { /* gone */ } W = null; } },
+	};
+}
 const num = (n) => (Number.isFinite(n) ? Math.round(n).toLocaleString('en-US') : String(n));
 const safe = (s) => String(s || 'level').replace(/[^\w .()-]/g, '').trim().slice(0, 60) || 'level';
 
@@ -91,12 +121,20 @@ async function main() {
 		else if (verbose && ev.ev === 'progress' && Date.now() - lastProg >= 5000) { lastProg = Date.now(); row('...', ev.sec * 1000, ev.detail); }
 		else if (verbose && ev.ev === 'bug') row('bug', null, `${ev.what}: ${ev.why || ev.error || ev.label || ''}`);
 	};
+	// (the hard watchdog: a part that blocks this thread past the budget (a synchronous call that ignores its own budget) is
+	// not cut by the loop's clocks; a worker thread then prints why, with the last stage and event this thread passed it,
+	// and ends the process: never a compile that hangs)
+	const wdS = +process.env.EEAT_COMPILE_WATCHDOG_S > 0 ? +process.env.EEAT_COMPILE_WATCHDOG_S : seconds + Math.max(WATCHDOG_MIN_S, WATCHDOG_F * seconds);
+	const wd = watchdog(wdS * 1000, json);
+	const emit0 = emit;
+	const emitW = (ev) => { if (ev.ev === 'stage' || ev.ev === 'step' || ev.ev === 'plan') wd.note(ev); emit0(ev); };
 	const opts = { file: lv.file || undefined, md5: lv.md5 || undefined, seconds, workers, seed: Number.isFinite(+a.seed) ? +a.seed : 1, first: a.first === '1', polish: a.polish !== '0',
 		stallS: +a.stallS || 0, parseMs, known: a.known === '0' ? false : undefined };
 	if (a.inflight) opts.inflight = +a.inflight;
 	if (a.parts) opts.parts = path.resolve(a.parts);
 	if (a.runOut) opts.out = path.resolve(a.runOut);
-	const r = await S.compile(L, opts, emit);
+	let r;
+	try { r = await S.compile(L, opts, emitW); } finally { wd.stop(); }
 	// ---- the .eetas: the evaluated inputs (cut at the finish), written and read back to the same finish
 	let wrote = '', verified = null;
 	if (r.ok && r.masks) {
@@ -135,4 +173,4 @@ if (require.main === module) {
 		exitWith(1);
 	});
 }
-module.exports = { levelOf };
+module.exports = { levelOf, watchdog, WATCHDOG_MIN_S, WATCHDOG_F };

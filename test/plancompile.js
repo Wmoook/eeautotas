@@ -165,6 +165,13 @@ function sectionUnit(TMP) {
 	// (exit 1: an error)
 	r = cli([path.join(TMP, 'nope.eelvl'), `--parts=${path.join(__dirname, 'planmock.js')}`, '--seconds=5']);
 	check('a missing level: exit 1 with an error line', r.status === 1 && /^error\s/.test(String(r.stdout || '')), `exit ${r.status}: ${String(r.stdout || '').slice(0, 200)}`);
+	// (the hard watchdog: a part's synchronous call that ignores its budget blocks the compile's thread; the watchdog
+	// thread ends the process past its limit with the reason and the last stage: never a compile that hangs)
+	const tw0 = Date.now();
+	r = cli([toy, `--parts=${path.join(__dirname, 'planmock.js')}`, '--seconds=2', '--workers=1', `--out=${path.join(TMP, 'out', 'wd.eetas')}`], { PLANMOCK_MODE: 'block', EEAT_COMPILE_WATCHDOG_S: '3' });
+	const twS = (Date.now() - tw0) / 1000;
+	check('the hard watchdog: a part blocked in a synchronous call (the mock\'s lowerBound busy-waiting) ends at the limit (3 s): exit 1, "error    the watchdog: ... blocked after the stage model"',
+		r.status === 1 && twS < 20 && /^error\s+the watchdog: the compile passed its hard limit of 3 s, blocked after the stage model/m.test(String(r.stdout || '')), `exit ${r.status} after ${twS.toFixed(1)} s: ${String(r.stdout || '').slice(-300)}`);
 	// (--json: the events)
 	r = cli([toy, `--parts=${path.join(__dirname, 'planmock.js')}`, '--seconds=10', '--workers=1', '--json', `--out=${path.join(TMP, 'out', 'toy2.eetas')}`]);
 	const jl = String(r.stdout || '').split('\n').filter(Boolean);

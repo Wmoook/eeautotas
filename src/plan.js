@@ -55,7 +55,13 @@ async function main() {
 	if (a.progressMs) opts.progressMs = +a.progressMs;
 	if (a.rungMs) opts.rungMs = String(a.rungMs).split(',').map(Number);
 	const S = require('./plan/strategy.js');
-	const r = await S.run(L, opts, emit);
+	// (the CLI's hard watchdog: a part's synchronous call past the budget ends the process with its reason, as in compile.js)
+	const CP = require('./compile.js');
+	const wdS = +process.env.EEAT_COMPILE_WATCHDOG_S > 0 ? +process.env.EEAT_COMPILE_WATCHDOG_S : opts.seconds + Math.max(CP.WATCHDOG_MIN_S, CP.WATCHDOG_F * opts.seconds);
+	const wd = CP.watchdog(wdS * 1000, true);
+	const emitW = (ev) => { if (ev.ev === 'stage' || ev.ev === 'step' || ev.ev === 'plan') wd.note(ev); emit(ev); };
+	let r;
+	try { r = await S.run(L, opts, emitW); } finally { wd.stop(); }
 	if (stdinLines) stdinLines.close();
 	return r;
 }

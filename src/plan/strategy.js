@@ -59,8 +59,10 @@ const POLISH_MS = 15000, POLISH_F = 0.25;
 const FRONTIER_STEPS = 60, FRONTIER_MAX = 400;
 // the fallbacks when the planner has nothing left (fallbackJob): at most this many without a new anchor
 const FALLBACK_MAX = 6;
-// the arrivals' own bounds for the branch and bound (the planner's lowerBound from one arrival: a short search)
-const ARR_LB_MS = 25, ARR_LB_EXPAND = 20000;
+// the arrivals' own bounds for the branch and bound (the planner's lowerBound from one arrival: a short search); the start's
+// bound gets LB_MS; a lowerBound call that took LB_SLOW_MS or more is not made again that compile (a synchronous part that
+// overruns its budget cannot be cut: Moving Ice Puzzle's took 90 s with 1.5 s asked)
+const ARR_LB_MS = 25, ARR_LB_EXPAND = 20000, LB_MS = 1500, LB_SLOW_MS = 5000;
 /** a relative deadline (a step's or a waypoint's beforeTickFrom): a number, or 'prev+N' (N ticks after the previous
  *  step's arrival, i.e. this anchor's arrival: a key's KEY_TICKS) -> ticks | NaN */
 function relOf(x) {
@@ -269,7 +271,10 @@ async function compile(L, opts = {}, emit = () => {}) {
 	const startStatic = (() => { try { const r1 = T.playTo(L, new Uint8Array(1)); return !r1.sim.is_dead && r1.sim.stateHash() === r0.sim.stateHash(); } catch (e) { return false; } })();
 	const startAnchorArg = { arrival: a0, arrivals: [a0], S: S0, key: String(S0.key), tick: 0, run: 0 };
 	let lbPlanner = 0, lbBounds = 0, lbComplete = false, lbInf = false;
-	try { const r = planner.lowerBound ? planner.lowerBound(startAnchorArg) : null; lbPlanner = lbTicks(r); lbComplete = !!(r && r.complete); } catch (e) { say({ ev: 'bug', what: 'lowerBound', error: e.message }); }
+	// (a part that overruns its own budget cannot be cut here (a synchronous call): the call is timed, and one that took
+	// LB_SLOW_MS or more is not made again this compile (the arrivals' bounds, the refresh at the end))
+	let lbSlow = false;
+	try { const tq = Date.now(); const r = planner.lowerBound ? planner.lowerBound(startAnchorArg, { ms: LB_MS }) : null; lbPlanner = lbTicks(r); lbComplete = !!(r && r.complete); if (Date.now() - tq >= LB_SLOW_MS) { lbSlow = true; say({ ev: 'warning', text: `the planner's lowerBound took ${((Date.now() - tq) / 1000).toFixed(1)} s (asked ${LB_MS / 1000} s): not called again this compile` }); } } catch (e) { say({ ev: 'bug', what: 'lowerBound', error: e.message }); }
 	if (lbPlanner === Infinity) { lbInf = true; lbPlanner = 0; say({ ev: 'warning', text: 'the planner\'s lower bound from the start is infinite: no way to the trophy in its relaxation (a proof there, if the model is sound); the moves try anyway' }); }
 	if (bounds && typeof bounds.leg === 'function') {
 		try { lbBounds = idleRunLB(L, bounds, T.goalOf(L, { kind: 'trophy', label: 'trophy' })); } catch (e) { say({ ev: 'warning', text: `bounds.leg: ${e.message}` }); }
@@ -404,7 +409,13 @@ async function compile(L, opts = {}, emit = () => {}) {
 		let v = arrLbCache.get(a.hash);
 		if (v !== undefined) return v;
 		v = 0;
-		try { if (planner.lowerBound) { const t = lbTicks(planner.lowerBound({ arrival: a, arrivals: [a], S: A.S, key: A.key, tick: a.tick, run: a.run }, { ms: ARR_LB_MS, maxExpand: ARR_LB_EXPAND })); v = t; } } catch (e) { v = 0; }
+		try {
+			if (planner.lowerBound && !lbSlow) {
+				const tq = Date.now();
+				v = lbTicks(planner.lowerBound({ arrival: a, arrivals: [a], S: A.S, key: A.key, tick: a.tick, run: a.run }, { ms: ARR_LB_MS, maxExpand: ARR_LB_EXPAND }));
+				if (Date.now() - tq >= LB_SLOW_MS) { lbSlow = true; say({ ev: 'warning', text: `the planner's lowerBound from an arrival took ${((Date.now() - tq) / 1000).toFixed(1)} s (asked ${ARR_LB_MS} ms): not called again this compile` }); }
+			}
+		} catch (e) { v = 0; }
 		arrLbCache.set(a.hash, v);
 		return v;
 	};
@@ -864,12 +875,14 @@ async function compile(L, opts = {}, emit = () => {}) {
 	if (best && startStatic && !deathsMove && best.legs.length === 1 && best.legs[0].fromTick === 0 && best.legs[0].proven && best.legs[0].tool === 'exact' && !String(best.how || '').includes('polish')) {
 		if (best.runTicks > LB) { LB = best.runTicks; lbComplete = true; lbProof = 'one exact leg from the static level start, proven the fewest ticks'; }
 	}
-	try {
-		const r = planner.lowerBound ? planner.lowerBound(startAnchorArg) : null;
-		const t = lbTicks(r);
-		if (Number.isFinite(t) && t > LB) { LB = t; if (r && r.complete) lbComplete = true; }
-		if (t === Infinity && best) bug('bound', { why: 'the planner\'s lower bound is infinite while a route exists: its relaxation is unsound here' });
-	} catch (e) { /* the first one stands */ }
+	if (!lbSlow && !lbProof && planner.lowerBound) {
+		try {
+			const r = planner.lowerBound(startAnchorArg, { ms: LB_MS });
+			const t = lbTicks(r);
+			if (Number.isFinite(t) && t > LB) { LB = t; if (r && r.complete) lbComplete = true; }
+			if (t === Infinity && best) bug('bound', { why: 'the planner\'s lower bound is infinite while a route exists: its relaxation is unsound here' });
+		} catch (e) { /* the first one stands */ }
+	}
 	if (best && LB > best.runTicks) { bug('bound', { why: `the lower bound ${LB} is above the route's ${best.runTicks} run ticks: inadmissible`, lb: LB, planner: lbPlanner, bounds: lbBounds }); LB = Math.max(0, ...[lbPlanner, lbBounds].filter((x) => Number.isFinite(x) && x <= best.runTicks)); }
 	try { if (exec && exec.close) await exec.close(); } catch (e) { /* closed */ }
 	try { if (prims && prims.close) await prims.close(); } catch (e) { /* closed */ }

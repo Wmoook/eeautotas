@@ -66,6 +66,8 @@ function createPlanner(model, F) {
 		stats: () => ({ facts: F.version, blocked: F.blocked.size, done: F.done.size }),
 	};
 	if (mode() !== 'nolb') P.lowerBound = (anchor) => ({ ticks: lbFrom(anchor.arrival.tile), complete: true });
+	// ('block': a part call that ignores its budget: the first lowerBound busy-waits PLANMOCK_BLOCK_MS, the CLI's hard watchdog's test)
+	if (mode() === 'block') { const lb0 = P.lowerBound; let once = false; P.lowerBound = (anchor, o) => { if (!once) { once = true; const t = Date.now() + (+process.env.PLANMOCK_BLOCK_MS || 1e9); while (Date.now() < t) { /* blocked */ } } return lb0(anchor, o); }; }
 	return P;
 }
 /** holds right from each start until the waypoint's goal test holds (at most the budget's ticks), a real arrival */
