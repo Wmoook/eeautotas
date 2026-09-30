@@ -52,13 +52,16 @@
 // API
 //   const S = createSolver(L, {K, Tmax})
 //   S.leg(start, target, o) -> {ok, masks (Uint8Array of the leg, replayed), T, hop (masks with the jump on the last
-//       tick: the landing hop, verified too) | null, lb, cert, proven, tool, member, k, cands, verifies, us, why}
+//       tick: the landing hop, verified too) | null, lb, cert, proven, provenBy ('plain' | 'events'), lbMath, proveUs,
+//       tool, member, k, cands, verifies, us, why}
 //     start: an EESnapshot of L (sim.snapshot()) or an EESim of L (its current state is read, not changed)
 //     target: {tiles: number[] (centre tiles), cls: 'G' | 'Z' | 'W' | 'C' | 'B' | 'A' | 'any', tele: bool (the goal tick
 //       must teleport), via: number[] (portal tiles to enter for a teleport target)}
 //     o: {Tmax, K (max x changes, default 2), plain, fields, coupled (each default true), nodes (the plain branch and
-//       bound's budget, 400 k), fieldMs (250), coupledTicks (2 M), debug(item)}
-//   S.chain(start, target, o) -> {ok, masks, T, closed, expanded, legs, nodes, cut, reach, ms}
+//       bound's budget, 400 k), fieldMs (250), coupledTicks (2 M), chain / chainAny / chainMs (the chain tier),
+//       prove (the event-graph proof of src/math/lb.js for a leg the plain certificate did not prove; default
+//       createSolver's opts.prove, false), proveMs (50), debug(item)}
+//   S.chain(start, target, o) -> {ok, masks, T, closed, expanded, legs, nodes, cut, reach, firstMs, ms}
 //                                o: {ms, legT, w, fanT, fanMax, fanNodes, events, reach (the reach field's order), kappa}
 //   S.landings(start, o) -> [{tile, T, masks, hop}]   the forward fan-out from a plain state
 //   S.lowerBound(start, target) -> ticks (the plain regime's bound; 0 when none applies)
