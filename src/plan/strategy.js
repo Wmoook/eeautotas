@@ -192,7 +192,7 @@ const ST_MIN_MS = 3000, ST_TRIES = 2;
 // (a stretch the child did not finish hands back its node of the least time to go (the backward model's), replayed here:
 // the relay start of that stretch's next executor rung when it has none (the executor's own closest replaces it at its
 // next rung, as a relay does); EEAT_ST_RELAY=0: off)
-const ST_RELAY = process.env.EEAT_ST_RELAY !== '0', ST_CHAIN = process.env.EEAT_ST_CHAIN !== '0';
+const ST_RELAY = process.env.EEAT_ST_RELAY !== '0', ST_CHAIN = process.env.EEAT_ST_CHAIN !== '0', ST_STALE_MS = 5000;
 /** a relative deadline (a step's or a waypoint's beforeTickFrom): a number, or 'prev+N' (N ticks after the previous
  *  step's arrival, i.e. this anchor's arrival: a key's KEY_TICKS) -> ticks | NaN */
 function relOf(x) {
@@ -767,6 +767,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 				say({ ev: 'stretch', what: 'arrival', id: q.id, k: m.k, label: labelOf(g.step), tick: masks.length, ok: arr.length + routes.length > 0, ms: m.ms });
 				// (the next leg of a chain starts from this one's verified arrival: its anchor the parent)
 				if (next) { q.A = next.A; q.a = next.a; }
+				q.k = m.k + 1;
 			} else if (m.ev === 'done' && q) {
 				stStats.ms += Date.now() - q.t;
 				if (m.ok) stStats.ok++;
@@ -802,6 +803,15 @@ async function compile(L, opts = {}, emit = () => {}) {
 	};
 	/** the child idle: the next request (the short first plan once, then the failed stretch of the most progress) */
 	const stSchedule = () => {
+		// (a request gone stale: its stretch done by the executor meanwhile, or a route known and it is no whole-level request
+		// (whose route may be faster): the child is stopped and started again (its memo lost) rather than left to finish it)
+		if (ST_ON && stChild && stBusy && !stBusy.short && Date.now() - stBusy.t < stBusy.ms - ST_STALE_MS
+			&& ((stBusy.cand && stBusy.cand.solved && stBusy.k === 0) || best)) {
+			say({ ev: 'stretch', what: 'stale', id: stBusy.id, why: best ? 'a route' : 'the executor did it', ms: Date.now() - stBusy.t });
+			stStats.stale = (stStats.stale || 0) + 1;
+			stStop();
+			if (!best) stStart();
+		}
 		if (!ST_ON || !stChild || stBusy || stopped || best) return;
 		// (before a route the moves have the whole budget: the polish's and the proof's reserves are kept only once a route
 		// is known, and a route of the child's own is one; the whole-level backward solve needed 37 s in one piece on Stone
