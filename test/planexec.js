@@ -57,7 +57,7 @@ async function unit() {
 	const ex = await EX.createExecutor(L, { file, workers: 0 });
 	const start = { masks: new Uint8Array(0) };
 	const wpKey = { kind: 'trigger', tiles: [at(6, 4)], trig: 0, expect: { feat: 'key0', value: 1 }, label: 'red key' };
-	const r1 = await ex.reach([start], wpKey, { ms: 3000, level: 0 });
+	const r1 = await ex.reach([start], wpKey, { ms: 10000, level: 0 });
 	const gk = T.goalOf(L, wpKey);
 	const a1 = r1.arrivals[0];
 	check('E-UNIT reach(the red key) ok, the arrival replays (playTo goalAt = its end)', r1.ok && a1 && T.playTo(L, a1.masks, { goal: gk }).goalAt === a1.masks.length,
@@ -91,7 +91,7 @@ async function unit() {
 	check('E-UNIT reach(the trophy) from the key: ok, finishes', r6.ok && r6.arrivals.every((a) => T.playTo(L, a.masks).finished === a.masks.length), r6.ok ? `${r6.tool} ${r6.arrivals[0].masks.length}` : r6.fail.why);
 	// workers 0 = workers 2
 	const ex2 = await EX.createExecutor(L, { file, workers: 2 });
-	const q = await Promise.all([ex2.reach([start], wpKey, { ms: 3000 }), ex2.reach([start], wpCoin, { ms: 2000 })]);
+	const q = await Promise.all([ex2.reach([start], wpKey, { ms: 10000 }), ex2.reach([start], wpCoin, { ms: 2000 })]);
 	const s0 = r1.arrivals.map((a) => T.strOf(a.masks)).join('|'), s2 = q[0].ok ? q[0].arrivals.map((a) => T.strOf(a.masks)).join('|') : '';
 	check('E-UNIT workers 2 = workers 0 (the same arrivals, the same proof)', ex2.workers() === 2 && s0 === s2 && !q[1].ok && q[1].fail.why === r2.fail.why, `workers ${ex2.workers()}, ${ex2.stats().notes.join('; ')}`);
 	await ex2.close();

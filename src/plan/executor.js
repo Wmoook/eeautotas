@@ -40,6 +40,7 @@ const T = require('./types.js');
 const X = require('./exact.js');
 const LG = require('./legs.js');
 
+const X_NEAR = +process.env.EEAT_X_NEAR || 40;   // ticks: the exact tier's full share only where the goal can be this near
 const VERIFY_MARGIN_MS = 60;    // the worker's clock ends this much before the deadline (this thread's replays)
 const WATCHDOG_MS = 150;        // past the deadline + this, an unanswered worker call is answered 'budget'
 const REPLAY_CACHE = 64;
@@ -196,7 +197,12 @@ function makeCore(L, co) {
 		let found = null;   // {cands, tool, proven, lbAbs}
 		{
 			const t2 = Date.now();
-			const xEnd = t2 + 0.35 * (wEnd - t2);
+			// (its share: 35% where the goal can be near (the least start bound within X_NEAR ticks: the exact search's
+			// reach, each tick of slack multiplying its states), else 12%: then it proves a lower bound and the finders get the
+			// time)
+			let h0 = Infinity;
+			if (!allowDeath) { const B0 = X.boundFor(L, goal); for (const s of starts) { sim.restore(s.snap); const h = require('../endgame.js').lowerBound(B0, sim, X_NEAR + 1) + (s.tick - t0); if (h < h0) h0 = h; } }
+			const xEnd = t2 + (h0 <= X_NEAR ? 0.35 : 0.12) * (wEnd - t2);
 			const track = { dist: undefined };
 			const r = X.solveExact(L, snaps, goal, Object.assign({}, baseX, { deadline: xEnd, track, distField: field0 }));
 			sims += sumTicks(r);

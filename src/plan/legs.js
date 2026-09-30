@@ -1,16 +1,19 @@
 'use strict';
-// THE FINE-CELL LEG SEARCH (n4plan, part 'executor', tier 3 of reach()): not a proof, a finder. src/legsearch.js's
-// algorithm (copied, not edited): a breadth-first search by ABSOLUTE tick from real states (each start injected at its
-// own tick) over FINE cells (1 px x, 2 px y, 1/16 px/tick vx, 1/8 px/tick vy, on the ground, the jump count, the ball's
-// door-reading state: exact.js discKey) that keeps the FASTEST state of each cell (|vx| + |vy|), where the exact search
-// keeps every state and the coarse searches the first arrival: a leg whose speed has to be built far from its goal is
-// found here. The goal is the waypoint's test (types.js goalOf, + beforeTick). A layer over its width is kept half by the
-// goal field's distance (RCH3 on the level as the doors stood at the start: the nearest first) and half by novelty per
-// tile (the tiles seen least in earlier layers), then speed. The region: tiles the goal field's walk reaches (a proof
-// there only while the doors stay; here only a limit), dilated by a tile, inside a box around the starts and the goal.
-// The width widens (x4) whenever a pass ends without a goal (exhausted, the depth limit, or no nearer state for `stall`
-// layers) while the clock lasts: an easy leg is found with a narrow goal-led beam in milliseconds, a hard one gets
-// breadth. The masks of each state come from endgame.probeMasks (the same states, fewer simulations).
+// THE LEG FINDERS (n4plan, part 'executor', tier 3 of reach()): not proofs, finders; every find is replayed by the
+// executor. Both search from real states (each start injected at its own ABSOLUTE tick), the masks of each state from
+// endgame.probeMasks (the same states, fewer simulations), over FINE cells (1 px x, 2 px y, 1/16 px/tick vx, 1/8 px/tick
+// vy, on the ground, the jump count, the ball's door-reading state: exact.js discKey), inside a region (the tiles the goal
+// field's walk reaches, dilated by a tile, in a box around the starts and the goal), ranked by a TIME estimate (ticks):
+// the admissible kinematic bound (endgame.lowerBound) within 64 ticks of the goal, else the goal field's distance at the
+// running pace (or the primitives' tick field when bounds are given). The distance alone is blind to speed: a beam by it
+// kept the slow states at a wall's face and lost the run-ups (the key door leg of test/planexec.js: 184 ticks vs 38).
+//   legBest (the executor's default): best-first, f = the tick + w x the estimate (w 2.5), the first arrival closes its
+//     cell; it dives toward the goal and falls back to the next best open state where it is stuck (T-EXEC-LEGS, box 3,
+//     3 s: 41% of the legs vs the beam's 30%, and nearer the route's own ticks: p90 1.12x vs 2.1x).
+//   legBFS: src/legsearch.js's algorithm (copied, not edited): breadth-first by tick keeping the FASTEST state of each
+//     cell, a layer over its width kept by the estimate with at most 8 states a tile (flybeam.js's rule), the rest by
+//     novelty per tile; the width widens (x4) when a pass ends without a goal (the depth limit, exhausted, or no nearer
+//     state for `stall` layers).
 //
 //   legBFS(L, starts, goal, o) -> {status 'found' | 'exhausted' | 'depth' | 'time' | 'stopped', tick (absolute), start,
 //        tail, goals [{start, tail, depth}], passes [{width, layers, sims, why}], sims, closest {dist, start, tail},
@@ -331,7 +334,8 @@ function legBest(L, starts, goal, o) {
 		hpush(i, gg[i] + w * scoreOf(d));
 	}
 	let why = 'exhausted';
-	while (heap.length && goals.length < collect) {
+	let popsAtFound = -1;
+	while (heap.length && goals.length < collect && (popsAtFound < 0 || pops - popsAtFound < 3000)) {
 		if ((pops & 63) === 0) {
 			const now = Date.now();
 			if (now > deadline) { why = 'time'; break; }
@@ -354,6 +358,7 @@ function legBest(L, starts, goal, o) {
 			if (sim.is_dead && !allowDeath) continue;
 			if (!sim.is_dead && X.goalAt(goal, sim, t0 + g + 1, beforeTick)) {
 				if (found < 0 || g + 1 < found) found = g + 1;
+				if (popsAtFound < 0) popsAtFound = pops;
 				goals.push({ node: i, mask: m, depth: g + 1 });
 				continue;
 			}
