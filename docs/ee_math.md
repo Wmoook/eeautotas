@@ -2011,3 +2011,129 @@ variants only for a leg the members left unsolved) keeps a solved leg's cost exa
 - **So:** the variants raise the plain tier's share of the airborne route legs (4.13: 58.0% -> 66.6%, 0 lost) at no
   cost to a leg it solved before; the compiler's own direct legs do not show it yet (the same ~6% with a leg on the
   class). What the compiler's missed legs need is 7.8's: legs past the 120-tick horizon and across fields.
+
+## 8 Backward reachability and the meet: long legs as dynamic programming (the lab, n5-lab-backward)
+
+(CHAINS-LAB approach A, 2026-09-30.) Code: `src/plan/lab/backward.js` (the solver), `tools/cmp/bwkrt.js` (krt.js's
+known-route legs through it), `tools/cmp/bwsumm.js`, `tools/cmp/abcmp.js`, `test/labbackward.js`; the executor's tier
+`EEAT_BACKWARD=1` (OPT-IN; off = the executor byte for byte). The wall of section 7: the compiler's trigger legs are
+long (median 176 ticks, 47 input changes) and cross fields, and a chain of single moves (4.6) finds 52% of 4-move
+chains. Here a leg is solved as a Bellman problem on a finite MACRO MODEL of the leg's corridor, and the real start
+meets the values:
+
+### 8.1 The model
+- A CELL = the discrete state (coins, keys, switches, team, effects; the clock's phase in 50-tick buckets on a level
+  with time doors), grounded, the centre's half tile in x and y, vx in 1/2 and vy in 1 px/tick, the gravity queue's
+  physics classes (a field entered acts 2 ticks later: without them a ball that had just entered an arrow was its own
+  parent's cell and the dedup dropped it; every search in Gravity's Rainbow's 1-wide arrow shaft ended in 15 nodes).
+- A MACRO MOVE from an exact state = one mask (the directions that act: left / right under a vertical pull, up / down
+  under a horizontal one, all nine without a pull or in a liquid; with and without the jump press where a jump can
+  fire) held to its first EVENT: a half tile on the ground or in a field, a landing (with its HOP: the jump on the
+  landing tick) or a take-off, the physics class of the centre changed, a teleport, 6 ticks of plain air (the air
+  control), 48 ticks, the target's tiles touched. A dead state's move is its dead ticks to the respawn. Every move is
+  the engine's replay: every child is an exact state.
+
+### 8.2 Backward: the values
+The CORRIDOR: the gravity-blind walk from the target's tiles (portals both ways, time doors open), the tiles within the
+start's walk distance x 1.5 + 40, and within the reach field's band of the doors as they stand (the killers closed:
+Endless Space's spike maze 11,759 -> 2,156 tiles). SEEDS: the start's discrete state at rest on every standable half
+tile of the corridor, settled by the engine (independent of the start: the target's side is covered before the start
+arrives there). THE CLOSURE: every cell expanded once from its representative (the first exact state that made it),
+TARGET FIRST (a bucket queue by the walk distance: a closure its clock cuts holds the target's side). D = the Bellman
+time to go, D(c) = min over c's moves (ticks + D(child)), D(target) = 0, by Dijkstra on the reversed edges. D carries
+the SPEED: a run-up's arrival has a value where the same place at rest has a larger or none (test/labbackward.js: a
+13-tile spiked gap crossed from its edge only after running away from it).
+
+### 8.3 The meet, the exact basin, the ladder, the relay
+- THE MEET: A* over exact engine states from the real start with the same macro moves (a cell keeps 2 exact states, a
+  state twice is one node), h = D(the child's cell), else the nearest speed class of its place, else the reach field
+  (src/reach.js, deaths off, the doors as they stand) at the top running speed x 3 + 200. A QUICK MEET on that order
+  alone runs first (0.3 of the clock, 50 k nodes): most legs need no closure (r6: 81 of the 104 legs found).
+- THE EXACT BASIN: a node within 100 ticks of the target by its value asks msolve's direct leg (section 4: the plain
+  regime's per-axis closed forms and the field tier, i.e. the target's per-axis backward sets evaluated), once per 8
+  expansions within a quarter of the meet's time: a last move the macro cells are too coarse for (Presto Penguins'
+  trophy in an arrow maze with portals).
+- THE REFINEMENT LADDER: an exhausted meet again with the dedup cells halved and one state more a cell (3 steps).
+- THE RELAY: a meet its node caps stopped (not its clock) commits to its expanded node of the least time to go (its path
+  from the start kept) and meets again from it: a long leg as a chain of meets (greedy; up to 6 steps).
+Every leg returned is replayed from the start once more (a dead start through its dead ticks).
+
+### 8.4 The numbers (box 5; the 55 known-route legs of krt_b4 with a hit: from the route's own state at the previous
+trigger, 300 and 120 ticks before the route first enters the stuck waypoint; every leg replayed from the level start)
+| run | prev (55) | hit-300 (32) | hit-120 (42) | median s (prev / 300 / 120) | ticks / route median |
+|---|---:|---:|---:|---|---|
+| the executor, krt.js rungs 1-2 (5 + 15 s) | 31 | 23 | 38 | - | - |
+| r3: closure + meet, 30 s a start | 33 | 25 | 38 | 13.1 / 13.5 / 0.1 | 1.005 / 1.057 / 1.042 |
+| r6: + the exact basin, the ladder, the quick meet | **37** | **28** | **39** | 13.1 / 1.9 / 0.2 | 1.004 / 1.060 / 1.050 |
+| r6, the meet alone (no closure) | 34 | 28 | 39 | 4.7 / 1.8 / 0.2 | 1.009 / 1.103 / 1.042 |
+- From the previous trigger by krt's class: ARRIVAL 30 / 31, LONG (legs of 488-3,052 route ticks none of the
+  executor's rungs found from there) 6 / 20, FINDER (no executor start found them) 1 / 4 (Sandcastle Safari: the ball
+  must first run AWAY to take a right-arrow band's speed); found by this and not the executor: 7 (prev), 7 (hit-300), 2
+  (hit-120); only by the executor 1 / 2 / 1. At or under the route's own ticks: 18 / 12 / 13.
+- The Bellman value at the start cell where the closure reached it vs the leg found: 455 / 455, 269 / 279, 479 / 490,
+  344 / 346, 474 / 514 (the model's optimal chain from its representatives; the meet's exact leg).
+- LONG legs at a 90-s clock (the 24 LONG / FINDER levels; the relay on): from the previous trigger 12 / 24 (the
+  executor's rungs 1-2: 0 of them): Gravity's Rainbow's trophy from the spawn (the whole level: 2,197 route ticks) in
+  2,319 t (41 s), Christmas Town 1,363 -> 1,470, Endless Space (a spike maze) 1,417 -> 1,475, Don't Stop Jumping 1,406
+  -> 1,906, NC Naos de5f 882 -> 1,042; hit-300 18 / 21, hit-120 21 / 24.
+- Found legs take median 1.2 s (prev), 1.5 s (hit-300), 0.2 s (hit-120), p90 22-25 s; 81 of r6's 104 legs by the quick
+  meet alone.
+
+### 8.5 What breaks
+- A leg that needs a DELIBERATE DEATH (death doors: Tutorial 2's switch leg; the meet drops dead children, only a dead
+  start plays its dead ticks).
+- Sparse arrow staircases on effect levels (Eurus: a walk-mode reach field; the meet ends 15 ticks from the coin, the
+  basin's msolve finds no leg) and pixel puzzles (My level de42: dots over spikes): the half-tile cells and the
+  6-tick air control are too coarse, the ladder too slow for them.
+- Legs of 1,500-3,000 route ticks through corridors of 10-35 k tiles (INFINITE, Aperture, 7 Depths, Egg Quest II's base
+  route): the closure caps at 400 k cells (the target's side only), the meet at 400 k expansions / 900 k nodes (~1.5 KB
+  a node), and the relay's commitment is greedy.
+- THE VALUES are the representatives' futures: along a precise trajectory most route states have no cell with a value
+  (Sandcastle Safari: none along the route but its last 50 ticks; Endless Space: 7.9 k of 229 k cells with a value);
+  the meet (the reach field's order + the exact basin) finds most legs, the closure adds ~3 legs a start kind at
+  ~5-10x the time.
+- THE CLOCK IS PART OF THE ANSWER: every share is a fraction of the leg's clock and the relay commits greedily, so the
+  same leg solves at one clock and not at a longer one (Stone Ruin 37 s at 90 s, 'budget' at 120 / 150 s; On And On And
+  On 1 of 2 at 150 s); restarts on several clocks (8.7) are the cheap cure, a clock-free schedule the real one.
+
+### 8.6 In the compiler (the tier EEAT_BACKWARD=1)
+- The executor's own known-route test (tools/cmp/krt.js, rungs 1-2: 5 + 15 s; one tree cd032db, the knob off vs on; the
+  tier at 0.2 / 0.3 / 0.3 / 0.6 of the window by rung): **from the previous trigger 30 -> 33 / 54, hit-300 23 -> 25 / 31,
+  hit-120 35 -> 38 / 41, none lost in any start kind**; the tier's own legs 9 / 10 / 26, ticks / route median 1.000 /
+  1.160 / 1.033. (A first run with 0.5-0.6 at rung 2 lost Egg Quest II, Frostbitten and Endless Pain: the skeleton's
+  rung-2 finds lost the window's time to the tier.)
+- The full compile, 12 failing levels, 300 s, W3, the final shares (A/B 2): compiled 0 vs 0, progress better 1 / worse 3
+  (Late christmas 4 vs 13 triggers, YMCK 14 vs 20, Snow Jumping 3 vs 4) / same 8: inside the executor's windows the tier
+  does not turn a failing level into a compiled one (Stone Ruin not either: its whole-level solve needs its clock in one
+  piece, and each rung's window starts it over).
+- The full compile, 36 levels (20 failing ONE-LEG / STUCK-* / RATE + 16 compiled), 180 s, W3, the tier at 0.5 of every
+  window (the r3 solver): compiled 14 vs 15 (Fish Gods, a flicker of earlier gates), both-compiled run ticks x0.974,
+  failing progress better 2 / worse 1 / same 18: the failing levels' stuck legs are their first far legs from the
+  spawn (hundreds of tiles; the compile's first plans) and the planner's order, not legs the tier's window finds.
+
+### 8.7 The whole level as one leg (EEAT_BW_LEVEL=1)
+- `tools/cmp/bwlevel.js`: the solver from the level's start state to the trophy's tiles, the run then evaluated from the
+  level file (a trophy touched a tick after the centre is in its tile: the last direction held, then released). THE SWEEP
+  (box 5, the 206 levels the 300-s full compile f300 did not route, 120 s each): **4 levels finished from the level
+  alone**, every run replayed from the level file (0 deaths, chance 1): On And On And On 2,489 run ticks (best known
+  2,381), The Blank Page 2,081 (1,915), **Gravity's Rainbow 2,090 (2,197: under the best known)**, INVASION 4,127 (4,054);
+  77 levels 'the start is not in the target's walk' (the trophy behind a gate: one leg cannot be the level), 84 'budget',
+  41 'exhausted'; the near misses (the best node's value 2-9 ticks: SPOT THE DIDFERNECE, Katwalk, Nightmare Relics, Ice
+  Cream Expedition, NSFW Spring Relics (also 300 s: 7), DEEPER, Tropical Trials) end at the false nears the steer rows
+  name (a live portal by the trophy, a coin gate as the floor). Stone Ruin: solved at a 90-s clock in 37 s, not at 120 /
+  150 s.
+- IN THE COMPILER (strategy.js `wholeLevel`, src/plan/lab/bwlevel_child.js, opt-in): a child process started with the
+  moves loop (at most 0.5 of the budget, 150 s; it never blocks the compiler's thread), its route a route like the moves'
+  (routeOf: then verify, polish, prove), the moves go on; with no route when the moves end, the child keeps the time
+  left. THE A/B (A/B 3: box 5, 300 s, W3, one tree cfe4ebe, the knob on vs off on the 5 levels, on alone on 4 compiled
+  controls; every .eetas replayed from the level file): **compiled 3 vs 0**: The Blank Page 2,022 (the child's 2,087 at
+  32 s, polished), **Gravity's Rainbow 2,022 (best known 2,197)**, INVASION 4,095 (4,054); On And On And On and Stone Ruin
+  not (the child's 'budget'); the controls all compiled, each no slower than the f300 compile: Desolate Caverns 1,458 vs
+  1,562, Tree Decorating 1,232 vs 1,407 (the child's route at 38 s), Accident Prone 3,175 vs 3,206 (the child's at
+  19 s: the first route), NC Naos d3c6 319 = 319. (The newest n5-plan full compile, with the perfect pass, routes
+  Gravity's Rainbow and On And On And On in its own 300-s run, not The Blank Page or INVASION.)
+- RESTARTS ON TWO CLOCKS (1285dc8, the child's default; --sched): the solve's shares are fractions of its clock (the quick
+  meet 0.3, the closure, the relay's steps), so a longer clock is not a superset of a shorter one: on the 5 levels,
+  standalone, 150 s: 0.4 of the clock then the rest finished 4 of 5 (On And On And On and Gravity's Rainbow on the second
+  clock), one 150-s clock lost On And On in 1 of 2 runs; inside the compile (W3 next to it, the box loaded ~100) On And
+  On and Stone Ruin still 'budget' (A/B 4, 2 levels).
