@@ -896,6 +896,32 @@ function createSolver(L, opts = {}) {
 		return out;
 	}
 	/**
+	 * eventFan(start, maxT): each of the 18 held masks (DIR9, with and without the press on the first tick) played to
+	 * its first support event within maxT ticks: a landing (on_ground after a tick in the air or a fresh press), the
+	 * class letter changing (a field entered or left), a teleport; [{masks}] (deaths dropped)
+	 */
+	function eventFan(start, maxT) {
+		const snap = snapOf(start);
+		const out = [];
+		for (const p0 of [0, 1]) for (const m0 of DIR9) {
+			sim.restore(snap);
+			const c0 = clsOf(sim, flags);
+			let air = !sim.on_ground || sim.speed_y !== 0;
+			const ms = [];
+			for (let t = 0; t < maxT; t++) {
+				const px = sim.px, py = sim.py;
+				const mk = t === 0 ? (m0 | p0) : m0;
+				E.applyMask(inp, mk); sim.tick(inp); ms.push(mk);
+				if (sim.is_dead) break;
+				const c = clsOf(sim, flags);
+				const tele = Math.abs(sim.px - px) > TELEPORT_PX || Math.abs(sim.py - py) > TELEPORT_PX;
+				if (tele || (c !== c0 && c !== 'A') || (sim.on_ground && air && t > 0)) { out.push({ masks: Uint8Array.from(ms), hop: null }); break; }
+				if (!sim.on_ground) air = true;
+			}
+		}
+		return out;
+	}
+	/**
 	 * chain(start, target, o): A* over SUPPORT STATES with solved legs as edges. A node = an exact engine state (its
 	 * snapshot, the masks from the chain's start, g = ticks); its edges = the direct leg to the target and legs to the
 	 * o.fan (8) standable tiles nearest the target (supportsNear), each landing also as its hop (the jump on the
@@ -947,8 +973,9 @@ function createSolver(L, opts = {}) {
 			if (r.ok && (!best || n.g + r.T < best.T)) best = { T: n.g + r.T, masks: cat(n.masks, r.masks) };
 			sim.restore(n.snap);
 			const ctx = plainStart(sim);
-			if (!ctx || fan <= 0) continue;
-			const lands = landings(n.snap, { Tmax: Math.min(lim, o.fanT || 60), K: o.fanK, max: o.fanMax || 80, toward: tg, nodes: o.fanNodes || 60000, perTile: o.perTile || 0 });
+			if (fan <= 0) continue;
+			const lands = ctx ? landings(n.snap, { Tmax: Math.min(lim, o.fanT || 60), K: o.fanK, max: o.fanMax || 80, toward: tg, nodes: o.fanNodes || 60000, perTile: o.perTile || 0 }) : [];
+			if (o.events !== false) for (const e of eventFan(n.snap, Math.min(lim, o.fanT || 60))) lands.push(e);
 			legs += lands.length;
 			for (const rr of lands) {
 				if (Date.now() - t0 >= budgetMs) break;
