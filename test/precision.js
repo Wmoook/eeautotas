@@ -167,6 +167,38 @@ const X = (OX + 3.5) * 16;   // (the one x: 1976)
 		check('the ball drops into the pocket at px == 1976.0 exactly', !!leave && leave.px === X, leave ? `t${leave.t}: px ${leave.px}` : 'no drop seen');
 		check('the reach field (a proof where it says -1) allows every state of the route', cut < 0, cut < 0 ? `start cost ${RF.costAt(field, (() => { const q = new E.EESim(level); q.reset(); return q; })()).toFixed(1)} tiles` : `cut at t${cut}`);
 	}
+	// the fast rests (n5-perfect: braked from the attempt's moving states, not coasted): a route, exact, and faster
+	const t1 = Date.now();
+	const rf = spawnSync(process.execPath, [path.join(__dirname, '..', 'src', 'precision.js'), file, `--attempts=${attFile}`, '--workers=2', '--seconds=30', '--first=1', '--fast=1'], { encoding: 'utf8' });
+	const evf = (rf.stdout || '').split('\n').filter((l) => l.startsWith('{')).map((l) => JSON.parse(l));
+	const resf = evf.filter((e) => e.ev === 'result');
+	const fastRoute = resf.length ? Uint8Array.from(resf[resf.length - 1].inputs, (c) => (c.charCodeAt(0) - 48) & 31) : null;
+	const evF = fastRoute ? C.evaluate(level, fastRoute) : null;
+	check('--fast=1: a route from the same attempt, replayed by C.evaluate, 0 deaths, fewer run ticks than without', !!evF && evF.deaths === 0 && (!ev || evF.runTicks < ev.runTicks),
+		`${evF ? C.fmt(evF.runTicks) : 'none'} vs ${ev ? C.fmt(ev.runTicks) : 'none'} after ${((Date.now() - t1) / 1000).toFixed(1)} s; ${JSON.stringify(evf.find((e) => e.ev === 'progress' && e.phase === 'fast') || null)}`);
+	if (fastRoute) {
+		const s = new E.EESim(level);
+		s.reset();
+		let leave = null, done3 = false;
+		s.onEvent = (k) => { if (k === 'complete') done3 = true; };
+		for (let k = 0; k < fastRoute.length && !done3; k++) {
+			const py0 = s.py;
+			E.applyMask(inp, fastRoute[k]); s.tick(inp);
+			if (!leave && py0 === (OY + 3) * 16 && s.py > py0 && s.px <= X + 16) leave = { t: k + 1, px: s.px };
+		}
+		check('--fast=1: the ball drops into the pocket at px == 1976.0 exactly', !!leave && leave.px === X, leave ? `t${leave.t}: px ${leave.px}` : 'no drop seen');
+	}
+	// the stopping-distance table is a lower bound: braking every tick from v never stops sooner than stopDist(v)
+	{
+		let bad = 0;
+		for (let k = 0; k < 3000; k++) {
+			const v = -(k / 3000) * 6.5, st2 = { px: 5000, sx: v };
+			let far = 0, c = 0;
+			while (st2.sx !== 0 && c < 4000) { P.latTick(st2, st2.sx < 0 ? 1 : 0, false); far = Math.max(far, 5000 - st2.px); c++; }
+			if (P.stopDist(v) > far + 1e-9) bad++;
+		}
+		check('the least stopping distance is a lower bound of the braked run (3000 speeds)', bad === 0, `${bad} above`);
+	}
 }
 
 // ---------------------------------------------------------------- sealed: no route
