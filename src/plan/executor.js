@@ -820,7 +820,7 @@ function makeCore(L, co) {
 					let th = 0x811c9dc5;
 					for (const t of mTarget.tiles) { th = (th ^ t) >>> 0; th = Math.imul(th, 0x01000193); }
 					const resume = `${MSv.sim.stateHash()}|${Tmax}|${mTarget.tiles.length}|${th >>> 0}`;
-					try { rc = corridor().solve(s.snap, mTarget, Object.assign({ M: 3, Mu: 1, legT: 90, RX: 18, RD: 30, subStop: 2, legs: false, plainStops: [8, 20], dom: 'dir' }, CORR_OPTS, { ms: Math.max(10, cEnd - Date.now()), deadline: cEnd, Tmax, resume, first: true })); }
+					try { rc = corridor().solve(s.snap, mTarget, Object.assign({ M: 3, Mu: 1, legT: 90, RX: 18, RD: 30, subStop: 2, plainStops: [8, 20], dom: 'dir', landMax: 0, legMode: 'lazy', lazyWide: true, lazyLegs: false }, CORR_OPTS, { ms: Math.max(10, cEnd - Date.now()), deadline: cEnd, Tmax, resume, first: true })); }
 					catch (e) { rc = { ok: false, error: String(e && e.message || e) }; }
 					if (rc && rc.ok) mathCands(bi, rc.masks, { T: rc.T, proven: false, lb: 0 }, cands, 'math:corridor');
 					// (no chain: the corridor's most advanced state is the call's closest when it is nearer by the call's own goal

@@ -44,7 +44,8 @@ const replays = (masks, tiles) => {
 
 const S = MS.createSolver(L, {});
 const modes = [
-	['fans + stops + dir (the executor default)', { legs: false, plainStops: [8, 20], dom: 'dir' }],
+	['fans + stops + dir', { legs: false, plainStops: [8, 20], dom: 'dir' }],
+	['the executor default (no landings, lazy widened fan)', { plainStops: [8, 20], dom: 'dir', landMax: 0, legMode: 'lazy', lazyWide: true, lazyLegs: false }],
 	['sub-legs always', { M: 3, Mu: 1, legT: 90, RX: 18, RD: 30, subStop: 2 }],
 	['lazy widened fan', { plainStops: [8, 20], dom: 'dir', legMode: 'lazy', lazyWide: true, lazyLegs: false, directOnce: true }],
 ];

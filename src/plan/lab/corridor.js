@@ -17,7 +17,9 @@
 //     progress (c0 - bestC) / c0 0.48 (the legs always: 1 / 17, 0.33).
 //   * THE MOVES STUDY'S 4-MOVE CHAINS (tools/lab/corridor_chain.js, 5 s each, paired with msolve.chain): see the LAB
 //     lines (74.8% vs 51.2% on the first 535; 240+ route ticks 40.5% vs 4.1%).
-// So the default in the executor (tier MC, EEAT_CORRIDOR=1) is the fans + the plain stops, no sub-legs (o.legs false);
+// So the default in the executor (tier MC, EEAT_CORRIDOR=1) is the event fan + the plain stops + the x-direction store
+// (no landings fan: landMax 0, as good on the chains, found in 510 vs 730 ms median) and, where that store runs empty or
+// stalls, the lazy pass's WIDENED fan (o.lazyWide: more stops, a longer hold, the landings) on the most advanced nodes;
 // the sub-legs stay as options: legMode 'always' / 'stuck' (only where the fans made no progress) / 'lazy' (on the most
 // advanced node the fans left, when their open list is empty or the frontier stalls lazyStall expansions; legNew: aimed
 // only at footholds no node stands on).
