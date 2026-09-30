@@ -45,6 +45,7 @@ function levelOf(arg) {
 		const buf = fs.readFileSync(arg);
 		return { L, file: path.resolve(arg), name: String(L.world_name || L.name || path.basename(arg).replace(/\.[^.]+$/, '')), md5: crypto.createHash('md5').update(buf).digest('hex'), job: null };
 	}
+	if (/\.(eelvl|json)$/i.test(String(arg))) throw new Error(`no such level file: ${arg}`);
 	// (a job id or part of its name: the job's level JSON (its start mode), its original.eelvl for the md5)
 	const J = require('./jobs.js');
 	const id = J.resolve(arg);

@@ -462,6 +462,16 @@ const STRATEGIES = {
 	precision: { label: 'exact landings', cpu: true, precision: true, args: (f, o, q) => [f.eelvl, `--attempts=${q.attemptsFile}`, `--seconds=${q.seconds}`, `--workers=${q.workers}`,
 		`--after=${PREC_AFTER_S}`, '--stdin=1', ...(q.depth ? [`--depth=${q.depth}`] : [])] },
 };
+// THE PLANNER (n4plan, the compiler: src/plan.js on src/plan/strategy.js; OPT-IN: EEAT_PLAN=1 or the solve body's
+// plan: true, else nothing of it runs and the strategies, their arguments and their events are main's byte for byte):
+// the compile loop (model -> plan -> moves derived from the physics -> verify) as a CPU strategy next to the others, on
+// PLAN_SHARE of the CPU search's threads (as the path skips: laneWorkersOf); its routes are found()'s (the cleanup, the
+// other strategies told, the AutoTASer's feed), its new model states go into the one search's archive (feedOne), its
+// status line is the row's detail, and the other strategies' routes reach it on its stdin ("route <inputs>": the bound
+// of its branch and bound). Kept out of STRATEGIES (its keys stay main's): stratOf().
+const PLAN_STRATEGY = { label: 'the planner (compile)', cpu: true, args: (f, o, q) => [f.eelvl, `--seconds=${q.seconds}`, `--workers=${o.planWorkers || 1}`, `--seed=${o.seed}`, '--stdin=1', '--known=0'] };
+const planOn = (b) => process.env.EEAT_PLAN === '1' || !!(b && b.plan === true);
+const stratOf = (k) => (k === 'plan' ? PLAN_STRATEGY : STRATEGIES[k]);
 // The precision stage (strategy 'precision', "exact landings", CPU; src/precision.js): a route that needs one exact
 // sub-pixel position (the user's pocket behind a spike corner: the ball must drop in with x == 5720.0 exactly, one double
 // on a grid of 2^-40 px) is lost by every search that keeps one state per cell or samples random runs (the diagnosis:
@@ -2416,6 +2426,10 @@ function start(b, gpu, test) {
 	// test.skips === true)
 	const lw = cpu && b.skips !== false && process.env.EEAT_SKIPS !== '0' && (test ? test.skips === true : GX.cellsFor(ins.level) === 'coarse') ? laneWorkersOf(workers, b.skipWorkers) : { lane: 0, workers };
 	if (lw.lane > 0) { which.push('skips'); workers = lw.workers; }
+	// (the planner, the compiler (PLAN_STRATEGY): OPT-IN, EEAT_PLAN=1 or body plan: true; its threads as the path skips'
+	// (laneWorkersOf: a quarter of the CPU search's), at least one)
+	let planWorkers = 0;
+	if (cpu && planOn(b)) { const pw = laneWorkersOf(workers, b.planWorkers); planWorkers = Math.max(1, pw.lane); if (pw.lane > 0) workers = pw.workers; which.push('plan'); }
 	const seed = Number.isInteger(+b.seed) && +b.seed >= 0 ? +b.seed : 1;
 	// the most salt tries the exploration runs side by side (eegpu explore --lanes=auto --lanesMax): LANES by default
 	const lanes = Number.isInteger(+b.lanes) && +b.lanes >= 1 ? Math.min(64, +b.lanes) : LANES;
@@ -2431,8 +2445,8 @@ function start(b, gpu, test) {
 		improve: [],
 		cleanMode: cleanModeOf(b.clean),
 		physics: null, cpuOnly: noGpu ? cpuOnlyText(noGpu, workers, guide) : '',
-		strategies: which.map((k) => ({ key: k, label: k === 'goexplore' && one ? ONE_LABEL : STRATEGIES[k].label, cpu: !!STRATEGIES[k].cpu, rolls: !!STRATEGIES[k].rolls, ...(STRATEGIES[k].precision ? { precision: true } : {}),
-			...(STRATEGIES[k].lane ? { lane: true } : {}),
+		strategies: which.map((k) => ({ key: k, label: k === 'goexplore' && one ? ONE_LABEL : stratOf(k).label, cpu: !!stratOf(k).cpu, rolls: !!stratOf(k).rolls, ...(stratOf(k).precision ? { precision: true } : {}),
+			...(stratOf(k).lane ? { lane: true } : {}),
 			...((k === 'goexplore' || k === 'escape') && one ? { gpuShare: true } : {}), state: 'starting', layer: 0, deepest: 0, states: 0, ticksPerSec: 0,
 			found: null, error: null, live: false, pass: k === 'explore' && (!test || test.probe) ? PASS_MAX : PASS_START, probe: k === 'explore' && (!test || test.probe) ? 'running' : '',
 			passes: 1, ends: {}, share: 0, depthCap: 0, detail: '', salt: 0, tries: 0, lanes: 1, saltNoted: 0,
@@ -2459,7 +2473,9 @@ function start(b, gpu, test) {
 		// (the plan past its count: `b.pastPlan === false` off)
 		pastPlan: b.pastPlan !== false && !(test && test.pastPlan === false),
 		// (past the plan, wq-watch: after a trophy round that brought nothing, the untaken coins; `b.breakPast === false`: off)
-		breakPast: b.breakPast !== false && !(test && test.breakPast === false) },
+		breakPast: b.breakPast !== false && !(test && test.breakPast === false),
+		// (the planner's threads: 0 = not running; PLAN_STRATEGY)
+		planWorkers },
 		cpuCmd: test && Array.isArray(test.cpu) ? test.cpu : [process.execPath, path.join(__dirname, 'goexplore.js')],
 		cpuNice: !(test && Array.isArray(test.cpu)),   // (goexplore.js takes --nice; a test's stand-in need not)
 		// (the stall escape: goexplore.js itself, also next to a test's stand-in CPU search; tests: test.escapeCmd)
@@ -2469,6 +2485,9 @@ function start(b, gpu, test) {
 		laneNice: !(test && Array.isArray(test.laneCmd)),
 		precisionCmd: test && Array.isArray(test.precisionCmd) ? test.precisionCmd : [process.execPath, path.join(__dirname, 'precision.js')],
 		rollsCmd: test && Array.isArray(test.rollsCmd) ? test.rollsCmd : [process.execPath, path.join(__dirname, 'goexplore.js')],
+		// (the planner, the compiler: src/plan.js; tests: test.planCmd, a stand-in)
+		planCmd: test && Array.isArray(test.planCmd) ? test.planCmd : [process.execPath, path.join(__dirname, 'plan.js')],
+		planNice: !(test && Array.isArray(test.planCmd)),
 		// the proof (eegpu prove: CPU only, so also without an NVIDIA GPU, whenever the native tool is there; EEAT_PROOF=0: none)
 		prover: test && test.prover !== undefined ? (Array.isArray(test.prover) ? test.prover : null) : process.env.EEAT_PROOF === '0' ? null : G.nativeTool() ? [G.nativeTool()] : null,
 		proveSeconds: test && test.proveSeconds ? test.proveSeconds : PV.SECONDS, proveWatchdogS: test ? test.proveWatchdogS : undefined };
@@ -2528,7 +2547,7 @@ function start(b, gpu, test) {
 	// start as soon as the reach field and the tool check are done; the others when the steer field is built or its wait
 	// is over (launchDeferred). b.earlyStart === false, test.earlyStart === false or EEAT_EARLY=0: every strategy after the
 	// steer wait, as before)
-	const early = wantSteer && which.some((k) => EARLY_KEYS.has(k)) && b.earlyStart !== false && !(test && test.earlyStart === false) && process.env.EEAT_EARLY !== '0';
+	const early = wantSteer && which.some((k) => EARLY_KEYS.has(k) || k === 'plan') && b.earlyStart !== false && !(test && test.earlyStart === false) && process.env.EEAT_EARLY !== '0';
 	const ready = early ? Promise.all([reachP, toolP]) : Promise.all([reachP, toolP, steerP]);
 	ready.then(([rf, toolWhy, sf]) => {
 		if (gen !== searchGen) return;
@@ -2649,7 +2668,7 @@ function launchAll(rf, noGpu, stale, which, cpu, ins, guide, defer) {
 	const noWayUp = rf.mode === 'physics' && rf.startCost < 0;
 	S.physics = { mode: rf.mode, startCost: rf.startCost < 0 ? null : Math.round(rf.startCost * 10) / 10, noWayUp, explain: rf.explain || null, viaDeath: !!deathNote(rf), deathMoves: !!cur.opts.deaths };
 	if (noGpu) {
-		which = which.filter((k) => STRATEGIES[k].cpu);
+		which = which.filter((k) => stratOf(k).cpu);
 		S.strategies = S.strategies.filter((q) => q.cpu);
 		cur.opts.bursts = false;
 		for (const q of S.strategies) if (q.gpuShare) { q.gpuShare = false; q.label = STRATEGIES[q.key].label; }
@@ -2697,7 +2716,7 @@ function launchAll(rf, noGpu, stale, which, cpu, ins, guide, defer) {
 		// (the precision stage waits for a stall; its distances are the reach field's, ranked like a steerless strategy's)
 		if (k === 'precision') { Object.assign(S.strategies[n], { state: 'waiting', noSteer: true, detail: `waits for the search to stall near a spot (no attempt nearer by ${PREC_TILES} tiles for ${prec ? prec.wait : PREC_WAIT_S} s)` }); return null; }
 		// (the early start: a strategy that reads the steer field starts once it is built or its wait is over: launchDeferred)
-		if (k !== 'relay' && defer && !EARLY_KEYS.has(k) && cur.deferred) { cur.deferred.push(n); Object.assign(S.strategies[n], { state: 'starting', detail: 'waits for the steer field (its build, at most its wait)' }); return null; }
+		if (k !== 'relay' && defer && !EARLY_KEYS.has(k) && k !== 'plan' && cur.deferred) { cur.deferred.push(n); Object.assign(S.strategies[n], { state: 'starting', detail: 'waits for the steer field (its build, at most its wait)' }); return null; }
 		if (k !== 'relay') return launch(n);
 		Object.assign(S.strategies[n], { state: 'waiting', detail: `waits for an attempt of ${RELAY_MIN_TICKS}+ ticks to go on from` });
 		return null;
@@ -2990,7 +3009,8 @@ function tellCpu(ticks, inputs, n) {
 			if (q.lane) { if (k !== n && inputs) { try { ch.stdin.write(`route ${inputs}\n`); } catch (e) { /* gone */ } } return; }
 			try {
 				ch.stdin.write(`depth ${Math.max(1, ticks - 1)}\n`);
-				if (q.gpuShare && k !== n && inputs) ch.stdin.write(`route ${inputs}\n`);
+				// (the planner too: the route bounds its branch and bound)
+				if ((q.gpuShare || q.key === 'plan') && k !== n && inputs) ch.stdin.write(`route ${inputs}\n`);
 			} catch (e) { /* gone */ }
 		}
 	});
@@ -3039,7 +3059,7 @@ function launch(n) {
 		// a route of T ticks known: only the first T - 1 ticks (a route there is faster)
 		q.depth = V.depthCap = S.result ? Math.max(1, boundTicks() - 1) : 0;
 	}
-	const args = STRATEGIES[V.key].args(cur.files, cur.opts, q);
+	const args = stratOf(V.key).args(cur.files, cur.opts, q);
 	const cpu = V.cpu;
 	// (the GPU random runs: node src/goexplore.js --gpu=1, a GPU strategy (stop and pause files for its eegpu) that is told
 	// the depth bound on its stdin like the CPU search)
@@ -3059,8 +3079,8 @@ function launch(n) {
 	// rented cloud GPU) lacks, and next to busy CPU threads "every move" was 3-7x slower without it. Before, the whole
 	// process was reniced, so its main thread and the one search's GPU bursts (its eegpu children inherit the main
 	// thread's value) ran at nice 10 too: below every normal process of a shared machine (the cycle 7 test's A100).)
-	const niceCpu = cpu && !S.cpuOnly && process.platform === 'linux' && !V.precision && (V.lane ? cur.laneNice : V.key === 'escape' ? cur.escapeNice : cur.cpuNice);
-	const cmd = cpu ? [...(V.precision ? cur.precisionCmd : V.lane ? cur.laneCmd : V.key === 'escape' ? cur.escapeCmd : cur.cpuCmd), ...args, ...(niceCpu ? ['--nice=10'] : [])] : [...(rolls ? cur.rollsCmd : [cur.tool, ...cur.toolArgs]), ...args, ...G.cacheArgs(), `--stopfile=${stopFile}`, `--pausefile=${pauseFile}`,
+	const niceCpu = cpu && !S.cpuOnly && process.platform === 'linux' && !V.precision && (V.lane ? cur.laneNice : V.key === 'escape' ? cur.escapeNice : V.key === 'plan' ? cur.planNice : cur.cpuNice);
+	const cmd = cpu ? [...(V.precision ? cur.precisionCmd : V.lane ? cur.laneCmd : V.key === 'escape' ? cur.escapeCmd : V.key === 'plan' ? cur.planCmd : cur.cpuCmd), ...args, ...(niceCpu ? ['--nice=10'] : [])] : [...(rolls ? cur.rollsCmd : [cur.tool, ...cur.toolArgs]), ...args, ...G.cacheArgs(), `--stopfile=${stopFile}`, `--pausefile=${pauseFile}`,
 		`--parent=${process.pid}`];
 	// (the CPU search sizes its workers' heaps from its memory budget: no heap flag for it, which would cap them all; the
 	// GPU random runs are one thread, their cells' states outside the V8 heap)
@@ -3131,6 +3151,8 @@ function launch(n) {
 	};
 	const onEvent = (ev) => {
 		if (!mine()) return;
+		// (the planner (EEAT_PLAN=1 / body plan: true): its own events, planEvent)
+		if (V.key === 'plan' && planEvent(V, n, ev)) { totals(); save(); return; }
 		// (the early start: an early strategy's attempts wait for the steer field's decision on the distances' scale)
 		if (cur && cur.early && (ev.ev === 'closest' || ev.ev === 'source')) { cur.early.push(() => onEvent(ev)); return; }
 		if (V.lane && laneEvent(V, n, ev)) { totals(); save(); return; }
@@ -3610,7 +3632,8 @@ function cpuDone() {
 	// (the one search is a GPU search too: it goes on looking for faster routes, its bursts bounded by the route, until
 	// the time is up)
 	// (the path skips too: they look for path changes of the best route)
-	S.strategies.forEach((q, k) => { if ((q.cpu || q.rolls) && !q.gpuShare && !q.lane && alive(kids[k])) { if (!q.found) q.state = 'beaten'; halt(kids[k], 'finish'); } });
+	// (the planner too: its branch and bound over the trigger orders, then its polish)
+	S.strategies.forEach((q, k) => { if ((q.cpu || q.rolls) && !q.gpuShare && !q.lane && q.key !== 'plan' && alive(kids[k])) { if (!q.found) q.state = 'beaten'; halt(kids[k], 'finish'); } });
 }
 /**
  * "every move" (strategy n) tried every situation at a fine grain with nothing cut and found no route: the GPU beams (a
@@ -4008,6 +4031,29 @@ function toArchive(inputs) {
 	try { ch.stdin.write(`${cur.opts.bursts ? 'import' : 'seed'} ${inputs}\n`); } catch (e) { return false; }
 	return true;
 }
+/** the planner's events (strategy 'plan', only with EEAT_PLAN=1 / body plan: true; V, strategy n): "result" a route
+ *  (found(), as every strategy's: the cleanup, the other strategies told, the AutoTASer's feed; the process goes on),
+ *  "source" a new model state (a real state the compiler reached) into the one search's archive (feedOne: "import";
+ *  CPU only: "seed"), "progress" its status line as the row's detail, "stall" / "warning" notes; true = handled here */
+function planEvent(V, n, ev) {
+	if (ev.ev === 'progress') {
+		Object.assign(V, { state: V.found ? 'found' : 'running', layer: Number.isFinite(ev.layer) ? ev.layer : V.layer, deepest: Math.max(V.deepest || 0, ev.layer || 0),
+			states: Number.isFinite(ev.states) ? ev.states : V.states, ticksPerSec: 0 });
+		if (ev.detail) V.detail = String(ev.detail).slice(0, 300);
+		if (!S.result && S.stage !== 'error') S.stage = 'searching';
+	} else if (ev.ev === 'result' && ev.kind === 'finish' && /^[0-O]+$/.test(String(ev.inputs || ''))) {
+		found(String(ev.inputs), n, true);
+	} else if (ev.ev === 'source' && /^[0-O]+$/.test(String(ev.inputs || ''))) {
+		V.sources = (V.sources || 0) + 1;
+		feedOne(String(ev.inputs), true, true);
+	} else if (ev.ev === 'stall') {
+		V.stalls = (V.stalls || 0) + 1;
+		if (V.stalls <= 3) note(`${V.label}: stall ${V.stalls}: ${String(ev.why || '').slice(0, 300)}`);
+	} else if (ev.ev === 'warning') note(`${V.label}: ${String(ev.text || '').slice(0, 300)}`);
+	else if (ev.ev === 'done') V.end = ev.end || '';
+	else if (ev.error) { V.error = String(ev.error).slice(0, 500); note(`${V.label}: error: ${V.error}`); }
+	return true;
+}
 /** the path skips' events (V, strategy n): true when handled here. "shortcut" (a shortened attempt, one carried over to
  *  a newer attempt, a lead): into the CPU search's archive; "progress": the page's line; "result": a route (found(), as
  *  every strategy's); start / search / done: counters */
@@ -4288,6 +4334,90 @@ function heatState(since, trail, search) {
 		{ trailId: EXV.trails.id, trails: EXV.trails.since(mine ? trail : 0), replays: EXV.replays, replayMs: Math.round(EXV.replayMs) });
 }
 
+// ---------------------------------------------------------------- the COMPILE action (the compiler: src/compile.js)
+// The page's "Compile" button (POST /api/editor/compile): the level -> src/compile.js (no search, no GPU: the model, the
+// plan, moves derived from the physics, the engine's verify, the polish) -> a verified .eetas, one compile at a time, in
+// its own process (<data>/editor/compile/: level.eelvl, route.eetas, report.json). Its stage lines (parse, model, bounds,
+// plan, moves, verify, polish) as they come; on success a job from the route (makeJob) and the eeo-tas line for it
+// (/loadtas <the job's best.eetas>), which the page copies to the clipboard. Additive: nothing of Find a route changes.
+// (tests: EEAT_COMPILE_PARTS=<module of mock parts> reaches src/compile.js through its environment)
+const COMPILE_S = 60, COMPILE_MAX_S = 3600, COMPILE_KEEP = 40;
+let CMP = null;
+const compileDir = () => path.join(dir(), 'compile');
+/** POST /api/editor/compile: b {eelvlB64 (or level: the editor's JSON), seconds (60), workers, name} -> compileState() */
+function compileStart(b) {
+	if (CMP && CMP.running) throw new Error('a compile is already running (one at a time): wait for it, or stop it');
+	const buf = b.eelvlB64 ? Buffer.from(String(b.eelvlB64), 'base64') : b.level ? eelvlOf(b.level) : null;
+	if (!buf || !buf.length) throw new Error('missing eelvlB64 (the level as .eelvl bytes, base64)');
+	const ins = inspect(buf, { source: b.source });
+	if (ins.problems.length) { const e = new Error(ins.problems.map((q) => q.text).join(' ')); e.problems = ins.problems; throw e; }
+	const d = compileDir();
+	fs.mkdirSync(d, { recursive: true });
+	const lf = path.join(d, 'level.eelvl'), route = path.join(d, 'route.eetas'), report = path.join(d, 'report.json');
+	fs.writeFileSync(lf, buf);
+	for (const f of [route, report]) { try { fs.unlinkSync(f); } catch (e) { /* none */ } }
+	const seconds = Math.max(3, Math.min(COMPILE_MAX_S, Math.round(+b.seconds || COMPILE_S)));
+	const workers = cpuWorkers(b.workers);
+	const name = String(b.name || ins.json.world_name || 'level').slice(0, 80);
+	const args = [path.join(__dirname, 'compile.js'), lf, `--out=${route}`, '--json', `--seconds=${seconds}`, `--workers=${workers}`, `--report=${report}`,
+		...(process.env.EEAT_COMPILE_PARTS ? [`--parts=${path.resolve(process.env.EEAT_COMPILE_PARTS)}`] : [])];
+	const ch = spawn(process.execPath, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: C.workerHeapEnv() });
+	const me = CMP = { running: true, started: Date.now(), seconds, workers, name, buf, stage: 'parse', stages: [], notes: [], result: null, job: null, loadtas: null, message: '', kid: ch, err: '' };
+	let out = '';
+	const onEvent = (ev) => {
+		if (ev.ev === 'stage') { me.stages.push({ name: String(ev.name), ms: Math.round(+ev.ms || 0), text: String(ev.text || '').slice(0, 400) }); me.stage = String(ev.name); }
+		else if (ev.ev === 'progress' && ev.detail) me.detail = String(ev.detail).slice(0, 300);
+		else if (ev.ev === 'warning' || ev.ev === 'stall') { me.notes.push(String(ev.text || ev.why || '').slice(0, 300)); if (me.notes.length > COMPILE_KEEP) me.notes.shift(); }
+		else if (ev.ev === 'report') me.report = ev;
+		else if (ev.error) me.message = String(ev.error).slice(0, 500);
+	};
+	ch.stdout.on('data', (chunk) => {
+		out += chunk;
+		const k = out.lastIndexOf('\n');
+		if (k < 0) return;
+		const lines = out.slice(0, k).split('\n');
+		out = out.slice(k + 1);
+		for (const l of lines) { const s = l.trim(); if (!s.startsWith('{')) continue; try { onEvent(JSON.parse(s)); } catch (e) { /* a partial line */ } }
+	});
+	ch.stderr.on('data', (c) => { me.err = (me.err + c).slice(-4000); });
+	ch.on('error', (e) => { me.message = `the compiler could not start: ${e.message}`; });
+	ch.on('close', (code) => {
+		me.running = false; me.kid = null; me.code = code; me.ended = Date.now();
+		const r = me.report;
+		if (me.stopped) { me.stage = 'stopped'; me.message = me.message || 'stopped'; return; }
+		if (r && r.ok && fs.existsSync(route)) {
+			try {
+				// (the route replayed once more here, then a job: the app's runs, the optimizer, the viewer)
+				const L = require('./cleanroute.js').editorLevel(me.buf), ms = C.readEetas(route), ev = C.evaluate(L, ms);
+				if (!ev) throw new Error('the compiled route does not finish on its replay here');
+				const meta = makeJob({ eelvlB64: me.buf.toString('base64'), eetasB64: fs.readFileSync(route).toString('base64'), name: `${me.name} (compiled)` });
+				me.job = meta.id;
+				me.loadtas = `/loadtas ${path.resolve(C.JOBS, meta.id, 'best.eetas')}`;
+				me.result = { runTicks: ev.runTicks, time: C.fmt(ev.runTicks), ticks: ev.complete, deaths: ev.deaths, chance: ev.chance, lb: r.lb, lbTime: Number.isFinite(r.lb) ? C.fmt(r.lb) : null,
+					gap: r.gap, gapPct: r.gapPct, legs: r.legs || [], provenLegs: r.provenLegs || 0, known: r.known || null, ratio: r.ratio };
+				me.stage = 'done';
+				me.message = `Compiled: ${C.fmt(ev.runTicks)} (${ev.runTicks} run ticks; lower bound ${Number.isFinite(r.lb) ? C.fmt(r.lb) : '-'}, gap ${r.gapPct}%)`;
+			} catch (e) { me.stage = 'error'; me.message = `the compiled route could not become a run: ${e.message}`; }
+		} else {
+			me.stage = code === 2 ? 'no route' : 'error';
+			me.message = (r && r.why) || me.message || (code === 2 ? 'no route' : `the compiler ended with exit code ${code}${me.err.trim() ? `: ${me.err.trim().split('\n').pop().slice(0, 300)}` : ''}`);
+		}
+	});
+	return compileState();
+}
+/** GET /api/editor/compile: {running, stage, stages [{name, ms, text}], detail, notes, result {runTicks, time, lb, gap, legs,
+ *  known, ...}, job, loadtas, message, started, elapsed, seconds} */
+function compileState() {
+	if (!CMP) return { running: false, stage: 'none', stages: [], result: null, job: null, loadtas: null, message: '' };
+	return { running: CMP.running, stage: CMP.stage, stages: CMP.stages.slice(), detail: CMP.detail || '', notes: CMP.notes.slice(-8), result: CMP.result, job: CMP.job, loadtas: CMP.loadtas,
+		message: CMP.message, started: CMP.started, elapsed: Math.round(((CMP.ended || Date.now()) - CMP.started) / 100) / 10, seconds: CMP.seconds, name: CMP.name };
+}
+/** POST /api/editor/compile/stop */
+function compileStop() {
+	if (CMP && CMP.running && CMP.kid) { CMP.stopped = true; try { CMP.kid.kill(); } catch (e) { /* gone */ } }
+	return compileState();
+}
+
 // ---------------------------------------------------------------- a job from a found route (Watch / Optimize)
 /** b: { eelvlB64, eetasB64 } (else the last search's level and route), name. Returns the job's meta (jobs.importJob). */
 function makeJob(b) {
@@ -4304,12 +4434,14 @@ function makeJob(b) {
 
 /** stops a running search (the server is shutting down) */
 function shutdown() {
+	if (CMP && CMP.running) compileStop();
 	if (S) { S.halted = true; saveNow(); }
 	for (const ch of kids) halt(ch, 'stopped');
 	if (alive(proofKid)) { try { proofKid.kill(); } catch (e) { /* gone */ } }
 }
 
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown, heatState,
+	compileStart, compileState, compileStop, PLAN_STRATEGY, stratOf, planOn,
 	EXP_REPLAY_MS, EXP_TIP, IMPROVE_KEEP,
 	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, burstSizeArgs, breakShareOpen, breakDryAfter, rollsDryAfter, sourcesOf, classRoutes, coinsOfDesc, progOfDesc, progGt, progressCands, breakCmp, evictVictim, gateEnter, reachInfo, reachBase,
 	escRotOf, escFromOf, escTurnOf, rollsOf, rollsNext, rollsFresh, STRATEGIES, GX_DEFAULTS, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S,

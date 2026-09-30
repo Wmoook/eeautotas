@@ -68,6 +68,11 @@ button.small { padding: 4px 9px; font-size: 12px; }
 .msg.warn b.w { color: var(--gold); }
 .msg.warn > div + div { margin-top: 5px; }
 .md5 { font: 11.5px var(--mono); color: var(--muted); overflow-wrap: anywhere; }
+/* the Compile action (src/compile.js): its stage lines like a compiler's, the eeo-tas line */
+.cmpOut { margin-top: 10px; padding: 8px 10px; border-radius: 9px; background: var(--panel2); font: 11.5px var(--mono); color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; }
+.cmpOut .dim { color: var(--muted); }
+.cmpLine { display: flex; gap: 6px; margin-top: 8px; align-items: center; }
+.cmpLine input { flex: 1; min-width: 0; font: 11.5px var(--mono); }
 .spin { display: inline-block; width: 12px; height: 12px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
 	animation: sp .8s linear infinite; vertical-align: -2px; margin-right: 6px; }
 @keyframes sp { to { transform: rotate(360deg); } }
@@ -269,7 +274,8 @@ kbd { font: 11px var(--mono); background: var(--panel2); border: 1px solid var(-
 						<option value="4096">4 k</option><option value="8192">8 k</option><option value="16384">16 k</option><option value="32768" selected>32 k</option>
 						<option value="65536">64 k</option></select></label>
 				</div>
-				<div class="row" style="margin-top:10px"><button class="go" id="bSolve">Find a route</button><button class="go" id="bAuto" title="Find a route, then optimize it at once as a run (the GPU goes to the optimizer when Find a route stops finding faster routes), for the time chosen above. Its run pauses any other running run (one at a time)">Find and optimize</button><button class="stop" id="bStop" hidden>Stop</button></div>
+				<div class="row" style="margin-top:10px"><button class="go" id="bSolve">Find a route</button><button class="go" id="bAuto" title="Find a route, then optimize it at once as a run (the GPU goes to the optimizer when Find a route stops finding faster routes), for the time chosen above. Its run pauses any other running run (one at a time)">Find and optimize</button><button class="stop" id="bStop" hidden>Stop</button><button class="go" id="bCompile" title="Compile the level into a TAS: no search, no GPU (the level's model, a plan of which trigger to take next, moves derived from the physics, the engine's own replay as the check), for at most the time chosen above (10 min at most). The result becomes a run, and its /loadtas line is copied for eeo-tas">Compile</button></div>
+				<div id="compileSt"></div>
 				<div id="autoSt"></div>
 				<div class="hint" id="solveWhy"></div>
 				<div id="solveSt"></div>
@@ -2978,6 +2984,74 @@ async function pollAuto() {
 }
 $('bAuto').onclick = autotas;
 $('bSolve').onclick = solve;
+// ------------------------------------------------------------ Compile (POST / GET /api/editor/compile: src/compile.js)
+// The level -> a verified .eetas, like a compiler: no search, no GPU. Its stage lines (parse, model, bounds, plan, moves,
+// verify, polish) appear as they come; on success the run it made (a job) and its eeo-tas line (/loadtas <file>), copied
+// to the clipboard (else a read-only field with a Copy button) and a toast.
+const CMPL = { st: null, poll: 0, mine: 0, told: 0 };
+async function compileLevel() {
+	$('bCompile').disabled = true;
+	try {
+		const bytes = await eelvlBytes();
+		const seconds = Math.max(5, Math.min(600, +$('sSec').value || 60));
+		CMPL.st = await postJson('/api/editor/compile', { eelvlB64: b64(bytes), seconds, name: LV.name, source: fileSource() });
+		CMPL.mine = CMPL.st.started || 0;
+		renderCompile();
+		pollCompile();
+	} catch (e) {
+		$('compileSt').innerHTML = `<div class="msg err">Compile: ${esc(e.message)}</div>`;
+		$('bCompile').disabled = false;
+	}
+}
+async function pollCompile() {
+	clearTimeout(CMPL.poll);
+	try { CMPL.st = await api('/api/editor/compile'); } catch (e) { /* keep the last */ }
+	renderCompile();
+	const s = CMPL.st;
+	if (s && s.running) { CMPL.poll = setTimeout(pollCompile, 700); return; }
+	// (done: once per compile this page started, the eeo-tas line to the clipboard and a toast)
+	if (s && s.started && s.started === CMPL.mine && CMPL.told !== s.started) {
+		CMPL.told = s.started;
+		if (s.loadtas) copyLoadtas(s);
+		else toast(`Compile: ${esc(s.message || s.stage)}`, true);
+	}
+}
+async function copyLoadtas(s) {
+	const r = s.result || {};
+	const what = `Compiled: <b>${esc(r.time || '')}</b>${r.lbTime ? ` (lower bound ${esc(r.lbTime)})` : ''}`;
+	try {
+		await navigator.clipboard.writeText(s.loadtas);
+		toast(`${what}, /loadtas line copied. In eeo-tas: paste it, then /reset and /playtas.`);
+	} catch (e) {
+		CMPL.noClip = true;
+		renderCompile();
+		toast(`${what}. Copy the /loadtas line below (the browser refused the clipboard).`);
+	}
+}
+function renderCompile() {
+	const s = CMPL.st, el = $('compileSt');
+	$('bCompile').disabled = !!(s && s.running);
+	if (!s || s.stage === 'none') { el.innerHTML = ''; return; }
+	const rows = (s.stages || []).map((g) => `${esc(g.name.padEnd(8))}${esc((g.ms / 1000).toFixed(2).padStart(6))} s  ${esc(g.text)}`);
+	if (s.running) rows.push(`<span class="dim">${esc(s.detail || `${s.stage}…`)} (${esc(String(s.elapsed))} s of ${esc(String(s.seconds))})</span>`);
+	const r = s.result;
+	if (r) rows.push(`${esc('result'.padEnd(8))}        ${esc(`${r.runTicks.toLocaleString('en-US')} run ticks (${r.time}); lower bound ${Number.isFinite(r.lb) ? r.lb.toLocaleString('en-US') : '-'}` +
+		`${Number.isFinite(r.gapPct) ? ` (gap ${r.gapPct}%)` : ''}; proven legs ${r.provenLegs || 0} of ${(r.legs || []).length}${r.known ? `; best known ${fmt(r.known.runTicks)} (${r.known.source})` : ''}`)}`);
+	let html = `<div class="cmpOut">${rows.join('\n')}</div>`;
+	if (s.running) html += `<div class="row" style="margin-top:6px"><button class="small" id="bCmpStop">Stop compiling</button></div>`;
+	else if (s.loadtas) {
+		html += `<div class="cmpLine"><input type="text" id="cmpLine" readonly value="${esc(s.loadtas)}" title="the eeo-tas line: paste it in eeo-tas, then /reset and /playtas"><button class="small" id="bCmpCopy">Copy</button></div>` +
+			`<div class="hint">The run it made: <a href="/#watch=${encodeURIComponent(s.job)}&zoom=fit" target="_blank">watch it</a> · <a href="/" id="cmpOpen">open your runs</a>${CMPL.noClip ? ' · the browser refused the clipboard: copy the line above' : ''}</div>`;
+	} else if (s.message) html += `<div class="msg ${s.stage === 'stopped' ? 'info' : 'err'}">Compile: ${esc(s.message)}</div>`;
+	el.innerHTML = html;
+	if ($('bCmpStop')) $('bCmpStop').onclick = async () => { try { CMPL.st = await postJson('/api/editor/compile/stop', {}); } catch (e) { /* ignore */ } pollCompile(); };
+	if ($('bCmpCopy')) $('bCmpCopy').onclick = async () => {
+		const inp = $('cmpLine');
+		try { await navigator.clipboard.writeText(inp.value); toast('The /loadtas line is copied.'); } catch (e) { inp.focus(); inp.select(); try { document.execCommand('copy'); toast('The /loadtas line is copied.'); } catch (e2) { toast('Select the line and copy it (Ctrl+C).', true); } }
+	};
+	if ($('cmpOpen')) $('cmpOpen').onclick = () => store.set('tasopt.sel', s.job);
+}
+$('bCompile').onclick = compileLevel;
 // (while Find and optimize runs, Stop ends it: Find a route stops and its run pauses with its best)
 $('bStop').onclick = async () => {
 	if (AUTO.st && AUTO.st.running) { try { AUTO.st = await postJson('/api/editor/autotas/stop', {}); } catch (e) { /* ignore */ } pollAuto(); pollSolve(); return; }
@@ -3028,6 +3102,7 @@ function demoLevel() {
 	loadGpu();
 	pollSolve();
 	pollAuto();
+	pollCompile();   // (a compile running or done: its lines; no clipboard or toast for one this page did not start)
 	jobFromHash();   // #job=<id>: "Open in level editor" (the run viewer, the job page)
 	window.addEventListener('hashchange', jobFromHash);
 })();
