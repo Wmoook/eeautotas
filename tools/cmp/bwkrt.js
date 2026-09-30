@@ -55,7 +55,7 @@ const pos = argv.filter((s) => !s.startsWith('--'));
 		const snap = sim.snapshot();
 		const t0 = Date.now();
 		let r;
-		try { r = B.solve(snap, { tiles }, { ms, probe: opt('probe', '0') === '1' ? masks.subarray(tk, hit).map((m) => m & 31) : null, probeEvery: +opt('probeEvery', 10) }); } catch (e) { r = { ok: false, why: 'error ' + (e && e.stack || e) }; }
+		try { r = B.solve(snap, { tiles }, { ms, probe: opt('probe', '0') === '1' ? masks.subarray(tk, hit).map((m) => m & 31) : null, probeEvery: +opt('probeEvery', 10), debugReplay: opt('debugReplay', '0') === '1' }); } catch (e) { r = { ok: false, why: 'error ' + (e && e.stack || e) }; }
 		const row = { start: name, tick: tk, routeLeg: hit - tk, ok: r.ok, T: r.ok ? r.T : null, ms: Date.now() - t0, why: r.why || null, st: r.stats, rssMB: Math.round(process.memoryUsage().rss / 1048576) };
 		if (r.ok) {
 			// the whole run: the route's prefix + the leg, from the level's start

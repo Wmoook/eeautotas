@@ -571,7 +571,7 @@ function createBackward(L, opts = {}) {
 					let r = null;
 					try { r = msol().leg(snapE, { tiles: Array.from(target.tiles), cls: 'any' }, { Tmax: P.finishT, chain: false, prove: false, coupled: nd.h <= 40, fields: true, nodes: 40000, fieldMs: P.finishMs, coupledTicks: 30000, deadline: tf + P.finishMs, alts: 0 }); } catch (e) { r = null; }
 					stats.finishCalls++; stats.finishMs += Date.now() - tf;
-					if (r && r.ok && r.masks && r.masks.length) { found = { par: id, masks: Uint8Array.from(r.masks), g: nd.g + r.T }; stats.finishOk++; }
+					if (r && r.ok && r.masks && r.masks.length) { found = { par: id, masks: Uint8Array.from(r.masks), g: nd.g + r.T, prefix: root.prefix }; stats.finishOk++; }
 				}
 				sim.restore(snapE);
 				const ms = found ? [] : macrosOf();
@@ -615,6 +615,7 @@ function createBackward(L, opts = {}) {
 		for (let k = 0; !found && k < P.relay && stats.meetCapped && lastBest && lastBest.snap && Date.now() < tEnd - 50; k++) {
 			if (!(lastBest.h < rootH - P.relayMin)) break;
 			const pm = pathOf(lastBest.id), pre = new Uint8Array(root.prefix.length + pm.length);
+			if (o.debugReplay) { sim.restore(root.snap); for (const mk of pm) { E.applyMask(inp, mk); sim.tick(inp); } const h1 = sim.stateHash(); sim.restore(lastBest.snap); (stats.relayCheck = stats.relayCheck || []).push(h1 === sim.stateHash() ? 'ok' : 'DIFF'); }
 			pre.set(root.prefix); pre.set(pm, root.prefix.length);
 			rootH = lastBest.h;
 			root = { snap: lastBest.snap, prefix: pre };
@@ -657,6 +658,7 @@ function createBackward(L, opts = {}) {
 				// the first move whose replay leaves the chain's own states
 				const chain = []; for (let q = found.par; q >= 0; q = nodes[q].par) chain.push(q); chain.reverse();
 				sim.restore(snap0); let tt = 0; const rep = [];
+				if (found.prefix) { for (const mk of found.prefix) { E.applyMask(inp, mk); sim.tick(inp); tt++; } rep.push(['prefix', tt, sim.stateHash() === (root.snap && root.snap.level ? (() => { const h0 = sim.stateHash(); return h0; })() : 0) ? '' : '']); }
 				for (const q of chain) { const nd = nodes[q]; if (nd.masks) { for (const mk of nd.masks) { E.applyMask(inp, mk); sim.tick(inp); tt++; } } rep.push([q, tt, nd.g, nd.hsh === undefined ? 'root' : nd.hsh === sim.stateHash() ? 'same' : 'DIFF', sim.is_dead ? 'dead' : '']); }
 				stats.replay = rep;
 			}
