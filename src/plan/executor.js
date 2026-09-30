@@ -99,6 +99,20 @@ const LADDER = [[0.5, 0.25, 8, 2], [1, 0.5, 16, 8], [2, 1, 32, 16]];
 const COARSE_CELL = [0.5, 0.25, 2, 1];
 const COARSE_SHARE = process.env.EEAT_COARSE_SHARE !== undefined ? +process.env.EEAT_COARSE_SHARE : 0.5;
 const COARSE_RUNG = process.env.EEAT_COARSE_RUNG !== undefined ? +process.env.EEAT_COARSE_RUNG : 1;
+// THE RATE RULE (COMPILE-ALL lane 6, block 4): before the compile's first route the strategy marks its steps' budgets fast;
+// a leg the finders found in such a call is tightened (3b), polished (polishLeg) and bounded by the exact search (2b) only
+// for RATE_F x the time the call took to find it (at least RATE_MIN_MS), not for the rest of the window: those three used
+// the whole window after every find (MIHB's Dream / Gingerbread House / Pancake Quest: 35% of the successful calls' worker
+// time, a rung-1 leg found at 1 s answered at 5 s), and a PARTIAL level's legs run one after another from each other's
+// arrivals. After the first route the budgets are not fast: the branch and bound's legs are tightened as before, and the
+// polish stage polishes the route. Measured (box 3, 60 s, --workers=3, the lane's 12 RATE levels, side by side with the
+// base): triggers 195 vs 173 on the 11 levels neither compiled (Tutorial 3 6 vs 1, Level 1 Overworld 48 vs 38, Pancake
+// 16 vs 12), a second run 189; the cost: a first route built of untightened legs is slower (the shared gate: Accident
+// Prone 4,243 vs 3,422 / 3,311 with EEAT_RATE=0, Rosa dei Venti 4,184 vs 3,815). EEAT_RATE=0: off (the executor byte for
+// byte as before); EEAT_RATE_F, EEAT_RATE_MIN_MS.
+const RATE_ON = process.env.EEAT_RATE !== '0';
+const RATE_F = process.env.EEAT_RATE_F !== undefined ? +process.env.EEAT_RATE_F : 0.5;
+const RATE_MIN_MS = process.env.EEAT_RATE_MIN_MS !== undefined ? +process.env.EEAT_RATE_MIN_MS : 100;
 const LEG_MODE = () => { const m = String(process.env.EEAT_EXEC_LEG || 'best'); return m === 'beam' || m === 'mix' ? m : 'best'; };
 const BASE_FEATS = ['key0', 'key1', 'key2', 'key3', 'key4', 'key5', 'team', 'coins', 'bcoins', 'crown', 'silver', 'deaths', 'cp', 'fx', 'prot'];
 
@@ -348,6 +362,11 @@ function makeCore(L, co) {
 		budget = budget || {};
 		const deadline = Math.min(budget.deadline > 0 ? budget.deadline : Infinity, tIn + (budget.ms > 0 ? budget.ms : 3000));
 		const wEnd = deadline - VERIFY_MARGIN_MS;
+		// (THE RATE RULE: before the compile's first route (budget.fast) a leg the finders found is tightened, polished and
+		// bounded by the exact search only until pEnd, RATE_F x the time it took to find it (at least RATE_MIN_MS), not to
+		// the window's end: the next leg starts from its arrival that much sooner)
+		let pEnd = wEnd;
+		const fast = RATE_ON && !!budget.fast;
 		const stop = typeof budget.stop === 'function' ? budget.stop : null;
 		const k = budget.k > 0 ? budget.k : K_DEFAULT;
 		const rung = budget.level | 0;
@@ -805,15 +824,16 @@ function makeCore(L, co) {
 				}
 			}
 			if (r.status === 'found') found = { cands: r.goals, tool: 'leg', proven: false, lbAbs };
+			if (found && fast) { const tf = Date.now(); pEnd = Math.min(wEnd, tf + Math.max(RATE_MIN_MS, RATE_F * (tf - tIn))); }
 			// (the tightening: a leg found, the best-first search again with the kinematic bound in its order and only legs
 			// shorter than it, half of what is left: T-EXEC-LEGS, box 3, 3 s: 77.0% vs 76.6%, the legs found 1.020 vs 1.046 of
 			// the route's (median), shorter in 91 of the 202 both found, longer in none; EEAT_TIGHTEN=0 off; its weight 3
 			// (EEAT_TIGHT_W): 77.4% either way, the legs 1.000 vs 1.007 (median), 1.303 vs 1.438 (p90), shorter in 66 of 204)
-			if (found && process.env.EEAT_TIGHTEN !== '0' && Date.now() < wEnd - 50) {
+			if (found && process.env.EEAT_TIGHTEN !== '0' && Date.now() < pEnd - 50) {
 				const tm = String(process.env.EEAT_TIGHTEN_MODE || 'best');
 				// (EEAT_TIGHTEN_MODE: 'best' (the default), 'beam' (legBFS bounded by the leg: layered by tick, it keeps the
 				// fastest state per cell), 'both' (the beam, then best-first on what is left of the share))
-				const t8 = Date.now(), tEnd = t8 + (+process.env.EEAT_TIGHT_SHARE || 0.5) * (wEnd - t8);
+				const t8 = Date.now(), tEnd = t8 + (+process.env.EEAT_TIGHT_SHARE || 0.5) * (pEnd - t8);
 				if (tm === 'beam' || tm === 'both') {
 					const ub = Math.min(...found.cands.map((c) => c.depth));
 					const rb = runBeam(tm === 'both' ? t8 + 0.6 * (tEnd - t8) : tEnd, ub - 1);
@@ -843,19 +863,19 @@ function makeCore(L, co) {
 		}
 		// -------- the leg found made shorter: polish.js polishLeg (exact windows from its end back: the waypoint sooner, the
 		// leg's own state region sooner, exact rejoins; every change replayed from the start)
-		if (found && found.tool === 'leg' && Date.now() < wEnd - 20 && process.env.EEAT_LEG_POLISH !== '0') {
+		if (found && found.tool === 'leg' && Date.now() < pEnd - 20 && process.env.EEAT_LEG_POLISH !== '0') {
 			const t6 = Date.now();
 			const c0 = found.cands.reduce((m, c) => (c.depth < m.depth ? c : m), found.cands[0]);
 			const PO = require('./polish.js');
-			const pl = PO.polishLeg(L, snaps[c0.start], c0.tail, goal, { sim, deadline: t6 + 0.6 * (wEnd - t6), allowDeath, beforeTick, stop: stopFn });
+			const pl = PO.polishLeg(L, snaps[c0.start], c0.tail, goal, { sim, deadline: t6 + 0.6 * (pEnd - t6), allowDeath, beforeTick, stop: stopFn });
 			tiers.push({ tier: 'leg-polish', ms: Date.now() - t6, saved: pl.saved, mutated: pl.mutated, windows: pl.windows });
 			if (pl.saved > 0) found.cands.unshift({ start: c0.start, tail: pl.tail, depth: c0.depth - pl.saved });
 		}
 		// -------- tier 2b: the exact search bounded by the leg found (a shorter leg, or a proof that it is optimal)
-		if (found && found.tool === 'leg' && Date.now() < wEnd - 5) {
+		if (found && found.tool === 'leg' && Date.now() < pEnd - 5) {
 			const t4 = Date.now();
 			const ub = Math.min(...found.cands.map((c) => c.depth));
-			const r = X.exactLeg(L, snaps, goal, Object.assign({}, baseX, { maxDepth: ub - 1, deadline: wEnd - 2 }));
+			const r = X.exactLeg(L, snaps, goal, Object.assign({}, baseX, { maxDepth: ub - 1, deadline: pEnd - 2 }));
 			sims += r.stats.ticks;
 			tiers.push({ tier: 'exact-ub', ms: Date.now() - t4, status: r.status, maxDepth: ub - 1 });
 			if (r.status === 'found') found = { cands: r.goals, tool: 'exact', proven: true, lbAbs: r.depth };
@@ -1558,7 +1578,7 @@ async function createExecutor(L, opts) {
 		// (the exact tier's exhaustion: no time in it), is the answer; else the skeleton with the rest)
 		if (SKEL_DIRECT > 0 && !skelMemo.has(skelKey(goal, wp, startStrs, wN))) {
 			const dMs = SKEL_DIRECT * (deadline - Date.now());
-			const r0 = await reachLeg(starts, wp, { ms: dMs, level: budget.level | 0, k: budget.k, deadline: Math.min(deadline, Date.now() + dMs), stop: budget.stop });
+			const r0 = await reachLeg(starts, wp, { ms: dMs, level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline: Math.min(deadline, Date.now() + dMs), stop: budget.stop });
 			if (r0.ok || (r0.fail && (r0.fail.why === 'proof' || r0.fail.why === 'stopped' || r0.fail.why === 'dies'))) return r0;
 			const rD = await deathLeg(starts, wp, budget, r0, Date.now() + 0.5 * (deadline - Date.now()));
 			if (rD) return rD;
@@ -1599,7 +1619,7 @@ async function createExecutor(L, opts) {
 			// what is left)
 			const share = retried ? Math.max(300, 0.5 * left) : Math.min(left - 50, Math.max(300, left * Math.min(0.5, (3 * step) / cCur)));
 			const sub = { kind: 'region', tiles, expect: null, allowDeath: !!wp.allowDeath, fieldTiles: Array.from(T.fieldTilesOf(goal)), fieldTouch: T.fieldTouchOf(goal), label: `${wp.label || wp.kind} (skeleton ${Math.round(c)} tiles)` };
-			let r = await reachLeg(cur, sub, { ms: share, level: budget.level | 0, k: budget.k, deadline: Math.min(deadline, Date.now() + share), stop: budget.stop }, true);
+			let r = await reachLeg(cur, sub, { ms: share, level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline: Math.min(deadline, Date.now() + share), stop: budget.stop }, true);
 			sims += r.sims || 0;
 			// (the dead ends' states dropped from a sub-leg's arrivals (above); every one of them a dead end: the sub-leg once
 			// more for DEAD_K arrivals in what is left of its share, else an 'exhausted' sub-leg (a dead end too))
@@ -1608,7 +1628,7 @@ async function createExecutor(L, opts) {
 				let r2 = keep(r);
 				if (!r2 && Date.now() < deadline - 150) {
 					const s2 = Math.max(200, Math.min(share, deadline - Date.now() - 50));
-					const rr = await reachLeg(cur, sub, { ms: s2, level: budget.level | 0, k: DEAD_K, deadline: Math.min(deadline, Date.now() + s2), stop: budget.stop }, true);
+					const rr = await reachLeg(cur, sub, { ms: s2, level: budget.level | 0, fast: !!budget.fast, k: DEAD_K, deadline: Math.min(deadline, Date.now() + s2), stop: budget.stop }, true);
 					sims += rr.sims || 0;
 					if (rr.ok) r2 = keep(rr);
 				}
@@ -1658,7 +1678,7 @@ async function createExecutor(L, opts) {
 			return { ok: false, arrivals: [], tool: null, ms: Date.now() - tIn, sims, legs: [], lb: 0, fail: Object.assign({}, fail, { why: 'budget', closest: cl }) };
 		}
 		// (the last leg to the waypoint itself, from the deepest arrivals reached)
-		const r = await reachLeg(cur, wp, { ms: deadline - Date.now(), level: budget.level | 0, k: budget.k, deadline, stop: budget.stop });
+		const r = await reachLeg(cur, wp, { ms: deadline - Date.now(), level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline, stop: budget.stop });
 		// (a failure after sub-legs is no proof: the time was split)
 		if (cur === startStrs) { if (!r.ok && levels.length && r.fail && r.fail.why !== 'stopped') r.fail = Object.assign({}, r.fail, { why: 'budget' }); return r; }
 		// (the arrivals' legs are the whole way from the step's own starts: the start that prefixes each)
@@ -1730,13 +1750,13 @@ async function createExecutor(L, opts) {
 	async function dispatchLeg(startStrs, w, budget, ms, k, deadline) {
 		let res;
 		if (nW === 0) {
-			try { res = await core.reach(startStrs, w, { ms, level: budget.level | 0, k, deadline, stop: budget.stop }); }
+			try { res = await core.reach(startStrs, w, { ms, level: budget.level | 0, fast: !!budget.fast, k, deadline, stop: budget.stop }); }
 			catch (e) { res = { ok: false, arrivals: [], tool: null, legs: [], lb: 0, fail: { why: 'budget', closest: null, touched: [], blockedBy: [], level: budget.level | 0, note: `error: ${e && e.message || e}` } }; }
 		} else {
 			const sab = new SharedArrayBuffer(4), flag = new Int32Array(sab);
 			let poll = null;
 			if (typeof budget.stop === 'function') poll = setInterval(() => { try { if (budget.stop()) Atomics.store(flag, 0, 1); } catch (e) { /* ignore */ } }, 20);
-			const pending = dispatch({ type: 'reach', starts: startStrs, wp: w, budget: { ms, level: budget.level | 0, k, deadline }, tDisp: PROF ? Date.now() : 0 }, deadline, sab);
+			const pending = dispatch({ type: 'reach', starts: startStrs, wp: w, budget: { ms, level: budget.level | 0, fast: !!budget.fast, k, deadline }, tDisp: PROF ? Date.now() : 0 }, deadline, sab);
 			// (while the worker searches: the starts replayed from the level start in this thread too, for finalize's checks)
 			for (const s of startStrs) { try { core.startOf(String(s)); } catch (e) { /* finalize replays it again */ } }
 			const msg = await pending;

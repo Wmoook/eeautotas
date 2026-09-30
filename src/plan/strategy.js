@@ -651,7 +651,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const room = left() - (best ? endReserve : 0) - 100;
 		const ms = Math.max(50, Math.min(rungMs[r] * mult, room));
 		const deadline = Date.now() + ms;
-		return { ms, level: r, k: ARRIVALS_K, deadline, stop: () => stopped || left() <= 0 || Date.now() > deadline + 2000 };
+		// (fast: before the first route a found leg's tightening is capped by the time it took to find it: executor.js RATE_ON)
+		return { ms, level: r, k: ARRIVALS_K, deadline, fast: !best, stop: () => stopped || left() <= 0 || Date.now() > deadline + 2000 };
 	};
 	/** the waypoint a step runs to: its own, with beforeTick filled from beforeTickFrom (ticks after the earliest start) */
 	const waypointOf = (step, A) => {
