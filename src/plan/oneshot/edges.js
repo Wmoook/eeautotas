@@ -60,7 +60,7 @@ const DOTS = new Set([4, 414]);
 const DIR9 = [0, 2, 4, 8, 16, 10, 12, 18, 20];
 const TELEPORT_PX = 20;
 const DEAD_MAX = 80;                      // the dead ticks played on to the respawn (the engine: 54)
-const DEF = { rounds: 1, landT: 60, landK: 1, landMax: 400, landNodes: 60000, reach: 0, reachMax: 200, reachK: 2, reachNodes: 400000, eventT: 60, oneT: 40, touchT: 90, touchNodes: 20000, settle: 2, arriveMax: 4, maxNew: 20000 };
+const DEF = { p1: 1, rounds: 1, landT: 60, landK: 1, landMax: 400, landNodes: 60000, reach: 0, reachMax: 200, reachK: 2, reachNodes: 400000, eventT: 60, oneT: 40, touchT: 90, touchNodes: 20000, settle: 2, arriveMax: 4, maxNew: 20000 };
 const VERSION = 1;
 
 // ------------------------------------------------------------------ small helpers
@@ -126,7 +126,22 @@ function ctxOf(L, o = {}) {
 	const triggers = model ? model.triggers.map((X) => ({ id: X.id, kind: X.kind, tiles: X.tiles, label: X.label })) : [];
 	for (const X of triggers) for (const t of X.tiles) trigAt[t] = X.id;
 	if (model) for (const G of model.gates) for (const t of G.tiles) gateAt[t] = G.id;
-	return { L, W, H, N, sim, inp, start, flags, S, MS, triggers, trigAt, gateAt, o: Object.assign({}, DEF, o), sups: null, snaps: new Map() };
+	const oo = Object.assign({}, DEF, o);
+	// part 1's support classes (src/plan/oneshot/supports.js): every end state and representative classified by them, so
+	// the one-shot search links these edges to part 1's nodes (o.p1 0: none)
+	let P1 = null, P1M = null;
+	if (oo.p1) {
+		try { P1M = require('./supports.js'); P1 = P1M.buildSupports(L, { model }); } catch (e) { P1 = null; }
+	}
+	return { L, W, H, N, sim, inp, start, flags, S, MS, triggers, trigAt, gateAt, o: oo, sups: null, snaps: new Map(), P1, P1M };
+}
+/** part 1's class of the sim's state: 'kind:id' (s surface, f field, p portal exit, t trigger), '' none */
+function p1Of(ctx, sim, teleported, touched) {
+	if (!ctx.P1) return undefined;
+	let c = null;
+	try { c = ctx.P1M.classify(ctx.P1, sim, { teleported, touched }); } catch (e) { c = null; }
+	if (!c || c.id === undefined || c.id < 0) return '';
+	return c.kind[0] + c.id;
 }
 
 // ------------------------------------------------------------------ the placement (the respawn's rule)
@@ -182,7 +197,7 @@ function staticSupports(ctx) {
 			const key = `${t},${c},${vcOf(sim.speed_x, sim.speed_y)}`;
 			if (seen.has(key)) break;
 			seen.add(key);
-			out.push({ i: out.length, tile: t, cls: c, vc: vcOf(sim.speed_x, sim.speed_y), kind: 'rest', px: 16 * x + ox, py: 16 * y + oy });
+			out.push({ i: out.length, tile: t, cls: c, vc: vcOf(sim.speed_x, sim.speed_y), kind: 'rest', px: 16 * x + ox, py: 16 * y + oy, p1: p1Of(ctx, sim, false, -1) });
 			break;
 		}
 	}
@@ -219,11 +234,13 @@ function factsOf(ctx, snap, masks) {
 	const { sim, inp, W, H, trigAt, gateAt } = ctx;
 	sim.restore(snap);
 	const tr = [], g = [];
-	let died = 0;
+	let died = 0, tele = false;
 	for (let t = 0; t < masks.length; t++) {
+		const px = sim.px, py = sim.py;
 		E.applyMask(inp, masks[t]);
 		sim.tick(inp);
 		if (sim.is_dead) died = 1;
+		tele = !sim.is_dead && (Math.abs(sim.px - px) > TELEPORT_PX || Math.abs(sim.py - py) > TELEPORT_PX);
 		const x = sim._pastx, y = sim._pasty;
 		if (x >= 0 && y >= 0 && x < W && y < H) { const k = trigAt[y * W + x]; if (k >= 0 && !tr.includes(k)) tr.push(k); }
 		if (gateAt.length) {
@@ -235,7 +252,8 @@ function factsOf(ctx, snap, masks) {
 			}
 		}
 	}
-	return { tile: tileOf(sim, W, H), cls: clsOf(sim, ctx.flags), end: [sim.px, sim.py, sim.speed_x, sim.speed_y], tr, g, d: died, hash: sim.stateHash() };
+	const pt = sim._pastx >= 0 && sim._pasty >= 0 && sim._pastx < W && sim._pasty < H ? sim._pasty * W + sim._pastx : -1;
+	return { tile: tileOf(sim, W, H), cls: clsOf(sim, ctx.flags), end: [sim.px, sim.py, sim.speed_x, sim.speed_y], tr, g, d: died, hash: sim.stateHash(), p1: p1Of(ctx, sim, tele, pt) };
 }
 
 // ------------------------------------------------------------------ the families
@@ -415,6 +433,7 @@ function edgesFrom(ctx, i) {
 		seen.add(dup);
 		for (const k of f.tr) touched.add(k);
 		const e = { f: i, k: r.k, tile: f.tile, cls: r.dies ? 'R' : f.cls, vc: vcOf(f.end[2], f.end[3]), T: r.T, m: rleOf(r.masks), end: f.end, tr: f.tr, g: f.g, d: f.d };
+		if (f.p1 !== undefined) e.p1 = f.p1;
 		if (r.k === 'touch') { e.trig = r.trig; e.tool = r.tool; if (r.proven) e.proven = 1; }
 		out.push(e);
 	};
@@ -469,7 +488,7 @@ function linkRound(sups, byKey, edges, from, grow, o) {
 		if (!byTC.has(tc)) byTC.set(tc, []);
 		if (byTC.get(tc).length >= o.arriveMax) continue;
 		const i = sups.length;
-		sups.push({ i, tile: e.tile, cls: e.cls, vc: e.vc, kind: 'arrive', org: { f: e.f, m: e.m } });
+		sups.push({ i, tile: e.tile, cls: e.cls, vc: e.vc, kind: 'arrive', org: { f: e.f, m: e.m }, p1: e.p1 });
 		byKey.set(key, i);
 		byTC.get(tc).push(i);
 		added.push(i);
@@ -507,7 +526,12 @@ function buildLocal(src, o = {}) {
 
 function finish(src, L, sups, edges, st, o) {
 	const byKind = {}, supKind = {};
-	for (const e of edges) byKind[e.k] = (byKind[e.k] || 0) + 1;
+	const p1 = { edges: 0, sups: 0, classes: 0 };
+	const p1s = new Set();
+	for (const e of edges) { byKind[e.k] = (byKind[e.k] || 0) + 1; if (e.p1) { p1.edges++; p1s.add(e.p1); } }
+	for (const u of sups) if (u.p1) { p1.sups++; p1s.add(u.p1); }
+	p1.classes = p1s.size;
+	st.p1 = p1;
 	for (const u of sups) supKind[u.kind + ':' + u.cls] = (supKind[u.kind + ':' + u.cls] || 0) + 1;
 	const mem = process.memoryUsage();
 	let maxRss = 0;
