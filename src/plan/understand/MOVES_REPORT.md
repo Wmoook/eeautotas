@@ -46,9 +46,13 @@ moves together take **52% of the route time**.
 that tick's movement lands (`grounded`) and the jump fires in the same tick. 21,458 of the 40,153 ground-start moves
 are launched this way.
 
-The primitives family (`origin/n4plan-primitives` 2e70a92, and still f6911f4) **cannot express a hop**. Its arc
-edge's landing tick carries the macro's own mask, which has no jump bit after k = 0. The next JUMP presses one tick
-later, which is a different state and one tick slower on every bounce.
+In the primitives family (`origin/n4plan-primitives` 2e70a92, and still f6911f4), **no ground macro ends in a hop**.
+The landing tick of a JUMP / WALKOFF / RUN arc carries the macro's own mask, which has no jump bit after k = 0. The
+next JUMP presses one tick later: a different state, and one tick slower on every bounce.
+
+The graph as a whole can still hop, but only through an air node, for example STEP(J|d) from the ground followed by
+the HOLD(d|J, land) chain. That path holds jump through the whole arc, which leaves a different held-jump-timer state
+than a clean hop, and it costs two or more edges and extra expansions.
 
 Exact coverage from the route's own takeoff state (same end stateHash, same tick), one macro:
 
@@ -72,7 +76,9 @@ launched by a hop is the macro's tail (k >= 1, no press).
 - **Change kinds** among the one-change hits:
   - jump: "late hold" (no direction on the press tick, a direction from tick c) 1,003; turn 399; release 248.
   - hop: late hold 1,216; turn 915; release 437.
-  - **The builder's JUMP family has no late hold at all.** It always presses with d at k = 0.
+  - **No builder macro has the late hold.** JUMP always presses with d at k = 0. The graph can compose it (STEP(J),
+    then the HOLD(d) chain), but only at the HOLD stops (c ∈ {1, 3, 7, 17, ...} with more edges) and at the cost of
+    more depth.
 - **Essential changes.** The route's inputs were greedily simplified: merge a direction run into a neighbour, drop
   up/down, keep jump bits only where a jump happened, shorten jump runs to one tick. Each step was kept only while the
   engine still reached the same end stateHash. The result is an upper bound on the minimum changes, so the coverages

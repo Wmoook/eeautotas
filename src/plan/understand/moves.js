@@ -138,6 +138,46 @@ function analyseRoute(entry) {
 		const mv = { r: entry._idx, t0, t1, len, c0, c1, endKind, label, takeoff, jumps, jumpAir, firstJump, liquid, climb, dot, boost, arrow,
 			rawDirRuns, rawJumpRuns, hopEnd, hopStart: hopStart ? 1 : 0, tile0: tileAt[t0], tile1: tileAt[t1] };
 		const target = hashAt(t1);
+		if (argv.hopneed) {
+			// ---- 7 (--hopneed): is the hop NEEDED? A plain hop move (launched by a jump on the previous landing tick
+			// t0 - 1 -> t0): land WITHOUT the jump instead, press on the next tick (k = 0 of the shapes below, per-tick one
+			// change, masks -, L, R) and try to reach the move's next support (class + tile) by the route's tick t1. The
+			// same shapes WITH the hop (the route's own landing tick) as the control.
+			if (!(label === 'hop' && c0 === 'G' && t0 >= 1 && len <= 200)) continue;
+			sim.restore(snaps[t0]);
+			if (sim.flip_gravity !== 0 || sim.has_levitation || sim.max_jumps !== 1 || sim.jump_boost !== 0 || sim.speed_boost !== 0 || sim.low_gravity) continue;
+			const hitFrom = (snap, N, fn) => {
+				sim.restore(snap);
+				for (let k = 0; k < N; k++) {
+					E.applyMask(inp, fn(k)); sim.tick(inp);
+					if (sim.is_dead) return 0;
+					if (clsOf(sim, flags) === c1 && T.tileOf(sim, W, H) === tileAt[t1]) return k + 1;
+				}
+				return 0;
+			};
+			const D = [0, 2, 4];
+			const f1 = (snap, N, pr) => {
+				let best = 0;
+				for (const d0 of D) for (const d1 of D) {
+					if (d1 === d0) { const h = hitFrom(snap, N, (k) => (k === 0 ? pr | d0 : d0)); if (h && (!best || h < best)) best = h; continue; }
+					for (let c = 1; c < N; c++) { const h = hitFrom(snap, N, (k) => (k === 0 ? pr | d0 : k < c ? d0 : d1)); if (h && (!best || h < best)) best = h; }
+				}
+				return best;
+			};
+			// control: with the hop (the route's state at t0), shapes without a press, N = len
+			const withHop = f1(snaps[t0], len, 0);
+			// without: the landing tick without the jump bit, then the press at t0 (k = 0), N = len (the same deadline t1)
+			sim.restore(snaps[t0 - 1]);
+			E.applyMask(inp, masks[t0 - 1] & 30); sim.tick(inp);
+			const landed = !!sim.on_ground;
+			const s1 = sim.snapshot();
+			const noHop = landed ? f1(s1, len, 1) : 0;
+			// and the no-hop search given 1..3 extra ticks (how late it is)
+			let late = 0;
+			if (landed && !noHop) for (let x = 1; x <= 3 && !late; x++) { if (f1(s1, len + x, 1)) late = x; }
+			moves.push({ r: entry._idx, t0, len, label, withHop, noHop, late, landed: landed ? 1 : 0 });
+			continue;
+		}
 		if (argv.cls) {
 			// ---- 6 (--cls): SUPPORT-CLASS coverage: does a family member reach the route's next support (the same class
 			// letter, the same centre tile, a teleport when the route teleported) at the same tick or EARLIER? From the
