@@ -79,7 +79,10 @@ function createPlanner(model, facts, o = {}) {
 	const ST = { rchChecks: 0, plans: 0, planMs: 0, expands: 0, lbCalls: 0, lbMs: 0, lbExpands: 0, learned: 0, costOf: 0 };
 	const paceSamples = [];
 	let lastPlans = [], lastWhy = '';
-	const relevant = model.triggers.filter((X) => X.relevant && X.kind !== 'trophy');
+	const relevant = model.triggers.filter((X) => X.relevant && X.kind !== 'trophy' && !X.crumb);
+	// (the crumbs: coins no gate reads, relevant only with EEAT_CRUMBS=1 (model.js); left out of the plan search, offered
+	// one at a time by crumbPlan)
+	const crumbs = model.triggers.filter((X) => X.relevant && X.crumb);
 	const trophyTiles = model.trophyTiles;
 	const openS = { key: '__open__', dkey: '__open__', vals: [], feats: {} };
 	// ---------------------------------------------------------------- floors (a count gate the way STANDS on)
@@ -453,7 +456,7 @@ function createPlanner(model, facts, o = {}) {
 	 * prices it by the est walk (killers walls unless protected; a death step where only a death reaches it; a heavy
 	 * penalty where only the relaxation reaches it) and applies the facts (blocks, proofs, needs, learned ticks)
 	 */
-	function edgesOf(S, pos, base, mode, root, rootCls) {
+	function edgesOf(S, pos, base, mode, root, rootCls, only) {
 		const out = [];
 		const P = pace();
 		const extra = pos.extra || 0;
@@ -486,7 +489,9 @@ function createPlanner(model, facts, o = {}) {
 				}
 				est = Math.max(lb, est);
 			}
-			return { lb, est, steps, viaDeath, relaxOnly };
+			// (pen: which penalty priced the edge, a diagnostic for the plan's steps: 'relax' (only the relaxation reaches
+			// it), 'rch' (RCH3 -1 at rest / rising), 'floor' / 'zone' (a count floor not reached))
+			return { lb, est, steps, viaDeath, relaxOnly, pen: relaxOnly ? 'relax' : '' };
 		};
 		const finish = (X, tiles, edge, tr) => {
 			const g = leg(tiles);
@@ -496,17 +501,17 @@ function createPlanner(model, facts, o = {}) {
 					if (facts.blocked(edge, cls, proofKey(S, pos))) return;
 					if (facts.needsOf(edge, cls).some((n) => S.feats[n.feat] !== n.value)) return;
 					const ok = facts.okTicks(edge, cls);
-					if (ok !== undefined) g.est = Math.max(g.lb, ok);
+					if (ok !== undefined) { g.est = Math.max(g.lb, ok); g.pen = ''; }
 				}
-				if (X === null) { for (const n of floorNeeds) if (!((S.feats[n.feat] || 0) >= n.min)) { g.est += PENALTY; break; } }
-				else if (floorNeeds.length && zoneNeed(S, tiles)) g.est += PENALTY;
+				if (X === null) { for (const n of floorNeeds) if (!((S.feats[n.feat] || 0) >= n.min)) { g.est += PENALTY; g.pen = (g.pen ? g.pen + '+' : '') + 'floor'; break; } }
+				else if (floorNeeds.length && zoneNeed(S, tiles)) { g.est += PENALTY; g.pen = (g.pen ? g.pen + '+' : '') + 'zone'; }
 				const bad = rchBad.get(rchKey(S, pos, edge));
 				if (bad === 'proof' && root) return;
-				if (bad) g.est += PENALTY;
+				if (bad) { g.est += PENALTY; g.pen = (g.pen ? g.pen + '+' : '') + 'rch'; }
 			}
-			out.push({ X, S2: tr ? tr.S2 : S, pos2: X ? posOf(X, S, tr ? tr.S2 : S) : null, expect: tr ? tr.expect : null, lb: g.lb, est: g.est, steps: g.steps, viaDeath: g.viaDeath, relaxOnly: g.relaxOnly, edge, live: tiles });
+			out.push({ X, S2: tr ? tr.S2 : S, pos2: X ? posOf(X, S, tr ? tr.S2 : S) : null, expect: tr ? tr.expect : null, lb: g.lb, est: g.est, steps: g.steps, viaDeath: g.viaDeath, relaxOnly: g.relaxOnly, pen: g.pen || '', edge, live: tiles });
 		};
-		for (const X of relevant) {
+		for (const X of (only || relevant)) {
 			if (pos.trig === X.id && !(X.kind === 'psw' || X.kind === 'osw')) continue;
 			const live = model.liveTiles(S, X);
 			if (!live.length) continue;
@@ -518,6 +523,7 @@ function createPlanner(model, facts, o = {}) {
 			if (!tr.changed) continue;
 			finish(X, live, 'trig:' + X.id, tr);
 		}
+		if (only) return out;
 		finish(null, trophyTiles, 'trophy', null);
 		// DEATHS AS MOVES (lane 2's die edge, lane 5): where a death door (1011) or gate (1012) reads the death count, a death
 		// is an edge of its own (plan mode: the est walk to the nearest killer, the dead ticks, back at the respawn with one
@@ -787,7 +793,7 @@ function createPlanner(model, facts, o = {}) {
 				continue;
 			}
 			const wp = X ? { kind: 'trigger', tiles: e.live.slice(), trig: X.id, expect: e.expect, label: X.label } : { kind: 'trophy', label: 'trophy' };
-			push({ edge: e.edge, nodeClass: cls, rung: facts ? facts.rungOf(e.edge, cls) : 0, waypoint: wp, estTicks: Math.round(e.est), lb: e.lb });
+			push({ edge: e.edge, nodeClass: cls, rung: facts ? facts.rungOf(e.edge, cls) : 0, waypoint: wp, estTicks: Math.round(e.est), lb: e.lb, pen: e.pen || '' });
 			// a key followed by its door: the passage while the key is on
 			if (X && X.kind === 'key' && i + 1 < path.length) {
 				const next = path[i + 1].e;
@@ -889,6 +895,9 @@ function createPlanner(model, facts, o = {}) {
 		if (plans.length && NEAR_K > 0 && facts) {
 			try { const near = nearPlans(a, plans); if (near.length) plans.unshift(...near); } catch (e) { /* the rule is ordering only */ }
 		}
+		if (plans.length && crumbs.length) {
+			try { const cp = crumbPlan(a, plans); if (cp) plans.unshift(cp); } catch (e) { if (process.env.EEAT_CRUMB_DBG === '1') console.error('crumbPlan', e.stack); }
+		}
 		if (!plans.length) {
 			why = rootEdges < 0 ? 'budget' : rootEdges === 0 && !(facts && facts.list().length) ? 'proof' : 'exhausted';
 			// (no edge at the root because the facts took them all: exhausted; none at all without facts: a walk proof)
@@ -964,6 +973,36 @@ function createPlanner(model, facts, o = {}) {
 		}
 		ST.nearPlans = (ST.nearPlans || 0) + out.length;
 		return out;
+	}
+	/**
+	 * THE CRUMB PLAN (doctor 9, n5; EEAT_CRUMBS=1, model.js): the nearest crumb (a coin no gate reads) by the admissible
+	 * bound, as a one-step plan in front of the plans, when the best plan's first leg is long (its lb >= CRUMB_MIN ticks)
+	 * and the crumb is nearer than that leg's target (lb below CRUMB_F x its lb); the least lb x (1 + its rung) first (a
+	 * crumb that failed its rung gives way to the next nearest, a far one waits). An arrival at a crumb is a new anchor with one gain more: the
+	 * strategy goes on from it, so the compile follows the level's breadcrumb trail one leg at a time, and every plan from
+	 * each crumb is the plan search's own (the trophy's direct leg first). Ordering only: no edge dropped, the lb untouched.
+	 */
+	const CRUMB_MIN = +process.env.EEAT_CRUMB_MIN || 50, CRUMB_F = +process.env.EEAT_CRUMB_F || 0.9;
+	function crumbPlan(a, plans) {
+		const p0 = plans.find((p) => !p.near) || plans[0];
+		if (!p0 || !p0.steps || !p0.steps.length) return null;
+		const s0 = p0.steps.find((s) => !String(s.edge).startsWith('death:') && !String(s.edge).startsWith('region:key')) || p0.steps[0];
+		const lb0 = Number.isFinite(+s0.lb) ? +s0.lb : Infinity;
+		if (!(lb0 >= CRUMB_MIN)) return null;
+		const cls = a.S.key + '|' + a.cls;
+		const es = edgesOf(a.S, a.pos, a.base, 'plan', true, cls, crumbs);
+		// (a crumb past the est walk's CEGAR cuts is kept: the cuts come from the long leg's failures, and a way around its
+		// deceptive field is what a crumb is for; its lb is the relaxation's, still admissible)
+		const cands = es.filter((e) => e.X && e.X.crumb && !e.viaDeath && e.lb < CRUMB_F * lb0)
+			.sort((x, y) => (facts ? x.lb * (1 + facts.rungOf(x.edge, cls)) - y.lb * (1 + facts.rungOf(y.edge, cls)) : 0) || x.lb - y.lb || x.est - y.est);
+		if (process.env.EEAT_CRUMB_DBG === '1') console.error(`crumbPlan: lb0 ${lb0} crumb edges ${es.length} cands ${cands.length}: ${es.slice(0, 6).map((e) => `${e.X && e.X.label} lb ${e.lb} pen '${e.pen}' relax ${e.relaxOnly} r ${facts ? facts.rungOf(e.edge, cls) : '-'}`).join('; ')}`);
+		if (!cands.length) return null;
+		const e = cands[0];
+		const root = { S: a.S, pos: a.pos, e: null, parent: null };
+		const steps = stepsOf(a, { S: e.S2, pos: e.pos2, e, parent: root });
+		if (!steps.length) return null;
+		ST.crumbPlans = (ST.crumbPlans || 0) + 1;
+		return { id: `p${ST.plans}.c`, steps, cost: p0.cost, lb: e.lb + hLb(e.pos2), partial: true, why: `crumb: the nearest breadcrumb before '${s0.waypoint && s0.waypoint.label}' (lb ${lb0})`, near: true, crumb: true };
 	}
 	// ---------------------------------------------------------------- CEGAR
 	/** the value of the feature gate tile i reads that opens it */
