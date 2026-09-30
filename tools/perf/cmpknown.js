@@ -63,3 +63,12 @@ for (const p of pairs) {
 	}
 }
 if (json) console.log(JSON.stringify(rows));
+// --sum: one line a level: the triggers only ours / only the known route takes, the common ones in the same order, and
+// the three legs where the known route gains the most (per common trigger in our order: the growth of the difference)
+if (args.includes('--sum')) {
+	for (const r of rows) {
+		if (!r.known) { console.log(`${r.level.padEnd(48)} ${r.ours} (no known route)`); continue; }
+		const top = (r.legs || []).slice().sort((a, b) => b.dd - a.dd).slice(0, 3).map((l) => `${l.t} +${l.dd}`).join(', ');
+		console.log(`${r.level.padEnd(48)} ${r.ours} vs ${r.known} (${r.ratio}) only ours ${(r.onlyOurs || []).length}, only known ${(r.onlyKnown || []).length}, common ${r.common} (${r.sameOrder} in order) | the known gains most: ${top} | after the last common trigger ${r.legs && r.legs.length ? r.endD - r.legs[r.legs.length - 1].d : r.endD}`);
+	}
+}

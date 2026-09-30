@@ -33,6 +33,8 @@ const LEG_MS = 1500, LEG_MS_MAX = 6000, POLISH_SHARE = 0.35, K_PLANS = 3, LB_MS 
 // beforeTick waypoint, executor.js reachWp); a longer one runs free and its arrivals are cut here)
 const BOUND_ROOM = 400;
 const REEXPAND = 3;
+// (EEAT_PERFECT_LOG=1: a line per leg on stderr)
+const LOG = process.env.EEAT_PERFECT_LOG === '1';
 
 /** the route's model-state changes: [{tick, masks, sim, S}] (the level start first), the replay stopped at the finish */
 function routeSeeds(L, model, masks) {
@@ -193,6 +195,7 @@ async function perfectRoute(ctx, masks0, o = {}) {
 			try { res = await exec.reach(N.arrivals, wp, { ms: legMs, level: Math.min(3, step.rung | 0), k: 4, deadline: dl, stop: () => Date.now() > Math.min(dl + 2000, deadline) }); } catch (e) { res = null; }
 			const arr = verify(wp, res, N.arrivals);
 			try { planner.learn(step, res && res.ok && arr.length ? Object.assign({}, res, { arrivals: arr }) : Object.assign({}, res || {}, { ok: false, fail: (res && res.fail) || { why: 'budget' } }), anchorArg(N)); } catch (e) { /* the planner's bookkeeping */ }
+			if (LOG) console.error(`perfect: node @${N.tick} (${N.via || ''}) f ${Math.round(N.f)} -> ${(step.waypoint && step.waypoint.label) || step.edge} r${step.rung | 0} ${legMs}ms: ${arr.length ? `${arr.length} arrivals, first @${Math.min(...arr.map((a) => a.tick))}` : `fail ${res && res.fail ? res.fail.why : '?'}`}${res && res.tool ? ` [${res.tool}]` : ''}`);
 			if (!arr.length) { failed++; continue; }
 			St.legsOk++; St.arrivals += arr.length;
 			const byKey = new Map();

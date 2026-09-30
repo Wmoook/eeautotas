@@ -17,10 +17,14 @@ const opt = (k, d) => { const a = args.find((x) => x.startsWith(`--${k}=`)); ret
 	const planner = createPlanner(model, facts, { bounds, file, floorAsync: false });
 	const GX = require('../../src/goexplore.js');
 	const RM = GX.roomOf(L);
-	const r0 = T.playTo(L, new Uint8Array(0));
-	const a0 = Object.assign(T.arrivalOf(L, r0.sim, new Uint8Array(0), RM), { run: 0, leg: null });
+	// (--route=<file.eetas> --at=<tick>: plan from that route's state after `at` inputs instead of the level start)
+	const rf = args.find((x) => x.startsWith('--route='));
+	const at = opt('at', 0);
+	const m0 = rf ? require('../../src/common.js').readEetas(rf.slice(8)).subarray(0, at) : new Uint8Array(0);
+	const r0 = T.playTo(L, m0, { allowDeath: true });
+	const a0 = Object.assign(T.arrivalOf(L, r0.sim, m0, RM), { run: r0.sim.run_ticks, leg: null });
 	const S0 = model.stateOf(r0.sim);
-	const anchor = { arrival: a0, arrivals: [a0], S: S0, key: String(S0.key), tick: 0, run: 0 };
+	const anchor = { arrival: a0, arrivals: [a0], S: S0, key: String(S0.key), tick: a0.tick, run: a0.run };
 	const lb = planner.lowerBound(anchor, { ms: 3000 });
 	console.log('lowerBound', JSON.stringify(lb));
 	const ps = planner.plan(anchor, { k: opt('k', 6), ms: opt('ms', 4000) });
