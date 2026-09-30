@@ -1123,6 +1123,20 @@ async function createExecutor(L, opts) {
 		if (process.env.EEAT_SKEL_DBG === '1') console.error(`skel closest: sub-leg ${fc ? fc.dist : 'none'} -> waypoint ${best ? best.dist : 'none'} (${cands.length} cands)`);
 		return best || fc;
 	}
+	// ---- DEAD-END LEVELS (lane 1, block 3): the skeleton's arrivals at a sub-level set can be states the finders cannot
+	// go on from (Endless Space: the skeleton entered c <= 207 at (8,44) at tick 347; from there legBest popped 18 states
+	// (30 dead children, the rest closed) and ran out of open states, on every cell grain; from the known route's own state
+	// there at tick 345 the same sub-leg (c <= 195) is found in 1.3 s). The skeleton kept them as its deepest level, both
+	// tries of the next sub-leg ended 'exhausted' at once, the memo popped a level and the same search found the same
+	// arrivals again: every call of every rung ended in 10-700 ms of its 8-45 s. Now a level whose next sub-leg ends
+	// 'exhausted' on both tries is a DEAD END: its arrivals' states (stateHash) are marked, the skeleton goes back one level
+	// (this call's, else the memo's, else the starts) and its sub-legs ask for DEAD_K arrivals and keep only the unmarked
+	// ones, at most DEAD_BACK times a call. Ordering of the skeleton only (which arrivals it goes on from; every arrival
+	// is still the engine's replay, verified as before); no claim reads it. EEAT_DEADEND=0 off.
+	const DEAD_ON = process.env.EEAT_DEADEND !== '0';
+	const DEAD_K = 16, DEAD_BACK = 6, DEAD_REST = 0.3;
+	const deadEnds = new Set();   // stateHash of skeleton arrivals the finders could not go on from
+	const hashOf = (str) => { try { return core.startOf(String(str)).hash; } catch (e) { return null; } };
 	async function reach(starts, wp, budget) {
 		const r = await reachWp(starts, wp, budget);
 		stuckNote(wp, r);
@@ -1165,12 +1179,16 @@ async function createExecutor(L, opts) {
 		// (resume from the deepest level an earlier call for this step reached)
 		let key = skelKey(goal, wp, startStrs, wN);
 		const memo = skelMemo.get(key);
-		const top = memo && memo.length ? memo[memo.length - 1] : null;
+		// (a memo level no deeper than the starts' own cost is not resumed: a relay start (the strategy's nearest state of the
+		// last rung) can stand deeper than the skeleton's deepest level, and resuming went back up to it; EEAT_DEADEND=0: as
+		// before)
+		const top0 = memo && memo.length ? memo[memo.length - 1] : null;
+		const top = top0 && (!DEAD_ON || top0.c < c0 - 0.5) ? top0 : null;
 		let cur = top ? top.cur.slice() : startStrs, cCur = top ? top.c : c0;
 		const levels = [];
 		// (the step adapts: a sub-leg found in under a third of its share doubles it (fast motion: fewer legs, fewer goal
 		// fields to build), a failed one halves it for its retry)
-		let lastFail = null, sims = 0, retried = false, stuck = false, step = SKEL_STEP;
+		let lastFail = null, sims = 0, retried = false, stuck = false, step = SKEL_STEP, firstExh = false, backs = 0;
 		while (Date.now() < deadline - 100) {
 			// (new counterexample walls from the last sub-leg: the level where the skeleton stands, on the new field)
 			if (wRefresh()) {
@@ -1193,13 +1211,40 @@ async function createExecutor(L, opts) {
 			// what is left)
 			const share = retried ? Math.max(300, 0.5 * left) : Math.min(left - 50, Math.max(300, left * Math.min(0.5, (3 * step) / cCur)));
 			const sub = { kind: 'region', tiles, expect: null, allowDeath: !!wp.allowDeath, fieldTiles: Array.from(T.fieldTilesOf(goal)), fieldTouch: T.fieldTouchOf(goal), label: `${wp.label || wp.kind} (skeleton ${Math.round(c)} tiles)` };
-			const r = await reachLeg(cur, sub, { ms: share, level: budget.level | 0, k: budget.k, deadline: Math.min(deadline, Date.now() + share), stop: budget.stop }, true);
+			let r = await reachLeg(cur, sub, { ms: share, level: budget.level | 0, k: budget.k, deadline: Math.min(deadline, Date.now() + share), stop: budget.stop }, true);
 			sims += r.sims || 0;
+			// (the dead ends' states dropped from a sub-leg's arrivals (above); every one of them a dead end: the sub-leg once
+			// more for DEAD_K arrivals in what is left of its share, else an 'exhausted' sub-leg (a dead end too))
+			if (DEAD_ON && r.ok && deadEnds.size) {
+				const keep = (x) => { const a = x.arrivals.filter((q) => !deadEnds.has(hashOf(T.strOf(q.masks)))); return a.length ? Object.assign({}, x, { arrivals: a }) : null; };
+				let r2 = keep(r);
+				if (!r2 && Date.now() < deadline - 150) {
+					const s2 = Math.max(200, Math.min(share, deadline - Date.now() - 50));
+					const rr = await reachLeg(cur, sub, { ms: s2, level: budget.level | 0, k: DEAD_K, deadline: Math.min(deadline, Date.now() + s2), stop: budget.stop }, true);
+					sims += rr.sims || 0;
+					if (rr.ok) r2 = keep(rr);
+				}
+				if (!r2) { S.deadLegs = (S.deadLegs || 0) + 1; r = { ok: false, arrivals: [], tool: null, ms: r.ms, sims: 0, fail: { why: 'exhausted', closest: null, touched: [], blockedBy: [], level: budget.level | 0, note: 'skeleton: every arrival a dead end' } }; }
+				else r = r2;
+			}
 			levels.push({ c: Math.round(c), ok: !!r.ok, ms: r.ms, tool: r.tool });
 			if (!r.ok) {
 				lastFail = r;
 				if (r.fail && r.fail.why === 'stopped') break;
-				if (!retried) { retried = true; step = Math.max(SKEL_STEP / 2, step / 2); continue; }
+				const exh = !!(r.fail && r.fail.why === 'exhausted');
+				if (!retried) { retried = true; firstExh = exh; step = Math.max(SKEL_STEP / 2, step / 2); continue; }
+				// (both tries 'exhausted' from a level the skeleton reached: a dead end: its states marked, one level back)
+				if (DEAD_ON && exh && firstExh && cur !== startStrs && backs < DEAD_BACK && Date.now() < deadline - 300) {
+					backs++; S.deadEnds = (S.deadEnds || 0) + 1;
+					for (const s of cur) { const h = hashOf(s); if (h !== null) deadEnds.add(h); }
+					const st = skelMemo.get(key) || [];
+					while (st.length && st[st.length - 1].cur.every((s) => deadEnds.has(hashOf(s)))) st.pop();
+					const prev = st.length ? st[st.length - 1] : null;
+					cur = prev ? prev.cur.slice() : startStrs; cCur = prev ? prev.c : c0;
+					retried = false; step = SKEL_STEP;
+					levels.push({ back: Math.round(cCur) });
+					continue;
+				}
 				// (a resumed level whose next sub-leg fails twice: a dead end, one level back next time)
 				if (top && levels.length === 2) memo.pop();
 				stuck = true;
@@ -1213,6 +1258,10 @@ async function createExecutor(L, opts) {
 			skelMemo.get(key).push({ c: cCur, cur: cur.slice() });
 		}
 		if (emit) emit({ ev: 'exec.skel', label: wp.label || '', c0: Math.round(c0), c: Math.round(cCur), resumed: !!memo, levels, walls: wN });
+		// (stuck with DEAD_REST of the call or more left: the direct leg from the deepest level AND the starts with the rest
+		// (the sub-level sets' way is the relaxation's; the finders from the starts may know another: Endless Space's direct
+		// leg reached route tick ~1,000 of 1,821 in 5 s where the skeleton sat at ~350), instead of returning the time unused)
+		if (DEAD_ON && stuck && cur !== startStrs && deadline - Date.now() > DEAD_REST * ms) { cur = cur.concat(startStrs.filter((s) => !cur.includes(s))); stuck = false; S.deadDirect = (S.deadDirect || 0) + 1; }
 		if (Date.now() >= deadline - 100 || (stuck && cur !== startStrs)) {
 			const fail = (lastFail && lastFail.fail) || { why: 'budget', closest: null, touched: [], blockedBy: [], level: budget.level | 0, note: 'skeleton: out of time' };
 			const cl = skelClosest(fail.closest, cur !== startStrs ? cur : [], f0);
