@@ -487,6 +487,12 @@ function createBounds(L, o = {}) {
 		if (!B) { B = EG.boundContext(L, { goals: Array.from(m.goals) }); egCtx.set(k, B); if (egCtx.size > 16) egCtx.delete(egCtx.keys().next().value); }
 		return EG.lowerBound(B, sim, lim);
 	}
+	/** whether field(goalTiles, Lc) is memoized (a lookup, no Dijkstra): the planner's time-boxed callers use it */
+	function hasField(goalTiles, Lc, fo = {}) {
+		const gl = Array.from(goalTiles).filter((t) => t >= 0 && t < N).sort((a, b) => a - b);
+		const touch = fo.touch !== undefined ? !!fo.touch : gl.length > 0 && gl.every((t) => L.fg[t] === TROPHY);
+		return memo.has(`${Lc ? T.fgHash(Lc.fg) : '-'}|${touch ? 1 : 0}|${gl.join(',')}`);
+	}
 	/** min over fromTiles of field(toTiles, Lc) */
 	function pair(fromTiles, toTiles, Lc) {
 		const f = field(toTiles, Lc);
@@ -520,7 +526,7 @@ function createBounds(L, o = {}) {
 		if (S.deaths) { let r = Infinity; for (const x of S.respawn) if (f[x] < r) r = f[x]; if (DEATH_MIN + r < out.endgame) out.endgame = DEATH_MIN + r; }
 		return out;
 	}
-	return { vmax, vplain: usePlain ? vp : null, isPlain, tiersOn, field, at, pair, leg, tiers, meta: (f) => META.get(f), stats: () => Object.assign({}, st, { memo: memo.size }), static: S };
+	return { vmax, vplain: usePlain ? vp : null, isPlain, tiersOn, field, hasField, at, pair, leg, tiers, meta: (f) => META.get(f), stats: () => Object.assign({}, st, { memo: memo.size }), static: S };
 }
 
 module.exports = { createBounds, vmaxOf, terminal, staticOf, dijkstra, D_TICK, DEATH_MIN, V_RUN, V_FALL, V_JUMP, V_CAP, SLACK };

@@ -110,6 +110,14 @@ function tileOf(sim, W, H) {
 	return y * W + x;
 }
 /**
+ * the tile the last tick's touch read (eesim.js _touchBlock: the centre cell at the tick's start, after the half-block
+ * remap: _pastx / _pasty), -1 outside the level: every trigger (coin, switch, key, effect, checkpoint) fires there
+ */
+function touchedTile(sim, W, H) {
+	const x = sim._pastx, y = sim._pasty;
+	return x >= 0 && y >= 0 && x < W && y < H ? y * W + x : -1;
+}
+/**
  * playTo(L, masks, o) -> {sim, tick, dead, finished, goalAt}: the masks from the level start in a fresh EESim.
  * dead: the first tick the ball was dead (-1 never; the replay stops there unless o.allowDeath); finished: the first
  * tick with the level complete (-1 never); goalAt: the first tick o.goal.test(sim) held (-1 never; o.goal from goalOf).
@@ -168,7 +176,12 @@ function goalOf(L, wp) {
 	const mask = new Uint8Array(N);
 	for (const t of wp.tiles) if (t >= 0 && t < N) mask[t] = 1;
 	const ex = wp.expect ? wp.expect : null;
-	const test = ex ? (sim) => !sim.is_dead && mask[tileOf(sim, W, H)] === 1 && featValue(sim, ex.feat) === ex.value : (sim) => !sim.is_dead && mask[tileOf(sim, W, H)] === 1;
+	// a trigger's goal: the Expect holds and the ball's centre is on the trigger now OR the last tick's touch read it
+	// (touchedTile): the engine touches the centre cell at the tick's START and then moves, so a ball that crosses a coin /
+	// switch / checkpoint in one tick (a boost's 16 px/tick, any fast pass) has left the tile by the time the feature shows
+	// the touch, and "on the tile with the feature changed" never holds (the leg searches' "closest 0 tiles" failures)
+	const test = ex ? (sim) => { if (sim.is_dead || featValue(sim, ex.feat) !== ex.value) return false; if (mask[tileOf(sim, W, H)] === 1) return true; const tt = touchedTile(sim, W, H); return tt >= 0 && mask[tt] === 1; }
+		: (sim) => !sim.is_dead && mask[tileOf(sim, W, H)] === 1;
 	return { kind: wp.kind, tiles: Int32Array.from(wp.tiles), mask, test, allowDeath: !!wp.allowDeath };
 }
 
@@ -242,4 +255,4 @@ function goalField(Lc, tiles, o = {}) {
 /** emitter(stream) -> (ev) => void: one JSON object per line */
 const emitter = (stream = process.stdout) => (ev) => { try { stream.write(JSON.stringify(ev) + '\n'); } catch (e) { /* closed */ } };
 
-module.exports = { VERSION, strOf, masksOf, concat, loadLevelFile, tileOf, playTo, featValue, goalOf, arrivalOf, classOf, pickDiverse, levelNow, goalField, fgHash, emitter, CLOCK_DOORS };
+module.exports = { VERSION, strOf, masksOf, concat, loadLevelFile, tileOf, touchedTile, playTo, featValue, goalOf, arrivalOf, classOf, pickDiverse, levelNow, goalField, fgHash, emitter, CLOCK_DOORS };

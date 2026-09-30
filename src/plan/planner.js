@@ -316,6 +316,12 @@ function createPlanner(model, facts, o = {}) {
 	// ---------------------------------------------------------------- edges
 	const hasCG = model.hasCoinGate.coins || model.hasCoinGate.bcoins;
 	const useBounds = !!bounds && !model.canDie && !hasCG;
+	// (the primitives' bound per edge is a Dijkstra field per (target, door state): ~0.35 s each on a 400 x 200 level, and
+	// a node's edges are every relevant trigger (26_2 Terror In The North: 172 coins, 60 s for the root's edges alone, past
+	// the compile's watchdog). A new field only while the calling search is inside its own budget (pairUntil), a memoized
+	// one always; else the tier-0 bound alone: both admissible, their max only tighter)
+	let pairUntil = Infinity;
+	const pairOK = (tiles, lvl) => Date.now() < pairUntil || (typeof bounds.hasField === 'function' && bounds.hasField(tiles, lvl));
 	/** the physics check's memo: (door key, position, edge) -> true when RCH3 is -1 from every tile of the position at
 	 *  rest and rising at the most (a heavy est penalty in the plan search, never a drop: an abstract position is no real
 	 *  state); 'proof' from the anchor's real state (then the edge is dropped at the root: an exact proof) */
@@ -347,7 +353,7 @@ function createPlanner(model, facts, o = {}) {
 			if (drL && rL < INF) lb = Math.min(lb, lbOfSteps(dvL.dk) + DEAD_TICKS + lbOfSteps(rL));
 			if (!Number.isFinite(lb)) return null;
 			lb += extra;
-			if (useBounds) { try { const bb = bounds.pair(pos.tiles, tiles, model.levelOf(S)); if (Number.isFinite(bb)) lb = Math.max(lb, bb + extra); } catch (e) { /* the tier-0 bound */ } }
+			if (useBounds) { try { const lvl = model.levelOf(S); if (pairOK(tiles, lvl)) { const bb = bounds.pair(pos.tiles, tiles, lvl); if (Number.isFinite(bb)) lb = Math.max(lb, bb + extra); } } catch (e) { /* the tier-0 bound */ } }
 			let est = lb, steps = sL, viaDeath = false, relaxOnly = false;
 			if (wantEst) {
 				if (sE < INF) { est = sE * P + extra; steps = sE; }
@@ -433,6 +439,7 @@ function createPlanner(model, facts, o = {}) {
 		ST.lbCalls++;
 		const a = anchorOf(anchor);
 		const ms = lo.ms !== undefined ? lo.ms : 1500, maxExpand = lo.maxExpand || 200000;
+		pairUntil = t0 + ms;
 		const open = new Heap(), best = new Map();
 		let seq = 0, expanded = 0, goal = Infinity, complete = false;
 		// (nodes merged over the coins' identities: one node per (feature values, checkpoint, position) with the least g
@@ -480,6 +487,7 @@ function createPlanner(model, facts, o = {}) {
 	function search(a, po, exclude) {
 		const t0 = Date.now();
 		const ms = po.ms, maxExpand = po.maxExpand;
+		pairUntil = t0 + ms;
 		const budget = po.depth > 0 ? po.depth - a.tick : Infinity;
 		const open = new Heap(), best = new Map();
 		let seq = 0, expanded = 0, found = null, pruned = 0;

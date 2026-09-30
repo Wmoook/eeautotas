@@ -58,6 +58,9 @@ const POLISH_MS = 15000, POLISH_F = 0.25;
 // the proof's share once a route is known (a static level start only): min(PROVE_MS, PROVE_F x the budget) kept for the
 // PROVE stage (one exact search from the level start bounded by the route's own arrival), and all the time the moves leave
 const PROVE_MS = 30000, PROVE_F = 0.2;
+// the exact landing (precision.js): a trophy leg's nearest state within PREC_NEAR tiles (the goal field's), at most
+// PREC_RUNS runs a compile of at most PREC_S s (at least PREC_MIN_S left), its PREC_ATTEMPTS nearest attempts
+const PREC_NEAR = 8, PREC_RUNS = 3, PREC_S = 40, PREC_MIN_S = 6, PREC_ATTEMPTS = 8;
 // the proof's starts: the level start after k = 0..R idle ticks, R = the idle ticks until the state rests (the timer starts
 // at the first input: waiting is free); at most PROVE_IDLE_MAX (one exact search each)
 const PROVE_IDLE_MAX = 64;
@@ -380,6 +383,68 @@ async function compile(L, opts = {}, emit = () => {}) {
 		return { ev, better: true };
 	};
 
+	// ---- THE EXACT LANDING (src/precision.js as a child process: it never blocks this thread): a trophy leg whose nearest
+	// state is within PREC_NEAR tiles of the trophy and that no tier reached is the signature of a ZERO-WIDTH window: a way
+	// that needs ONE exact sub-pixel x (a spike's centre rule on one side, a half block's solid half on the other: the box
+	// must drop at px == 5720.0 exactly, one double on a grid of 2^-40 px). Every static x constraint of the engine sits on
+	// a multiple of 8 px, so the target x is COMPUTED (the nudge test), and the inputs that reach it exactly are COMPUTED
+	// too (a meet in the middle of the engine's own rest-to-rest moves: exact pieces that sum to the target). No search of
+	// the old paradigm; every route it prints is C.evaluate'd there and again here (routeOf). The attempts: the trophy
+	// legs' nearest states (fail.closest), nearest first.
+	const precOn = opts.precision !== false && process.env.EEAT_PLAN_PREC !== '0' && !!opts.file;
+	const precAtt = new Map();   // masks string -> dist
+	let precRuns = 0, precBusy = false, precChild = null;
+	const precision = async (closest) => {
+		if (!precOn || !closest || !closest.masks || !(closest.dist >= 0) || closest.dist > PREC_NEAR) return null;
+		const str = typeof closest.masks === 'string' ? closest.masks : T.strOf(closest.masks);
+		if (!/^[0-O]+$/.test(str)) return null;
+		const had = precAtt.size;
+		if (!precAtt.has(str)) precAtt.set(str, +closest.dist);
+		if (precBusy || precRuns >= PREC_RUNS || precAtt.size === had || stopped) return null;
+		const secs = Math.floor(Math.min(PREC_S * 1000, left() - endReserve - 2000) / 1000);
+		if (secs < PREC_MIN_S) return null;
+		precBusy = true; precRuns++;
+		const os = require('os'), cp = require('child_process');
+		const att = [...precAtt].sort((a, b) => a[1] - b[1]).slice(0, PREC_ATTEMPTS).map((e) => e[0]);
+		const file = path.join(os.tmpdir(), `eeat_prec_${process.pid}_${precRuns}.txt`);
+		const t1 = Date.now();
+		let found = null, done = null;
+		try {
+			fs.writeFileSync(file, att.join('\n') + '\n');
+			say({ ev: 'precision', run: precRuns, attempts: att.length, nearest: Math.round(+precAtt.get(att[0]) * 10) / 10, seconds: secs });
+			await new Promise((resolve) => {
+				const pw = Math.max(1, Math.min(workers, 4));
+				const ch = cp.spawn(process.execPath, [path.join(__dirname, '..', 'precision.js'), String(opts.file), `--attempts=${file}`, `--workers=${pw}`, `--seconds=${secs}`, '--first=1'], { stdio: ['ignore', 'pipe', 'ignore'] });
+				precChild = ch;
+				const onExit = () => { try { ch.kill('SIGKILL'); } catch (e) { /* gone */ } };
+				process.once('exit', onExit);
+				ch.on('close', () => process.removeListener('exit', onExit));
+				let buf = '';
+				const kill = setTimeout(() => { try { ch.kill('SIGKILL'); } catch (e) { /* gone */ } }, (secs + 10) * 1000);
+				const poll = setInterval(() => { if (stopped || left() <= 0) { try { ch.kill('SIGKILL'); } catch (e) { /* gone */ } } }, 500);
+				ch.stdout.on('data', (d) => {
+					buf += d;
+					let k;
+					while ((k = buf.indexOf('\n')) >= 0) {
+						const line = buf.slice(0, k); buf = buf.slice(k + 1);
+						let ev = null;
+						try { ev = JSON.parse(line); } catch (e) { continue; }
+						if (ev.ev === 'result' && ev.kind === 'finish' && typeof ev.inputs === 'string' && !found) found = ev.inputs;
+						else if (ev.ev === 'done') done = ev.end;
+					}
+				});
+				ch.on('error', () => { clearTimeout(kill); clearInterval(poll); resolve(); });
+				ch.on('close', () => { clearTimeout(kill); clearInterval(poll); precChild = null; resolve(); });
+			});
+		} catch (e) { say({ ev: 'warning', text: `precision: ${e.message}` }); }
+		try { fs.unlinkSync(file); } catch (e) { /* gone */ }
+		precBusy = false;
+		say({ ev: 'precision', run: precRuns, end: found ? 'finish' : done || 'ended', ms: Date.now() - t1 });
+		if (!found) return null;
+		const x = routeOf(T.masksOf(found.replace(/[^0-O]/g, '')), 'the exact landing (precision)', null);
+		return x && x.better ? x.ev : null;
+	};
+
 	// ---- control: stdin lines
 	let stopped = false, end = '', imports = 0;
 	const onLine = (line) => {
@@ -638,6 +703,11 @@ async function compile(L, opts = {}, emit = () => {}) {
 		lastSteps.push({ n: steps, label: rec.label, rung: step.rung, ok: rec.ok, why: rec.why, ms, anchor: A.id });
 		if (lastSteps.length > 8) lastSteps.shift();
 		if (fail) { lastFails.push({ n: steps, label: rec.label, rung: step.rung, why: fail.why, closest: fail.closest ? { tile: fail.closest.tile, dist: fail.closest.dist } : null, blockedBy: fail.blockedBy || [], touched: (fail.touched || []).length }); if (lastFails.length > 6) lastFails.shift(); }
+		// (a trophy leg that ended within PREC_NEAR tiles of the trophy: the exact landing, above)
+		if (fail && wp.kind === 'trophy' && fail.closest && !route) {
+			const pr = await precision(fail.closest);
+			if (pr) route = pr;
+		}
 		const verAfter = factsVer(facts);
 		if (verAfter !== verBefore) lastProgress = Date.now();
 		// (the invariant: every step adds an anchor or changes a fact; else the planner would propose it again: blocked here)
