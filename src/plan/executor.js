@@ -285,7 +285,7 @@ function makeCore(L, co) {
 			const c0 = found.cands.reduce((m, c) => (c.depth < m.depth ? c : m), found.cands[0]);
 			const PO = require('./polish.js');
 			const pl = PO.polishLeg(L, snaps[c0.start], c0.tail, goal, { sim, deadline: t6 + 0.6 * (wEnd - t6), allowDeath, beforeTick, stop: stopFn });
-			tiers.push({ tier: 'leg-polish', ms: Date.now() - t6, saved: pl.saved, windows: pl.windows });
+			tiers.push({ tier: 'leg-polish', ms: Date.now() - t6, saved: pl.saved, mutated: pl.mutated, windows: pl.windows });
 			if (pl.saved > 0) found.cands.unshift({ start: c0.start, tail: pl.tail, depth: c0.depth - pl.saved });
 		}
 		// -------- tier 2b: the exact search bounded by the leg found (a shorter leg, or a proof that it is optimal)

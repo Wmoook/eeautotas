@@ -60,7 +60,8 @@ function mutatePass(L, masks, o) {
 	const n = masks.length;
 	// the route: per tick the state hash, the position, the latest tick of each hash
 	const sim = new E.EESim(L), inp = new E.EEInput(), ws = new E.EESim(L);
-	sim.reset();
+	// (o.startSnap: the masks from that state (a leg), else from the level start (a route))
+	if (o.startSnap) sim.restore(o.startSnap); else sim.reset();
 	const H = new Float64Array(n + 1), PX = new Float64Array(n + 1), PY = new Float64Array(n + 1), VX = new Float64Array(n + 1), VY = new Float64Array(n + 1), G = new Int8Array(n + 1);
 	const last = new Map();
 	const grav = (x) => x.gravity_dir.x * 3 + x.gravity_dir.y;
@@ -233,7 +234,7 @@ function polishRoute(L, masks0, o) {
 		if (!ev) return false;
 		const v = C.judge(ev, best, maxDeaths);
 		if (!v.accept) return false;
-		steps.push({ how, from: best.runTicks, to: ev.runTicks });
+		steps.push({ how, from: best.runTicks, to: ev.runTicks, at: Date.now() - t0 });
 		best = ev;
 		return true;
 	};
@@ -387,6 +388,31 @@ function polishLeg(L, start, tail0, goal, o) {
 		}
 		return !sim.is_dead && goal.test(sim) && (beforeTick < 0 || T0 + tl.length <= beforeTick);
 	};
+	// (the mutation pass first, as polishRoute's (a2): the classic moves with exact rejoins on the leg's own states, from
+	// its start state; half of the time)
+	let mutated = 0;
+	if (!o.noMutate && process.env.EEAT_LEG_MUT !== '0') {
+		const mEnd = Math.min(deadline, t0 + (o.mutShare > 0 ? o.mutShare : 0.5) * (deadline - t0));
+		let ranges = null;
+		for (let pass = 0; pass < 32 && Date.now() < mEnd && !(o.stop && o.stop()); pass++) {
+			const mp = mutatePass(L, tail, { startSnap: start.snap, deadline: mEnd, stop: o.stop, ranges });
+			if (!mp.shortcuts.length) break;
+			const set = bestShortcutSet(tail.length, mp.shortcuts);
+			let applied = null;
+			const c0 = spliceShortcuts(tail, set);
+			if (good(c0)) { applied = set; tail = c0; }
+			else {
+				for (const c of mp.shortcuts.slice().sort((x, y) => y.saved - x.saved).slice(0, 32)) {
+					const c1 = spliceShortcuts(tail, [c]);
+					if (good(c1)) { applied = [c]; tail = c1; break; }
+				}
+			}
+			if (!applied) break;
+			mutated += applied.reduce((a, c) => a + c.saved, 0);
+			if (mp.timeUp) break;
+			ranges = spansOf(applied, 100, tail.length);
+		}
+	}
 	let R = trace(tail);
 	let windows = 0;
 	for (let b = tail.length; b > 0 && Date.now() < deadline && !(o.stop && o.stop()); ) {
@@ -426,7 +452,7 @@ function polishLeg(L, start, tail0, goal, o) {
 		}
 		b = a;
 	}
-	return { tail, saved: tail0.length - tail.length, windows, ms: Date.now() - t0 };
+	return { tail, saved: tail0.length - tail.length, mutated, windows, ms: Date.now() - t0 };
 }
 
 module.exports = { polishRoute, polishLeg, traceRoute, mutatePass, bestShortcutSet, spliceShortcuts, spansOf };
