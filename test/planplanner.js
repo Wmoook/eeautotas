@@ -142,6 +142,18 @@ function units() {
 			const all = f1.concat(f2);
 			check('P-UNIT stepping stones: a failed stone cuts nothing, blocked at its second rung', all.every((f) => !f.cut) && f2.some((f) => f.kind === 'block') && !f1.some((f) => f.kind === 'block'), JSON.stringify(all.map((f) => [f.kind, f.rung, !!f.cut])));
 		} else check('P-UNIT stepping stones: a failed stone cuts nothing', false, 'no stone step');
+		// (a stone the anchor took already is no step: held right until the coin at x 22 is taken, then plan)
+		{
+			const E2 = require('../src/eesim.js');
+			const sim = new E2.EESim(L); sim.reset(); const inp = new E2.EEInput();
+			let n = 0; for (; n < 400 && !sim.is_coin_collected(22, 10); n++) { E2.applyMask(inp, 4); sim.tick(inp); }
+			const an = anchorAfter(L, m, new Uint8Array(n).fill(4));
+			const pA = sim.is_coin_collected(22, 10) ? on.plan(an, { k: 1 })[0] : null;
+			const a2 = on._anchorOf(an);
+			const es2 = pA ? on._edgesOf(a2.S, a2.pos, a2.base, 'plan', true, a2.S.key + '|' + a2.cls) : [];
+			const xsA = es2.filter((e) => e.X && e.X.kind === 'coin').map((e) => e.X.tiles[0] % Wd);
+			check('P-UNIT stepping stones: a stone the anchor took already is no edge', !!pA && !xsA.includes(22) && xsA.includes(42) && kindsOf(m, pA).pop() === 'trophy', pA ? `${planStr(m, pA)}; stone edges at x ${xsA.join(',')}` : 'coin not taken');
+		}
 		// (THE WALLED PRICE, EEAT_WALL_PRICE=1: a 1-row tunnel to the trophy; a rung-1 failure's cut in it severs the est walk:
 		// off the trophy edge costs the 1e6 penalty, on WALL_F x the unwalled walk)
 		{

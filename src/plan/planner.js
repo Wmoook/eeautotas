@@ -473,6 +473,7 @@ function createPlanner(model, facts, o = {}) {
 	let stones = STONES ? model.triggers.filter((X) => !X.relevant && (X.kind === 'coin' || X.kind === 'bcoin') && X.tiles && X.tiles.length) : [];
 	if (stones.length > STONE_MAX) stones = [];
 	const stoneIds = new Set(stones.map((X) => X.id));
+	let stoneLive = null;   // (per plan() call: stone id -> its tiles the anchor has not taken; null: every tile)
 	// THE WALLED PRICE (n5 doctor 4): the CEGAR walls (a failure's cut just past its closest tile and the 3 x 3 around
 	// the closest tile of every failure at rung >= 1) are never taken back, and in a corridor level they SEVER the est
 	// walk: then every edge past them is 'relaxation only' and costs the 1e6 PENALTY, and the plan ranking is gone (every
@@ -583,10 +584,13 @@ function createPlanner(model, facts, o = {}) {
 		if (wantEst && STONES && stones.length) {
 			for (const X of stones) {
 				if (pos.trig === X.id) continue;
+				// (a stone the anchor's own run took already is none: the model state does not track irrelevant coins)
+				const live = stoneLive ? stoneLive.get(X.id) : X.tiles;
+				if (!live || !live.length) continue;
 				let sE = INF;
-				if (dE) for (const t of X.tiles) if (dE[t] < sE) sE = dE[t];
+				if (dE) for (const t of live) if (dE[t] < sE) sE = dE[t];
 				if (sE >= INF) continue;
-				finish(X, X.tiles, 'trig:' + X.id, { S2: S, expect: null });
+				finish(X, live, 'trig:' + X.id, { S2: S, expect: null });
 			}
 		}
 		// DEATHS AS MOVES (lane 2's die edge, lane 5): where a death door (1011) or gate (1012) reads the death count, a death
@@ -936,6 +940,13 @@ function createPlanner(model, facts, o = {}) {
 		ST.plans++;
 		syncWalls();
 		const a = anchorOf(anchor);
+		// (the stones' untaken tiles in the anchor's own state: Treasure Trove Cove's box-5 compile with the stones went back to
+		// the blue coins its anchors held already, 6 of 30 stone steps)
+		stoneLive = null;
+		if (STONES && stones.length && a.sim && typeof a.sim.is_coin_collected === 'function') {
+			stoneLive = new Map();
+			for (const X of stones) stoneLive.set(X.id, X.tiles.filter((t) => !a.sim.is_coin_collected(t % W, (t / W) | 0)));
+		}
 		const k = po.k || 3;
 		const first = ST.plans === 1;
 		const so = { ms: po.ms || (first ? 2000 : 300), maxExpand: po.maxExpand || 200000, depth: po.depth || 0 };
