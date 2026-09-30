@@ -2092,3 +2092,13 @@ trigger, 300 and 120 ticks before the route first enters the stuck waypoint; eve
   (Sandcastle Safari: none along the route but its last 50 ticks; Endless Space: 7.9 k of 229 k cells with a value);
   the meet (the reach field's order + the exact basin) finds most legs, the closure adds ~3 legs a start kind at
   ~5-10x the time.
+
+### 8.6 In the compiler (the tier EEAT_BACKWARD=1)
+- The executor's own known-route test (tools/cmp/krt.js, rungs 1-2: 5 + 15 s; one tree, the knob off vs on; the tier at
+  0.2 / 0.3 / 0.6 of the window by rung): from the previous trigger 30 vs 29 (+ Treasure Trove Cove, Snow Jumping;
+  - Egg Quest II, Frostbitten, Endless Pain: the skeleton's rung-2 finds lost the window's time to the tier, whose share
+  at rung 2 is 0.3 since), hit-300 23 vs 25, hit-120 35 vs 37; the tier's own finds 9 / 10 / 28.
+- The full compile, 36 levels (20 failing ONE-LEG / STUCK-* / RATE + 16 compiled), 180 s, W3, the tier at 0.5 of every
+  window (the r3 solver): compiled 14 vs 15 (Fish Gods, a flicker of earlier gates), both-compiled run ticks x0.974,
+  failing progress better 2 / worse 1 / same 18: the failing levels' stuck legs are their first far legs from the
+  spawn (hundreds of tiles; the compile's first plans) and the planner's order, not legs the tier's window finds.
