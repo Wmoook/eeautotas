@@ -321,6 +321,12 @@ const MATH_RUNUP_TMAX = +process.env.EEAT_MATH_RUNUP_TMAX > 0 ? +process.env.EEA
 const MATH_RUNUP_TICKS = +process.env.EEAT_MATH_RUNUP_TICKS > 0 ? +process.env.EEAT_MATH_RUNUP_TICKS : 1500000;
 const MATH_RUNUP_MS = +process.env.EEAT_MATH_RUNUP_MS > 0 ? +process.env.EEAT_MATH_RUNUP_MS : 2500;
 const MATH_RUNUP_SHARE = +process.env.EEAT_MATH_RUNUP_SHARE > 0 ? +process.env.EEAT_MATH_RUNUP_SHARE : 0.25;
+// (C6 lane 1, the executor's RATE; OPT-IN EEAT_RUNUP_YIELD=1, off = the run-up as above): the run-up's floor share and
+// its MS follow its OWN yield on the level (mathShare's rule from its RUNUP_YIELD_MIN-th call: 4 x its success rate,
+// 0.15 .. 1): the f300 compile's lane-1 levels spent 635 worker-s in the direct tier for 120 legs of 5,289 arrivals
+// (First Person Maze 235 s for 3 legs, 29% of its steps' time), most of it the run-up's 25-100% floor at rungs 2-3
+const RUNUP_YIELD = () => process.env.EEAT_RUNUP_YIELD === '1';
+const RUNUP_YIELD_MIN = 6;
 const MATH_CERT = () => process.env.EEAT_MATH_CERT !== '0';   // the math bound on the search tiers' legs
 // THE ARRIVALS a math leg leaves (iterate lane 'chains'): the direct leg's cheapest T is ONE end state (mostly full speed or
 // launched), where the search tiers leave up to k diverse ones (T.pickDiverse over every goal state at the least depth);
@@ -462,7 +468,7 @@ function makeCore(L, co) {
 	let CR_ = null;
 	const corridor = () => CR_ || (CR_ = require('./lab/corridor.js').createCorridor(L, { solver: mathSolver() }));
 	const cY = { tries: 0, ok: 0 };   // (the corridor tier's yield on this level)
-	const mY = { dTry: 0, dOk: 0, cTry: 0, cOk: 0 };   // (the math's yield on this level: calls and calls with a leg)
+	const mY = { dTry: 0, dOk: 0, cTry: 0, cOk: 0, uTry: 0, uOk: 0 };   // (the math's yield on this level: calls and calls with a leg; u: the run-up's)
 	const pY = { t: 0, ok: 0 };   // (the profile tier's yield on this level, EEAT_PROFILE=1: calls and calls with a leg)
 	const fieldMs = { n: 0, perTile: 0 };
 	let noFieldLegs = 0, noFieldMemo = 0, noFieldBuilt = 0;   // (FIELD_MEMO diagnostics: calls without a field, memo hits, sub-leg builds past the window)
@@ -632,7 +638,8 @@ function makeCore(L, co) {
 		const mathLbE = new Map();   // start index -> the math's lower bound on its leg (the executor's ticks)
 		if (mathOn && Date.now() < wEnd - 20) {
 			const rUp = MATH_RUNUP && rung >= MATH_RUNUP_RUNG;
-			const tM = Date.now(), mEnd = tM + (rUp ? Math.min(MATH_RUNUP_MS * (rung > MATH_RUNUP_RUNG ? 2 : 1), Math.max(MATH_RUNUP_SHARE, mathShare(MATH_DIRECT, mY.dTry, mY.dOk, 8)) * (wEnd - tM))
+			const rUpF = rUp && RUNUP_YIELD() ? mathShare(1, mY.uTry, mY.uOk, RUNUP_YIELD_MIN) : 1;
+			const tM = Date.now(), mEnd = tM + (rUp ? Math.min(rUpF * MATH_RUNUP_MS * (rung > MATH_RUNUP_RUNG ? 2 : 1), Math.max(rUpF * MATH_RUNUP_SHARE, mathShare(MATH_DIRECT, mY.dTry, mY.dOk, 8)) * (wEnd - tM))
 				: Math.min(MATH_DIRECT_MS, mathShare(MATH_DIRECT, mY.dTry, mY.dOk, 8) * (wEnd - tM)));
 			const cands = [];
 			let tries = 0, why = '', best = null, far = 0;
@@ -675,7 +682,7 @@ function makeCore(L, co) {
 				if (Array.isArray(r.alts)) for (const a of r.alts) mathCands(si, a.masks, Object.assign({}, r, { T: a.T, proven: !!r.proven && a.T === r.T }), cands, 'math:' + r.tool);
 				for (let i = n0; i < cands.length; i++) if (!best || cands[i].depth < best.depth) best = cands[i];
 			}
-			if (tries > 0) { mY.dTry++; if (cands.length) mY.dOk++; }
+			if (tries > 0) { mY.dTry++; if (cands.length) mY.dOk++; if (rUp) { mY.uTry++; if (cands.length) mY.uOk++; } }
 			tiers.push({ tier: 'math', ms: Date.now() - tM, prof, tries, far, ok: cands.length > 0, tool: best ? best.leg.tool : null, T: best ? best.leg.ticks : null, proven: !!(best && best.leg.proven), provenBy: best ? best.leg.provenBy || null : null, why: cands.length ? null : why });
 			if (cands.length) {
 				// (a short leg the math found but did not prove: the exact search bounded by it (the tier 2b of the finders'
