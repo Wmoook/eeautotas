@@ -99,7 +99,7 @@ function createPlanner(model, facts, o = {}) {
 	let lastPlans = [], lastWhy = '';
 	// (EEAT_TRICKS exh: the (edge, node class) pairs whose leg the exact search exhausted: learn())
 	const exhausted = new Set();
-	const relevant = model.triggers.filter((X) => X.relevant && X.kind !== 'trophy');
+	const relevant = model.triggers.filter((X) => X.relevant && X.kind !== 'trophy').concat(model.chains || []);   // (+ the FORCED CHAINS, model.js, EEAT_TRICKS chain)
 	const trophyTiles = model.trophyTiles;
 	const openS = { key: '__open__', dkey: '__open__', vals: [], feats: {} };
 	// ---------------------------------------------------------------- floors (a count gate the way STANDS on)
@@ -545,7 +545,7 @@ function createPlanner(model, facts, o = {}) {
 			out.push({ X, S2: tr ? tr.S2 : S, pos2: X ? posOf(X, S, tr ? tr.S2 : S) : null, expect: tr ? tr.expect : null, lb: g.lb, est: g.est, steps: g.steps, viaDeath: g.viaDeath, relaxOnly: g.relaxOnly, edge, live: tiles });
 		};
 		for (const X of relevant) {
-			if (pos.trig === X.id && !(X.kind === 'psw' || X.kind === 'osw')) continue;
+			if (pos.trig === X.id && !(X.kind === 'psw' || X.kind === 'osw' || X.kind === 'chain')) continue;
 			const live = model.liveTiles(S, X);
 			if (!live.length) continue;
 			// (reachable first: the touch builds a state)
