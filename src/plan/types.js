@@ -344,6 +344,7 @@ function goalField(Lc, tiles, o = {}) {
 		const keyU = `${fgHash(Lc.fg)}|${Array.from(tiles).sort((a, b) => a - b).join(',')}|${o.deaths === true ? 1 : 0}|u`;
 		const hadU = FIELDS.get(keyU);
 		if (hadU) { FIELDS.delete(keyU); FIELDS.set(keyU, hadU); return hadU; }
+		if (o.cachedOnly === true) return null;   // (the memo only: executor.js FIELD_MEMO)
 		const fP = goalField(plain, tiles, o);
 		const fgU = Int32Array.from(Lc.fg);
 		for (const p of on) fgU[p] = 0;
@@ -359,6 +360,7 @@ function goalField(Lc, tiles, o = {}) {
 	const key = `${fgHash(Lc.fg)}|${Array.from(tiles).sort((a, b) => a - b).join(',')}|${o.deaths === true ? 1 : 0}${pfx ? '|p' : ''}`;
 	const had = FIELDS.get(key);
 	if (had) { FIELDS.delete(key); FIELDS.set(key, had); return had; }
+	if (o.cachedOnly === true) return null;   // (the memo only: executor.js FIELD_MEMO)
 	const f = RF.reachField(Lc, pfx ? { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: o.deaths === true, plainFx: true } : { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: o.deaths === true });
 	if (FIELDS.size === 0 && FIELDS_MB > 0) FIELDS_MAX = Math.max(FIELDS_MIN, Math.min(FIELDS_CAP, Math.floor(FIELDS_MB * 1048576 / Math.max(1, fieldBytes(f)))));
 	FIELDS.set(key, f);

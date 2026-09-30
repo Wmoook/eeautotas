@@ -1388,6 +1388,7 @@ function createPlanner(model, facts, o = {}) {
 		const rung = facts.rungOf(edge, cls);
 		// (the est walk's path to the waypoint, cut just past the point nearest the closest approach: the next plans'
 		// est walk goes another way there, CEGAR's generalization over every edge through that corridor)
+		// (EEAT_FIELD_MEMO=1 (executor.js): a closest of unknown distance (the call had no goal field) cuts nothing)
 		// (a STONE is optional: its failure is no counterexample to the corridor (a cut there walled the est walk's way to
 		// cut there walled the est walk's way to the target: doctor 4))
 		const isStone = STONES && stones.length && step.waypoint && step.waypoint.trig !== undefined && stoneIds.has(step.waypoint.trig) && process.env.EEAT_PLAN_STONE_CUT !== '1';
@@ -1399,7 +1400,7 @@ function createPlanner(model, facts, o = {}) {
 			const dC = model.pairSteps(a.S, a.pos, [fail.closest.tile], 'est', a.base), dT = model.pairSteps(a.S, a.pos, tiles, 'est', a.base);
 			if (dT > 0 && dT < INF && !(dC >= CUT_PROG_F * dT)) { noWall = true; ST.cutSkipped = (ST.cutSkipped || 0) + 1; }
 		}
-		if (!isStone && !noWall && a && fail.closest && fail.closest.tile !== undefined && fail.closest.tile !== null && (rung + 1 >= 2 || fail.why === 'exhausted')) {
+		if (!isStone && !noWall && a && fail.closest && fail.closest.tile !== undefined && fail.closest.tile !== null && !(process.env.EEAT_FIELD_MEMO === '1' && !(fail.closest.dist >= 0)) && (rung + 1 >= 2 || fail.why === 'exhausted')) {
 			const tiles = step.waypoint && step.waypoint.kind !== 'trophy' && step.waypoint.tiles ? step.waypoint.tiles : trophyTiles;
 			cut = cutPast(a.S, a.pos, tiles, a.base, fail.closest.tile);
 		}
