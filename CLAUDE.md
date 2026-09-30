@@ -482,6 +482,18 @@ ways in.
   `--out` defaults to `<level name>.eetas` next to the level (`src/out/compile/` for a job id); `--workers` defaults to the
   threads - 1 (at most 8). Exit 0 = routed, the .eetas written and read back to the same finish; 2 = no route (the report says
   why and where it stalled); 1 = an error (a watchdog thread ends a compile blocked past its hard limit).
+- **The compiler's default knobs** (`src/plan/defaults.js`, the doctors' synthesis 2026-09-30: `src/out/n5/doctor/SYNTHESIS.md`):
+  src/compile.js and src/plan.js turn on, unless the environment names them (=0 off; `EEAT_COMPILER_DEFAULTS=0` none),
+  EEAT_COVER=3 (the coverage leg finder as the fallback), EEAT_CRUMBS=1 (coins no gate reads as breadcrumb relays),
+  EEAT_FIELD_MEMO=1, EEAT_PLAN_ANY=1 (a set-kind trigger group = one edge), EEAT_PLAN_UNTOGGLE=1, EEAT_FX_FIELD=1 /
+  EEAT_FX_STATE=1 (physics goal fields on effect levels), EEAT_ICE_LOCAL=1, EEAT_PROT_LAYER=1; the modules themselves stay
+  opt-in (their tests and the truth checkers read them as before). Box 5, 300 s, W3, one run a level: all of them on (the
+  combo, 22 levels) compiled 15 vs the base's 9, none lost (+K Underground, On And On And On, Crypts Of Anubis, Presto
+  Penguins, The Witch's House; Vignettes, Perilous Endeavor and Stone Ruin Speedrun compiled in the single-group arms, not
+  in the combo); the cost: slower first routes on the both-compiled (Bygone Tutorial 2,286 vs 1,979-1,987, Gingerbread
+  House 5,289 vs 4,658, Tutorial 1 2,189 vs 2,014-2,084: WATCH), faster Tutorial 3 (2,567; the base compiles it 1 of 3) and
+  The Ten Commandments (1,465 vs 1,847); the shared gate (60 s) exit 0, 13 vs 11. Every other doctor fix is merged OPT-IN
+  (the knobs in SYNTHESIS.md section 3).
 - **In the app**: the level editor's **Compile** button (POST / GET `/api/editor/compile`, section 9) runs the CLI in its own
   process in `<data>/editor/compile/`, shows its stage lines, replays the route once more, makes a job `<name> (compiled)`
   (watch it, optimize it like any run) and copies its `/loadtas` line. `src/plan.js` is the headless runner (JSON lines):
