@@ -135,14 +135,14 @@ async function compileAll(a, out, append) {
 		const runTicks = verified ? verified.runTicks : null;
 		const row = { kind: 'level', set: lv.set, name: lv.name, file: lv.file, routed, exit: r.code, killed: r.killed, sec: r2(r.ms / 1000), runTicks, time: runTicks !== null ? C.fmt(runTicks) : null,
 			lb: report ? report.lb : null, gap: routed && report ? runTicks - report.lb : null, gapPct: routed && report && runTicks > 0 ? r2((100 * (runTicks - report.lb)) / runTicks) : null,
-			legs: report ? (report.legs || []).length : null, provenLegs: report ? report.provenLegs || 0 : null, verified: fs.existsSync(eetas) ? !!verified : null, verifyFail: vfail || undefined,
+			optimal: !!(routed && report && report.lbProof), lbProof: report && report.lbProof ? report.lbProof : undefined, legs: report ? (report.legs || []).length : null, provenLegs: report ? report.provenLegs || 0 : null, verified: fs.existsSync(eetas) ? !!verified : null, verifyFail: vfail || undefined,
 			reportRunTicks: report ? report.runTicks : null, known: known ? known.runTicks : null, knownSource: known ? known.source : null, ratio: routed && known && known.runTicks > 0 ? r2(runTicks / known.runTicks, 3) : null,
 			stages: report ? report.stages : null, end: report ? report.end : null, steps: report ? report.steps : null, anchors: report ? report.anchors : null, bugs: report ? report.bugs : null,
 			why: routed ? '' : (report && report.why) || (r.killed ? `timeout after ${seconds + 90} s` : `exit ${r.code}: ${(r.err || r.out).trim().split('\n').pop() || ''}`.slice(0, 400)) };
 		rows.push(row);
 		append(row);
 		n++;
-		console.log(`[truth] ${n}/${todo.length} ${lv.set}/${lv.name}: ${routed ? `${row.time} (${runTicks} run ticks, lb ${row.lb}, gap ${row.gapPct}%${row.ratio !== null ? `, x${row.ratio} the known` : ''})` : `no route: ${String(row.why).slice(0, 120)}`}${vfail ? ` UNVERIFIED: ${vfail}` : ''} [${row.sec} s, ${Math.round((Date.now() - t0) / 1000)} s in]`);
+		console.log(`[truth] ${n}/${todo.length} ${lv.set}/${lv.name}: ${routed ? `${row.time} (${runTicks} run ticks, lb ${row.lb}, gap ${row.gapPct}%${row.optimal ? ', PROVEN OPTIMAL' : ''}${row.ratio !== null ? `, x${row.ratio} the known` : ''})` : `no route: ${String(row.why).slice(0, 120)}`}${vfail ? ` UNVERIFIED: ${vfail}` : ''} [${row.sec} s, ${Math.round((Date.now() - t0) / 1000)} s in]`);
 	};
 	await Promise.all(Array.from({ length: Math.min(par, todo.length) }, async () => { while (next < todo.length) { const lv = todo[next++]; await one(lv); } }));
 	return rows;
@@ -154,7 +154,7 @@ function totalsOf(rows) {
 	const legs = rows.reduce((s, x) => s + (x.routed ? x.legs || 0 : 0), 0), proven = rows.reduce((s, x) => s + (x.routed ? x.provenLegs || 0 : 0), 0);
 	return { levels: all, routed: routed.length, routedPct: all ? r2((100 * routed.length) / all) : 0, unverified, medianSec: r2(median(rows.map((x) => x.sec))), p90Sec: r2(pctl(rows.map((x) => x.sec), 0.9)),
 		medianSecRouted: r2(median(routed.map((x) => x.sec))), medianRatio: r2(median(routed.map((x) => x.ratio)), 3), withKnown: routed.filter((x) => x.ratio !== null).length,
-		provenPct: legs ? r2((100 * proven) / legs) : 0, legs, proven, medianGapPct: r2(median(routed.map((x) => x.gapPct))), under60: routed.filter((x) => x.sec <= 60).length };
+		provenPct: legs ? r2((100 * proven) / legs) : 0, legs, proven, medianGapPct: r2(median(routed.map((x) => x.gapPct))), under60: routed.filter((x) => x.sec <= 60).length, optimal: routed.filter((x) => x.optimal).length };
 }
 /** a number for the tables: '-' for none */
 const v = (x, pre = '', post = '') => (x === null || x === undefined || !Number.isFinite(+x) ? '-' : `${pre}${x}${post}`);
@@ -211,7 +211,7 @@ async function main() {
 	const t = rows.length ? totalsOf(rows) : null;
 	if (t) {
 		append(Object.assign({ kind: 'totals' }, t));
-		console.log(`[truth] T-E2E: routed ${t.routed}/${t.levels} (${t.routedPct}%), unverified ${t.unverified}, median ${v(t.medianSec)} s (p90 ${v(t.p90Sec)}), median ratio ${v(t.medianRatio, 'x')} (${t.withKnown} with a known), proven legs ${t.provenPct}%, median gap ${v(t.medianGapPct, '', '%')}`);
+		console.log(`[truth] T-E2E: routed ${t.routed}/${t.levels} (${t.routedPct}%), unverified ${t.unverified}, median ${v(t.medianSec)} s (p90 ${v(t.p90Sec)}), median ratio ${v(t.medianRatio, 'x')} (${t.withKnown} with a known), proven optimal ${t.optimal || 0}, proven legs ${t.provenPct}%, median gap ${v(t.medianGapPct, '', '%')}`);
 	}
 	console.log(`[truth] wrote ${path.join(out, 'truth.md')} and truth.jsonl`);
 	const bad = partsRows.some((r) => r.status === 'fail' || r.status === 'timeout') || (t && t.unverified > 0);
