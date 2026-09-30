@@ -116,6 +116,7 @@ async function main() {
 	const sized = list.map(([lp, es]) => [lp, es, sizeOf(lp)]).filter((q) => !argv.maxTiles || q[2] <= +argv.maxTiles);
 	sized.sort((a, b) => a[2] - b[2]);
 	list = sized.slice(+argv.skip || 0, argv.limit ? (+argv.skip || 0) + +argv.limit : undefined);
+	if (argv.shard) { const [si, sn] = String(argv.shard).split('/').map(Number); list = list.filter((q, k) => k % sn === si); }
 	const o = { threads: +(argv.threads || 8) };
 	for (const k of Object.keys(ED.DEF)) if (argv[k] !== undefined) o[k] = +argv[k];
 	if (argv.touch === '0') o.touch = false;
@@ -125,19 +126,24 @@ async function main() {
 	const byLab = {};
 	for (const [lp, entries, tiles] of list) {
 		const t0 = Date.now();
-		let g;
-		try { g = await ED.buildGraph(lp, o); } catch (e) { console.error('build failed', lp, e && e.message); continue; }
+		let g = null, lazy = null;
+		// --lazy=1: the edges of the supports the moves start at only (edges.js edgeSource, this thread): the pair
+		// coverage without the whole-level build
+		try { if (argv.lazy === '1') lazy = ED.edgeSource(lp, o); else g = await ED.buildGraph(lp, o); } catch (e) { console.error('build failed', lp, e && e.message); continue; }
 		const buildMs = Date.now() - t0;
 		const L = T.loadLevelFile(lp);
 		const W = L.width, H = L.height;
 		// the index: supports by tile, edges by source support
+		const supsAll = lazy ? lazy.sups : g.sups;
 		const supAt = new Map();
-		for (const u of g.sups) { if (!supAt.has(u.tile)) supAt.set(u.tile, []); supAt.get(u.tile).push(u); }
+		for (const u of supsAll) { if (!supAt.has(u.tile)) supAt.set(u.tile, []); supAt.get(u.tile).push(u); }
 		const out = new Map();
-		for (let n = 0; n < g.edges.length; n++) { const e = g.edges[n]; if (!out.has(e.f)) out.set(e.f, []); out.get(e.f).push(n); }
-		const masksCache = new Map();
-		const masksOfEdge = (n) => { let m = masksCache.get(n); if (!m) { m = ED.masksOf(g.edges[n].m); masksCache.set(n, m); } return m; };
-		const lv = { level: path.basename(lp), W, H, tiles, sups: g.sups.length, edges: g.edges.length, buildMs: g.stats.ms, wallMs: buildMs, threads: g.stats.threads, maxRssMB: g.stats.maxRssMB, cached: !!g.stats.cached, byKind: g.stats.byKind, routes: 0, moves: 0, src: 0, pair: 0, pairT: 0, replay: 0, replayT: 0, respawn: 0, lab: {} };
+		if (g) for (let n = 0; n < g.edges.length; n++) { const e = g.edges[n]; if (!out.has(e.f)) out.set(e.f, []); out.get(e.f).push(e); }
+		const edgesOfSup = (u) => (lazy ? lazy.edgesOf(u.i) : out.get(u.i) || []);
+		const masksOfEdge = (e) => e._ms || (e._ms = ED.masksOf(e.m));
+		const lv = g
+			? { level: path.basename(lp), W, H, tiles, sups: g.sups.length, edges: g.edges.length, buildMs: g.stats.ms, wallMs: buildMs, threads: g.stats.threads, maxRssMB: g.stats.maxRssMB, cached: !!g.stats.cached, byKind: g.stats.byKind, routes: 0, moves: 0, src: 0, pair: 0, pairT: 0, replay: 0, replayT: 0, respawn: 0, lab: {} }
+			: { level: path.basename(lp), W, H, tiles, sups: lazy.sups.length, lazy: 1, routes: 0, moves: 0, src: 0, pair: 0, pairT: 0, replay: 0, replayT: 0, respawn: 0, lab: {} };
 		for (const entry of entries) {
 			let tr = null;
 			try { tr = TS.loadTruth(entry); } catch (e) { tr = null; }
@@ -156,17 +162,16 @@ async function main() {
 				if (!srcs.length) { miss('nosrc'); continue; }
 				lv.src++; lab.src++;
 				const cands = [];
-				for (const u of srcs) for (const n of out.get(u.i) || []) {
-					const e = g.edges[n];
-					if (mv.c1 === 'D' ? e.cls === 'R' : (e.tile === mv.tile1 && (mv.tele || mv.c1 === 'A' || e.cls === mv.c1))) cands.push(n);
+				for (const u of srcs) for (const e of edgesOfSup(u)) {
+					if (mv.c1 === 'D' ? e.cls === 'R' : (e.tile === mv.tile1 && (mv.tele || mv.c1 === 'A' || e.cls === mv.c1))) cands.push(e);
 				}
 				if (!cands.length) { miss('nopair'); continue; }
 				lv.pair++; lab.pair++;
-				cands.sort((a, b) => g.edges[a].T - g.edges[b].T);
-				if (g.edges[cands[0]].T <= mv.len) { lv.pairT++; lab.pairT++; }
+				cands.sort((a, b) => a.T - b.T);
+				if (cands[0].T <= mv.len) { lv.pairT++; lab.pairT++; }
 				let best = 0;
-				for (const n of cands.slice(0, 64)) {
-					const h = replayHit(sim, inp, mv.snap, masksOfEdge(n), mv, W, H);
+				for (const e of cands.slice(0, 64)) {
+					const h = replayHit(sim, inp, mv.snap, masksOfEdge(e), mv, W, H);
 					if (h && (!best || h < best)) best = h;
 				}
 				if (best) { lv.replay++; lab.replay++; if (best <= mv.len) { lv.replayT++; lab.replayT++; } }
@@ -183,6 +188,7 @@ async function main() {
 				}
 			}
 		}
+		if (lazy) { const s = lazy.stats(); lv.built = s.built; lv.edges = s.edges; lv.buildMs = s.ms; lv.msPerSup = s.built ? +(s.ms / s.built).toFixed(1) : 0; lv.maxRssMB = Math.round(process.resourceUsage().maxRSS / 1024); }
 		const line = JSON.stringify(lv);
 		console.log(line);
 		if (outF) fs.appendFileSync(outF, line + '\n');
