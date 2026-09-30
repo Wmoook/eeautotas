@@ -23,6 +23,7 @@
 const os = require('os');
 const E = require('../eesim.js');
 const EG = require('../endgame.js');
+const RF = require('../reach.js');
 const T = require('./types.js');
 const NG = require('./navgraph.js');
 
@@ -35,6 +36,8 @@ const JUMP2 = [4, 8, 12, 16];
 const HOLD_N = [2, 6, 16];
 const TELEPORT_PX = 20;
 const DEATH_WAIT = 80;
+const GUIDE_K = 2;          // ticks per reach-field tile in the greedy passes' order
+const GUIDE_FAR = 1e5;
 
 // ---------------------------------------------------------------- the macros: mask(k, sim) -> mask | -1 (end)
 function mkMacros() {
@@ -232,6 +235,15 @@ async function createPrims(L, o = {}) {
 		}
 		const ctx = { goal };
 		const classDedup = ro.classDedup !== false;
+		// the greedy passes' guide (ordering only, never a prune, never in a w = 1 pass): the reach field (RCH3, physics-
+		// aware: rises, falls, fields) to the goal tiles, in tiles x GUIDE_K ticks
+		let guide = null;
+		if (ro.guide !== false && classDedup) {
+			try {
+				const gf = T.goalField(L, goal.tiles, { deaths: false });
+				guide = (s) => { const c = RF.costAt(gf, s); return c < 0 ? GUIDE_FAR : c * GUIDE_K; };
+			} catch (e) { guide = null; }
+		}
 		const fo = { family: ro.family || 'all', step: ro.step !== undefined ? !!ro.step : (ro.family === 'step' || ro.classDedup === false) };
 		// anytime: weighted A* first (a route soon), then w = 1 bounded by the best so far (every prune by the admissible
 		// bound: a node whose tick + h reaches the best cannot beat it)
@@ -254,7 +266,7 @@ async function createPrims(L, o = {}) {
 					for (const c of kids) {
 						s.restore(c.snap);
 						c.h0 = c.goal ? 0 : h(s);
-						c.h = c.h0 * w;
+						c.h = c.goal ? 0 : (w > 1 && guide ? Math.max(c.h0, guide(s)) : c.h0) * w;
 						c.key = classDedup && !c.goal ? (support(s) || airKey(s)) : null;
 						st.macroUse[c.fam] = (st.macroUse[c.fam] || 0) + 1;
 					}
@@ -275,7 +287,7 @@ async function createPrims(L, o = {}) {
 		const arrivals = [];
 		for (const gn of R.goals) {
 			const masks = NG.masksOf(gn);
-			const r = T.playTo(L, masks, { allowDeath: !!goal.allowDeath });
+			const r = T.playTo(L, masks, { allowDeath: true });   // (a death in the prefix, before the leg: the replay goes on through it)
 			if (!goal.test(r.sim) || r.sim.stateHash() !== gn.hash) continue;
 			arrivals.push(T.arrivalOf(L, r.sim, masks, null));
 		}
@@ -316,7 +328,7 @@ async function createPrims(L, o = {}) {
 		if (!pool) pool = require('./primworker.js').createPool(o.file, o.workers);
 		return pool.route(starts.map((a) => T.strOf(a.masks)), wp, { ms: budget.ms, deadline: budget.deadline, k: budget.k }, ro).then((r) => {
 			if (!r) return route(starts, goal, budget, ro);
-			r.arrivals = r.arrivals.map((s) => { const masks = T.masksOf(s); const p = T.playTo(L, masks, { allowDeath: !!goal.allowDeath }); return T.arrivalOf(L, p.sim, masks, null); });
+			r.arrivals = r.arrivals.map((s) => { const masks = T.masksOf(s); const p = T.playTo(L, masks, { allowDeath: true }); return T.arrivalOf(L, p.sim, masks, null); });
 			if (r.best) r.best.masks = T.masksOf(r.best.masks);
 			if (r.closest) r.closest.masks = T.masksOf(r.closest.masks);
 			return r;
