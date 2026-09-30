@@ -304,6 +304,7 @@ function discKeyCache() {
 
 function legBest(L, starts, goal, o) {
 	o = o || {};
+	const JSKIP_L = process.env.EEAT_JSKIP !== '0' && !o.noJskip;
 	const sim = o.sim || new E.EESim(L), inp = new E.EEInput();
 	const W = L.width, H = L.height;
 	const allowDeath = !!o.allowDeath;
@@ -425,7 +426,7 @@ function legBest(L, starts, goal, o) {
 	}
 	let why = 'exhausted';
 	let popsAtFound = -1;
-	const drop = { dead: 0, over: 0, oob: 0, region: 0, closed: 0 };
+	const drop = { dead: 0, over: 0, oob: 0, region: 0, closed: 0, skipJ: 0 };
 	const over = typeof goal.over === 'function' ? goal.over : null;
 	while (heap.length && goals.length < collect && (popsAtFound < 0 || pops - popsAtFound < 3000)) {
 		if ((pops & 63) === 0) {
@@ -460,11 +461,17 @@ function legBest(L, starts, goal, o) {
 		const pa = ka, pb = kb;
 		const masks = EG.probeMasks(sim, inp, snap);
 		sims++;
+		// (a jump held that cannot jump: while the input without the jump bit leaves no jump after every tick of its hold (the
+		// run timer on, no levitation, jump_count >= max_jumps), its jump twin is the very same trajectory (exact.js's rule
+		// tick by tick) and its child the same cell: not simulated)
+		let noJump = 0;
 		for (let k = 0; k < masks.length; k++) {
 			const m = masks[k];
+			if ((m & 1) && JSKIP_L && (noJump & (1 << (m & 30))) !== 0) { drop.skipJ++; continue; }
 			if (k > 0) { sim.restore(snap); E.applyMask(inp, m); sim.tick(inp); sims++; }
-			let reps = 1, same = true, bad = false;
+			let reps = 1, same = true, bad = false, nj = JSKIP_L && !(m & 1);
 			for (;;) {
+				if (nj && !(sim.run_ticks !== 0 && !sim.has_levitation && sim.jump_count >= sim.max_jumps)) nj = false;
 				if (sim.is_dead && !allowDeath) { drop.dead++; bad = true; break; }
 				if (over !== null && over(sim)) { drop.over++; bad = true; break; }
 				if (!sim.is_dead && X.goalAt(goal, sim, t0 + g + reps, beforeTick)) {
@@ -480,6 +487,7 @@ function legBest(L, starts, goal, o) {
 				if (reps >= HOLD && !(reps < WAIT && sim.speed_x === 0 && sim.speed_y === 0)) break;
 				E.applyMask(inp, m); sim.tick(inp); sims++; reps++;
 			}
+			if (nj) noJump |= 1 << (m & 30);
 			if (bad) continue;
 			if (same) { drop.closed++; continue; }
 			const cx = (sim.px + 8) >> 4, cy = (sim.py + 8) >> 4;
