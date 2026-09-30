@@ -85,6 +85,11 @@ const MSOLVE_ON = () => process.env.EEAT_MSOLVE === '1';
 const PROFILE_ON = () => process.env.EEAT_PROFILE === '1';
 const PROFILE_SHARE = process.env.EEAT_PROFILE_SHARE !== undefined ? +process.env.EEAT_PROFILE_SHARE : 0.4;
 const PROFILE_SHARE0 = process.env.EEAT_PROFILE_SHARE0 !== undefined ? +process.env.EEAT_PROFILE_SHARE0 : PROFILE_SHARE;
+// the first rung it runs at (EEAT_PROFILE_RUNG, 2: a leg the finders failed at rungs 0-1; at every rung (0) the compile A/B of
+// the 29 compiled levels lost 4 (13 vs 9 compiled at 60 s) and its routes were slower: its first arrival replaced the
+// finders' tightened, polished legs (The Ten Commandments 669 -> 1,531 ticks), and it took 40% of every call)
+const PROFILE_RUNG = process.env.EEAT_PROFILE_RUNG !== undefined ? +process.env.EEAT_PROFILE_RUNG : 2;
+const PROFILE_AT = process.env.EEAT_PROFILE_AT === 'early' ? 'early' : 'leg';
 const MSOLVE_SHARE = process.env.EEAT_MSOLVE_SHARE !== undefined ? +process.env.EEAT_MSOLVE_SHARE : 0.2;        // the direct legs' cap
 const MSOLVE_CHAIN_SHARE = process.env.EEAT_MSOLVE_CHAIN !== undefined ? +process.env.EEAT_MSOLVE_CHAIN : 0.3;   // the chains' share, after the primitives
 const MSOLVE_LEGT = +process.env.EEAT_MSOLVE_LEGT || 150;       // the direct leg's horizon (ticks)
@@ -604,37 +609,40 @@ function makeCore(L, co) {
 		// -------- tier P: THE PROFILE (n5-lab-profile, approach B; OPT-IN EEAT_PROFILE=1, off = the executor before byte for
 		// byte): src/plan/lab/profile.js, the bang-bang family's reachable set tick by tick from every live start (x holds one
 		// key between switching events, the jump bit on the ticks whose move hits the floor, states merged by stateHash, the
-		// front cut by this call's goal field's time to go, msolve.leg finishing from the front's best states); PROFILE_SHARE of
-		// the window; its arrivals replayed by the executor's own goal test (finishFound's verifyTail)
-		if (PROFILE_ON() && !allowDeath && !wp.dieField && Date.now() < wEnd - 50) {
-			const tP = Date.now(), pEnd = tP + (rung <= 0 ? PROFILE_SHARE0 : PROFILE_SHARE) * (wEnd - tP);
-			const pst = { tier: 'profile', ok: false };
+		// front cut by this call's goal field's time to go, msolve.leg finishing from the front's best states), from rung
+		// PROFILE_RUNG on, PROFILE_SHARE of the window; its arrivals replayed by the executor's own goal test. WHERE
+		// (EEAT_PROFILE_AT): 'leg' (the default) in the leg finders' place (after the math, the primitives and the short exact
+		// search, before tier 3; a leg it finds goes through the leg polish and the exact search bounded by it, as the finders'
+		// legs), 'early' here (its first arrivals returned as they are)
+		const profileTier = (pEnd) => {
+			const tP = Date.now();
+			const pst = { tier: 'profile', ok: false, at: PROFILE_AT };
 			try {
 				const PFm = require('./lab/profile.js');
 				const idx = [];
 				starts.forEach((s, i) => { if (!s.dead) idx.push(i); });
+				if (!idx.length) return null;
 				const f0 = fields.get(starts[idx[0]].disc) || null;
 				const r = PFm.profileLeg(L, idx.map((i) => ({ snap: starts[i].snap, tick: starts[i].tick })), goal,
 					{ deadline: pEnd, stop: stopFn, collect: 4 * k, extra: 2, beforeTick, field: f0 || undefined });
 				sims += r.sims || 0;
 				Object.assign(pst, { ms: Date.now() - tP, why: r.why, layers: r.layers, sims: r.sims, fin: r.finCalls, closest: r.closest });
-				if (r.ok) {
-					const cands = [];
-					for (const a of r.arrivals || []) {
-						const i = idx[a.start];
-						cands.push({ start: i, tail: Uint8Array.from(a.masks), depth: starts[i].tick - t0 + a.masks.length });
-					}
-					cands.sort((a, b) => a.depth - b.depth);
-					if (cands.length) {
-						const c0 = cands[0];
-						const legsP = [{ start: c0.start, ticks: c0.tail.length, lb: 0, proven: false, tool: 'profile' }];
-						const rP = finishFound(cands, 'profile', legsP, 0);
-						pst.ok = !!rP;
-						tiers.push(pst);
-						if (rP) { delete rP.arrivalsRaw; return out(rP); }
-					} else tiers.push(pst);
-				} else tiers.push(pst);
-			} catch (e) { pst.error = String(e && e.message || e); pst.ms = Date.now() - tP; tiers.push(pst); }
+				const cands = [];
+				if (r.ok) for (const a of r.arrivals || []) { const i = idx[a.start]; cands.push({ start: i, tail: Uint8Array.from(a.masks), depth: starts[i].tick - t0 + a.masks.length }); }
+				cands.sort((a, b) => a.depth - b.depth);
+				pst.ok = cands.length > 0;
+				tiers.push(pst);
+				return cands.length ? cands : null;
+			} catch (e) { pst.error = String(e && e.message || e); pst.ms = Date.now() - tP; tiers.push(pst); return null; }
+		};
+		const profileOn = PROFILE_ON() && rung >= PROFILE_RUNG && !allowDeath && !wp.dieField;
+		if (profileOn && PROFILE_AT === 'early' && Date.now() < wEnd - 50) {
+			const cands = profileTier(Date.now() + (rung <= 0 ? PROFILE_SHARE0 : PROFILE_SHARE) * (wEnd - Date.now()));
+			if (cands) {
+				const c0 = cands[0];
+				const rP = finishFound(cands, 'profile', [{ start: c0.start, ticks: c0.tail.length, lb: 0, proven: false, tool: 'profile' }], 0);
+				if (rP) { delete rP.arrivalsRaw; return out(rP); }
+			}
 		}
 		// -------- tier 0b: THE EXACT END SEARCH from a NEAR state (within NEAR_T tiles of the goal by the goal field): a later
 		// start (the strategy's relay: the last rung's nearest state) and, after the primitives and the exact tier, this
@@ -891,6 +899,11 @@ function makeCore(L, co) {
 			const r = nearEnd(nearJobs([T.strOf(closest.masks)]), Date.now() + NEAR_F * (wEnd - Date.now()), 'closest', closest.dist);
 			if (r) return out(r);
 		}
+		// -------- tier P in the finders' place (EEAT_PROFILE_AT=leg, the default; see tier P above)
+		if (profileOn && PROFILE_AT === 'leg' && !found && !exactProof && Date.now() < wEnd - 50) {
+			const cands = profileTier(Date.now() + (rung <= 0 ? PROFILE_SHARE0 : PROFILE_SHARE) * (wEnd - Date.now()));
+			if (cands) found = { cands, tool: 'profile', proven: false, lbAbs };
+		}
 		// -------- tier 3: the fine-cell leg search
 		if (!found && !exactProof && Date.now() < wEnd - 5) {
 			// (the finders: the best-first search dives (the first leg, soonest), then the time-layered beam bounded by it
@@ -1017,7 +1030,7 @@ function makeCore(L, co) {
 		}
 		// -------- the leg found made shorter: polish.js polishLeg (exact windows from its end back: the waypoint sooner, the
 		// leg's own state region sooner, exact rejoins; every change replayed from the start)
-		if (found && found.tool === 'leg' && Date.now() < pEnd - 20 && process.env.EEAT_LEG_POLISH !== '0') {
+		if (found && (found.tool === 'leg' || found.tool === 'profile') && Date.now() < pEnd - 20 && process.env.EEAT_LEG_POLISH !== '0') {
 			const t6 = Date.now();
 			const c0 = found.cands.reduce((m, c) => (c.depth < m.depth ? c : m), found.cands[0]);
 			const PO = require('./polish.js');
@@ -1026,7 +1039,7 @@ function makeCore(L, co) {
 			if (pl.saved > 0) found.cands.unshift({ start: c0.start, tail: pl.tail, depth: c0.depth - pl.saved });
 		}
 		// -------- tier 2b: the exact search bounded by the leg found (a shorter leg, or a proof that it is optimal)
-		if (found && found.tool === 'leg' && Date.now() < pEnd - 5) {
+		if (found && (found.tool === 'leg' || found.tool === 'profile') && Date.now() < pEnd - 5) {
 			const t4 = Date.now();
 			const ub = Math.min(...found.cands.map((c) => c.depth));
 			const r = X.exactLeg(L, snaps, goal, Object.assign({}, baseX, { maxDepth: ub - 1, deadline: pEnd - 2 }));
