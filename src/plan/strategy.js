@@ -170,6 +170,10 @@ const ARR_LB_MS = 25, ARR_LB_EXPAND = 20000, LB_MS = 1500, LB_SLOW_MS = 5000;
 // (the start's bound in the bounds stage gets LB0_MS: it only reports (the report's lb, the polish's stop) until the end,
 // where the refresh takes the whole LB_MS again and keeps the larger; the stage's clock goes to the moves instead)
 const LB0_MS = +process.env.EEAT_LB0_MS || 500;
+// THE WHOLE LEVEL AS ONE LEG (the lab's backward solver, src/plan/lab/bwlevel_child.js, a child process next to the moves
+// stage; OPT-IN EEAT_BW_LEVEL=1, off = the compile byte for byte): the level's start -> the trophy in one solve, at most
+// BW_LEVEL_F of the budget and BW_LEVEL_MAX_S; its route is a route like the moves' (routeOf), the moves go on
+const BW_LEVEL = process.env.EEAT_BW_LEVEL === '1', BW_LEVEL_F = +process.env.EEAT_BW_LEVEL_F || 0.5, BW_LEVEL_MAX_S = +process.env.EEAT_BW_LEVEL_MAX_S || 150;
 /** a relative deadline (a step's or a waypoint's beforeTickFrom): a number, or 'prev+N' (N ticks after the previous
  *  step's arrival, i.e. this anchor's arrival: a key's KEY_TICKS) -> ticks | NaN */
 function relOf(x) {
@@ -618,6 +622,45 @@ async function compile(L, opts = {}, emit = () => {}) {
 		if (!found) return null;
 		const x = routeOf(T.masksOf(found.replace(/[^0-O]/g, '')), 'the exact landing (precision)', null);
 		return x && x.better ? x.ev : null;
+	};
+
+	// ---- THE WHOLE LEVEL AS ONE LEG (EEAT_BW_LEVEL=1; BW_LEVEL above): started with the moves loop, killed at its end
+	let bwlChild = null, bwlDone = null;
+	const wholeLevel = () => {
+		if (!BW_LEVEL || !opts.file || bwlDone) return;
+		const secs = Math.floor(Math.min(BW_LEVEL_MAX_S, (+seconds || 60) * BW_LEVEL_F, (left() - endReserve - 2000) / 1000));
+		if (!(secs >= 5)) return;
+		const cp = require('child_process'), t1 = Date.now();
+		say({ ev: 'bwlevel', seconds: secs });
+		bwlDone = new Promise((resolve) => {
+			let found = null, done = null, buf = '';
+			const ch = cp.spawn(process.execPath, ['--max-old-space-size=2000', path.join(__dirname, 'lab', 'bwlevel_child.js'), String(opts.file), `--ms=${secs * 1000}`], { stdio: ['ignore', 'pipe', 'ignore'] });
+			bwlChild = ch;
+			const onExit = () => { try { ch.kill('SIGKILL'); } catch (e) { /* gone */ } };
+			process.once('exit', onExit);
+			const kill = setTimeout(onExit, (secs + 20) * 1000);
+			const poll = setInterval(() => { if (stopped || left() <= 0) onExit(); }, 500);
+			if (kill.unref) kill.unref();
+			if (poll.unref) poll.unref();
+			ch.stdout.on('data', (d) => {
+				buf += d;
+				let k;
+				while ((k = buf.indexOf('\n')) >= 0) {
+					const line = buf.slice(0, k); buf = buf.slice(k + 1);
+					let ev = null;
+					try { ev = JSON.parse(line); } catch (e) { continue; }
+					if (ev.ev === 'result' && ev.kind === 'finish' && typeof ev.inputs === 'string') {
+						found = ev.inputs;
+						const x = routeOf(T.masksOf(found.replace(/[^0-O]/g, '')), 'the whole level as one leg (backward)', null);
+						say({ ev: 'bwlevel', end: 'finish', runTicks: x && x.ev ? x.ev.runTicks : null, better: !!(x && x.better), ms: Date.now() - t1 });
+					} else if (ev.ev === 'done') done = ev.end;
+				}
+			});
+			let finished = false;
+			const fin = () => { if (finished) return; finished = true; clearTimeout(kill); clearInterval(poll); process.removeListener('exit', onExit); bwlChild = null; if (!found) say({ ev: 'bwlevel', end: done || 'ended', ms: Date.now() - t1 }); resolve(); };
+			ch.on('error', fin);
+			ch.on('close', fin);
+		});
 	};
 
 	// ---- control: stdin lines
@@ -1278,6 +1321,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	}
 	lastProgress = progressAt = Date.now();   // (the stall clocks from the loop's start)
 	progress();
+	wholeLevel();
 	try {
 		while (true) {
 			if (stopped) { end = 'stopped'; break; }
@@ -1326,6 +1370,11 @@ async function compile(L, opts = {}, emit = () => {}) {
 			const tick = new Promise((res) => { const tt = setTimeout(res, 250); if (tt.unref) tt.unref(); });
 			await Promise.race([...[...inflight.values()].map((f) => f.promise), tick]);
 		}
+		// (the whole level as one leg still running and no route: it has the time left)
+		if (bwlChild && !best && !stopped && left() > 1000) {
+			const wms = Math.max(0, left() - 500);
+			await Promise.race([bwlDone, new Promise((res) => { const tt = setTimeout(res, wms); if (tt.unref) tt.unref(); })]);
+		}
 		// (in-flight steps: told to stop, awaited briefly)
 		const wasStopped = stopped;
 		stopped = true;
@@ -1334,6 +1383,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		stopped = wasStopped;
 	} finally {
 		for (const tt of timers) clearInterval(tt);
+		if (bwlChild) { try { bwlChild.kill('SIGKILL'); } catch (e) { /* gone */ } }
 	}
 	if (osw) osHarvest();   // (the one shot's thread: what arrived during the last turn)
 	const legTools = (lg) => { const c = {}; for (const g of lg) c[g.tool || '?'] = (c[g.tool || '?'] || 0) + 1; return c; };
