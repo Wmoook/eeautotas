@@ -45,6 +45,8 @@ const VERIFY_MARGIN_MS = 60;    // the worker's clock ends this much before the 
 const WATCHDOG_MS = 150;        // past the deadline + this, an unanswered worker call is answered 'budget'
 const REPLAY_CACHE = 64;
 const K_DEFAULT = 4;
+// the best-first search's cells after one that ran out of open states: finer vy, then everything 2x, then 4x
+const LADDER = [[0.5, 0.25, 8, 2], [1, 0.5, 16, 8], [2, 1, 32, 16]];
 const LEG_MODE = () => { const m = String(process.env.EEAT_EXEC_LEG || 'best'); return m === 'beam' || m === 'mix' ? m : 'best'; };
 const BASE_FEATS = ['key0', 'key1', 'key2', 'key3', 'key4', 'key5', 'team', 'coins', 'bcoins', 'crown', 'silver', 'deaths', 'cp', 'fx', 'prot'];
 
@@ -223,12 +225,28 @@ function makeCore(L, co) {
 			const depthMax = beforeTick >= 0 ? beforeTick - t0 : 4000;
 			const runBeam = (end, dmax) => LG.legBFS(L, snaps, goal, { sim, deadline: end, stop: stopFn, allowDeath, beforeTick, field: field0, region, bounds: co.bounds || null,
 				width0: 300, widthMax: 80000, depthMax: dmax, stall: 150 + 100 * rung });
-			const runBest = (end) => LG.legBest(L, snaps, goal, { sim, deadline: end, stop: stopFn, allowDeath, beforeTick, field: field0, region, bounds: co.bounds || null, depthMax, w: +process.env.EEAT_BEST_W || 0, cell: process.env.EEAT_BEST_CELL ? process.env.EEAT_BEST_CELL.split(",").map(Number) : null });
+			const cell0 = process.env.EEAT_BEST_CELL ? process.env.EEAT_BEST_CELL.split(',').map(Number) : null;
+			const runBest = (end, cell) => LG.legBest(L, snaps, goal, { sim, deadline: end, stop: stopFn, allowDeath, beforeTick, field: field0, region, bounds: co.bounds || null, depthMax, w: +process.env.EEAT_BEST_W || 0, cell: cell || cell0 });
 			const mode = LEG_MODE();
 			const t3 = Date.now();
-			let r = mode === 'beam' ? runBeam(wEnd - 3, depthMax) : runBest(mode === 'best' ? wEnd - 3 : t3 + 0.7 * (wEnd - t3));
+			// (EEAT_BEST_PORT=<f>: the first cells get that share of the window, then the next grain of the ladder the rest (a
+			// measurement knob: a portfolio of grains instead of one)
+			const port = +process.env.EEAT_BEST_PORT || 0;
+			let r = mode === 'beam' ? runBeam(wEnd - 3, depthMax) : runBest(mode === 'best' ? (port > 0 && port < 1 ? t3 + port * (wEnd - t3) : wEnd - 3) : t3 + 0.7 * (wEnd - t3));
 			sims += r.sims;
 			tiers.push({ tier: mode === 'beam' ? 'leg' : 'best', ms: Date.now() - t3, status: r.status, passes: r.passes });
+			// (the refinement ladder: a best-first search that ran out of open states (its cells closed every way: the first
+			// arrival's rule on coarse cells) goes again on finer cells while time is left; EEAT_BEST_LADDER=0 off)
+			if (mode === 'best' && process.env.EEAT_BEST_LADDER !== '0') {
+				for (const cell of LADDER) {
+					if (!(r.status === 'exhausted' || (port > 0 && r.status === 'time')) || Date.now() >= wEnd - 20) break;
+					if (r.closest && r.closest.tail) noteClosest(r.closest.dist, r.closest.start, r.closest.tail);
+					const t7 = Date.now();
+					r = runBest(wEnd - 3, cell);
+					sims += r.sims;
+					tiers.push({ tier: 'best', ms: Date.now() - t7, status: r.status, passes: r.passes, cell });
+				}
+			}
 			if (mode === 'mix' && r.status !== 'stopped' && Date.now() < wEnd - 5) {
 				const ub = r.status === 'found' ? Math.min(...r.goals.map((c) => c.depth)) : depthMax + 1;
 				if (ub > 1) {
@@ -345,6 +363,23 @@ function makeCore(L, co) {
 			for (let dy = -1; dy <= 1 && !reg[t]; dy++) for (let dx = -1; dx <= 1; dx++) {
 				const xx = x + dx, yy = y + dy;
 				if (xx >= 0 && yy >= 0 && xx < W && yy < H && walk[yy * W + xx] !== RF.CUT) { reg[t] = 1; break; }
+			}
+		}
+		// (and anywhere in the level the tiles the walk puts no more than M tiles farther from the goal than the farthest
+		// start: a portal's exits outside the box (Santa's Workshop: the start's portal to x 38, the goal at x 299; every
+		// child cut, the search 'exhausted' after one pop))
+		if (walk !== null) {
+			let w0 = -1;
+			for (const s of starts) { sim.restore(s.snap); const v = walk[T.tileOf(sim, W, H)]; if (v !== RF.CUT && v > w0) w0 = v; }
+			if (w0 >= 0) {
+				const lim = w0 + 5 * M;
+				const add2 = [];
+				for (let t = 0; t < N; t++) if (!reg[t] && walk[t] !== RF.CUT && walk[t] <= lim) add2.push(t);
+				for (const t of add2) {
+					reg[t] = 1;
+					const x = t % W, y = (t / W) | 0;
+					for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const xx = x + dx, yy = y + dy; if (xx >= 0 && yy >= 0 && xx < W && yy < H) reg[yy * W + xx] = 1; }
+				}
 			}
 		}
 		// (the starts' own tiles always)
