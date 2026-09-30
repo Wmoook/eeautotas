@@ -486,6 +486,12 @@ function createPlanner(model, facts, o = {}) {
 		return out;
 	}
 	const DIE_EDGE = process.env.EEAT_PLAN_DIE !== '0';
+	// (a death toward a door's count holds back at ANY respawn (a checkpoint touched on the way is where the engine puts
+	// the ball): the count opens the door wherever the ball comes back, and the strategy re-anchors on the real state.
+	// The Ten Commandments: its start room's only way out is a portal onto the checkpoint (2,21), so a death "back at the
+	// spawn" never held (every leg 'budget', closest 0 at a killer, rungs 2-3 spent). A viaDeath step (a death as a
+	// teleport to its respawn) keeps its respawn. EEAT_PLAN_DIE_ANY=0: the state's own respawn)
+	const DIE_ANY = process.env.EEAT_PLAN_DIE_ANY !== '0';
 	// (a death is a move only toward a death door / gate threshold at most DIE_GAP deaths on: First Person Maze's 999-death
 	// door made "die" its first plan step (est 138), a way no route takes; each death costs 54 dead ticks at least)
 	const DIE_GAP = +process.env.EEAT_PLAN_DIE_GAP || 3;
@@ -699,7 +705,7 @@ function createPlanner(model, facts, o = {}) {
 				// (a death as a move: the respawn with one death more; a death shortcut after it counts from there)
 				deathsNow = e.expect.value;
 				push({ edge: e.edge, nodeClass: cls, rung: facts ? facts.rungOf(e.edge, cls) : 0, estTicks: Math.round(e.est), lb: e.lb,
-					waypoint: dieField({ kind: 'region', tiles: e.live.slice(), expect: e.expect, allowDeath: true, label: X.label }) });
+					waypoint: dieField({ kind: 'region', tiles: DIE_ANY && model.respawn && model.respawn.length ? model.respawn.slice() : e.live.slice(), expect: e.expect, allowDeath: true, label: X.label }) });
 				continue;
 			}
 			const wp = X ? { kind: 'trigger', tiles: e.live.slice(), trig: X.id, expect: e.expect, label: X.label } : { kind: 'trophy', label: 'trophy' };
