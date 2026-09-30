@@ -176,7 +176,12 @@ async function main() {
 // (the end: stdout drained first, then out, whatever worker threads a part left)
 const exitWith = (code) => { process.exitCode = code; try { process.stdout.write('', () => process.exit(code)); } catch (e) { process.exit(code); } };
 if (require.main === module) {
-	main().then((code) => exitWith(code), (e) => {
+	// (a ref'd keep-alive until main settles: the executor's workers and most timers are unref'd, so a part awaiting only
+	// them left the event loop empty and the process ended with code 0 and no output (a verified route never written: Fish
+	// Gods, box 3, lane 4 b4); the hard watchdog still ends a real hang)
+	const keep = setInterval(() => {}, 1 << 30);
+	main().then((code) => { clearInterval(keep); exitWith(code); }, (e) => {
+		clearInterval(keep);
 		const msg = String(e && e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : e);
 		try { if (process.argv.includes('--json')) process.stdout.write(JSON.stringify({ error: msg }) + '\n'); else process.stdout.write(`error    ${msg}\n`); } catch (e2) { /* closed */ }
 		exitWith(1);

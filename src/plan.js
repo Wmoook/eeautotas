@@ -67,7 +67,10 @@ async function main() {
 }
 // (the end: stdout drained first, then out, whatever worker threads a part left)
 const exitWith = (code) => { process.exitCode = code; try { process.stdout.write('', () => process.exit(code)); } catch (e) { process.exit(code); } };
-main().then(() => exitWith(0), (e) => {
+// (a ref'd keep-alive until main settles: see src/compile.js)
+const keepAlive = setInterval(() => {}, 1 << 30);
+main().then(() => { clearInterval(keepAlive); exitWith(0); }, (e) => {
+	clearInterval(keepAlive);
 	try { process.stdout.write(JSON.stringify({ error: String(e && e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : e) }) + '\n'); } catch (e2) { /* closed */ }
 	exitWith(1);
 });

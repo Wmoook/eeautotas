@@ -64,6 +64,7 @@ const WATCHDOG_MS = 150;        // past the deadline + this, an unanswered worke
 // EEAT_WORKER_KEEP=0: the old rule, a late worker terminated and replaced at once)
 const WORKER_HANG_MS = +process.env.EEAT_WORKER_HANG_MS || 30000;
 const WORKER_KEEP = process.env.EEAT_WORKER_KEEP !== '0';
+const QUEUE_TIMER = process.env.EEAT_QUEUE_TIMER !== '0';
 // the primitives tier's share of a reach window (rung 0 / rung 1 on; env: measurements)
 const PRIMS_SHARE = process.env.EEAT_PRIMS_SHARE !== undefined ? +process.env.EEAT_PRIMS_SHARE : 0.5;
 const PRIMS_SHARE_HI = process.env.EEAT_PRIMS_SHARE_HI !== undefined ? +process.env.EEAT_PRIMS_SHARE_HI : 0.2;
@@ -1450,7 +1451,21 @@ async function createExecutor(L, opts) {
 		}
 	}
 	function dispatch(msg, deadline, stopFlag) {
-		return new Promise((resolve) => { queue.push({ msg, deadline, stopFlag, resolve }); pump(); });
+		// (a queued job is answered at its deadline at the latest ('queue'), by a ref'd timer: with every slot held by a late
+		// worker (WORKER_KEEP) the job waited for an answer from an unref'd worker, nothing kept the event loop alive, and the
+		// process ended with code 0 in the polish, its verified route never written (Fish Gods, box 3, lane 4 b4: the moves
+		// stage's in-flight steps late, the polish's mutscan jobs queued behind them); EEAT_QUEUE_TIMER=0: the rule before)
+		return new Promise((resolve) => {
+			const q = { msg, deadline, stopFlag, resolve };
+			if (QUEUE_TIMER) {
+				const tq = setTimeout(() => {
+					const k = queue.indexOf(q);
+					if (k >= 0) { queue.splice(k, 1); resolve({ id: 0, error: 'queue', queued: true }); }
+				}, Math.max(10, deadline - Date.now()) + WATCHDOG_MS);
+				q.resolve = (m) => { clearTimeout(tq); resolve(m); };
+			}
+			queue.push(q); pump();
+		});
 	}
 
 	// ---- THE SKELETON (lane 3, COMPILE-ALL block 1): a far waypoint (the goal field's cost at the starts past SKEL_MIN
