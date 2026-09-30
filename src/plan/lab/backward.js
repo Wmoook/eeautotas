@@ -536,11 +536,11 @@ function createBackward(L, opts = {}) {
 		};
 		// (THE RELAY: a meet from a committed root: its snapshot and the masks from the start to it; lastBest: the expanded node
 		// with the least time to go of the last meet, with its snapshot, the relay's next root)
-		let lastBest = null;
+		let lastBest = null, lastBests = [];
 		const root0 = { snap: snap0, prefix: new Uint8Array(0), key: startKey };
 		const meet = (cap, until, res = 0, root = root0) => {
 			const keep = P.keep + res;
-			lastBest = null;
+			lastBest = null; lastBests = [];
 			const heap = makeHeap();
 			nodes = [];                              // {snap, par, masks (Uint8Array of the move), g}
 			const seenG = new Map();                   // cell key -> [g, ...] (the P.keep least)
@@ -568,6 +568,14 @@ function createBackward(L, opts = {}) {
 				ex++; stats.meetExpanded++;
 				if (nd.h < stats.minH) { stats.minH = Math.round(nd.h); stats.minHg = nd.g; }
 				if (id > 0 && (!lastBest || nd.h < lastBest.h)) lastBest = { id, h: nd.h, g: nd.g, snap: nd.snap };
+				if (id > 0 && P.relay > 0 && (lastBests.length < 4 || nd.h < lastBests[lastBests.length - 1].h)) {
+					sim.restore(nd.snap); const tl0 = tileOfS(sim);
+					const j = lastBests.findIndex((b) => b.tile === tl0);
+					if (j < 0 || nd.h < lastBests[j].h) {
+						if (j >= 0) lastBests.splice(j, 1);
+						lastBests.push({ id, h: nd.h, snap: nd.snap, tile: tl0 }); lastBests.sort((a, b) => a.h - b.h); if (lastBests.length > 4) lastBests.pop();
+					}
+				}
 				if (o.trace) { sim.restore(nd.snap); o.trace('pop', nd.g, keyOf(sim), sim); }
 				const snapE = nd.snap;
 				nd.snap = null;
@@ -635,17 +643,18 @@ function createBackward(L, opts = {}) {
 		// the start kept) and meet again from it, while each step lowers the time to go by P.relayMin: a long leg as a chain
 		// of meets (greedy: a committed root in a dead end ends it)
 		const pathOf = (id) => { const parts = []; for (let q = id; q >= 0 && nodes[q].masks; q = nodes[q].par) parts.push(nodes[q].masks); parts.reverse(); let n = 0; for (const a of parts) n += a.length; const m = new Uint8Array(n); let off = 0; for (const a of parts) { m.set(a, off); off += a.length; } return m; };
-		let root = root0, rootH = Infinity;
-		for (let k = 0; !found && k < P.relay && stats.meetCapped && lastBest && lastBest.snap && Date.now() < tEnd - 50; k++) {
-			if (!(lastBest.h < rootH - P.relayMin)) break;
-			const pm = pathOf(lastBest.id), pre = new Uint8Array(root.prefix.length + pm.length);
-			if (o.debugReplay) { sim.restore(root.snap); for (const mk of pm) { E.applyMask(inp, mk); sim.tick(inp); } const h1 = sim.stateHash(); sim.restore(lastBest.snap); (stats.relayCheck = stats.relayCheck || []).push(h1 === sim.stateHash() ? 'ok' : 'DIFF'); }
-			pre.set(root.prefix); pre.set(pm, root.prefix.length);
-			rootH = lastBest.h;
-			root = { snap: lastBest.snap, prefix: pre };
-			stats.relay = k + 1; stats.relayH = Math.round(rootH); stats.relayG = pre.length;
+		// (a best-first over committed roots: each meet's 4 best nodes of distinct tiles are candidates, the one of the least time
+		// to go next, and a meet's candidates only when they are P.relayMin nearer than its root: a root in a dead end gives none,
+		// the next best one is tried)
+		const candsOf = (prefix, below) => lastBests.filter((c) => c.h < below - P.relayMin).map((c) => { const pm = pathOf(c.id); const pre = new Uint8Array(prefix.length + pm.length); pre.set(prefix); pre.set(pm, prefix.length); return { snap: c.snap, prefix: pre, h: c.h }; });
+		const open = !found && stats.meetCapped ? candsOf(root0.prefix, Infinity) : [];
+		for (let k = 0; !found && open.length && k < P.relay && Date.now() < tEnd - 50; k++) {
+			open.sort((p, q) => p.h - q.h);
+			const root = open.shift();
+			stats.relay = k + 1; stats.relayH = Math.round(root.h); stats.relayG = root.prefix.length;
 			const share = Math.max(200, (tEnd - Date.now()) / Math.max(1, Math.min(4, P.relay - k)));
 			found = meet(P.meetNodes, Math.min(tEnd, Date.now() + share), 0, root);
+			if (!found) for (const c of candsOf(root.prefix, root.h)) open.push(c);
 		}
 		stats.meetMs = Date.now() - tM0;
 		if (o.probe) {
@@ -682,7 +691,7 @@ function createBackward(L, opts = {}) {
 				// the first move whose replay leaves the chain's own states
 				const chain = []; for (let q = found.par; q >= 0; q = nodes[q].par) chain.push(q); chain.reverse();
 				sim.restore(snap0); let tt = 0; const rep = [];
-				if (found.prefix) { for (const mk of found.prefix) { E.applyMask(inp, mk); sim.tick(inp); tt++; } rep.push(['prefix', tt, sim.stateHash() === (root.snap && root.snap.level ? (() => { const h0 = sim.stateHash(); return h0; })() : 0) ? '' : '']); }
+				if (found.prefix) { for (const mk of found.prefix) { E.applyMask(inp, mk); sim.tick(inp); tt++; } rep.push(['prefix', tt]); }
 				for (const q of chain) { const nd = nodes[q]; if (nd.masks) { for (const mk of nd.masks) { E.applyMask(inp, mk); sim.tick(inp); tt++; } } rep.push([q, tt, nd.g, nd.hsh === undefined ? 'root' : nd.hsh === sim.stateHash() ? 'same' : 'DIFF', sim.is_dead ? 'dead' : '']); }
 				stats.replay = rep;
 			}
