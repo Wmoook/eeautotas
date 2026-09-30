@@ -189,6 +189,10 @@ const ST_ON = process.env.EEAT_STRETCH === '1';
 const ST_MS = +process.env.EEAT_ST_MS || 40000, ST_RUNG = process.env.EEAT_ST_RUNG !== undefined ? +process.env.EEAT_ST_RUNG : 1;
 const ST_SHORT = process.env.EEAT_ST_SHORT !== undefined ? +process.env.EEAT_ST_SHORT : 3, ST_SHORT_F = +process.env.EEAT_ST_SHORT_F || 0.9, ST_SHORT_MAX_S = +process.env.EEAT_ST_SHORT_MAX_S || 270;
 const ST_MIN_MS = 3000, ST_TRIES = 2;
+// (a stretch the child did not finish hands back its node of the least time to go (the backward model's), replayed here:
+// the relay start of that stretch's next executor rung when it has none (the executor's own closest replaces it at its
+// next rung, as a relay does); EEAT_ST_RELAY=0: off)
+const ST_RELAY = process.env.EEAT_ST_RELAY !== '0';
 /** a relative deadline (a step's or a waypoint's beforeTickFrom): a number, or 'prev+N' (N ticks after the previous
  *  step's arrival, i.e. this anchor's arrival: a key's KEY_TICKS) -> ticks | NaN */
 function relOf(x) {
@@ -682,7 +686,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	let stChild = null, stBusy = null, stSeq = 0, stShortSent = false;
 	const stQ = [];                  // the child's messages, harvested in the loop's turns (stHarvest)
 	const stCands = new Map();       // `${anchor id}|${edge key}` -> {A, step, wp, cost, rung, n, tries, lastMs, why, solved}
-	const stStats = { requests: 0, ok: 0, anchors: 0, routes: 0, legs: 0, ms: 0, short: null };
+	const stStats = { requests: 0, ok: 0, anchors: 0, routes: 0, legs: 0, ms: 0, relays: 0, short: null };
 	const stOkWp = (step, wp) => {
 		if (!step || !wp || step.synthetic || wp.allowDeath || wp.dieField || (wp.fieldTiles && wp.fieldTiles.length)) return false;
 		if (!(wp.kind === 'trophy' || (wp.kind === 'trigger' && (Array.isArray(wp.tiles) || ArrayBuffer.isView(wp.tiles)) && wp.tiles.length > 0))) return false;
@@ -731,7 +735,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const id = ++stSeq;
 		stBusy = { id, A, a, legs, k: 0, ms, cand, t: Date.now() };
 		stStats.requests++;
-		const req = { id, from: T.strOf(a.masks instanceof Uint8Array ? a.masks : T.masksOf(a.masks)), legs: legs.map((g) => ({ wp: stWpOf(g.wp), w: Math.max(1, +g.step.estTicks || 1) })), ms: Math.round(ms) };
+		const req = { id, from: T.strOf(a.masks instanceof Uint8Array ? a.masks : T.masksOf(a.masks)), legs: legs.map((g) => ({ wp: stWpOf(g.wp), w: Math.max(1, +g.step.estTicks || 1) })), ms: Math.round(ms), closest: ST_RELAY };
 		try { stChild.stdin.write(JSON.stringify(req) + '\n'); } catch (e) { stBusy = null; return false; }
 		say({ ev: 'stretch', what: 'request', id, anchor: A.id, legs: legs.map((g) => labelOf(g.step)), ms: Math.round(ms), from: a.tick });
 		return true;
@@ -768,6 +772,20 @@ async function compile(L, opts = {}, emit = () => {}) {
 				if (m.ok) stStats.ok++;
 				if (q.cand) { q.cand.tries++; q.cand.lastMs = q.ms; q.cand.why = m.why || ''; }
 				if (q.short) stStats.short = { legs: q.legs.length, solved: m.k | 0, why: m.why || '', ms: m.ms };
+				// (the partial progress of the leg it stopped on: a relay start of that stretch when it has none)
+				if (ST_RELAY && m.closest && typeof m.closest.inputs === 'string' && q.legs[m.closest.k] && RELAY && !Number.isFinite(runBound())) {
+					const g = q.legs[m.closest.k], rk = `${q.A.id}|${edgeKey(g.step)}`;
+					const mk = T.masksOf(m.closest.inputs);
+					if (!relays.has(rk) && mk.length > q.a.tick && mk.length < tickBound) {
+						const r = replay(mk, null, false, q.a.tick);
+						const h = r.sim.stateHash();
+						if (r.dead < 0 && !r.sim.is_dead && r.finished < 0 && !q.A.arrivals.some((x) => x.hash === h)) {
+							const leg = addLeg({ label: `relay ${labelOf(g.step)} (stretch)`, fromTick: q.a.tick, ticks: mk.length - q.a.tick, lb: null, proven: false, tool: 'relay', prev: q.a.leg || null });
+							relays.set(rk, { arrival: Object.assign(T.arrivalOf(L, r.sim, mk, RM), { run: r.run, leg, relay: true }), dist: Infinity, wallsN: 0 });
+							stStats.relays++;
+						}
+					}
+				}
 				say({ ev: 'stretch', what: 'done', id: q.id, ok: !!m.ok, k: m.k | 0, why: m.why || '', ms: m.ms });
 				stBusy = null;
 			}

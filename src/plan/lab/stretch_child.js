@@ -54,7 +54,7 @@ function run(req) {
 	const t0 = Date.now(), ms = +req.ms || 30000;
 	let masks = T.masksOf(String(req.from || '').replace(/[^0-O]/g, ''));
 	const legs = Array.isArray(req.legs) ? req.legs : [];
-	let k = 0, why = '';
+	let k = 0, why = '', lastClosest = null;
 	for (; k < legs.length; k++) {
 		const rest = ms - (Date.now() - t0);
 		if (rest < 500) { why = 'budget'; break; }
@@ -70,20 +70,26 @@ function run(req) {
 		// (the whole-level child's two clocks: 0.4 of the share, then what is left of it (a longer clock is not a superset of a
 		// shorter one: the solve's shares are fractions of its clock))
 		const tL = Date.now();
-		let r = null;
+		let r = null, closest = null;
 		for (const f of [0.4, 1]) {
 			const left = share - (Date.now() - tL);
 			if (left < 300 || (r && (r.ok || /walk|bug|target/.test(r.why || '')))) break;
-			try { r = B.solve(snap, tgt, { ms: f < 1 ? Math.round(share * f) : left }); } catch (e) { r = { ok: false, why: 'error: ' + String(e && e.message || e).slice(0, 120) }; }
+			try { r = B.solve(snap, tgt, { ms: f < 1 ? Math.round(share * f) : left, closest: !!req.closest }); } catch (e) { r = { ok: false, why: 'error: ' + String(e && e.message || e).slice(0, 120) }; }
+			if (r && r.closest && r.closest.masks && r.closest.masks.length && (!closest || r.closest.h < closest.h)) closest = r.closest;
 		}
-		if (!r || !r.ok) { why = (r && r.why) || 'none'; break; }
+		if (!r || !r.ok) {
+			why = (r && r.why) || 'none';
+			// (the solve's partial progress: its node of the least time to go, from the level start; the compiler replays it)
+			if (closest) lastClosest = { k, inputs: T.strOf(T.concat(masks, closest.masks)), h: closest.h };
+			break;
+		}
 		const m = finishOf(masks, r.masks, goal);
 		if (!m) { why = 'the goal test never holds on the leg\'s replay'; break; }
 		masks = m;
 		out({ ev: 'arrival', id: req.id, k, inputs: T.strOf(masks), ms: Date.now() - t0 });
 		if (wp.kind === 'trophy') { k++; break; }
 	}
-	out({ ev: 'done', id: req.id, ok: k >= legs.length && legs.length > 0, k, why, ms: Date.now() - t0 });
+	out(Object.assign({ ev: 'done', id: req.id, ok: k >= legs.length && legs.length > 0, k, why, ms: Date.now() - t0 }, lastClosest ? { closest: lastClosest } : {}));
 }
 
 out({ ev: 'ready' });
