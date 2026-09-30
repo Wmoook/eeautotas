@@ -51,6 +51,20 @@ const REPLAY_CACHE = 64;
 const K_DEFAULT = 4;
 // the best-first search's cells after one that ran out of open states: finer vy, then everything 2x, then 4x
 const LADDER = [[0.5, 0.25, 8, 2], [1, 0.5, 16, 8], [2, 1, 32, 16]];
+// the chain (tier C): legs from more than CHAIN_MIN tiles by the goal field go as sub-legs of CHAIN_STEP tiles (at least
+// CHAIN_STEP_MIN), the last one within CHAIN_LAST; each stage gets CHAIN_STAGE_F of the time left (CHAIN_STAGE_MIN_MS ..
+// CHAIN_STAGE_MAX_MS), CHAIN_KEEP of the window is kept for the other tiers; only windows of CHAIN_MIN_WINDOW_MS or more
+// (rung 3: the rungs below run the tiers as before; at 15 s the chain lost Booty Return's first leg, which legBest finds in
+// 15 s from the leg's start); EEAT_CHAIN=0 off
+const CHAIN_ON = () => process.env.EEAT_CHAIN !== '0';
+const CHAIN_MIN = +process.env.EEAT_CHAIN_MIN || 24, CHAIN_LAST = +process.env.EEAT_CHAIN_LAST || 12;
+const CHAIN_STEP = +process.env.EEAT_CHAIN_STEP || 14, CHAIN_STEP_MIN = 3;
+const CHAIN_STAGE_F = 0.2, CHAIN_STAGE_MIN_MS = 1200, CHAIN_STAGE_MAX_MS = +process.env.EEAT_CHAIN_STAGE_MS || 6000;
+// a chain stage (budget.quick): the primitives' share of its window, and no tightening / leg polish / exact-ub (the route's
+// polish comes at the end of the compile)
+const CHAIN_PRIMS_F = +process.env.EEAT_CHAIN_PRIMS_F || 0.3;
+const CHAIN_KEEP = +process.env.EEAT_CHAIN_KEEP || 0.15, CHAIN_MAX_STAGES = 400, CHAIN_STALL = +process.env.EEAT_CHAIN_STALL || 8;
+const CHAIN_TAIL = +process.env.EEAT_CHAIN_TAIL || 0.4, CHAIN_MIN_WINDOW_MS = +process.env.EEAT_CHAIN_WINDOW_MS || 30000;
 const LEG_MODE = () => { const m = String(process.env.EEAT_EXEC_LEG || 'best'); return m === 'beam' || m === 'mix' ? m : 'best'; };
 const BASE_FEATS = ['key0', 'key1', 'key2', 'key3', 'key4', 'key5', 'team', 'coins', 'bcoins', 'crown', 'silver', 'deaths', 'cp', 'fx', 'prot'];
 
@@ -149,7 +163,8 @@ function makeCore(L, co) {
 			sim.restore(s.snap);
 			let f = fields.get(s.disc);
 			if (f === undefined) {
-				f = fieldFits(wEnd - Date.now()) ? fieldNow(goal, allowDeath) : null;
+				// (a chain stage: its leg's field, whose level sets its band waypoint is cut from)
+				f = budget.field ? budget.field : fieldFits(wEnd - Date.now()) ? fieldNow(goal, allowDeath) : null;
 				fields.set(s.disc, f);
 			}
 			if (f === null) { proofAll = false; startCost.push(-2); continue; }
@@ -171,11 +186,21 @@ function makeCore(L, co) {
 			if (!(dist >= 0) || tail === null || sIdx < 0) return;
 			if (closest.dist < 0 || dist < closest.dist) closest = { dist, masks: T.concat(starts[sIdx].masks, tail) };
 		};
+		// -------- tier C: the chain (a long leg compiled as short sub-legs down the goal field's level sets)
+		if (!budget.noChain && !allowDeath && beforeTick < 0 && field0 && CHAIN_ON() && wEnd - Date.now() >= CHAIN_MIN_WINDOW_MS) {
+			const rc = await chainLeg(starts, live, wp, goal, field0, { rung, k, deadline, wEnd, stop, tIn });
+			if (rc && rc.ok) { tiers.push({ tier: 'chain', ms: Date.now() - tIn, stages: rc.stages }); return out(rc); }
+			if (rc) {
+				tiers.push({ tier: 'chain', ms: Date.now() - tIn, stages: rc.stages, why: rc.why });
+				if (rc.closest && rc.closest.masks) closest = rc.closest;
+			}
+			if (stopFn()) return out(failResult('stopped', closest, 'stopped', rung, starts, goal, { deadline }));
+		}
 		// -------- tier 1: the primitives
 		if (co.prims && typeof co.prims.route === 'function' && Date.now() < wEnd) {
 			const t1 = Date.now();
 			try {
-				const pEnd = t1 + 0.5 * (wEnd - t1);
+				const pEnd = t1 + (budget.quick ? CHAIN_PRIMS_F : 0.5) * (wEnd - t1);
 				const arr = live.map((s) => { sim.restore(s.snap); return T.arrivalOf(L, sim, s.masks, null); });
 				// (beforeTick: this file's -1 is 'none'; the primitives' is undefined: -1 there pruned every child, so the
 				// primitives tier never found a leg in a compile)
@@ -269,7 +294,7 @@ function makeCore(L, co) {
 			// shorter than it, half of what is left: T-EXEC-LEGS, box 3, 3 s: 77.0% vs 76.6%, the legs found 1.020 vs 1.046 of
 			// the route's (median), shorter in 91 of the 202 both found, longer in none; EEAT_TIGHTEN=0 off; its weight 3
 			// (EEAT_TIGHT_W): 77.4% either way, the legs 1.000 vs 1.007 (median), 1.303 vs 1.438 (p90), shorter in 66 of 204)
-			if (found && process.env.EEAT_TIGHTEN !== '0' && Date.now() < wEnd - 50) {
+			if (found && !budget.quick && process.env.EEAT_TIGHTEN !== '0' && Date.now() < wEnd - 50) {
 				const tm = String(process.env.EEAT_TIGHTEN_MODE || 'best');
 				// (EEAT_TIGHTEN_MODE: 'best' (the default), 'beam' (legBFS bounded by the leg: layered by tick, it keeps the
 				// fastest state per cell), 'both' (the beam, then best-first on what is left of the share))
@@ -298,7 +323,7 @@ function makeCore(L, co) {
 		}
 		// -------- the leg found made shorter: polish.js polishLeg (exact windows from its end back: the waypoint sooner, the
 		// leg's own state region sooner, exact rejoins; every change replayed from the start)
-		if (found && found.tool === 'leg' && Date.now() < wEnd - 20 && process.env.EEAT_LEG_POLISH !== '0') {
+		if (found && !budget.quick && found.tool === 'leg' && Date.now() < wEnd - 20 && process.env.EEAT_LEG_POLISH !== '0') {
 			const t6 = Date.now();
 			const c0 = found.cands.reduce((m, c) => (c.depth < m.depth ? c : m), found.cands[0]);
 			const PO = require('./polish.js');
@@ -307,7 +332,7 @@ function makeCore(L, co) {
 			if (pl.saved > 0) found.cands.unshift({ start: c0.start, tail: pl.tail, depth: c0.depth - pl.saved });
 		}
 		// -------- tier 2b: the exact search bounded by the leg found (a shorter leg, or a proof that it is optimal)
-		if (found && found.tool === 'leg' && Date.now() < wEnd - 5) {
+		if (found && !budget.quick && found.tool === 'leg' && Date.now() < wEnd - 5) {
 			const t4 = Date.now();
 			const ub = Math.min(...found.cands.map((c) => c.depth));
 			const r = X.exactLeg(L, snaps, goal, Object.assign({}, baseX, { maxDepth: ub - 1, deadline: wEnd - 2 }));
@@ -376,6 +401,132 @@ function makeCore(L, co) {
 			return { ok: true, arrivals: good.map((a) => ({ masks: T.strOf(a.masks), start: a._c.start, ticks: a._c.tail.length })), tool, legs, lb, fail: null,
 				arrivalsRaw: good.map((a) => ({ start: a._c.start, tail: a._c.tail, arrival: a })) };
 		}
+	}
+
+	/**
+	 * THE CHAIN (tier C): a leg whose starts are more than CHAIN_MIN tiles from the goal by its field is compiled as short
+	 * sub-legs: stage i's waypoint is the band of tiles the field puts at least `step` tiles nearer than the stage's best
+	 * start (the tile's cost at rest, the goal's own tiles included), reached by the ordinary tiers (a recursive reach with
+	 * noChain, a share of the time); its verified arrivals (pickDiverse, up to k) are the next stage's starts; within
+	 * CHAIN_LAST tiles the last stage is the leg's own waypoint. A stage that fails is tried again with half the step,
+	 * then from the stage before (backtrack) with the step halved; no stage can be made: the leg's other tiers run with
+	 * the time left. Every arrival is the engine's own (the recursive reach replays and verifies it) and the final ones are
+	 * mapped to the leg's starts by their masks' prefix (the executor's finalize replays them again from the level start).
+	 */
+	async function chainLeg(starts, live, wp, goal, field, o) {
+		const tStart = Date.now();
+		const cost = (str) => { const e = startOf(str); sim.restore(e.snap); const c = RF.costAt(field, sim); return e.dead ? -1 : c; };
+		const liveStrs = live.map((s) => s.str);
+		let c0 = Infinity;
+		for (const s of liveStrs) { const c = cost(s); if (c >= 0 && c < c0) c0 = c; }
+		if (!(c0 > CHAIN_MIN)) return null;
+		// (the tiles' costs at rest: the band waypoints' tiles)
+		const tc = tileCosts(field);
+		const chainEnd = o.wEnd - Math.max(200, CHAIN_KEEP * (o.wEnd - tStart));
+		// (the stages' own end: the tail gets CHAIN_TAIL of the window; the last stage may run to chainEnd)
+		const stagesEnd = Math.min(chainEnd, tStart + (1 - CHAIN_TAIL) * (o.wEnd - tStart));
+		const stages = [];
+		// the stack of stages: {strs, c (best cost), step}
+		const stack = [{ strs: liveStrs, c: c0, step: Math.max(CHAIN_STEP_MIN, Math.min(CHAIN_STEP, c0 / 4)) }];
+		let best = { dist: -1, masks: null };
+		const note = (arrs) => {
+			for (const a of arrs) { const c = cost(a.masks); if (c >= 0 && (best.dist < 0 || c < best.dist)) best = { dist: c, masks: T.masksOf(a.masks) }; }
+		};
+		let guard = 0, bestC = c0, since = 0, frontier = null;
+		// (the leg's arrivals from a stage's: each mapped to the leg's start its masks extend)
+		const mapped = (arrs) => {
+			const arrivals = [];
+			for (const a of arrs) {
+				const si = starts.findIndex((s) => a.masks.length >= s.str.length && a.masks.startsWith(s.str));
+				if (si >= 0) arrivals.push({ masks: a.masks, start: si, ticks: a.masks.length - starts[si].tick });
+			}
+			if (!arrivals.length) return null;
+			const legs = arrivals.map((a) => ({ start: a.start, ticks: a.ticks, lb: 0, proven: false, tool: 'chain' }));
+			return { ok: true, arrivals, tool: 'chain', legs, lb: 0, fail: null, stages };
+		};
+		while (stack.length && Date.now() < stagesEnd && guard++ < CHAIN_MAX_STAGES) {
+			// (no stage nearer than the best one for CHAIN_STALL stages: a plateau of the field; the other tiers get the time)
+			if (since >= CHAIN_STALL) break;
+			if (o.stop && o.stop()) return { ok: false, stages, why: 'stopped', closest: best };
+			const top = stack[stack.length - 1];
+			const left = (top.c <= CHAIN_LAST ? chainEnd : stagesEnd) - Date.now();
+			const last = top.c <= CHAIN_LAST;
+			let sub, tiles = null;
+			if (last) sub = wp;
+			else {
+				const lim = top.c - top.step;
+				// (the band: the tiles at most lim by the field, and the goal's own tiles: a stage ends at the first touch of
+				// one (a coin of the waypoint's component taken on the way would overshoot its count), where the arrivals that
+				// pass the leg's own goal test are the leg's and those on a goal tile that do not are dropped)
+				tiles = [];
+				for (let t = 0; t < tc.length; t++) if (tc[t] >= 0 && tc[t] <= lim) tiles.push(t);
+				for (const t of goal.tiles) tiles.push(t);
+				sub = { kind: 'region', tiles, expect: null, label: `chain ${stages.length}: ${Math.round(lim)} tiles` };
+			}
+			const ms = last ? left : Math.max(CHAIN_STAGE_MIN_MS, Math.min(CHAIN_STAGE_MAX_MS, CHAIN_STAGE_F * left));
+			const t1 = Date.now();
+			const r = await reach(top.strs, sub, { ms: Math.min(ms, left), level: o.rung, k: o.k, deadline: Math.min(o.deadline, Date.now() + Math.min(ms, left)), stop: o.stop, noChain: true, quick: !last, field: last ? null : field });
+			const rec = { c: Math.round(top.c * 10) / 10, step: last ? 0 : Math.round(top.step * 10) / 10, ms: Date.now() - t1, ok: !!r.ok, tool: r.tool, why: r.fail ? r.fail.why : null,
+				tiers: (r.tiers || []).map((x) => `${x.tier}:${x.ms}${x.status ? ':' + x.status : x.ok !== undefined ? ':' + x.ok : ''}`).join(' ') };
+			stages.push(rec);
+			since++;
+			if (r.ok && r.arrivals.length) {
+				note(r.arrivals);
+				if (last) { const m = mapped(r.arrivals); if (m) return m; return { ok: false, stages, why: 'no arrival maps to a start', closest: best }; }
+				let cMin = Infinity;
+				const strs = [], fin = [];
+				for (const a of r.arrivals) {
+					const e = startOf(a.masks);
+					sim.restore(e.snap);
+					if (!e.dead && X.goalAt(goal, sim, e.tick, -1)) { fin.push(a); continue; }
+					if (goal.mask && goal.mask[T.tileOf(sim, W, H)]) continue;
+					const c = cost(a.masks);
+					if (c >= 0) { strs.push(a.masks); if (c < cMin) cMin = c; }
+				}
+				if (fin.length) { const m = mapped(fin); if (m) return m; }
+				if (!strs.length || !(cMin < top.c)) { top.step /= 2; if (top.step < CHAIN_STEP_MIN / 2) stack.pop(); continue; }
+				if (cMin < bestC - 0.5) { bestC = cMin; since = 0; frontier = { strs, c: cMin }; }
+				stack.push({ strs, c: cMin, step: Math.max(CHAIN_STEP_MIN, Math.min(CHAIN_STEP, cMin / 4)) });
+				continue;
+			}
+			if (r.fail && r.fail.why === 'stopped') return { ok: false, stages, why: 'stopped', closest: best };
+			if (last) { stack.pop(); if (stack.length) stack[stack.length - 1].step /= 2; continue; }
+			// (a stage that failed: half the step, then back to the stage before with its step halved)
+			top.step /= 2;
+			if (top.step < CHAIN_STEP_MIN / 2) { stack.pop(); if (stack.length) stack[stack.length - 1].step /= 2; }
+		}
+		const why = since >= CHAIN_STALL ? 'plateau' : stack.length ? 'budget' : 'exhausted';
+		// (the tail: the leg's own waypoint from the chain's frontier, the stage of the least cost, by the plain tiers with the
+		// time the stages leave: a long search from past the field's plateau (Tutorial 1's trophy leg: from the plateau's
+		// state 14 tiles in 13 s, from the leg's start 133))
+		const tailEnd = o.wEnd - 100;
+		if (frontier && tailEnd - Date.now() > CHAIN_STAGE_MIN_MS && !(o.stop && o.stop())) {
+			const t1 = Date.now();
+			const r = await reach(liveStrs.concat(frontier.strs), wp, { ms: tailEnd - t1, level: o.rung, k: o.k, deadline: Math.min(o.deadline, tailEnd), stop: o.stop, noChain: true });
+			stages.push({ c: Math.round(frontier.c * 10) / 10, step: 0, tail: true, ms: Date.now() - t1, ok: !!r.ok, tool: r.tool, why: r.fail ? r.fail.why : null });
+			if (r.ok && r.arrivals.length) { const m = mapped(r.arrivals); if (m) return m; }
+			if (r.fail && r.fail.closest && r.fail.closest.masks) {
+				const cm = typeof r.fail.closest.masks === 'string' ? r.fail.closest.masks : T.strOf(r.fail.closest.masks);
+				const c = cost(cm);
+				if (c >= 0 && (best.dist < 0 || c < best.dist)) best = { dist: c, masks: T.masksOf(cm) };
+			}
+		}
+		return { ok: false, stages, why, closest: best };
+	}
+	/** per tile the field's cost of a ball at rest with its box on the tile (tiles; -1 cut off), memoized per field */
+	const tileCostMemo = new WeakMap();
+	function tileCosts(field) {
+		let a = tileCostMemo.get(field);
+		if (a) return a;
+		a = new Float32Array(N);
+		for (let t = 0; t < N; t++) {
+			const x = t % W, y = (t / W) | 0;
+			if (field.walk && field.walk[t] === RF.CUT) { a[t] = -1; continue; }
+			const c = field.mode === 'walk' ? (field.walk ? field.walk[t] / 5 : -1) : RF.costAt(field, x * 16, y * 16, 0);
+			a[t] = c >= 0 ? c : -1;
+		}
+		tileCostMemo.set(field, a);
+		return a;
 	}
 
 	/** the region of the leg search: tiles the goal field's walk reaches (dilated by a tile) in a box around the starts
