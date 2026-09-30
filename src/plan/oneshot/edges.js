@@ -60,7 +60,7 @@ const DOTS = new Set([4, 414]);
 const DIR9 = [0, 2, 4, 8, 16, 10, 12, 18, 20];
 const TELEPORT_PX = 20;
 const DEAD_MAX = 80;                      // the dead ticks played on to the respawn (the engine: 54)
-const DEF = { rounds: 2, landT: 60, landK: 1, landMax: 400, landNodes: 60000, eventT: 60, oneT: 40, touchT: 90, touchNodes: 20000, settle: 2, arriveMax: 4, maxNew: 20000 };
+const DEF = { rounds: 1, landT: 60, landK: 1, landMax: 400, landNodes: 60000, reach: 0, reachMax: 200, reachK: 2, reachNodes: 400000, eventT: 60, oneT: 40, touchT: 90, touchNodes: 20000, settle: 2, arriveMax: 4, maxNew: 20000 };
 const VERSION = 1;
 
 // ------------------------------------------------------------------ small helpers
@@ -171,17 +171,24 @@ function staticSupports(ctx) {
 			}
 			if (!border) continue;
 		}
-		if (!place(ctx, 16 * x, 16 * y)) continue;
-		if (tileOf(sim, W, H) !== t) continue;
-		const c = clsOf(sim, flags);
-		if (!SUP_CLS.has(c)) continue;
-		const key = `${t},${c},${vcOf(sim.speed_x, sim.speed_y)}`;
-		if (seen.has(key)) continue;
-		seen.add(key);
-		out.push({ i: out.length, tile: t, cls: c, vc: vcOf(sim.speed_x, sim.speed_y), kind: 'rest', px: 16 * x, py: 16 * y });
+		// the centred placement, then the overhangs: the centre stays in the tile for px + 8 in [16 x, 16 x + 15], so a
+		// box can stand on a neighbour's floor with its centre over a gap (a spike, a ledge's edge): px = 16 x - 8 / + 7
+		// (and py for a floor beside the ball: side gravity)
+		for (const [ox, oy] of PLACE_OFFS) {
+			if (!place(ctx, 16 * x + ox, 16 * y + oy)) continue;
+			if (tileOf(sim, W, H) !== t) continue;
+			const c = clsOf(sim, flags);
+			if (!SUP_CLS.has(c)) continue;
+			const key = `${t},${c},${vcOf(sim.speed_x, sim.speed_y)}`;
+			if (seen.has(key)) break;
+			seen.add(key);
+			out.push({ i: out.length, tile: t, cls: c, vc: vcOf(sim.speed_x, sim.speed_y), kind: 'rest', px: 16 * x + ox, py: 16 * y + oy });
+			break;
+		}
 	}
 	return out;
 }
+const PLACE_OFFS = [[0, 0], [-8, 0], [7, 0], [0, -8], [0, 7]];
 
 /** the representative state of support i (memoised snapshots; an 'arrive' support replays its origin edge) */
 function supportState(ctx, i) {
@@ -319,9 +326,41 @@ function oneFamily(ctx, snap, out) {
 function landFamily(ctx, snap, out) {
 	const o = ctx.o;
 	let r = [];
-	try { r = ctx.S.landings(snap, { Tmax: o.landT, K: o.landK, max: o.landMax, nodes: o.landNodes }); } catch (e) { r = []; }
+	try { r = ctx.S.landings(snap, { Tmax: o.landT, K: o.landK, max: o.landMax, nodes: o.landNodes, overhang: true }); } catch (e) { r = []; }
 	for (const e of r) out.push({ k: 'land', masks: e.masks, T: e.masks.length, hop: e.hop ? 1 : 0 });
 }
+/**
+ * 'reach': the directed plain legs to the G support tiles no family edge of this support landed on (msolve's fan-out
+ * takes only tiles with a floor right under the centre: a ball standing on a neighbour's floor with its centre over a gap,
+ * a spike or a ledge's edge, is a support it never targets), within the plain extremes' box and msolve's certified plain
+ * bound (<= landT): the pairs a move can connect
+ */
+function reachFamily(ctx, snap, out, done) {
+	const { sim, W, S } = ctx, o = ctx.o;
+	if (!ctx.gTiles) {
+		const s = new Set();
+		for (const u of ctx.sups) if (u.cls === 'G' && u.kind !== 'arrive') s.add(u.tile);
+		ctx.gTiles = Array.from(s).sort((a, b) => a - b);
+	}
+	sim.restore(snap);
+	const cx = Math.trunc(sim.px + 8) >> 4, cy = Math.trunc(sim.py + 8) >> 4;
+	const RX = Math.ceil((o.landT * 7.3) / 16) + 1, UP = 6, DN = Math.ceil((o.landT * 13.6) / 16) + 1;
+	let n = 0;
+	for (const t of ctx.gTiles) {
+		if (done.has(t)) continue;
+		const x = t % W, y = (t / W) | 0;
+		if (Math.abs(x - cx) > RX || y < cy - UP || y > cy + DN || (x === cx && y === cy)) continue;
+		const tg = { tiles: [t], cls: 'G' };
+		let lb = 0;
+		try { lb = S.lowerBound(snap, tg); } catch (e) { lb = 0; }
+		if (lb > o.landT) continue;
+		if (++n > o.reachMax) break;
+		let r = null;
+		try { r = S.leg(snap, tg, { Tmax: o.landT, K: o.reachK, chain: false, fields: false, coupled: false, nodes: o.reachNodes }); } catch (e) { r = null; }
+		if (r && r.ok) out.push({ k: 'reach', masks: r.masks, T: r.T, hop: r.hop ? 1 : 0 });
+	}
+}
+
 /**
  * 'touch': the trigger components within the bound that no family edge of this support touched already, by the msolve
  * leg's plain tier (plain supports only: a field support's touches are its family edges' `tr`)
@@ -379,10 +418,18 @@ function edgesFrom(ctx, i) {
 		if (r.k === 'touch') { e.trig = r.trig; e.tool = r.tool; if (r.proven) e.proven = 1; }
 		out.push(e);
 	};
-	for (const r of raw) {
+	const pushHop = (r) => {
 		push(r);
 		// the landing hop (the jump on the landing tick): another end state on the same support, its own edge
 		if (r.hop) { const hm = Uint8Array.from(r.masks); hm[hm.length - 1] |= 1; push({ k: 'hop', masks: hm, T: hm.length }); }
+	};
+	for (const r of raw) pushHop(r);
+	if (plain && ctx.o.reach) {
+		const landed = new Set();
+		for (const e of out) if (e.cls === 'G') landed.add(e.tile);
+		const rr = [];
+		reachFamily(ctx, snap, rr, landed);
+		for (const r of rr) pushHop(r);
 	}
 	if (plain && ctx.o.touch !== false) {
 		const tr = [];
@@ -592,7 +639,7 @@ if (WT && !WT.isMainThread && WT.workerData && WT.workerData.oneshotEdges && WT.
 	});
 }
 
-module.exports = { buildGraph, buildLocal, ctxOf, staticSupports, supportState, edgesFrom, landFamily, eventFamily, oneFamily, touchFamily, factsOf, applyEdge, resolveEdge, rleOf, masksOf, clsOf, tileOf, loadGraph, saveGraph, cacheFile, md5OfLevel, DEF };
+module.exports = { buildGraph, buildLocal, ctxOf, staticSupports, supportState, edgesFrom, reachFamily, landFamily, eventFamily, oneFamily, touchFamily, factsOf, applyEdge, resolveEdge, rleOf, masksOf, clsOf, tileOf, loadGraph, saveGraph, cacheFile, md5OfLevel, DEF };
 
 // ------------------------------------------------------------------ CLI
 if (require.main === module && (!WT || WT.isMainThread)) {
