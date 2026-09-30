@@ -142,6 +142,21 @@ function units() {
 			const all = f1.concat(f2);
 			check('P-UNIT stepping stones: a failed stone cuts nothing, blocked at its second rung', all.every((f) => !f.cut) && f2.some((f) => f.kind === 'block') && !f1.some((f) => f.kind === 'block'), JSON.stringify(all.map((f) => [f.kind, f.rung, !!f.cut])));
 		} else check('P-UNIT stepping stones: a failed stone cuts nothing', false, 'no stone step');
+		// (THE WALLED PRICE, EEAT_WALL_PRICE=1: a 1-row tunnel to the trophy; a rung-1 failure's cut in it severs the est walk:
+		// off the trophy edge costs the 1e6 penalty, on WALL_F x the unwalled walk)
+		{
+			const tw = ['##############################################################', '#S...........................................................T#', '##############################################################'];
+			const L2 = level([tw[0], tw[1].slice(0, 62), tw[2]], {}), m2 = M.compileModel(L2);
+			const run = (wp) => {
+				const pl2 = P.createPlanner(m2, F.createFacts(), { wallPrice: wp });
+				const st = pl2.plan({}, { k: 1 })[0].steps[0];
+				const fl = { ok: false, fail: { why: 'budget', closest: { tile: 1 * 62 + 20, dist: 30 } } };
+				pl2.learn(Object.assign({}, st, { rung: 0 }), fl, {}); pl2.learn(Object.assign({}, st, { rung: 1 }), fl, {});
+				return pl2.plan({}, { k: 1 })[0];
+			};
+			const q0 = run(false), q1 = run(true);
+			check('P-UNIT walled price: off = the penalty past a severing cut, on = a finite 3x price', !!q0 && q0.cost >= 1e6 && !!q1 && q1.cost < 1e6 && q1.cost >= 3 * 50 && q1.lb === q0.lb, `${q0 && q0.cost} vs ${q1 && q1.cost}`);
+		}
 		const lbOff = off.lowerBound({}), lbOn = on.lowerBound({});
 		check('P-UNIT stepping stones: lowerBound unchanged (stones never in the lb)', lbOff.ticks === lbOn.ticks && lbOff.complete === lbOn.complete, `${lbOff.ticks} ${lbOn.ticks}`);
 	}
