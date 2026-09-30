@@ -42,6 +42,11 @@ const KEY_TICKS = 500;
 // the floor probe's time (steer.js buildSteer on a level with count gates: the plan the steer's physics layers walk, run
 // again with the gates the model leaves open as floors; env EEAT_PLAN_FLOOR=0: off)
 const FLOOR_MS = +process.env.EEAT_PLAN_FLOOR_MS || 8000;
+// (and its layers: the steer build grows its layer product a feature at a time and checks its clock only between
+// features, so a switch maze (23_4 Switcher Puzzle: 14 switches, 224 layers) took 61.6 s against the 8 s asked, in the
+// bounds stage, 51 s of a 60-s compile; the floors found so far need 6-20 layers: Aedan Garden 11, MoonBase 7, Rotcil
+// Illusions 6, Springopolis 20; at 32 layers Switcher Puzzle stops at its cap)
+const FLOOR_LAYERS = +process.env.EEAT_PLAN_FLOOR_LAYERS || 32;
 const COUNT_GATES = new Set([165, 214]);
 const COLOURS = ['red', 'green', 'blue', 'cyan', 'magenta', 'yellow'];
 
@@ -78,7 +83,7 @@ function createPlanner(model, facts, o = {}) {
 		if (has && model.feats && (model.feats.includes('coins') || model.feats.includes('bcoins'))) {
 			const tf = Date.now();
 			try {
-				const st = require('../steer.js').buildSteer(L, { maxMs: FLOOR_MS, noDP: true });
+				const st = require('../steer.js').buildSteer(L, { maxMs: FLOOR_MS, noDP: true, maxLayers: FLOOR_LAYERS });
 				const fl = (st && st.info && st.info.floors) || [];
 				const most = new Map();
 				for (const x of fl) if ((x.feat === 'coins' || x.feat === 'bcoins') && x.param > 0 && model.feats.includes(x.feat)) most.set(x.feat, Math.max(most.get(x.feat) || 0, x.param));

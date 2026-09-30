@@ -180,7 +180,16 @@ function goalOf(L, wp) {
 	// (touchedTile): the engine touches the centre cell at the tick's START and then moves, so a ball that crosses a coin /
 	// switch / checkpoint in one tick (a boost's 16 px/tick, any fast pass) has left the tile by the time the feature shows
 	// the touch, and "on the tile with the feature changed" never holds (the leg searches' "closest 0 tiles" failures)
-	const test = ex ? (sim) => { if (sim.is_dead || featValue(sim, ex.feat) !== ex.value) return false; if (mask[tileOf(sim, W, H)] === 1) return true; const tt = touchedTile(sim, W, H); return tt >= 0 && mask[tt] === 1; }
+	// the COUNTS (coins, blue coins, deaths) only grow within a leg: the Expect is the count right after the touch
+	// (model.js touch: + 1), so a way that takes another coin first (a coin of another component on the way: the est walk
+	// is coin-blind) reaches the target at + 2 and "=== + 1" never held; at least the Expect is the touch's own semantics
+	// (a coin: the tile the ball is on or touched last is one of the target's AND its coin is taken: with ">=" the count
+	// alone could be another coin's while the ball stands on the target's untaken coin)
+	const ge = ex && (ex.feat === 'coins' || ex.feat === 'bcoins' || ex.feat === 'deaths');
+	const coin = ex && (ex.feat === 'coins' || ex.feat === 'bcoins');
+	const okF = ex ? (ge ? (sim) => featValue(sim, ex.feat) >= ex.value : (sim) => featValue(sim, ex.feat) === ex.value) : null;
+	const onT = coin ? (sim, t) => t >= 0 && mask[t] === 1 && sim.is_coin_collected(t % W, (t / W) | 0) : (sim, t) => t >= 0 && mask[t] === 1;
+	const test = ex ? (sim) => !sim.is_dead && okF(sim) && (onT(sim, tileOf(sim, W, H)) || onT(sim, touchedTile(sim, W, H)))
 		: (sim) => !sim.is_dead && mask[tileOf(sim, W, H)] === 1;
 	// (fieldTiles: the tiles the ordering fields and bounds are built to, when not the goal's own (the executor's skeleton:
 	// a sub-level set of the waypoint's field, ordered by the waypoint's own fields, memoized across its sub-legs))
