@@ -241,7 +241,7 @@ function createCorridor(L, opts = {}) {
 		const domDir = o.dom === 'dir', airKey = o.airKey || 'cls';
 		// (the forward fan-out's size: o.landMax landings (0: none), horizon o.landT, o.landNodes)
 		const landMax = o.landMax !== undefined ? o.landMax : 12, landT = o.landT || 60, landNodes = o.landNodes || 10000;
-		const wideLand = Math.max(12, 2 * landMax);   // (the widened fan's landings: at least 12, also with landMax 0)
+		const wideLand = o.wideLand !== undefined ? o.wideLand : Math.max(12, 2 * landMax);   // (the widened fan's landings: at least 12, also with landMax 0; o.wideLand: that many)
 		// the event fan's timed stops (ticks): inside a field always (8, 20, 40), on plain physics o.plainStops (none by
 		// default: the held mask to its first event only); a stop is an airborne or mid-run node the next fans turn from
 		const stopsOf = (v, d) => new Set((v === undefined ? d : Array.isArray(v) ? v : String(v).split(',').filter(Boolean)).map(Number));
