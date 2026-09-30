@@ -196,8 +196,9 @@ async function truth() {
 	const TS = require('../src/plan/truthset.js');
 	const root = args.root || process.env.EEAT_TRUTH_ROOT;
 	const per = +args.per > 0 ? +args.per : 5, ms = +args.ms > 0 ? +args.ms : 1000;
-	// T-PRIM-EXACT: 1000 expansions over campaign levels + the toys
-	{
+	const [shI, shN] = (args.shard || '0/1').split('/').map(Number);
+	// T-PRIM-EXACT: 1000 expansions over campaign levels + the toys (the first shard)
+	if (shI === 0 && !args.noexact) {
 		const lv = TS.levelFiles({ root, sets: ['campaign'] });
 		let ok = 0, n = 0, bad = '';
 		const pick = [];
@@ -218,7 +219,8 @@ async function truth() {
 	const opt = { n: 0, both: 0, gaps: [], proven: 0 };
 	let nr = 0;
 	const order = routes.map((e, i) => i).sort(() => rnd() - 0.5).slice(0, lim);
-	for (const idx of order) {
+	for (const [oi, idx] of order.entries()) {
+		if (oi % shN !== shI) continue;
 		const e = routes[idx];
 		if (args.only && !String(e.name).toLowerCase().includes(String(args.only).toLowerCase())) continue;
 		let tr = null;
@@ -262,6 +264,9 @@ async function truth() {
 			const routeT = (own.goalAt > 0 ? own.goalAt : b) - a;
 			const r = pr.route([aA], goal, { ms }, {});
 			cover.n++;
+			cover.why = cover.why || {};
+			cover.why[r.why] = (cover.why[r.why] || 0) + 1;
+			if (args.verbose && !r.ok) console.log(`    miss ${e.name} ${a}->${b} (${routeT} ticks) ${expect ? expect.feat : '-'}: ${r.why}, lb ${r.lb}, closest ${r.closest ? r.closest.dist : '-'}, ${r.expanded} expanded, fx ${T.featValue(pa.sim, 'fx')}`);
 			if (r.ok) {
 				cover.found++;
 				const ft = r.best.ticks - a;
@@ -283,7 +288,7 @@ async function truth() {
 	const p90 = (a) => { if (!a.length) return NaN; const s = a.slice().sort((x, y) => x - y); return s[Math.floor(s.length * 0.9)]; };
 	const cov = cover.found / Math.max(1, cover.n);
 	console.log(`  T-PRIM-COVER: ${nr} routes, ${cover.n} legs, found ${cover.found} (${(100 * cov).toFixed(1)}%), ratio found / route median ${med(cover.ratio).toFixed(3)} p90 ${p90(cover.ratio).toFixed(3)}, at or below the route's ticks ${(100 * cover.atOrBelow / Math.max(1, cover.found)).toFixed(1)}%`);
-	console.log(`  macro usage: ${JSON.stringify(cover.macro)}`);
+	console.log(`  macro usage: ${JSON.stringify(cover.macro)}; why: ${JSON.stringify(cover.why)}`);
 	check('T-PRIM-COVER (coverage >= 80%, median ratio <= 1.05)', cov >= 0.8 && med(cover.ratio) <= 1.05, `${(100 * cov).toFixed(1)}%, median ${med(cover.ratio).toFixed(3)}`);
 	const gz = opt.gaps.filter((g) => g === 0).length;
 	console.log(`  T-PRIM-OPT: ${opt.n} short legs, both found ${opt.both}, the exact proven ${opt.proven}, gap macros - exact: median ${med(opt.gaps)}, p90 ${p90(opt.gaps)}, max ${opt.gaps.length ? Math.max(...opt.gaps) : NaN}, zero gap ${gz}/${opt.gaps.length}; below 0: ${opt.gaps.filter((g) => g < 0).length} (the exact search cut by its budget)`);

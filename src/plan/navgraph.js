@@ -138,8 +138,10 @@ function astar(ctx) {
 			const node = { snap: c.snap, tick, parent: n, edge: c.edge, f: tick + h, h, sp: Math.abs(c.vx) + Math.abs(c.vy), hash: c.hash, tile: c.tile, vx: c.vx, vy: c.vy,
 				px: c.px, py: c.py, event: c.event, macro: c.macro, goal: !!c.goal };
 			if (!closest || h < closest.h || (h === closest.h && tick < closest.tick)) closest = node;
+			if (node.goal && ctx.greedy) { goals.push(node); if (goals.length === 1) goalF = node.f; continue; }
 			heap.push(node); nodes++;
 		}
+		if (ctx.greedy && goals.length >= k) { why = 'found'; break; }
 		if (nodes > maxNodes) { why = 'budget'; break; }
 	}
 	if (goals.length && why !== 'found') why = 'found';

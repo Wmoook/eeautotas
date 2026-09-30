@@ -191,7 +191,9 @@ function truth() {
 	let rng = 12345;
 	const rnd = () => { rng = (rng * 1103515245 + 12345) & 0x7fffffff; return rng / 0x7fffffff; };
 	const t0 = Date.now();
-	for (const e of routes.slice(0, lim)) {
+	const [shI, shN] = (args.shard || '0/1').split('/').map(Number);
+	for (const [ri, e] of routes.slice(0, lim).entries()) {
+		if (ri % shN !== shI) continue;
 		if (args.only && !String(e.name).toLowerCase().includes(String(args.only).toLowerCase())) continue;
 		let tr = null;
 		try { tr = TS.loadTruth(e); } catch (err) { tr = null; }

@@ -243,11 +243,12 @@ async function createPrims(L, o = {}) {
 			const w = ws[wi];
 			const left = tEnd - Date.now();
 			if (left <= 5) { whyLast = 'budget'; break; }
-			const share = wi === ws.length - 1 ? left : Math.max(20, Math.min(left, left / (ws.length - wi) * (wi === 0 ? 0.5 : 0.8)));
+			// the first (greediest) pass runs until it finds a route (or 85% of the budget); the others share the rest
+			const share = wi === ws.length - 1 ? left : wi === 0 ? left * 0.85 : Math.max(20, left / (ws.length - wi));
 			R = NG.astar({
 				sim, starts: sts, h, isGoal: (s) => goal.test(s), budget: { ms: share, deadline: tEnd, stop: budget.stop, k: budget.k || 1 }, classDedup,
 				allowDeath: !!goal.allowDeath || !!ro.allowDeath, beforeTick: ro.beforeTick !== undefined ? ro.beforeTick : goal.beforeTick,
-				k: budget.k || 1, slack: ro.slack || 0, stepAll: fo.step && w === 1, bound: incumbent === Infinity ? undefined : incumbent,
+				k: budget.k || 1, slack: ro.slack || 0, stepAll: fo.step && w === 1, bound: incumbent === Infinity ? undefined : incumbent, greedy: w > 1,
 				expand: (n, s) => {
 					const kids = expandNode(n, s, ctx, fo);
 					for (const c of kids) {

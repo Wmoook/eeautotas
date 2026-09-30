@@ -45,7 +45,7 @@ const D_TICK = 16.25;
 const SLACK = 2;                 // px: the engine's integer pixel test (floor(px)) lets the box 1 px nearer a low side
 const DEATH_MIN = 54;            // ticks from "centre in a killing tile" to "centre in the respawn tile" (the engine: 55)
 const EPS = 1e-6;
-const MAX_ROUNDS = 12;           // the teleport fixpoint's rounds (each is a lower bound; stops early when stable)
+const MAX_ROUNDS = 5;            // the teleport fixpoint's rounds (each is a lower bound: the fixpoint is iterated from below, so stopping early stays sound)
 const MEMO_MAX = 24;
 const TROPHY = 121, CHECKPOINT = 360, PORTAL = 242, PORTAL_INV = 381;
 const CURSE = 421, ZOMBIE = 422, POISON = 1584, LAVA = 416;
