@@ -460,11 +460,11 @@ function makeCore(L, co) {
 	let MS_ = null, MLB_ = null;
 	const mathSolver = () => MS_ || (MS_ = require('./msolve.js').createSolver(L, { prove: true }));
 	const mathLB = () => MLB_ || (MLB_ = require('../math/lb.js').createMathLB(L));
+	let BW_ = null;
+	const bwSolver = () => BW_ || (BW_ = require('./lab/backward.js').createBackward(L));
 	let CR_ = null;
 	const corridor = () => CR_ || (CR_ = require('./lab/corridor.js').createCorridor(L, { solver: mathSolver() }));
 	const cY = { tries: 0, ok: 0 };   // (the corridor tier's yield on this level)
-	let BW_ = null;
-	const bwSolver = () => BW_ || (BW_ = require('./lab/backward.js').createBackward(L));
 	const mY = { dTry: 0, dOk: 0, cTry: 0, cOk: 0 };   // (the math's yield on this level: calls and calls with a leg)
 	const pY = { t: 0, ok: 0 };   // (the profile tier's yield on this level, EEAT_PROFILE=1: calls and calls with a leg)
 	const fieldMs = { n: 0, perTile: 0 };
