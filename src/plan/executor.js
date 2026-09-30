@@ -1495,6 +1495,15 @@ async function createExecutor(L, opts) {
 	// one before it taken). Ordering only (which real arrivals a call goes on from): every arrival the engine's replay,
 	// verified as before; no claim reads it. Unset / 0: the memo as before, byte for byte.
 	const SKEL_KEEP = process.env.EEAT_SKEL_KEEP === '1';
+	// ---- THE SKELETON'S WALL CUT (COMPILER DOCTOR 10, n5; EEAT_SKEL_WALLCUT=1): a failed sub-leg learns counterexample
+	// walls, and walls that cut the level where the skeleton stands off the waypoint (the walled field -1 at its arrivals)
+	// ended the descent: the loop broke and the call's whole rest went to the direct leg to the FAR waypoint from there
+	// (whose own call then dropped those walls: 'wallsCut'). Presto Penguins' compile (box 5, 90 s): the trophy's rung-3
+	// step stood at c 338 at t = 29.3 s after one failed sub-leg (4.7 s) + 10 walls, then 40 s of that far direct leg
+	// (nothing found, the walls reset at 29.7 s). With the knob those walls' batches are dropped at once (measure()'s rule
+	// for the starts, the dropped tiles tabu) and the skeleton goes on with its retry. Ordering / time use only; unset: as
+	// before, byte for byte.
+	const SKEL_WALLCUT = process.env.EEAT_SKEL_WALLCUT === '1';
 	const skelKey = (goal, wp, startStrs, wn) => `${goal.kind}|${Array.from(goal.tiles).slice(0, 64).join(',')}|${goal.tiles.length}|${wp.expect ? wp.expect.feat + '=' + wp.expect.value : ''}|${startStrs[0].length}:${startStrs[0].slice(-64)}|w${SKEL_KEEP ? 0 : wn | 0}`;
 	const skelMemo = new Map();   // key (goal, first start, walls) -> [{c, cur: [mask strings]}] (the levels reached, deepest last)
 	// (the counterexample walls per field: the waypoint's field tiles, their touch rule and deaths -> a Set of tiles; a
@@ -1702,6 +1711,14 @@ async function createExecutor(L, opts) {
 			if (!SKEL_KEEP || !lv || (lv.wN | 0) === (wN | 0)) return true;
 			let fw;
 			try { fw = fieldAt(lv.cur[0], goal, wp.allowDeath, wArr); } catch (e) { fw = { f: null }; }
+			// (SKEL_WALLCUT: walls that cut the level off are dropped first, as in the descent below)
+			if (SKEL_WALLCUT && wk && fw.f && !(fw.c >= 0)) {
+				let n = 0;
+				while (fw.f && !(fw.c >= 0) && n++ < 8 && wallDropLast(wk, wp.label)) {
+					wN = -1; wRefresh();
+					try { fw = fieldAt(lv.cur[0], goal, wp.allowDeath, wArr); } catch (e) { fw = { f: null }; }
+				}
+			}
 			if (!fw.f || !(fw.c >= 0)) return false;
 			lv.c = fw.c; lv.wN = wN;
 			return true;
@@ -1722,6 +1739,16 @@ async function createExecutor(L, opts) {
 			if (wRefresh()) {
 				let fw;
 				try { fw = fieldAt(cur[0], goal, wp.allowDeath, wArr); } catch (e) { fw = { f: null }; }
+				// (SKEL_WALLCUT: walls that cut the level where the skeleton stands off the waypoint are no counterexample of
+				// the field's way from there: their batches dropped (measure()'s rule for the starts), the skeleton goes on)
+				if (SKEL_WALLCUT && wk && fw.f && !(fw.c >= 0)) {
+					let n = 0;
+					while (fw.f && !(fw.c >= 0) && n++ < 8 && wallDropLast(wk, wp.label)) {
+						wN = -1; wRefresh();
+						try { fw = fieldAt(cur[0], goal, wp.allowDeath, wArr); } catch (e) { fw = { f: null }; }
+					}
+					S.skelWallCut = (S.skelWallCut || 0) + 1;
+				}
 				if (!fw.f || !(fw.c >= 0)) break;
 				// (the step holds: new walls after a failed sub-leg re-measure the level, and the retry is the halved step on
 				// the new field, not a fresh start: every failed sub-leg learns walls, so the fresh start never let the call
