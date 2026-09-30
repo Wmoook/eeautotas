@@ -286,6 +286,16 @@ function fgHash(fg) {
 // FIELDS_MIN fields: the planner's path checks (model.reachable), the skeleton's measures and the workers' tiers share it,
 // and 8 fields thrashed between them (EEAT_FIELDS_MB, default 256; 0: the old 8)
 const FIELDS = new Map(), FIELDS_MIN = 8, FIELDS_CAP = 64;
+// THE PLAIN-BALL FIELD (COMPILER DOCTOR 6, n5): reach.js falls back to its gravity-blind walk mode for the WHOLE level when
+// any effect tile (jump 417, fly 418, speed 419, low gravity 453, multijump 461, gravity 1517) is anywhere in it: 93 of the
+// 228 benchmark levels (4 compiled in night 4's final vs 20 of the other 135; Witch's House has ONE jump effect tile). A
+// ball with no effect on is plain physics until it touches an effect tile that changes it: goalField(Lc, tiles, {plainFx:
+// true}) (the caller's start state plain: plainOf(sim)) builds the physics field with those tiles as goals at their walk
+// cost (reach.js opts.plainFx): a lower bound still (its -1 a proof for the plain ball), the physics ordering elsewhere.
+// EEAT_FX_FIELD=1: on; unset / 0: off (the walk as before, byte for byte).
+const FX_FIELD = process.env.EEAT_FX_FIELD === '1';
+/** the state in sim has no effect on (featValue 'fx' 0) and the plain-ball field is on */
+const plainOf = (sim) => FX_FIELD && !sim.has_levitation && sim.flip_gravity === 0 && sim.max_jumps === 1 && sim.jump_boost === 0 && sim.speed_boost === 0 && !sim.low_gravity;
 const FIELDS_MB = process.env.EEAT_FIELDS_MB !== undefined ? +process.env.EEAT_FIELDS_MB : 256;
 let FIELDS_MAX = FIELDS_MIN;
 const fieldBytes = (f) => { let b = 0; for (const k in f) { const a = f[k]; if (ArrayBuffer.isView(a)) b += a.byteLength; } return b; };
@@ -297,10 +307,11 @@ const fieldBytes = (f) => { let b = 0; for (const k in f) { const a = f[k]; if (
  * o.deaths: reachField's deaths option (false: no death edges, the executor's searches drop dead balls: the default).
  */
 function goalField(Lc, tiles, o = {}) {
-	const key = `${fgHash(Lc.fg)}|${Array.from(tiles).sort((a, b) => a - b).join(',')}|${o.deaths === true ? 1 : 0}`;
+	const pfx = o.plainFx === true && FX_FIELD;
+	const key = `${fgHash(Lc.fg)}|${Array.from(tiles).sort((a, b) => a - b).join(',')}|${o.deaths === true ? 1 : 0}${pfx ? '|p' : ''}`;
 	const had = FIELDS.get(key);
 	if (had) { FIELDS.delete(key); FIELDS.set(key, had); return had; }
-	const f = RF.reachField(Lc, { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: o.deaths === true });
+	const f = RF.reachField(Lc, pfx ? { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: o.deaths === true, plainFx: true } : { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: o.deaths === true });
 	if (FIELDS.size === 0 && FIELDS_MB > 0) FIELDS_MAX = Math.max(FIELDS_MIN, Math.min(FIELDS_CAP, Math.floor(FIELDS_MB * 1048576 / Math.max(1, fieldBytes(f)))));
 	FIELDS.set(key, f);
 	while (FIELDS.size > FIELDS_MAX) FIELDS.delete(FIELDS.keys().next().value);
@@ -314,4 +325,4 @@ const emitter = (stream = process.stdout) => (ev) => { try { stream.write(JSON.s
 /** the tiles a goal's ordering fields are built to, and their touch rule (the trophy's) */
 const fieldTilesOf = (goal) => (goal.fieldTiles ? goal.fieldTiles : goal.tiles);
 const fieldTouchOf = (goal) => (goal.fieldTiles ? !!goal.fieldTouch : goal.kind === 'trophy');
-module.exports = { VERSION, fieldTilesOf, fieldTouchOf, strOf, masksOf, concat, loadLevelFile, tileOf, touchedTile, playTo, featValue, featGetter, goalOf, arrivalOf, classOf, pickDiverse, levelNow, goalField, fgHash, emitter, CLOCK_DOORS };
+module.exports = { VERSION, fieldTilesOf, fieldTouchOf, strOf, masksOf, concat, loadLevelFile, tileOf, touchedTile, playTo, featValue, featGetter, goalOf, arrivalOf, classOf, pickDiverse, levelNow, goalField, plainOf, fgHash, emitter, CLOCK_DOORS };
