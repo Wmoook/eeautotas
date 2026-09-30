@@ -297,7 +297,7 @@ function dirsOf(field) {
 /** a set of (uint32, uint32) pairs: open addressing on typed arrays (a Set of the doubles a * 2^20 + b made a heap
  *  number per key) */
 class PairSet {
-	constructor(cap) { this.cap = 1 << Math.max(10, Math.ceil(Math.log2(cap || 4096))); this.a = new Int32Array(this.cap); this.b = new Int32Array(this.cap); this.u = new Uint8Array(this.cap); this.size = 0; }
+	constructor(cap, withV) { this.cap = 1 << Math.max(10, Math.ceil(Math.log2(cap || 4096))); this.a = new Int32Array(this.cap); this.b = new Int32Array(this.cap); this.u = new Uint8Array(this.cap); this.v = withV ? new Float32Array(this.cap) : null; this.size = 0; }
 	_slot(a, b) {
 		const m = this.cap - 1;
 		let i = (Math.imul(a ^ Math.imul(b, 0x9e3779b1), 0x85ebca6b) >>> 7) & m;
@@ -314,10 +314,20 @@ class PairSet {
 		if (this.size * 2 > this.cap) this._grow();
 		return true;
 	}
+	/** (a set made withV) true when new, or when this arrival's speed v is faster than the fastest recorded for the pair by
+	 *  more than dv (then recorded) */
+	addV(a, b, v, dv) {
+		a |= 0; b |= 0;
+		const i = this._slot(a, b);
+		if (this.u[i]) { if (v > this.v[i] + dv) { this.v[i] = v; return true; } return false; }
+		this.u[i] = 1; this.a[i] = a; this.b[i] = b; this.v[i] = v; this.size++;
+		if (this.size * 2 > this.cap) this._grow();
+		return true;
+	}
 	_grow() {
-		const oa = this.a, ob = this.b, ou = this.u, n = this.cap;
-		this.cap = n * 2; this.a = new Int32Array(this.cap); this.b = new Int32Array(this.cap); this.u = new Uint8Array(this.cap);
-		for (let k = 0; k < n; k++) if (ou[k]) { const i = this._slot(oa[k], ob[k]); this.u[i] = 1; this.a[i] = oa[k]; this.b[i] = ob[k]; }
+		const oa = this.a, ob = this.b, ou = this.u, ov = this.v, n = this.cap;
+		this.cap = n * 2; this.a = new Int32Array(this.cap); this.b = new Int32Array(this.cap); this.u = new Uint8Array(this.cap); this.v = ov ? new Float32Array(this.cap) : null;
+		for (let k = 0; k < n; k++) if (ou[k]) { const i = this._slot(oa[k], ob[k]); this.u[i] = 1; this.a[i] = oa[k]; this.b[i] = ob[k]; if (ov) this.v[i] = ov[k]; }
 	}
 }
 
@@ -450,7 +460,16 @@ function legBest(L, starts, goal, o) {
 		}
 		return top;
 	};
-	const closed = new PairSet(1 << 16);
+	// (THE FASTEST ARRIVAL, OPT-IN EEAT_BEST_ENERGY=1 or o.energy: a closed cell takes a later arrival again when its speed
+	// |v| is faster than every arrival it took by more than EEAT_BEST_EDV px/tick (default 0). The first arrival's rule keeps
+	// whichever state came first, and a cell's states differ by up to a speed quantum (the coarse grain's 1 px/tick vy): a
+	// PUMP (a dive into an arrow column for the speed that lifts the ball out; My level de42's trophy, two dives) needs the
+	// fastest of them, and the slower one closed its cell (lane 4 b4: from the known route's state at tick 80 the coarse
+	// grain 'exhausted' 361 k pops, with this rule found in 574 pops / 18 ms; from the spawn neither in 20 s: the first
+	// dive's apex is lost the same way within the default grain's quanta). Ordering / pruning only: no claim.)
+	const ENERGY = process.env.EEAT_BEST_ENERGY === '1' || !!o.energy;
+	const EDV = process.env.EEAT_BEST_EDV !== undefined ? +process.env.EEAT_BEST_EDV : 0;
+	const closed = new PairSet(1 << 16, ENERGY);
 	const dkOf = discKeyCache();
 	const scoreOf = (dist) => {
 		if (dist >= 1e9) return 1e9;
@@ -488,7 +507,7 @@ function legBest(L, starts, goal, o) {
 		const d = distOf(field, sim);
 		dst.push(d);
 		if (X.goalAt(goal, sim, starts[s].tick, beforeTick)) { goals.push({ node: i, mask: -1, depth: gg[i] }); found = gg[i]; continue; }
-		cellKey(); closed.add(ka, kb);
+		cellKey(); if (ENERGY) closed.addV(ka, kb, Math.hypot(sim.speed_x, sim.speed_y), EDV); else closed.add(ka, kb);
 		hpush(i, gg[i] + w * scoreOf(d));
 	}
 	let why = 'exhausted';
@@ -561,7 +580,9 @@ function legBest(L, starts, goal, o) {
 			if (cx < 0 || cy < 0 || cx >= W || cy >= H) { drop.oob++; continue; }
 			if (region !== null && !region[cy * W + cx]) { drop.region++; continue; }
 			if (vis !== null) vis[cy * W + cx] = 1;
-			if (!closed.add(ka, kb)) { drop.closed++; continue; }
+			if (!(ENERGY ? closed.addV(ka, kb, Math.hypot(sim.speed_x, sim.speed_y), EDV) : closed.add(ka, kb))) { drop.closed++; continue; }
+			// (o.onAdd(cellHash, sim, tick): a diagnostic hook, every state the search keeps)
+			if (o.onAdd) o.onAdd(ka, sim, g + reps);
 			const d = distD(field, sim, allowDeath);
 			const j = par.length;
 			par.push(i); msk.push(m); rp.push(reps); gg.push(g + reps); dst.push(d);
