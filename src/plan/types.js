@@ -180,7 +180,12 @@ function goalOf(L, wp) {
 	// (touchedTile): the engine touches the centre cell at the tick's START and then moves, so a ball that crosses a coin /
 	// switch / checkpoint in one tick (a boost's 16 px/tick, any fast pass) has left the tile by the time the feature shows
 	// the touch, and "on the tile with the feature changed" never holds (the leg searches' "closest 0 tiles" failures)
-	const test = ex ? (sim) => { if (sim.is_dead || featValue(sim, ex.feat) !== ex.value) return false; if (mask[tileOf(sim, W, H)] === 1) return true; const tt = touchedTile(sim, W, H); return tt >= 0 && mask[tt] === 1; }
+	// (a coin count holds at the expected count or more: the count only grows, and a leg that takes another coin on its way
+	// to this one (a coin chain, a cluster) reached the waypoint with one coin more and the equality never held: along
+	// MIHB's Dream's known route 41 pickups, and the legs of coin-dense plans; EEAT_GOAL_ATLEAST=0: the equality)
+	const atLeast = ex && (ex.feat === 'coins' || ex.feat === 'bcoins') && process.env.EEAT_GOAL_ATLEAST !== '0';
+	const holds = !ex ? null : atLeast ? (sim) => featValue(sim, ex.feat) >= ex.value : (sim) => featValue(sim, ex.feat) === ex.value;
+	const test = ex ? (sim) => { if (sim.is_dead || !holds(sim)) return false; if (mask[tileOf(sim, W, H)] === 1) return true; const tt = touchedTile(sim, W, H); return tt >= 0 && mask[tt] === 1; }
 		: (sim) => !sim.is_dead && mask[tileOf(sim, W, H)] === 1;
 	// (fieldTiles: the tiles the ordering fields and bounds are built to, when not the goal's own (the executor's skeleton:
 	// a sub-level set of the waypoint's field, ordered by the waypoint's own fields, memoized across its sub-legs))
