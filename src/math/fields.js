@@ -1,7 +1,7 @@
 'use strict';
 // FIELD KINEMATICS (n4-math, build / fields, 2026-09-30): every EE field as mathematics the compiler evaluates.
 //
-// THE ONE FACT (docs/ee_math.md section 4): in any field the tick is, per axis, the SAME scalar recurrence of kin.js
+// THE ONE FACT (docs/ee_math.md section 6): in any field the tick is, per axis, the SAME scalar recurrence of kin.js
 // (stepV + the move + the align), and a field only chooses its coefficients. A field context E = (the current tile,
 // the delayed tile, flipGravity, the effects) fixes per axis an AXIS CONTEXT
 //     A = { ms[3]  the input term m of each input index (0 '-', 1 neg = L / U, 2 pos = R / D), after x sm
@@ -130,7 +130,7 @@ function ctxOfSim(sim, o = {}) {
 /**
  * schedule(o, T): the per-tick contexts [1..T] of a path whose centre stays on tiles of `o.cur`'s physics for T ticks,
  * the gravity queue starting at (o.q0, o.q1) (the state's _q0, _q1): the first ticks read the queue's older tiles (the
- * 2-tick delay, 1 in dots / climbables), then the field itself (docs/ee_math.md 4.3). Returns {x: A[], y: A[], ctx: []}
+ * 2-tick delay, 1 in dots / climbables), then the field itself (docs/ee_math.md 6.4). Returns {x: A[], y: A[], ctx: []}
  * (index t = the context of tick t, t >= 1; index 0 unused).
  */
 function schedule(o, T) {
@@ -254,7 +254,7 @@ function fixedPoint(A, i, v0 = 0, tmax = 100000) {
 	return { v, tick: -1 };
 }
 const DRAG_NAMES = new Map([[K.BASE_DRAG, 'B'], [K.NO_MOD_DRAG, 'N'], [K.WATER_DRAG, 'W'], [K.MUD_DRAG, 'U'], [K.LAVA_DRAG, 'L'], [K.ICE_NO_MOD_DRAG, 'Ino'], [K.ICE_DRAG, 'I']]);
-/** the recurrence class of an axis context (docs/ee_math.md 4.1) */
+/** the recurrence class of an axis context (docs/ee_math.md 6.1) */
 function kindOf(A) {
 	if (A.boost !== 0) return 'BOOST';
 	if (K.isClimb(A.cur)) return 'CLIMB';

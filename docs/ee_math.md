@@ -778,3 +778,199 @@ evalGA, holdX, rangeIA, minT, minTSafe, solveIA, buildTable, lookup, summary, wr
 {K, T}), cacheDir, engineKey, CLASSES {rest, top, topL}, TOP, ALIGN_SLACK`; `src/plan/kin_tables/summary.json` (per class
 the resolution table and the hold R / hold L / release offsets and speeds to 240 ticks as hex doubles), `ga.json` (the
 gravity axis per (gm, jm) and start class 0 / J, 240 ticks, hex doubles).
+
+## 6 Field kinematics: every field as one recurrence with its own coefficients
+
+(build / fields.) Code: `src/math/fields.js` (the axis contexts, the recurrences, the envelope, the axis solver, the
+path through field boundaries), `src/math/fieldsolve.js` (the field leg solver), `tools/math/fields_tables.js` ->
+`src/math/field_tables/summary.json` (the tables), `test/fields_theorems.js` (the engine checks),
+`tools/math/fields_cover.js` (the real routes). Sections 1-3 are the plain field's; this section is every other field
+(arrows, dots, climbables, the four liquids, boosts, ice, gravity / speed / jump effects) and the boundaries between
+fields.
+
+### 6.1 The one recurrence: a field is an AXIS CONTEXT
+
+For one tick with the environment (current tile c, delayed tile d, flipGravity, the effects) each axis runs section
+1.4's `stepV` with coefficients the environment fixes. `fields.fieldCtx(o)` computes them exactly as `kin.tick` does
+(the axis choice reads d and the UNSCALED pulls, then `m x sm`, `mo x gm`, the modifier `(mo + m) / 7.752`, the jump
+multiplier after the ice timer), per axis an AXIS CONTEXT
+
+```
+A = { ms[3] (the input term of input index 0 none / 1 L or U / 2 R or D), mods[3] = (mo + ms[i]) / 7.752,
+      mo (this axis' pull x gm), moO (the other axis' pull: only whether it is 0 matters), cur (climbable / liquid
+      drags), slip (the ice timer after this tick's update), boost (0 or the +-16 a boost tile writes),
+      mor, J (the current tile's int pull and the jump speed; J = 0: no jump on this axis), liquid }
+v' = boost || stepV(v, mods[i], ms[i], moO, slip, cur);     p' = align(p (+) v', v', mods[i], liquid)
+```
+
+(`vStep`, `pStep`; `p (+) v'` is T-ADD's one rounded add, `kin.moveFree` below p = 16). The contexts fall into seven
+RECURRENCE CLASSES (`kindOf`, `describe`: the drag each input applies, release / along / against):
+
+| class | where | release / along / against | held from rest -> (exact double, tick) | release from it stops in |
+|---|---|---|---|---|
+| GRAV | air's y, an arrow's own axis, flip 1-3's rotated pull | B / B / B (no input acts) | 13.553105760940054 (1760); low gravity 2.0329658641410036 (1732) | (no input) |
+| INPUT | air's x, an arrow's cross axis (moO != 0) | B N / B / B N | 6.776552880470027 (1760); x1.5 10.164829320704984 (1709); x0.6 4.065931728282007 (1732) | 94 (97, 90) |
+| FREE | dots, flip 4, a boost's cross axis (moO = 0) | B / B / B N | the same as INPUT | **590** (612, 563) |
+| CLIMB | climbables (and toxic's x) | B N / B N / B N | 1.0189913613742367 (292); x1.5 1.5284870420613546; x0.6 0.6113948168245416 | 78 |
+| LIQUID | water / mud / lava / toxic (current) | x: B N / B D / B N; y: B D / B D / B N | water x 1.8106352581215837, y down 0.9053176290607918 / drift -0.9053176290607918; mud x 0.41289969932015064, y 0.5780595790482113 / drift 0.16515987972806034; lava x 0.5223087910013383, y 0.6267705492016059 / 0.10446175820026755; toxic y 0.6113948168245416 / -0.4075965445496944 | 70-83 (x) |
+| BOOST | a boost tile's axis | +-16 whatever the input | -16 / +16 (tick 1) | - |
+| ICE | slip > 0 (2 while on ice, then the 11-tick tail) | Ino / B / Ino I | the air values held; released x 0.99318 a tick | 1626 |
+
+(B the base drag, N the no-modifier drag, D the liquid's, Ino / I the ice drags: section 1.2. A liquid's buoyancy is
+its y pull; y's release drag is the liquid's because x has no pull there.)
+
+### 6.2 THEOREM F1: the field model is the engine (test/fields_theorems.js F1, F4)
+
+In every field and effect set, each axis' position and speed after every tick of every input word equal the axis
+context's recurrence. *Engine check (box 3, 24 shards, `--T=32`):* 99 field contexts (the 15 fields x plain, speed
+x1.5, x0.6, zombie, low gravity; flip 1-4 for air and the liquids; flip 1-4 with speed x1.5 and low gravity for air)
+x 4 start states x both axes x EVERY input pattern with <= 2 changes of length 32 on the axis' own channel (h for x, v
+for y: 5,769 patterns), the other channel sticky random and random jump bits: **4,569,048 engine runs, 146,209,536
+engine ticks, px, py, speed_x, speed_y compared every tick: 0 mismatches.** F4: every held input's fixed point (every
+context x axis x input x start 0 / +-16: 1,782) played by the engine to its tick: 1,408,500 ticks, 0 differ.
+
+### 6.3 THEOREM F2: the classification (the arrows ARE the plain field)
+
+**THEOREM F2 (the mirror).** `stepV(-v, -mod, -m, -moO) = -stepV(v, mod, m, moO)`: round to nearest is odd, the drag
+conditions test signs and `moO != 0`, the cap and the snap are symmetric (a `+0` may come back `-0`: the same number).
+So the field with every pull negated is the negated recurrence (`fields.mirror`). *Check (F2, box 3):* all 198 axis
+contexts of F1 over 1,982,407 speeds (the reachable closure from rest, +-16 and J, edge doubles, 20,000 random): 0
+failures. Grouping every axis context with an earlier one it equals or mirrors over those speeds gives **40 distinct
+recurrences** (each liquid and effect set its own). The identities the tables use, each checked there:
+- arrowL.y = arrowR.y = arrowU.x = arrowD.x = air.x: the cross axis of any arrow field IS the plain input axis;
+- arrowR.x = arrowD.y = air.y; **arrowL.x and arrowU.y are the MIRROR of air.y** (the gravity axis, negated);
+- air with flip 1 / 2 / 3: its pulled axis is air.y's mirror / mirror / itself; flip 4 = dots;
+- dot.y = dot.x = boostU.x = boostL.y (FREE); climb.y = climb.x;
+so every arrow field is the plain field rotated or reflected, bit for bit in the speeds, and the plain tables (section
+3, `src/plan/kin_tables`) serve it with the axes and signs changed; positions are evaluated from the real start
+(T-ADD: exact, no translation assumption).
+
+### 6.4 Field boundaries: the schedule (THEOREM F5)
+
+The coefficients change when the centre enters a tile of another physics, with the gravity queue's delay: tick t uses
+`cur_t` (the centre's tile at the tick's start, the half-block rule) and `del_t` = `cur` of 2 ticks before (1 in dots
+and climbables, where the queue shifts twice). Entering an arrow field from the air: 2 ticks with the arrow as `cur`
+(its floor / jump axis, kills) and the air as `del` (the down pull, h acting), then the arrow's own context; leaving it
+the same the other way. `fields.schedule(o, T)`: the per-tick contexts of a path that stays on one field's tiles from a
+given queue. `fields.pathEval(L, st, masks)`: the COLLISION-FREE per-axis evaluation of an input sequence through a
+static level's fields (per tick the centre tile, the queue, the tile below and the ice timer, fieldCtx, both axis maps,
+multi-jump's air jumps), stopping where the swept box meets a solid, the world's edge or a tile whose touch changes the
+state (effects, portals, keys, switches, crowns, the trophy, NPCs, music blocks; coins pass unless asked). *Engine check
+(F5, box 3):* two-field rooms (13 fields: air, the 4 arrows, dots, climbable, water, mud, the 4 boosts; every ordered
+pair, the boundary vertical and horizontal) x 40 runs of 90 sticky random ticks starting 2-7 tiles before the boundary
+with random effects: **12,480 runs, 1,029,469 ticks, 6,712 runs across the boundary: pathEval = the engine on every
+tick it evaluates (0 mismatches).**
+
+### 6.5 THEOREM F3: the envelope, sound in every field
+
+For an axis schedule (`A` or `A[t]`) and a start (p0, v0): `lo_{t+1} = min_i V(lo_t, i)`, `hi_{t+1} = max_i V(hi_t, i)`
+(V = vStep) and `plo_{t+1} = plo_t (+) lo_{t+1}`, `phi` likewise. **THEOREM F3.** Every input word's speed at t lies in
+`[lo_t, hi_t]` and its position in `[plo_t - s, phi_t + s]`, s = ALIGN_SLACK (2 px) where an armed tick is possible
+(`envelope`, `armable`). Proof: V is non-decreasing in v for every fixed input (section 1.4's MONOTONICITY, which holds
+in every field class), so `V(v, i) >= V(lo_t, i) >= lo_{t+1}` for v >= lo_t; the rounded add is monotone in both
+arguments; induction; the align moves a position toward the nearest grid line by < 0.2 px a tick and never across it.
+It needs NO key order, so it covers mud, lava and fast ice (section 1.4's exceptions), where hold-toward is not the
+extreme. *Check (F3):* every word of length 9 over the 3 inputs from 5 starts in every context and axis: **19,486,170
+words, 0 outside the envelope**, the largest align overshoot 0.967 px; the envelope's top is a held input's trajectory
+in 927 of 990 (context, start) cases (the rest: the liquids' key-order exceptions). `minTAxis(p0, v0, X, As)` = the
+least t whose envelope side reaches X: a lower bound for EVERY input word on that schedule (the 1D minimum time of any
+field), exact where a held input attains the envelope.
+
+### 6.6 Closed forms and the tables (src/math/field_tables/summary.json)
+
+Each held input is the affine map `v -> (v + a) d` rounded twice (a the modifier, d the drag product): in the reals
+`v_t = v* + (v0 - v*) d^t`, `v* = a d / (1 - d)`. The doubles stay within 1e-14 of it for 120 ticks in every class (the
+table's `closed.maxGap`: 1e-16 .. 9e-15) and reach an exact fixed point (the table's `fixed`: the double and its tick,
+engine-checked by F4). The table (`node tools/math/fields_tables.js`, 365 KB): 37 distinct recurrences of the 15
+fields x {plain, speed x1.5, x0.6, low gravity} x 2 axes (identical ones share an entry; `same` / `mirror` list the
+contexts served), per entry the class and drags, the constants as exact doubles (mods, mo, moO, J), the fixed points of
+every input from 0 and +-16, the release's stop from the held fixed point, the closed form, and the envelope rows from
+rest (vlo, vhi, plo, phi; 120 ticks, hex doubles): every field's 1D minimum-time function.
+
+### 6.7 The field leg solver (src/math/fieldsolve.js)
+
+`solveLeg(L, sim, goal, o)`: from a real state to goal tiles (the centre tile, with the support class asked: G on the
+ground, Z dots, W liquid, C climbable, B boost), within `goal.maxT` ticks:
+1. the start field's schedule (the queue's older tiles first) gives each axis' role: a GRAVITY axis (no input in
+   flight) or INPUT axes;
+2. a gravity field: the gravity axis has ONE trajectory per option: fly on (an airborne start), walk (pinned on its
+   floor), jump at tick j (pinned until the press, then J), walk off the floor's edge at T0 (the floor's span under the
+   box, from the level: pinned until T0 - 1, then free from rest), each read with a bonk on the start's ceiling
+   (axis.js moveAxis, the engine's sub-steps) and without; at every tick T where it lies in a goal tile's window, or (G)
+   lands on the goal row's floor plane `16 c` (both signs: the floor under a down-pulled ball, the wall beside an
+   arrow's ball, the ceiling of an up arrow), `fields.solveAxis` gives every input-axis pattern (<= k changes, default
+   2) in the goal tile's window at T, under the option's TUBE (the box over its floor until the press; off the edge
+   exactly at T0);
+3. no gravity (dots, climbables, liquids, boosts' cross axis, flip 4): both axes solved in the windows, every pair
+   composes (section 2's THEOREM 3);
+4. candidates by increasing T, each replayed ONCE by the engine from the start's snapshot: the first that reaches a
+   goal tile with the class asked is the leg (exact: the engine's own replay);
+5. across field boundaries: a refused candidate's ENGINE schedule (the contexts the engine used on its replay, tick by
+   tick) replaces the assumed one and steps 2-4 run again on it (time-varying contexts; 2 rounds).
+The field bound `lb`: per goal tile the later of the input axis' envelope time (THEOREM F3) and the earliest tick any
+gravity option lands on the goal row's plane (G; the window tick otherwise): every input word inside the start field's
+model needs at least lb ticks, and a leg found at lb is optimal there.
+
+`fields.solveAxis(p0, v0, T, lo, hi, As, o)` is kin1d.solveIA for any axis schedule: every pattern with <= o.k changes
+whose EXACT p_T is in [lo, hi] (a speed window, a tube, an input subset), fewest changes first, branch and bound on
+THEOREM F3 from each node's exact state, the last change binary-searched (LEMMA L) where both runs are held keys of an
+ordered class. *Check (F6):* 400 random patterns (<= 2 changes, T <= 64, random contexts and axes) as exact point
+targets: all found, all 4,151 answers equal their evaluation, each first answer replayed by the engine lands where the
+solver says.
+
+### 6.8 The real moves (tools/math/fields_cover.js; box 3, 28 shards)
+
+The 218 routes cut into moves between support states as the moves study does (a boundary at every landing, field
+entry, teleport, death, respawn; labels hop, jump, fall, walk, arrow, dot, climb, swim, boost, airjump); every move of
+<= 127 ticks that ends on a support (not a teleport or a death), from the route's OWN start state: is the route's next
+support (its class letter and centre tile) reached within the route's own ticks? The mathematics alone (no family, no
+search), a 250 ms clock for the candidate generation:
+
+| label | moves | solved | faster than the route | as fast | median / p90 ms | found leg = the field bound |
+|---|---|---|---|---|---|---|
+| hop | 16,981 | 88.4% | 91 | 14,924 | 1 / 2 | 89.2% |
+| arrow | 8,914 | 34.0% | 1,035 | 1,992 | 1 / 251 | 35.3% |
+| jump | 7,533 | 74.2% | 3,734 | 1,853 | 18 / 251 | 51.5% |
+| dot | 4,947 | 57.8% | 967 | 1,890 | 1 / 28 | 16.1% |
+| fall | 4,455 | 75.7% | 459 | 2,914 | 4 / 126 | 33.3% |
+| boost | 2,209 | 43.1% | 112 | 840 | 0 / 8 | 64.0% |
+| climb | 361 | 43.5% | 56 | 101 | 1 / 35 | 22.3% |
+| swim | 265 | 33.2% | 56 | 32 | 1 / 38 | 42.0% |
+| airjump | 136 | 5.1% | 6 | 1 | 24 / 269 | 42.9% |
+| walk | 42 | 100% | 38 | 4 | 1 / 19 | 85.7% |
+| all | 45,843 | **67.9%** | 6,554 | 24,551 | **1 / 69** | 63.1% |
+
+(1,114 s summed over the 45,843 legs; the schedule iteration found 521 of them, 384 on dots.) The field bound was never
+above the route's own ticks where it was finite: admissible on every real move measured. Where the mathematics loses a
+move: arrow moves cross fields and slide along walls (contacts the per-axis model does not see), dot moves end by
+landing after leaving the dots (the schedule iteration's gain there: +7.8 points), multi-jump (airjump: no air-jump
+option yet). For comparison, the moves study's exhaustive one-change family over the 9 direction masks (every change
+tick: ~5,700 engine ticks a move) reaches the class-level support in time for jump 96.0%, hop 97.1%, fall 87.3%, dot
+83.9%, arrow 61.5%, and the builder's navigation-graph search (1.5 s a move) 87.2% overall (arrow 72.0%, dot 75.0%).
+With that family as `solveLeg`'s last resort (`o.family`: only where the mathematics found nothing; median 2 ms, p90
+136 ms a leg): **87.4% overall** (math 66.7% + schedule iteration 1.1% + family 19.6%): hop 97.4%, arrow 75.2%, dot
+86.6%, fall 89.0%, boost 91.2%, climb 90.3%, swim 90.9%, jump 78.8%, airjump 12.5%; faster than the route on 9,354 moves.
+
+### 6.9 What the field tables do not cover yet
+
+- Portals: section 1.8's map (`kin.portalTurn`: `(vx, vy) -> R_d (vx, vy)` through `(v x 7.752) x 1.42 / 7.752`, the
+  position to the exit's corner, the old remainders kept) is exact (kin E: 1,861 real teleports); the solver does not
+  plan through a portal (the random exit is the world's `W.exit`; pathEval stops at a portal tile).
+- Levitation (fly): the thrust (`kin.thrustStep`) is a third per-axis term every tick; not in the axis contexts.
+- Ice: the ICE class is modelled per tick (slip in the context) but the solver's first schedule assumes slip 0; a
+  refused candidate's engine schedule carries the real slip.
+- Multi-jump: pathEval has the air jumps; the solver has no air-jump option.
+- Contacts beyond the start's floor / ceiling: walls met on the way, one-ways, half blocks: the engine's verify decides.
+
+### 6.10 API
+
+`src/math/fields.js`: `CLASSES, REP, classOfId(id), physKey(id), tileKind(id), fieldCtx(o), ctxOfSim(sim), schedule(o,
+T), vStep(v, i, A), pStep(p, v, i, A), step, At(As, t), armed, evalAxis(p0, v0, code, t, As, trace), holdAxis,
+envelope(p0, v0, T, As, from), minTAxis(p0, v0, X, As, tmax, safe, from), fixedPoint(A, i, v0), kindOf(A), describe(A),
+solveAxis(p0, v0, T, lo, hi, As, o), mirror(A), pathEval(L, st, masks, o)`. `src/math/fieldsolve.js`: `solveLeg(L,
+sim, goal, o) -> {ok, masks, ticks, tool ('math' | 'iter' | 'family'), T, lb, tried, solves, ms}` (o: k 2, jmax 40,
+limit 6, maxMs 250, iterate true, rounds 2, family false: the exhaustive one-change family as a last resort),
+`supportClass(sim)`, `tileOfSim(sim)`, `verify`, `scheduleOf(sim, T)`. Checks: `node test/fields_theorems.js [--quick]
+[--only=F1..F6] [--T=32] [--D=9] [--shard=i/n]` (box 3 at full size: **176,469,571 checks, 0 mismatches**); the tables:
+`node tools/math/fields_tables.js`; the routes: `EEAT_TRUTH_ROOT=<truth> node tools/math/fields_cover.js --shard=i/n
+--out=<dir> [--family=1]`, then `--agg=<dir>`.

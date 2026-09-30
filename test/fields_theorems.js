@@ -1,5 +1,5 @@
 'use strict';
-// THE ENGINE CHECKS of FIELD KINEMATICS (src/math/fields.js, docs/ee_math.md section 4). Every statement the field
+// THE ENGINE CHECKS of FIELD KINEMATICS (src/math/fields.js, docs/ee_math.md section 6). Every statement the field
 // tables and the field solver use is checked here against src/eesim.js itself, bit for bit (===, no tolerance):
 //   F1  every field (air, the 4 arrows, dots, climbables, the 4 liquids, the 4 boosts) x effect sets (plain, speed x1.5 /
 //       x0.6, zombie, low gravity, flip 1-4 where the field's pull rotates) x start states: EVERY input pattern with <= 2

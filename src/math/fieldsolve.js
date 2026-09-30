@@ -1,6 +1,6 @@
 'use strict';
 // THE FIELD LEG SOLVER (n4-math, build / fields, 2026-09-30): a leg through a field is SOLVED from the per-axis
-// mathematics of src/math/fields.js (docs/ee_math.md section 4.6), not searched:
+// mathematics of src/math/fields.js (docs/ee_math.md section 6.7), not searched:
 //   1. the field of the start (the centre tile's physics; the gravity queue's older tiles for the first ticks: the
 //      schedule) fixes each axis' role: a GRAVITY axis (air's y, an arrow's own axis: no input in flight; its only
 //      control is the jump press on a grounded tick) and INPUT axes (the cross axis of a gravity field; both axes in dots,
