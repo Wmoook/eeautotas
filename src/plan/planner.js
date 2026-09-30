@@ -119,7 +119,7 @@ function createPlanner(model, facts, o = {}) {
 		// Person Maze's press takes effect one portal hop later); out: the region and the tiles next to it (sparse sets)
 		const m1 = model.passMask(S1, 'lb', null);
 		const inR = new Set(), out = new Set(tiles), q = [];
-		const ok = (j) => m1[j] || model.A.cls[j] === 3;
+		const ok = (j) => m1[j] === 1;   // (a shut gate of another feature is no way: only the tiles passable under S1)
 		for (const t of tiles) {
 			if (near[t] && !inR.has(t)) { inR.add(t); q.push(t); }
 			const x = t % W, y = (t / W) | 0;
@@ -436,7 +436,7 @@ function createPlanner(model, facts, o = {}) {
 		let bestPartial = root;
 		// (the partial plan's end: the fewest landmarks left, then the most gain, then the least f)
 		const better = (x, y) => { const hx = hLM(x.S), hy = hLM(y.S); return hx < hy || (hx === hy && (x.S.gain > y.S.gain || (x.S.gain === y.S.gain && x.f < y.f))); };
-		let rootEdges = 0, bestRootChild = null;
+		let rootEdges = -1, bestRootChild = null;   // (-1: the budget ended before the root was expanded: no proof of anything)
 		while (open.size) {
 			const n = open.pop();
 			if (n.goal) { found = n; break; }
@@ -615,7 +615,7 @@ function createPlanner(model, facts, o = {}) {
 			if (n.e) exclude.add(n.e.edge);
 		}
 		if (!plans.length) {
-			why = rootEdges === 0 && !(facts && facts.list().length) ? 'proof' : 'exhausted';
+			why = rootEdges < 0 ? 'budget' : rootEdges === 0 && !(facts && facts.list().length) ? 'proof' : 'exhausted';
 			// (no edge at the root because the facts took them all: exhausted; none at all without facts: a walk proof)
 			if (rootEdges === 0 && facts && facts.list().length) {
 				const raw = edgesOf(a.S, a.pos, a.base, 'lb', false, null);

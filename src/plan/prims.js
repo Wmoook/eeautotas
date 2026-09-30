@@ -131,6 +131,27 @@ async function createPrims(L, o = {}) {
 	 * one edge: the macro from the state now in `s` (restored from `snap`) until its first event. Returns the edge record
 	 * with the child's snapshot, or null when it moved nothing (the same state).
 	 */
+	let hopPre = null;
+	/** n4u hop: the landing tick (buf[n - 1]) replayed from the pre-landing state with the jump bit: a child when it jumps */
+	function hopChild(s, buf, n, name, fam, ctx, out) {
+		if (!hopPre || (buf[n - 1] & 1) === 1) return;
+		s.restore(hopPre);
+		const m = buf[n - 1] | 1;
+		E.applyMask(inp, m);
+		s.tick(inp);
+		st.ticks++;
+		if (s.is_dead || !s.on_ground || s.jump_count === 0) return;
+		const hash = s.stateHash();
+		if (hash === ctx.parentHash) return;
+		const goal = !!(ctx.goal && ctx.goal.test(s));
+		const e = { macro: name + '+HOP', fam, edge: null, ticks: n, event: goal ? 'goal' : 'land', goal, dead: false, hash, snap: null, tile: T.tileOf(s, W, H),
+			px: s.px, py: s.py, vx: s.speed_x, vy: s.speed_y, onGround: !!s.on_ground, jumps: s.jump_count, finished: !!s.has_silver_crown };
+		if (ctx.onChild && !ctx.onChild(s, e)) return;
+		const ed = buf.slice(0, n); ed[n - 1] = m;
+		e.edge = ed;
+		e.snap = s.snapshot();
+		out.push(e);
+	}
 	function simEdge(s, snap, macro, ctx, buf0) {
 		const buf = macro.max > buf0.length ? new Uint8Array(macro.max) : buf0;
 		s.restore(snap);
@@ -141,6 +162,7 @@ async function createPrims(L, o = {}) {
 		for (let k = 0; k < macro.max; k++) {
 			const m = macro.mask(k, s, stt);
 			if (m < 0) break;
+			if (!onG && !macro.whole) hopPre = s.snapshot(hopPre);
 			E.applyMask(inp, m);
 			s.tick(inp);
 			buf[n++] = m;
@@ -155,6 +177,11 @@ async function createPrims(L, o = {}) {
 		}
 		st.ticks += n;
 		if (n === 0) return null;
+		if (event === 'land' && ctx.hops) {
+			const keep = s.snapshot();
+			hopChild(s, buf, n, macro.name, macro.fam, ctx, ctx.hops);
+			s.restore(keep);
+		}
 		const hash = s.stateHash();
 		if (hash === h0) return null;
 		const e = { macro: macro.name, fam: macro.fam, edge: null, ticks: n, event, goal, dead: !!s.is_dead, hash, snap: null, tile: T.tileOf(s, W, H),
@@ -183,6 +210,7 @@ async function createPrims(L, o = {}) {
 		};
 		for (let k = 0, n = 0; k < chain.max; k++) {
 			const m = chain.mask(k, s);
+			if (!onG) hopPre = s.snapshot(hopPre);
 			E.applyMask(inp, m);
 			s.tick(inp);
 			buf[n++] = m;
@@ -192,7 +220,7 @@ async function createPrims(L, o = {}) {
 			if (Math.abs(s.px - px) > TELEPORT_PX || Math.abs(s.py - py) > TELEPORT_PX) { emit(n, 'portal', false); return; }
 			const g = fsig(s);
 			if (g !== sig) { emit(n, 'trigger', false); return; }
-			if (!onG && s.on_ground) { emit(n, 'land', false); return; }
+			if (!onG && s.on_ground) { emit(n, 'land', false); const hh = []; hopChild(s, buf, n, chain.name + ',land', chain.fam, ctx, hh); for (const e of hh) push(e); return; }
 			if (chain.stops.has(n) || n === chain.max) emit(n, 'end', false);
 			onG = !!s.on_ground; px = s.px; py = s.py;
 		}
@@ -244,8 +272,10 @@ async function createPrims(L, o = {}) {
 		}
 		s.restore(snap);
 		const fam = familyOf(s, snap, fo);
-		for (const m of fam.list) push(simEdge(s, snap, m, ctx, buf));
+		ctx.hops = [];
+		for (const m of fam.list) { push(simEdge(s, snap, m, ctx, buf)); for (const e of ctx.hops) push(e); ctx.hops.length = 0; }
 		if (fam.chains) for (const c of fam.chains) simChain(s, snap, c, ctx, buf, push);
+		ctx.hops = null;
 		if (fam.steps) for (const m of fam.steps) push(simEdge(s, snap, { name: `STEP(${m})`, fam: 'STEP', max: 1, mask: (k) => (k === 0 ? m : -1) }, ctx, buf));
 		st.edges += out.length;
 		for (const e of out) st.sims += e.ticks;
