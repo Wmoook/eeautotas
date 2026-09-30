@@ -43,6 +43,8 @@ const CELL_DOM = process.env.EEAT_PROFILE_CELL !== '0';
 const FIN_ON = process.env.EEAT_PROFILE_FIN !== '0';
 const FIN_EVERY = +process.env.EEAT_PROFILE_FIN_EVERY || 4, FIN_K = +process.env.EEAT_PROFILE_FIN_K || 2;
 const FIN_EST = +process.env.EEAT_PROFILE_FIN_EST || 80, FIN_TMAX = 120, FIN_MS = 60, FIN_CT = 20000, FIN_FMS = 20;
+const FIN_SHARE = process.env.EEAT_PROFILE_FIN_SHARE !== undefined ? +process.env.EEAT_PROFILE_FIN_SHARE : 0.35;
+const PASS_MAX = +process.env.EEAT_PROFILE_PASSES || 3;
 // the stalls: on (EEAT_PROFILE_STALL=0 off), STALL_L layers without a better time to go, the basin of the STALL_K best
 // states; a speed requirement's penalty REQ_PEN ticks (+ 20 a px/tick short) and its margin REQ_MARGIN px/tick
 const STALL_ON = process.env.EEAT_PROFILE_STALL === '1';   // OPT-IN: its walls cut the real way (krt 2 / 24 vs 3 / 24)
@@ -111,13 +113,39 @@ function dirsOf(field) {
 }
 
 /**
- * profileLeg: the bang-bang family's reachable sets tick by tick (see the header). Returns the earliest arrival the family
- * reaches within the budget.
+ * profileLeg: the bang-bang family's reachable sets tick by tick (see the header), in PASSES: a pass that ends without an
+ * arrival before the budget (the depth, the front exhausted) is followed by a wider one on another switching grid (width x
+ * 2, period 3, then x 4, period 10; PASS_MAX passes), the goal field and the move solver kept. Returns the earliest arrival
+ * of the first pass that reaches one.
  */
+const PASSES = [[1, 0], [2, 3], [4, 10]];
 function profileLeg(L, starts, goal, o = {}) {
+	const t0 = Date.now();
+	const deadline = Math.min(o.deadline > 0 ? o.deadline : Infinity, t0 + (o.ms > 0 ? o.ms : 2000));
+	const width = o.width > 0 ? o.width : 300;
+	let res = null, tot = { sims: 0, finCalls: 0, finMs: 0, layers: 0 };
+	const oo = Object.assign({}, o, { deadline, ms: 0 });
+	const nPass = o.passes > 0 ? Math.min(o.passes, PASSES.length) : PASS_MAX;
+	for (let p = 0; p < nPass; p++) {
+		if (p > 0 && (Date.now() > deadline - 50 || res.why === 'time' || res.why === 'stopped')) break;
+		oo.width = width * PASSES[p][0];
+		if (PASSES[p][1]) oo.period = PASSES[p][1];
+		res = profilePass(L, starts, goal, oo);
+		tot.sims += res.sims || 0; tot.finCalls += res.finCalls || 0; tot.finMs += res.finMs || 0; tot.layers += res.layers || 0;
+		if (res.field) oo.field = res.field;
+		if (res.msol) oo.msol = res.msol;
+		res.pass = p + 1;
+		if (res.ok) break;
+	}
+	res.ms = Date.now() - t0;
+	Object.assign(res, tot);
+	delete res.field; delete res.msol;
+	return res;
+}
+function profilePass(L, starts, goal, o = {}) {
 	const t0ms = Date.now();
 	const W = L.width, H = L.height;
-	const deadline = Math.min(o.deadline > 0 ? o.deadline : Infinity, t0ms + (o.ms > 0 ? o.ms : 2000));
+	const deadline = o.deadline > 0 ? (o.ms > 0 ? Math.min(o.deadline, t0ms + o.ms) : o.deadline) : t0ms + (o.ms > 0 ? o.ms : 2000);
 	const width = o.width > 0 ? o.width : 300, quota = o.quota > 0 ? o.quota : 3, P = o.period > 0 ? o.period : 6;
 	const depth = o.depth > 0 ? o.depth : 3000;
 	const allowDeath = !!goal.allowDeath;
@@ -210,7 +238,7 @@ function profileLeg(L, starts, goal, o = {}) {
 	// last input held up to 2 ticks more). The best finish's arrival tick bounds the front: the layers go on to it (an
 	// earlier arrival of the family itself wins).
 	const finOn = o.finish !== undefined ? !!o.finish : FIN_ON;
-	let msol = null;
+	let msol = o.msol || null;
 	const msolver = () => msol || (msol = require('../msolve.js').createSolver(L, {}));
 	const finTried = new Set();
 	let bestFin = null;          // {arrive (depth), ref (the node's ref at depth d0), d0, masks}
@@ -220,10 +248,12 @@ function profileLeg(L, starts, goal, o = {}) {
 		const Tmax = Math.min(FIN_TMAX, Math.max(8, Math.ceil(nd.est * 1.6) + 8));
 		if (bestFin && d + 1 >= bestFin.arrive) return;
 		let r = null;
+		const tf = Date.now();
 		try {
 			r = msolver().leg(nd.sn, { tiles: Array.from(goal.tiles), cls: goal.cls || 'any' }, { Tmax: bestFin ? Math.min(Tmax, bestFin.arrive - d - 1) : Tmax, chain: false, coupledTicks: FIN_CT, fieldMs: FIN_FMS, deadline: Math.min(deadline, Date.now() + FIN_MS) });
 		} catch (e) { r = null; }
 		finCalls++;
+		finMs += Date.now() - tf;
 		if (!r || !r.ok) return;
 		// the goal's own test on the engine's replay (the touch lag: the last input held up to 2 ticks more)
 		sim.restore(nd.sn);
@@ -241,7 +271,7 @@ function profileLeg(L, starts, goal, o = {}) {
 		const arrive = d + hit;
 		if (!bestFin || arrive < bestFin.arrive) { bestFin = { arrive, ref: nd.ref, d0: d, masks: ms.slice(0, hit), tool: r.tool }; finOK++; }
 	};
-	let finCalls = 0, finOK = 0;
+	let finCalls = 0, finOK = 0, finMs = 0;
 	// the layers: layers[d] = the states at depth d + 1: their parent reference (the index in layers[d - 1], or -1 - s for a
 	// start) and the mask of their tick
 	const layers = [];
@@ -283,8 +313,8 @@ function profileLeg(L, starts, goal, o = {}) {
 		if (bestFin && d >= bestFin.arrive) break;
 		if (cur.length === 0) { why = 'exhausted'; break; }
 		if (Date.now() > deadline) { why = 'time'; break; }
-		// the finish: the front's best states near the goal (every FIN_EVERY layers)
-		if (finOn && d % FIN_EVERY === 0) {
+		// the finish: the front's best states near the goal (every FIN_EVERY layers; at most FIN_SHARE of the time so far)
+		if (finOn && d % FIN_EVERY === 0 && finMs <= FIN_SHARE * (Date.now() - t0ms) + 20) {
 			let n = 0;
 			for (let q = 0; q < cur.length && n < FIN_K; q++) {
 				if (cur[q].est > FIN_EST) break;
@@ -433,7 +463,7 @@ function profileLeg(L, starts, goal, o = {}) {
 		}
 	}
 	// the arrivals: the family's own hits and the finish, the earliest first
-	const res = { ok: hits.length > 0 || !!bestFin, ms: Date.now() - t0ms, layers: layers.length, sims, why: hits.length ? 'found' : bestFin ? 'finish' : why, closest: bestEst, finCalls, finOK, stalls, wallsAdded, reqsAdded };
+	const res = { ok: hits.length > 0 || !!bestFin, ms: Date.now() - t0ms, layers: layers.length, sims, why: hits.length ? 'found' : bestFin ? 'finish' : why, closest: bestEst, finCalls, finOK, finMs, stalls, wallsAdded, reqsAdded, field, msol };
 	if (!res.ok) return res;
 	// the input string of a node: back through the layers (its start and the masks from it)
 	const pathTo = (ref, dd) => {
