@@ -5,7 +5,7 @@
 //   CLAIM-DEATH  its last failure is a claim ('exhausted' / 'proof') or a death step
 //   NEAR         its last failure's closest approach within 3 tiles
 //   ONE-LEG      no trigger reached, the plan one step (the whole route one leg to its target)
-//   RATE         the progress grows with time (at the end >= max(2, 1.3 x) the triggers of 60 s)
+//   RATE         still progressing at the budget's end (the triggers at the end >= those at 180 s + max(2, 20%))
 //   STUCK-FIELD  otherwise, a field block (arrow, dot, boost, climbable, liquid, portal) within 4 tiles of the failing
 //   STUCK-PLAIN  target or of its closest approach; else plain
 // Compiled levels: the gap to the best known route (--best=<FINAL.jsonl of an earlier chief: rel, best, bestSource>).
@@ -75,7 +75,7 @@ for (const l of fs.readFileSync(path.join(dir, 'index.jsonl'), 'utf8').split('\n
 		else if (claim) r.cls = 'CLAIM-DEATH';
 		else if (r.closest !== null && r.closest <= 3) r.cls = 'NEAR';
 		else if (r.gEnd === 0 && r.planSteps <= 1) r.cls = 'ONE-LEG';
-		else if (r.gEnd >= r.g60 + Math.max(2, Math.ceil(0.3 * r.g60))) r.cls = 'RATE';
+		else if (r.gEnd >= r.g180 + Math.max(2, Math.ceil(0.2 * r.g180))) r.cls = 'RATE';
 		else r.cls = field ? 'STUCK-FIELD' : 'STUCK-PLAIN';
 	}
 	rows.push(r);
