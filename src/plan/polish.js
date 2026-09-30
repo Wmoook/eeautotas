@@ -2,6 +2,12 @@
 // THE POLISH (n4plan, the compiler's last stage, part 'executor'): a finished route made faster by exact local search,
 // never slower, every candidate replayed by the engine (common.js evaluate + judge).
 //   (a) src/cleanroute.js cleanRoute (0.4 of the time): useless presses and flips dropped, rejoins and shortcuts kept;
+//   (a2) the mutation pass (mutatePass; half of the time left, passes while they gain): src/mutate.js's classic moves at
+//       every tick (delete one or two ticks, replace an input by any other, delete one and replace the next), each
+//       followed by the route's own inputs until an exact rejoin with a LATER route state (a proven shortcut), a rejoin
+//       that is not later, 200 ticks or 96 px of drift; the shortcuts combined by DP (weighted interval scheduling), the
+//       combination judged (else the largest one alone): T-POLISH's 10 routes (8 s each) saved 176 ticks vs 3 without;
+//       a raw Find a route route (Are You A God's 7,290) 7,042 in 30 s vs 7,255 (o.noMutate: off; o.horizon, o.drift);
 //   (b) per leg (the route's feature changes, or o.legs: tick marks), from the route's exact state at a window's start
 //       (windows of o.win ticks, from the end of the route backwards: an accepted change leaves every earlier window as it
 //       was), exact.js exactLeg toward the route's state region at the window's end: the centre in the same tile and the
@@ -33,6 +39,113 @@ function traceRoute(L, masks) {
 	for (let t = 0; t < n; t++) { E.applyMask(inp, masks[t]); sim.tick(inp); rec(t + 1); }
 	return { H, snaps, last, n, sim, inp };
 }
+// ---------------------------------------------------------------- the mutation pass (src/mutate.js's moves)
+const OPTIONS = [];
+for (const h of [0, 2, 4]) for (const v of [0, 8, 16]) for (const j of [0, 1]) OPTIONS.push(h | v | j);
+/**
+ * mutatePass(L, masks, o) -> {shortcuts [{t, j, ins, saved}], ticks, next (the first tick not searched), timeUp}:
+ * for every tick t from o.from, from the route's exact state S(t) the classic moves (src/mutate.js): delete tick t,
+ * delete t and t + 1, replace t by any other input, delete t and replace t + 1; each followed by the route's own inputs
+ * until its state equals a route state S(j) (stateHash: identical futures): j later than the candidate's own tick is a
+ * PROVEN shortcut t -> j (inputs ins from S(t) reach S(j) sooner), j not later ends it (the route's own future, no
+ * gain); also ended after o.horizon ticks or o.drift px from the route at the shifted time, or a death. The states after
+ * the first change are deduplicated per t (equal states play the same continuation).
+ */
+function mutatePass(L, masks, o) {
+	o = o || {};
+	const deadline = o.deadline || Infinity, stop = typeof o.stop === 'function' ? o.stop : null;
+	const HOR = o.horizon > 0 ? o.horizon : 200, DRIFT = o.drift > 0 ? o.drift : 96;
+	const n = masks.length;
+	// the route: per tick the state hash, the position, the latest tick of each hash
+	const sim = new E.EESim(L), inp = new E.EEInput(), ws = new E.EESim(L);
+	sim.reset();
+	const H = new Float64Array(n + 1), PX = new Float64Array(n + 1), PY = new Float64Array(n + 1);
+	const last = new Map();
+	const rec = (t) => { const h = sim.stateHash(); H[t] = h; PX[t] = sim.px; PY[t] = sim.py; last.set(h, t); };
+	rec(0);
+	const snaps = [sim.snapshot()];
+	for (let t = 0; t < n; t++) { E.applyMask(inp, masks[t]); sim.tick(inp); rec(t + 1); if ((t + 1) % 64 === 0) snaps[(t + 1) / 64] = sim.snapshot(); }
+	const shortcuts = [];
+	let ticks = 0;
+	const from = Math.max(0, o.from | 0);
+	sim.restore(snaps[Math.floor(from / 64)]);
+	for (let u = Math.floor(from / 64) * 64; u < from; u++) { E.applyMask(inp, masks[u]); sim.tick(inp); }
+	const seen = new Set();
+	let t = from, timeUp = false;
+	const pre = new Uint8Array(2);
+	for (; t < n - 1; t++) {
+		if ((t & 15) === 0 && (Date.now() > deadline || (stop !== null && stop()))) { timeUp = true; break; }
+		if (!sim.is_dead) {
+			const sT = sim.snapshot();
+			seen.clear();
+			// the moves: [prefix inputs, the route's input index after them]
+			const moves = [];
+			moves.push([0, -1, t + 1], [0, -1, t + 2]);
+			for (const a of OPTIONS) {
+				if (a !== masks[t]) moves.push([1, a, t + 1]);
+				if (t + 1 < n && a !== masks[t + 1]) moves.push([1, a, t + 2]);
+			}
+			for (const [np, a, r0] of moves) {
+				if (r0 > n) continue;
+				ws.restore(sT);
+				let q = 0;
+				if (np) { E.applyMask(inp, a); ws.tick(inp); ticks++; q = 1; pre[0] = a; }
+				let r = r0;
+				// (the first state after the change: once per state and t)
+				let h = ws.stateHash();
+				if (seen.has(h)) continue;
+				seen.add(h);
+				for (;;) {
+					if (ws.is_dead) break;
+					const j = last.get(h);
+					if (j !== undefined) {
+						if (j > t + q) {
+							const ins = new Uint8Array(q);
+							if (np) ins[0] = a;
+							for (let k = np; k < q; k++) ins[k] = masks[r0 + k - np];
+							shortcuts.push({ t, j, ins, saved: j - (t + q) });
+						}
+						break;
+					}
+					if (q >= HOR || r >= n) break;
+					if (Math.abs(ws.px - PX[r]) + Math.abs(ws.py - PY[r]) > DRIFT) break;
+					E.applyMask(inp, masks[r]); ws.tick(inp); ticks++; q++; r++;
+					h = ws.stateHash();
+				}
+			}
+		}
+		E.applyMask(inp, masks[t]); sim.tick(inp);
+	}
+	return { shortcuts, ticks, next: t, timeUp };
+}
+/** the best set of non-overlapping shortcuts (weighted interval scheduling over the route's ticks) */
+function bestShortcutSet(n, shortcuts) {
+	const byEnd = new Map();
+	for (const c of shortcuts) { const l = byEnd.get(c.j); if (l) l.push(c); else byEnd.set(c.j, [c]); }
+	const dp = new Float64Array(n + 1), how = new Array(n + 1).fill(null);
+	for (let k = 1; k <= n; k++) {
+		dp[k] = dp[k - 1]; how[k] = null;
+		const l = byEnd.get(k);
+		if (l) for (const c of l) if (dp[c.t] + c.saved > dp[k]) { dp[k] = dp[c.t] + c.saved; how[k] = c; }
+	}
+	const out = [];
+	for (let k = n; k > 0;) { const c = how[k]; if (c) { out.push(c); k = c.t; } else k--; }
+	return out.reverse();
+}
+/** the route with the shortcuts (sorted, non-overlapping) spliced in */
+function spliceShortcuts(masks, set) {
+	const parts = [];
+	let at = 0;
+	for (const c of set) { parts.push(masks.subarray(at, c.t), c.ins); at = c.j; }
+	parts.push(masks.subarray(at));
+	let len = 0;
+	for (const p of parts) len += p.length;
+	const out = new Uint8Array(len);
+	let o = 0;
+	for (const p of parts) { out.set(p, o); o += p.length; }
+	return out;
+}
+
 /** the sim at tick t of the traced route */
 function stateAt(R, masks, t) {
 	const s = Math.floor(t / SNAP) * SNAP;
@@ -77,6 +190,27 @@ function polishRoute(L, masks0, o) {
 			const r = CR.cleanRoute(L, best.ms, { ms: Math.max(50, 0.4 * ms) });
 			if (r && r.changed) accept(r.ms, 'clean');
 		} catch (e) { steps.push({ how: 'clean', error: String(e && e.message || e) }); }
+	}
+	// (a2) the mutation pass: the classic moves everywhere, exact rejoins combined by DP (a combination the judge refuses:
+	// its shortcuts one at a time, the largest first); passes while they find time and there is time (o.mutShare of it)
+	if (!o.noMutate) {
+		const mEnd = Math.min(deadline, Date.now() + (o.mutShare > 0 ? o.mutShare : 0.5) * (deadline - Date.now()));
+		for (let pass = 0; pass < 8 && Date.now() < mEnd; pass++) {
+			const cur = best.ms;
+			const mp = mutatePass(L, cur, { deadline: mEnd, stop, horizon: o.horizon, drift: o.drift });
+			if (!mp.shortcuts.length) break;
+			const set = bestShortcutSet(cur.length, mp.shortcuts);
+			const saved = set.reduce((a, c) => a + c.saved, 0);
+			if (!accept(spliceShortcuts(cur, set), `mutate ${set.length} (${saved})`)) {
+				let any = false;
+				for (const c of mp.shortcuts.slice().sort((x, y) => y.saved - x.saved).slice(0, 64)) {
+					if (Date.now() > mEnd) break;
+					if (accept(spliceShortcuts(best.ms === cur ? cur : cur, [c]), `mutate 1 (${c.saved})`)) { any = true; break; }
+				}
+				if (!any) break;
+			}
+			if (mp.timeUp) break;
+		}
 	}
 	// (b) + (c) the windows, from the end backwards
 	const legs = [];
@@ -237,4 +371,4 @@ function polishLeg(L, start, tail0, goal, o) {
 	return { tail, saved: tail0.length - tail.length, windows, ms: Date.now() - t0 };
 }
 
-module.exports = { polishRoute, polishLeg, traceRoute };
+module.exports = { polishRoute, polishLeg, traceRoute, mutatePass, bestShortcutSet, spliceShortcuts };
