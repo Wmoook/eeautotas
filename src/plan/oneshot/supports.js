@@ -638,15 +638,21 @@ function classify(S, sim, o = {}) {
 	const x = sim.px, y = sim.py;
 	const cx = Math.trunc(x + 8) >> 4, cy = Math.trunc(y + 8) >> 4;
 	if (o.teleported) {
-		// the exit the ball was put on: its corner is the teleport position, the rest of the tick moved it from there
+		// the exit the ball was put on: its corner is the teleport position (eesim.js _portalTeleport), the rest of the
+		// tick's sub-steps (rotated, x 1.42: up to 22.72 px an axis) moved it from there: the nearest exit corner within
+		// 24 px an axis
 		const ids = [];
-		for (const [dx, dy] of [[0, 0], [-1, 0], [1, 0], [0, -1], [0, 1], [-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+		let best = -1, bestD = Infinity;
+		for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
 			const ex = cx + dx, ey = cy + dy;
 			if (ex < 0 || ey < 0 || ex >= W || ey >= H) continue;
 			const l = S.portalAt.get(ey * W + ex);
-			if (l) for (const id of l) ids.push(id);
+			if (!l) continue;
+			const ddx = Math.abs(x - ex * 16), ddy = Math.abs(y - ey * 16);
+			if (ddx > 24 || ddy > 24) continue;
+			for (const id of l) { ids.push(id); if (ddx + ddy < bestD) { bestD = ddx + ddy; best = id; } }
 		}
-		if (ids.length) return { kind: 'portal', id: ids[0], ids };
+		if (best >= 0) return { kind: 'portal', id: best, ids, dist: bestD };
 		return { kind: 'portal', id: -1, miss: 'no portal exit near the teleported ball' };
 	}
 	// the current tile (after the half-block rule): the engine's own

@@ -82,8 +82,8 @@ function main() {
 				prevTouch = tt;
 			}
 			let isB = false, what = null;
-			if (tp) { isB = true; what = 'portal'; }
-			else if (prevCls === 'D' && c !== 'D') { isB = true; what = 'respawn'; }
+			if (prevCls === 'D' && c !== 'D') { isB = true; what = 'respawn'; }        // (a respawn moves the ball far: before the teleport test)
+			else if (tp) { isB = true; what = 'portal'; }
 			else if (c !== prevCls && SUPPORT.has(c)) { isB = true; what = c; }
 			prevCls = c;
 			if (!isB) continue;
@@ -99,6 +99,7 @@ function main() {
 			res = SP.classify(S, sim, { teleported: what === 'portal' });
 			if (what === 'portal') {
 				bump('portal', res.kind === 'portal' && res.id >= 0 ? true : (res.miss || res.kind));
+				if (!(res.kind === 'portal' && res.id >= 0) && misses.length < 40) misses.push({ t: t + 1, kind: 'portal', x: sim.px, y: sim.py, px, py, vx: sim.speed_x, vy: sim.speed_y });
 			} else if (what === 'G') {
 				if (res.kind === 'surf' && res.id >= 0) {
 					bump('G', true);
@@ -123,6 +124,7 @@ function main() {
 				const ok = res.kind === 'field' && res.id >= 0 && res.letter === what;
 				bump(what, ok ? true : (res.miss ? 'noregion' : 'kind:' + res.kind));
 				if (ok) bump(what + '.entry', res.entry ? true : 'notentry');
+				if (ok && !res.entry && misses.length < 40) misses.push({ t: t + 1, kind: what + '.entry', cell: [res.cell % W, (res.cell / W) | 0], x: sim.px, y: sim.py, px, py, cur: sim.current_tile, past: [sim._pastx, sim._pasty] });
 				if (!ok && misses.length < 40) misses.push({ t: t + 1, kind: what, got: res.kind, msg: res.miss, x: sim.px, y: sim.py, cur: sim.current_tile });
 			}
 			for (let lv = 0; lv < 3; lv++) keys[lv].add(SP.keyOf(S, res, sim, lv));
