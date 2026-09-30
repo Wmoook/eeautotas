@@ -513,6 +513,59 @@ function compileModel(L, o = {}) {
 		}
 		return dist;
 	}
+	/**
+	 * hopClosure(m, src) -> the tiles bfs(m, src) starts at 0: the sources (deduplicated) and, chained, the exits (passable
+	 * under m) of the portal tiles among them, in bfs's own order
+	 */
+	function hopClosure(m, src) {
+		const out = [], seen = new Set();
+		for (const s of src) { if (s < 0 || s >= N || seen.has(s)) continue; seen.add(s); out.push(s); }
+		for (let k = 0; k < out.length; k++) { const s = out[k]; if (portalIn[s]) for (const e of portalExits.get(s)) if (m[e] && !seen.has(e)) { seen.add(e); out.push(e); } }
+		return out;
+	}
+	/**
+	 * revDist(m, goals) -> Int32Array(N): per tile t the steps bfs(m, [t]) takes to the nearest goal tile, for every tile at
+	 * once (INF: none). bfs is a shortest-path search over the graph of its moves (t -> j, 1 step: moveOK) and its hops
+	 * (t -> e, 0 steps: a move into a portal tile j with exits, then its exit e, passable under m; a tile reached by a hop
+	 * does not hop again); this is the same graph searched backwards from the goals (0-1 BFS), so
+	 * min over goals of bfs(m, src)[g] = min over hopClosure(m, src) of revDist(m, goals) exactly: one search for all
+	 * sources instead of one per source (the planner's open-level heuristic: a bfs per trigger position, 3,346 of them on
+	 * Moving Ice Puzzle's root, 16.7 s of its lowerBound)
+	 */
+	function revDist(m, goals) {
+		// the reverse graph (CSR): r1 = the move edges' tails per head, r0 = the hop edges' tails per exit
+		const c1 = new Int32Array(N + 1), c0 = new Int32Array(N + 1);
+		for (let t = 0; t < N; t++) for (let d = 0; d < 8; d++) {
+			const j = moveOK(m, t, d);
+			if (j < 0) continue;
+			c1[j + 1]++;
+			if (portalIn[j]) for (const e of portalExits.get(j)) if (m[e]) c0[e + 1]++;
+		}
+		for (let i = 0; i < N; i++) { c1[i + 1] += c1[i]; c0[i + 1] += c0[i]; }
+		const a1 = new Int32Array(c1[N]), a0 = new Int32Array(c0[N]), f1 = c1.slice(0, N), f0 = c0.slice(0, N);
+		for (let t = 0; t < N; t++) for (let d = 0; d < 8; d++) {
+			const j = moveOK(m, t, d);
+			if (j < 0) continue;
+			a1[f1[j]++] = t;
+			if (portalIn[j]) for (const e of portalExits.get(j)) if (m[e]) a0[f0[e]++] = t;
+		}
+		const R = new Int32Array(N).fill(INF);
+		// (0-1 BFS by levels, as bfs: the current level's list grows by the 0 edges, the next level's by the 1 edges)
+		let cur = [], nxt = [];
+		for (const g of goals) if (g >= 0 && g < N && R[g] !== 0) { R[g] = 0; cur.push(g); }
+		let level = 0;
+		while (cur.length) {
+			nxt = [];
+			for (let k = 0; k < cur.length; k++) {
+				const v = cur[k];
+				if (R[v] !== level) continue;
+				for (let q = c0[v]; q < c0[v + 1]; q++) { const t = a0[q]; if (R[t] > level) { R[t] = level; cur.push(t); } }
+				for (let q = c1[v]; q < c1[v + 1]; q++) { const t = a1[q]; if (R[t] > level + 1) { R[t] = level + 1; nxt.push(t); } }
+			}
+			cur = nxt; level++;
+		}
+		return R;
+	}
 	const distMemo = new Map();
 	const DIST_CAP = Math.max(96, Math.floor(64e6 / (4 * N)));   // (the walks kept: ~64 MB of fields)
 	let distBuilds = 0, distMs = 0;
@@ -665,7 +718,7 @@ function compileModel(L, o = {}) {
 		L, W, H, N, A, feats, init, triggers, gates, stateOf, keyOf, levelOf, regionOf, reachable,
 		// (the planner's machinery)
 		file: o.file || null, S0, startTile, cpTracked, spawnTiles, respawnOf, idleTiles, trophyTiles, trophies, respawn, canDie, dieTile, dieSrc, deathT, timed, coinTiles, bcoinTiles,
-		pendingOf, setEstWalls, trigOf, gateOf, featSet, fIdx, hasCoinGate, touch, liveTiles, gateOpen, passMask, bfs, dist, pairSteps, pairLb, pairInfo, lbOfSteps, deathVia,
+		pendingOf, setEstWalls, trigOf, gateOf, featSet, fIdx, hasCoinGate, touch, liveTiles, gateOpen, passMask, bfs, hopClosure, revDist, dist, pairSteps, pairLb, pairInfo, lbOfSteps, deathVia,
 		mkState, INF, DEAD_TICKS,
 		stats: () => ({ ms: compileMs, distBuilds, distMs, triggers: triggers.length, relevant: triggers.filter((X) => X.relevant).length, gates: gates.length, feats: feats.length, coins: coinTiles.length, bcoins: bcoinTiles.length }),
 	};

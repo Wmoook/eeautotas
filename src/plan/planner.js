@@ -47,6 +47,13 @@ const FLOOR_MS = +process.env.EEAT_PLAN_FLOOR_MS || 8000;
 // bounds stage, 51 s of a 60-s compile; the floors found so far need 6-20 layers: Aedan Garden 11, MoonBase 7, Rotcil
 // Illusions 6, Springopolis 20; at 32 layers Switcher Puzzle stops at its cap)
 const FLOOR_LAYERS = +process.env.EEAT_PLAN_FLOOR_LAYERS || 32;
+// (off the critical path, o.floorAsync (the strategy's): the probe in a worker thread (src/plan/floorworker.js), the plans
+// made before its answer without floors, the floors added when it answers (floorVersion() bumps: the strategy's plan memo
+// re-plans); a probe still running at FLOOR_HARD_MS of wall time is terminated (no floors). The profile (lane 6, box 3):
+// the probe was 8-45 s of the bounds stage on 13 of the 14 STAGE-TIME levels (MKco Mushroom Cup 45 s: 5 purple switches'
+// 40 layers, 255 physics fields, no floor found; Dreamland 40 s, VVVVVV 37 s), where the floors it finds took 1.9-6.3 s
+// (Tropical Trials' coins >= 20: 25-30 s on the loaded box, so the cap is 30 s)
+const FLOOR_HARD_MS = +process.env.EEAT_PLAN_FLOOR_HARD_MS || 30000;
 const COUNT_GATES = new Set([165, 214]);
 const COLOURS = ['red', 'green', 'blue', 'cyan', 'magenta', 'yellow'];
 
@@ -77,19 +84,49 @@ function createPlanner(model, facts, o = {}) {
 	// its layered physics plan replayed with those gates as floors, a jump whose only support is such a gate names it)
 	// gives the count; the trophy edge from a state below it gets the PENALTY (a price, never a drop: the probe is no proof)
 	const floorNeeds = [];
+	let floorVer = 0;
+	/** the probe's floors (steer.js info.floors) -> floorNeeds: the most each count feature needs */
+	const setFloors = (fl) => {
+		const most = new Map();
+		for (const x of fl || []) if ((x.feat === 'coins' || x.feat === 'bcoins') && x.param > 0 && model.feats.includes(x.feat)) most.set(x.feat, Math.max(most.get(x.feat) || 0, x.param));
+		floorNeeds.length = 0;
+		for (const [feat, min] of most) floorNeeds.push({ feat, min });
+		ST.floors = floorNeeds.map((n) => `${n.feat}>=${n.min}`).join(' ') || '';
+		if (floorNeeds.length) floorVer++;
+	};
 	if (process.env.EEAT_PLAN_FLOOR !== '0' && L && L.fg) {
 		let has = false;
 		for (let i = 0; i < L.fg.length && !has; i++) if (COUNT_GATES.has(L.fg[i])) has = true;
 		if (has && model.feats && (model.feats.includes('coins') || model.feats.includes('bcoins'))) {
 			const tf = Date.now();
-			try {
-				const st = require('../steer.js').buildSteer(L, { maxMs: FLOOR_MS, noDP: true, maxLayers: FLOOR_LAYERS });
-				const fl = (st && st.info && st.info.floors) || [];
-				const most = new Map();
-				for (const x of fl) if ((x.feat === 'coins' || x.feat === 'bcoins') && x.param > 0 && model.feats.includes(x.feat)) most.set(x.feat, Math.max(most.get(x.feat) || 0, x.param));
-				for (const [feat, min] of most) floorNeeds.push({ feat, min });
-			} catch (e) { /* the probe is optional */ }
-			ST.floorMs = Date.now() - tf;
+			let started = false;
+			if (o.floorAsync) {
+				try {
+					const { Worker } = require('worker_threads');
+					const wd = { maxMs: FLOOR_MS, maxLayers: FLOOR_LAYERS };
+					if (o.file) wd.file = require('path').resolve(String(o.file)); else wd.L = L;
+					const w = new Worker(require('path').join(__dirname, 'floorworker.js'), { workerData: wd });
+					ST.floorProbe = 'running';
+					const hard = setTimeout(() => { if (ST.floorProbe === 'running') { ST.floorProbe = 'cut'; ST.floorMs = Date.now() - tf; } w.terminate().catch(() => {}); }, FLOOR_HARD_MS);
+					if (hard.unref) hard.unref();
+					w.on('message', (m) => {
+						if (ST.floorProbe !== 'running') return;
+						ST.floorProbe = m && m.error ? 'error' : 'done'; ST.floorMs = Date.now() - tf;
+						if (m && !m.error) setFloors(m.floors);
+						clearTimeout(hard); w.terminate().catch(() => {});
+					});
+					w.on('error', () => { if (ST.floorProbe === 'running') { ST.floorProbe = 'error'; ST.floorMs = Date.now() - tf; } clearTimeout(hard); });
+					w.unref();
+					started = true;
+				} catch (e) { started = false; }
+			}
+			if (!started) {
+				try {
+					const st = require('../steer.js').buildSteer(L, { maxMs: FLOOR_MS, noDP: true, maxLayers: FLOOR_LAYERS });
+					setFloors((st && st.info && st.info.floors) || []);
+				} catch (e) { /* the probe is optional */ }
+				ST.floorMs = Date.now() - tf;
+			}
 		}
 	}
 	ST.floors = floorNeeds.map((n) => `${n.feat}>=${n.min}`).join(' ') || '';
@@ -197,16 +234,41 @@ function createPlanner(model, facts, o = {}) {
 	// the fully open level (every tile but the static walls): the heuristics
 	let openMask = null;
 	const openDist = new Map();
+	const openOf = () => { if (!openMask) { openMask = new Uint8Array(model.N); for (let i = 0; i < model.N; i++) openMask[i] = model.A.cls[i] !== 0 ? 1 : 0; } return openMask; };
+	// (the open level's walks backwards from the trophy and from the killing tiles (model.revDist): the same numbers as one
+	// bfs per position (min over the goals), one search for every position; EEAT_PLAN_REVH=0: a bfs per position, as before:
+	// Moving Ice Puzzle's root has 3,346 trigger positions, 16.7 s of bfs in its first lowerBound expansion, Cold World's 568
+	// most of its first plan's 3.9 s)
+	const REVH = process.env.EEAT_PLAN_REVH !== '0' && typeof model.revDist === 'function';
+	let revTro = null, revDie = null;
+	const hsMemo = new Map();
+	const revMin = (R, tiles) => { let b = INF; for (const c of model.hopClosure(openOf(), tiles)) if (R[c] < b) b = R[c]; return b; };
 	function hSteps(pos) {
+		if (REVH) {
+			let h = hsMemo.get(pos.id);
+			if (h === undefined) { if (!revTro) revTro = model.revDist(openOf(), trophyTiles); h = revMin(revTro, pos.tiles); hsMemo.set(pos.id, h); }
+			return h;
+		}
 		let d = openDist.get(pos.id);
 		if (!d) {
-			if (!openMask) { openMask = new Uint8Array(model.N); for (let i = 0; i < model.N; i++) openMask[i] = model.A.cls[i] !== 0 ? 1 : 0; }
-			d = model.bfs(openMask, pos.tiles);
+			d = model.bfs(openOf(), pos.tiles);
 			openDist.set(pos.id, d);
 		}
 		let b = INF;
 		for (const t of trophyTiles) if (d[t] < b) b = d[t];
 		return b;
+	}
+	/** the open level's walk steps from pos to the nearest tile the ball can die in */
+	function dieSteps(pos) {
+		if (REVH) {
+			if (!revDie) { const g = []; for (let i = 0; i < model.N; i++) if (model.dieTile[i]) g.push(i); revDie = model.revDist(openOf(), g); }
+			return revMin(revDie, pos.tiles);
+		}
+		hSteps(pos);
+		const d = openDist.get(pos.id);
+		let dk = INF;
+		for (let i = 0; i < model.N; i++) if (model.dieTile[i] && d[i] < dk) dk = d[i];
+		return dk;
 	}
 	let openResp = null;
 	const hMemo = new Map(), hdMemo = new Map();
@@ -219,9 +281,7 @@ function createPlanner(model, facts, o = {}) {
 		if (had !== undefined) return had;
 		let best = hSteps(pos);
 		if (model.canDie) {
-			const d = openDist.get(pos.id);
-			let dk = INF;
-			for (let i = 0; i < model.N; i++) if (model.dieTile[i] && d[i] < dk) dk = d[i];
+			const dk = dieSteps(pos);
 			if (dk < INF) {
 				if (openResp === null) openResp = hSteps(respawnPos);
 				if (openResp < INF) best = Math.min(best, dk + openResp + Math.ceil(DEAD_TICKS / PACE0));
@@ -236,9 +296,7 @@ function createPlanner(model, facts, o = {}) {
 		if (had !== undefined) return had;
 		let best = lbOfSteps(hSteps(pos));
 		if (model.canDie) {
-			const d = openDist.get(pos.id);
-			let dk = INF;
-			for (let i = 0; i < model.N; i++) if (model.dieTile[i] && d[i] < dk) dk = d[i];
+			const dk = dieSteps(pos);
 			if (dk < INF) {
 				if (openResp === null) openResp = hSteps(respawnPos);
 				if (openResp < INF) best = Math.min(best, lbOfSteps(dk) + DEAD_TICKS + lbOfSteps(openResp));
@@ -878,7 +936,9 @@ function createPlanner(model, facts, o = {}) {
 		return `${p.partial ? 'PARTIAL ' : ''}plan ${p.id}: est ${p.cost} ticks, lb ${p.lb}: ` + p.steps.map((s) => s.waypoint.label + (s.rung ? `[r${s.rung}]` : '')).join(' -> ');
 	}
 	const stats = () => Object.assign({}, ST, { pace: pace(), model: model.stats() });
-	return { plan, learn, lowerBound, costOf, explain, stats, _edgesOf: edgesOf, _hLb: hLb, _anchorOf: anchorOf };
+	/** the floors' version: bumps when an async floor probe adds floors (plans made before it priced the trophy edge without) */
+	const floorVersion = () => floorVer;
+	return { plan, learn, lowerBound, costOf, explain, stats, floorVersion, _edgesOf: edgesOf, _hLb: hLb, _anchorOf: anchorOf };
 }
 
 module.exports = { createPlanner, PACE0 };

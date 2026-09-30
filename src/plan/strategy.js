@@ -74,6 +74,9 @@ const FALLBACK_MAX = 6;
 // bound gets LB_MS; a lowerBound call that took LB_SLOW_MS or more is not made again that compile (a synchronous part that
 // overruns its budget cannot be cut: Moving Ice Puzzle's took 90 s with 1.5 s asked)
 const ARR_LB_MS = 25, ARR_LB_EXPAND = 20000, LB_MS = 1500, LB_SLOW_MS = 5000;
+// (the start's bound in the bounds stage gets LB0_MS: it only reports (the report's lb, the polish's stop) until the end,
+// where the refresh takes the whole LB_MS again and keeps the larger; the stage's clock goes to the moves instead)
+const LB0_MS = +process.env.EEAT_LB0_MS || 500;
 /** a relative deadline (a step's or a waypoint's beforeTickFrom): a number, or 'prev+N' (N ticks after the previous
  *  step's arrival, i.e. this anchor's arrival: a key's KEY_TICKS) -> ticks | NaN */
 function relOf(x) {
@@ -139,6 +142,21 @@ const lbTicks = (r) => {
 const IDLE_MAX = 3000;
 function idleRunLB(L, bounds, goal) {
 	const sim = new E.EESim(L), inp = new E.EEInput();
+	// (first the idle trajectory alone: a ball that does not rest within IDLE_MAX ticks gets 0 (no claim) either way, so its
+	// IDLE_MAX + 1 bounds.leg calls (1.2-3.7 s on 8 of the 15 STAGE-TIME levels: a clock in the state never repeats) are
+	// not made)
+	{
+		sim.reset(); E.applyMask(inp, 0);
+		let h = sim.stateHash(), rests = false;
+		for (let i = 0; i <= IDLE_MAX && !rests; i++) {
+			if (sim.has_silver_crown) return 0;
+			sim.tick(inp);
+			const h2 = sim.stateHash();
+			if (h2 === h && !sim.is_dead) rests = true;
+			h = h2;
+		}
+		if (!rests) return 0;
+	}
 	sim.reset();
 	E.applyMask(inp, 0);
 	let lb = Infinity, h = sim.stateHash();
@@ -244,7 +262,9 @@ async function compile(L, opts = {}, emit = () => {}) {
 		try { bounds = await parts.createBounds(L, { model }); } catch (e) { bounds = null; say({ ev: 'warning', text: `the bounds could not be built (${e.message}): no admissible bound but the planner's` }); }
 	}
 	const facts = parts.createFacts({ rungs: 4, model });
-	const planner = parts.createPlanner(model, facts, { bounds, seed: opts.seed });
+	// (the planner's floor probe runs in a worker thread off the bounds stage: EEAT_PLAN_FLOOR_ASYNC=0 in line, as before)
+	const planner = parts.createPlanner(model, facts, { bounds, seed: opts.seed, file: opts.file, floorAsync: process.env.EEAT_PLAN_FLOOR_ASYNC !== '0' });
+	const floorVerOf = () => { try { return typeof planner.floorVersion === 'function' ? planner.floorVersion() : 0; } catch (e) { return 0; } };
 	// (the arrivals' room: goexplore.js roomOf, a pure function of the level: the contract's RM, no search)
 	const GX = opts.RM ? null : require('../goexplore.js');
 	const RM = opts.RM || GX.roomOf(L);
@@ -299,7 +319,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	// (a part that overruns its own budget cannot be cut here (a synchronous call): the call is timed, and one that took
 	// LB_SLOW_MS or more is not made again this compile (the arrivals' bounds, the refresh at the end))
 	let lbSlow = false, planSlowSaid = false;
-	try { const tq = Date.now(); const r = planner.lowerBound ? planner.lowerBound(startAnchorArg, { ms: LB_MS }) : null; lbPlanner = lbTicks(r); lbComplete = !!(r && r.complete); if (Date.now() - tq >= LB_SLOW_MS) { lbSlow = true; say({ ev: 'warning', text: `the planner's lowerBound took ${((Date.now() - tq) / 1000).toFixed(1)} s (asked ${LB_MS / 1000} s): not called again this compile` }); } } catch (e) { say({ ev: 'bug', what: 'lowerBound', error: e.message }); }
+	try { const tq = Date.now(); const r = planner.lowerBound ? planner.lowerBound(startAnchorArg, { ms: LB0_MS }) : null; lbPlanner = lbTicks(r); lbComplete = !!(r && r.complete); if (Date.now() - tq >= LB_SLOW_MS) { lbSlow = true; say({ ev: 'warning', text: `the planner's lowerBound took ${((Date.now() - tq) / 1000).toFixed(1)} s (asked ${LB0_MS / 1000} s): not called again this compile` }); } } catch (e) { say({ ev: 'bug', what: 'lowerBound', error: e.message }); }
 	if (lbPlanner === Infinity) { lbInf = true; lbPlanner = 0; say({ ev: 'warning', text: 'the planner\'s lower bound from the start is infinite: no way to the trophy in its relaxation (a proof there, if the model is sound); the moves try anyway' }); }
 	if (bounds && typeof bounds.leg === 'function') {
 		try { lbBounds = idleRunLB(L, bounds, T.goalOf(L, { kind: 'trophy', label: 'trophy' })); } catch (e) { say({ ev: 'warning', text: `bounds.leg: ${e.message}` }); }
@@ -529,7 +549,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 		return Math.min(d, Number.isFinite(tickBound) ? tickBound + 1 : Infinity);
 	};
 	const planOfAnchor = (A) => {
-		const v = factsVer(facts);
+		// (the plan memo's version: the facts', and the planner's floors (an async floor probe's answer re-plans))
+		const v = factsVer(facts) + floorVerOf() * 1e9;
 		if (A.plans && A.planVer === v && A.planEpoch === epoch && A.planBound === runBound()) return A.plans;
 		const rb = runBound();
 		pruneArrivals(A);
@@ -1123,4 +1144,4 @@ function run(L, opts = {}, emit = () => {}) {
 	return compile(L, Object.assign({ seconds: 300, sourceDist: true }, opts), emit);
 }
 
-module.exports = { compile, run, knownOf, md5Of, partsOf, plansOf, RUNG_MS, STALL_S, POLISH_MS, POLISH_F };
+module.exports = { compile, run, knownOf, md5Of, partsOf, plansOf, idleRunLB, RUNG_MS, STALL_S, POLISH_MS, POLISH_F };
