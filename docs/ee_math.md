@@ -1053,7 +1053,60 @@ slack)`. A target: `{tiles: [tile index], cls: 'G' | 'Z' | 'W' | 'C' | 'B' | 'A'
 `EESnapshot` or an `EESim`. `node test/msolve.js [--quick] [--samples=N]`;
 `EEAT_TRUTH_ROOT=<root> node tools/math/msolve_bench.js --moves=<exact_jsonl> --out=<dir> --shard=i/n` then `--agg=<dir>`;
 `tools/math/msolve_chain.js` likewise (`--chain=4 --every=48 --ms=5000`; `--w`, `--w1`, `--phase1`, `--fanMax`,
-`--fanNodes`, `--events=0`, `--reach=0`, `--kappa`).
+`--fanNodes`, `--events=0`, `--reach=0`, `--kappa`). The land-and-act members (4.10): `o.land` (default on,
+`EEAT_MSOLVE_LAND=0` off), `o.landStanding` (off), `o.landRows` (6 landings a base member), `o.plainMs` (the plain
+tier's clock); `EEAT_TRUTH_ROOT=<root> node tools/math/msolve_air.js --moves=<exact_jsonl> --out=<dir> --shard=i/n
+[--span=2] [--cls=any] [--coupled=1] [--fields=1]` then `--agg=<dir>`; `msolve_bench.js --land=0`.
+
+### 4.10 The land-and-act members (the coverage iteration)
+
+The compiler's missed legs (section 7.6) start in the AIR (79% of the trigger / trophy legs the search tiers found: an
+arrival is the touch of a coin or a switch mid-flight), and the plain tier's airborne start was ONE member, the launched
+trajectory to its landing: a leg that lands and acts again (a hop, a jump, a walk-off, a walk on) was the chain tier's
+(7% success in the compile).
+
+**THEOREM L (a landing composes).** In the plain regime a member that crosses the floor line 16 fr - 16 descending at
+tick T1, the box over a floor of row fr, ends tick T1 with y = the line and vy = 0 (the collision's), on the ground:
+from T1 on it is a STANDING ball of row fr, whatever the x pattern was (the plain regime's x recurrence is the same on
+the ground and in the air, section 2; the landing changes y alone). So the gravity axis of a leg through one landing is
+the base member up to T1 followed by the standing family from (line, T1): a jump at j2 >= T1 (j2 = T1 is the landing
+hop; y(t) = gravTrace(line, J)[t - j2] for t > j2), a walk-off at o2 > T1 (the fall from the line from o2 on), or the
+walk. A two-parameter family (T1 = the member's crossing tick of each floor line with a floor under the hold range, at
+most `o.landRows` 6 a base; j2 or o2), each member a closed form of the tables. The x axis is ONE pattern across the
+landing (<= K changes over the whole leg), the tube: before T1 the base member's, at T1 the landing test (the box free
+at the line, a floor of row fr under the raw / first-sub-step / aligned x), on the ground ticks the floor under the
+first x sub-step (the walk-off rule), the walk-off tick without it, after the act the member's own flight; the jump bits
+at the base's jump tick and at j2. Every candidate is replayed by the engine as before (a miss: the next candidate), so
+the family only orders and proposes: nothing is claimed that the engine did not play.
+
+**The cost rule.** Only airborne starts get the members by default (`o.landStanding`: a standing start's jump / walk-off
+members as bases too). On the single real moves (msolve_bench, every 4th move, box 3) the standing bases lost 43 of
+11,747 legs (39 jumps: the new items at the same T spent the jump members' node budget) and won 5 hops, 93 answers longer
+and 63 shorter. A failing leg now spends its whole node budget (400 k nodes: p90 421 ms vs 1 ms on the airborne legs
+below), so `o.plainMs` gives the plain tier a clock (checked per item and every 2,048 nodes); the compiler's executor
+passes half of its time left.
+
+**Measured** (box 3, `tools/math/msolve_air.js`: the route's exact state in the middle of every flight move of the 218
+routes, class A, to the support TWO moves on (land + act + arrive: the end of the next move), Tmax = the route's ticks
+from there + 10 (at most 150), the plain tier alone, the members on and off in one process, every answer replayed again
+by a separate EESim with the moves study's test):
+
+| airborne start -> the support 2 moves on | legs | solved on / off | <= route on / off | < route (on) |
+|---|---:|---|---|---:|
+| **all** | 15,281 | **58.0% / 4.7%** | **53.2% / 4.6%** | 17.1% |
+| hop > hop | 5,123 | 75.6% / 3.9% | 70.2% / 3.9% | 8.1% |
+| jump > hop | 1,484 | 68.8% / 6.3% | 64.8% / 6.3% | 13.0% |
+| hop > jump | 1,472 | 64.6% / 5.0% | 58.6% / 5.0% | 46.3% |
+| jump > jump | 918 | 70.2% / 6.5% | 62.9% / 6.5% | 50.5% |
+| fall > fall | 894 | 69.9% / 1.7% | 64.4% / 1.7% | 13.2% |
+| hop > fall | 659 | 67.8% / 3.2% | 60.1% / 3.2% | 19.9% |
+| hop > arrow / dot, jump > arrow | 2,084 | 6.5-15.4% / 1.7-6.7% | | |
+
+0 answers rejected by the independent replay; 8,154 legs solved only with the members, 0 only without; of the 712
+both solved, the same T in every one. The time a leg (the loaded box): median 6.3 ms vs 0.22 ms, p90 421 ms vs 1 ms
+(the failures' whole node budget: hence the clock). The field crossings (> arrow, > dot) stay the field / coupled
+tiers' (the plain tier alone here); the failures: no plain candidate 5,532 (the field crossings, a second landing, a
+bonk after the landing, K > 2), the node budget 707, not plain 176.
 
 ### 4.10 The field legs: the coupled piece's jump families and the speed-limit cut (the fields iteration)
 

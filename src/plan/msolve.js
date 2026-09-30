@@ -1026,20 +1026,24 @@ function createSolver(L, opts = {}) {
 				}
 			} else res = solvePlain(snap, sim, ctx, tg, goal, oo, stats);
 		}
-		if (!res.ok && oo.fields !== false && !target.tele) {
+		// a plain answer through a landing (4.10) is the plain regime's cheapest, not the cheapest of every tier: a way
+		// through a field or the coupled one-change family can be shorter (the single moves' hops: 30 of 11,747 legs
+		// longer than the field / coupled tiers' answers), so the other tiers are asked below its T too
+		const landAns = res.ok && res.tool === 'plain' && typeof res.member === 'string' && res.member.includes('>land');
+		if ((!res.ok || landAns) && oo.fields !== false && !target.tele && (!landAns || res.T > 1)) {
 			// THE FIELD TIER (src/math/fieldsolve.js, the fields derivation): the start field's axis roles, the gravity
 			// axis' option trajectories, the input axes solved by fields.solveAxis in the goal's windows, the schedule
 			// iteration across field boundaries; its candidates replayed by the engine there
 			sim.restore(snap);
-			const r = FSOLVE().solveLeg(L, sim, { tiles: tg.tiles, cls: tg.cls === 'any' ? null : tg.cls, maxT: oo.Tmax }, { k: oo.fieldK || 2, maxMs: oo.fieldMs || 250 });
+			const r = FSOLVE().solveLeg(L, sim, { tiles: tg.tiles, cls: tg.cls === 'any' ? null : tg.cls, maxT: landAns ? res.T - 1 : oo.Tmax }, { k: oo.fieldK || 2, maxMs: oo.fieldMs || 250 });
 			stats.fields = (stats.fields || 0) + 1;
 			if (r.ok) {
 				// the goal replayed here by this solver's own test (the same letters; a teleport goal never reaches here)
 				const hit = replay(snap, r.masks, goal);
-				if (hit > 0) res = { ok: true, tool: 'field', T: hit, masks: Uint8Array.from(r.masks.subarray(0, hit)), member: r.tool };
+				if (hit > 0 && (!res.ok || hit < res.T)) res = { ok: true, tool: 'field', T: hit, masks: Uint8Array.from(r.masks.subarray(0, hit)), member: r.tool };
 			}
 		}
-		if (res.ok && res.tool === 'field' && oo.coupled !== false && res.T > 1) {
+		if (res.ok && (res.tool === 'field' || landAns) && oo.coupled !== false && res.T > 1) {
 			// cheapest T across the tiers: the coupled piece below the field answer's T
 			const r = solveCoupled(snap, sim, tg, goal, Object.assign({}, oo, { Tmax: res.T - 1 }), stats);
 			if (r.ok && r.T < res.T) res = r;
