@@ -55,6 +55,7 @@ const TRICKS = new Set(String(process.env.EEAT_TRICKS || '').split(',').map((s) 
 const TR_ALL = TRICKS.has('1') || TRICKS.has('all');
 const TR_WARP = TR_ALL || TRICKS.has('warp');
 const TR_EXH = TR_ALL || TRICKS.has('exh');
+const TR_DBG = process.env.EEAT_TRICKS_DEBUG === '1';
 const WARP_MIN = +process.env.EEAT_WARP_MIN || 30;       // est ticks a warp must save at least
 const WARP_F = +process.env.EEAT_WARP_F || 0.8;          // and the death's est at most this share of the walk's
 // the diversification rule (nearPlans): one-step plans to the nearest untried triggers once every plan's first leg
@@ -498,7 +499,10 @@ function createPlanner(model, facts, o = {}) {
 				if (sE < INF) {
 					est = sE * P + extra; steps = sE;
 					// (THE DEATH WARP, EEAT_TRICKS warp: the death's est clearly below the walk's)
-					if ((TR_WARP || forceDeath) && drE && rE < INF) {
+					// (not on a level with a TIMED killer: there every tile is a death tile (model.dieTile, the lb's sound source)
+					// and the est's 0 walk steps to a death are a curse's / poison's timer in truth: Evolution Revolution's
+					// first A/B pair planned 10 warps, gain 1 vs 6)
+					if ((TR_WARP && !model.timed || forceDeath) && drE && rE < INF) {
 						const eD = (dvE.dk + rE) * P + DEAD_TICKS + extra;
 						if (forceDeath || (eD + WARP_MIN <= est && eD <= WARP_F * est)) { est = eD; steps = dvE.dk + rE; viaDeath = true; }
 					}
@@ -520,6 +524,7 @@ function createPlanner(model, facts, o = {}) {
 			let g = null;
 			if (TR_EXH && wantEst && exhausted.has(edge + '\u0001' + cls)) {
 				const gd = leg(tiles, true);
+				if (TR_DBG) { let rE = INF, sE = INF; const drE = dvE ? dvE.dr : null; for (const t of tiles) { if (drE && drE[t] < rE) rE = drE[t]; if (dE && dE[t] < sE) sE = dE[t]; } process.stderr.write(`[tricks exh] ${edge} viaDeath ${gd ? gd.viaDeath : null} relax ${gd ? gd.relaxOnly : null} dk ${dvE ? dvE.dk : null} sE ${sE} rE ${rE} cp ${S.cp} rsp ${model.respawnOf(S, 'est').id} cls ${String(cls).slice(-28)}\n`); }
 				if (gd && gd.viaDeath) { g = gd; edge += '~w'; }
 			}
 			if (!g) g = leg(tiles);
@@ -1061,6 +1066,7 @@ function createPlanner(model, facts, o = {}) {
 		}
 		const fail = (result && result.fail) || { why: 'budget' };
 		if (TR_EXH && fail.why === 'exhausted' && model.canDie && !/~w$/.test(edge)) exhausted.add(edge + '\u0001' + cls);
+		if (TR_DBG) process.stderr.write(`[tricks learn] ${edge} why ${fail.why} canDie ${model.canDie} cls ${String(cls).slice(-24)}\n`);
 		const sKey = a ? proofKey(a.S, a.pos) : (cls || '').split('|')[0];
 		if (fail.why === 'proof') out.push(facts.add({ kind: 'proof', edge, sKey }));
 		for (const b of fail.blockedBy || []) {
