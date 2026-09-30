@@ -34,6 +34,53 @@ const T = require('./types.js');
 // the zero-speed bucket of legBest's cells (doctor 8, n5-doc-8; DEFAULT ON since n5 lane 6 block 1, EEAT_CELL_ZERO=0 = the cells as
 // before): legBest's cellKey
 const ZERO_CELL = process.env.EEAT_CELL_ZERO !== '0';
+// THE EFFECT CELL (COMPILER DOCTOR b9, n5; OPT-IN EEAT_FX_CELL=1, off = the cells as before, byte for byte): legBest's and
+// legBFS's cells (position, speed, ground, jumps, dead + the door state dkOf) carried NO effect state, so a ball that took
+// an effect (low gravity, fly, multijump, jump / speed boost, gravity, protection, curse / poison / fire) and came back to a
+// place the plain ball had already visited shared the plain ball's cell and was merged away as a duplicate: the effect
+// detour, the whole point of an effect puzzle, is pruned. Bad EE Level 9's mini 3: the switch is 6 tiles past a 1-tall
+// corridor over a spike pit that only a low-gravity ball crosses, the low-gravity tile in a pocket 1 tile above the
+// entrance; the plain ball walks the corridor's first tiles first, the low-gravity ball that jumps into the pocket and
+// drops back lands in the same cells and is closed (tools/cmp/legab.js from the mini's entrance, a fresh executor a rep,
+// rungs 1-3 = 65 s: 0 of 5 reps, closest 40.6 tiles in the pit in every rep; with the knob 5 of 5 at rung 1, 4.6-5.3 s,
+// 524-534 ticks). exact.js keys by the full stateHash (effects in) and prims' featSig has them.
+const FX_CELL = process.env.EEAT_FX_CELL === '1';
+/** the effect state of the ball as one word (0 = plain: no effect on) */
+const fxWord = (sim) => (sim.low_gravity ? 1 : 0) | (sim.has_levitation ? 2 : 0) | ((sim.flip_gravity & 7) << 2) | ((sim.jump_boost & 3) << 5) |
+	((sim.speed_boost & 3) << 7) | (((sim.max_jumps === 1 ? 0 : (sim.max_jumps & 63) + 1)) << 9) | (sim.is_invulnerable ? 1 << 16 : 0) |
+	(sim.is_cursed ? 1 << 17 : 0) | (sim.is_poisoned ? 1 << 18 : 0) | (sim.is_on_fire ? 1 << 19 : 0);
+
+// THE QUEUE CELL (COMPILER DOCTOR b9, n5; OPT-IN EEAT_Q_CELL=1, off = the cells as before): the engine's gravity queue
+// (eesim.js _q0 / _q1: the tiles whose pull acts this tick and next) is no part of a cell either, so a ball entering a
+// ladder / dot / arrow / liquid row from the air and one already in it share a cell for the 1-2 ticks their pulls differ.
+// A word only while the two queued pulls differ (a transition): steady states keep their cells. Bad EE Level 9's mini 5
+// (a ladder maze between spike columns; tools/cmp/legab.js from its entrance, box 6): 3 of 3 at rung 2 either way, the
+// leg 571 ticks with it vs 884 without (EEAT_FX_FIELD=1: 0 of 3 at rungs 1-3).
+const Q_CELL = process.env.EEAT_Q_CELL === '1';
+const pullOf = (L, t) => ((Math.round(L.gMox[t] * 64) & 0x3ff) | ((Math.round(L.gMoy[t] * 64) & 0x3ff) << 10) | ((L.gFlags[t] & 2) << 19));
+/** the gravity queue's transition word (0 = both queued tiles pull alike) */
+const qWord = (sim) => {
+	const L = sim.level;
+	if (!L || !L.gMox) return 0;
+	const a = pullOf(L, sim._q0), b = pullOf(L, sim._q1);
+	return a === b ? 0 : ((a * 0x9e3779b1) ^ b) | 1;
+};
+
+// THE KEY CELL (COMPILER DOCTOR b9, n5; OPT-IN EEAT_KEY_CELL=1, off = the cells as before): a held key runs out 500 ticks
+// after its last pickup (eesim.js _kt), and dkOf has only which keys are held: a ball that took the key late (much time
+// left) and one that took it early (about to run out: a key GATE opens, a key DOOR shuts) share a cell. A word per held key:
+// its time left in 50-tick buckets. No key held: the cells as before. Bad EE Level 9's mini 1 (blue keys, key doors and
+// gates around its switch; legab from its entrance): 3 of 3 at rung 2 either way (367 vs 361 ticks): no gain shown.
+const KEY_CELL = process.env.EEAT_KEY_CELL === '1';
+const KEY_BUCKET = 50;
+/** the held keys' time-left word (0 = no key held) */
+const keyWord = (sim) => {
+	const m = sim._keysMask | 0;
+	if (m === 0 || !sim._kt) return 0;
+	let w = 0;
+	for (let c = 0; c < 6; c++) if (m & (1 << c)) w = Math.imul(w ^ (c + 1), 0x01000193) ^ Math.max(0, Math.floor((500 - (sim._ticks - sim._kt[c])) / KEY_BUCKET));
+	return w | 1;
+};
 
 /** the fine cell of the state in sim (a number: FNV over the cell's parts) */
 function cellOf(sim, disc) {
@@ -43,6 +90,9 @@ function cellOf(sim, disc) {
 	mix((sim.on_ground ? 1 : 0) | ((sim.jump_count & 255) << 1) | (sim.is_dead ? 512 : 0)); mix(disc | 0);
 	// (EEAT_CELL_ZERO=1: the state at rest on the tile grid, per axis, a cell of its own, as legBest's cellKey)
 	if (ZERO_CELL) { const ax = sim.speed_x === 0 && sim.px % 16 === 0, ay = sim.speed_y === 0 && sim.py % 16 === 0; if (ax || ay) mix(0x7f00 | (ax ? 1 : 0) | (ay ? 2 : 0)); }
+	if (FX_CELL) { const f = fxWord(sim); if (f !== 0) mix(0x5a000000 | f); }
+	if (Q_CELL) { const q = qWord(sim); if (q !== 0) { mix(0x5b000000); mix(q); } }
+	if (KEY_CELL) { const k = keyWord(sim); if (k !== 0) { mix(0x5c000000); mix(k); } }
 	// (a second word so that two cells share a number only by a 52-bit accident)
 	let g = 0x2545f491 | 0;
 	g ^= Math.floor(sim.px * 7) | 0; g = Math.imul(g, 0x5bd1e995); g ^= Math.floor(sim.py * 3) | 0; g = Math.imul(g, 0x5bd1e995);
@@ -505,6 +555,9 @@ function legBest(L, starts, goal, o) {
 			if (ax || ay) mix(0x7f00 | (ax ? 1 : 0) | (ay ? 2 : 0));
 		} else { mix(Math.floor(sim.px * q0) | 0); mix(Math.floor(sim.py * q1) | 0); mix(Math.floor(sim.speed_x * q2) | 0); mix(Math.floor(sim.speed_y * q3) | 0); }
 		mix((sim.on_ground ? 1 : 0) | ((sim.jump_count & 255) << 1) | (sim.is_dead ? 512 : 0) | (CLOCK && sim._timedoor_state ? 1024 : 0));
+		if (FX_CELL) { const f = fxWord(sim); if (f !== 0) mix(0x5a000000 | f); }
+		if (Q_CELL) { const q = qWord(sim); if (q !== 0) { mix(0x5b000000); mix(q); } }
+		if (KEY_CELL) { const k = keyWord(sim); if (k !== 0) { mix(0x5c000000); mix(k); } }
 		ka = h; kb = dkOf(sim) | 0;
 	};
 	const goals = [];
@@ -803,4 +856,153 @@ const distOf = (field, sim) => {
 	return c;
 };
 
-module.exports = { legBFS, legBest, cellOf, eta };
+/**
+ * THE COVERAGE FINDER (doctor 7, n5-doc-7; OPT-IN EEAT_COVER=1: the executor's tier 3 runs it first for EEAT_COVER_SHARE of
+ * its window from rung EEAT_COVER_RUNG on). The other finders rank by the goal field (legBest: f = tick + w x the field's
+ * time; legBFS: the field's rank per layer), and the field is a relaxation: where the only way to the goal first goes AWAY
+ * from it (a run-up: an arrow field, a boost, a pump; a detour around a wall the relaxation crosses) every state of the
+ * detour ranks behind the whole false near's region, and a 400-1,000-tick leg ends 'budget' at every rung. Measured on the
+ * known routes of doctor 7's batch (src/out/n5/doctor/batch7.md): along the route's own leg the goal field RISES by 28.4
+ * tiles (K Underground, checkpoint (17,80) -> (64,84): the run-up column (9, 73-76) into the right-arrow field), 36.4
+ * (Helix Reborn), 21.6 (Vignettes), 16.6 (The Tunnels), 12.6 (Endeavor) before it falls to the goal, and legBest fails
+ * those legs at rungs 1-2 from the route's OWN state (tools/cmp/krt.js). This finder does not follow the field: coarse
+ * cells (the centre tile, 7 x-speed and 7 y-speed classes, on the ground, the door-reading state) keep their EARLIEST
+ * arrival; a cell is picked by novelty (a tournament of COV_K cells by 1 / sqrt(1 + picks) + 0.5 / sqrt(1 + seen)), a
+ * share COV_PF of the picks the field's nearest of a sample (the pull toward the goal), and from it COV_R sticky random
+ * rollouts of 20-60 ticks (an input kept with p COV_KEEP) inside the executor's region; the goal test is the executor's
+ * (X.goalAt), every new cell a node of a path tree, so a find is a path of real inputs (the executor replays it, as every
+ * finder's). A seeded PRNG (the same seed, the same search for a given tick budget). Not a proof, not a bound.
+ *   legCover(L, starts, goal, o) -> legBest's result shape: {status 'found' | 'time' | 'stopped' | 'exhausted', goals
+ *   [{start, tail, depth}], tick, depth, start, tail, closest {dist, start, tail}, sims, passes, seconds, t0}
+ *   o: {sim, deadline, stop, allowDeath, beforeTick, field, region, depthMax, seed, maxCells}
+ */
+const COV_K = 16, COV_PF = +process.env.EEAT_COVER_PF >= 0 && process.env.EEAT_COVER_PF !== undefined ? +process.env.EEAT_COVER_PF : 0.25;
+const COV_R = 4, COV_KEEP = +process.env.EEAT_COVER_KEEP > 0 ? +process.env.EEAT_COVER_KEEP : 0.9;
+const COV_MASKS = (() => { const a = []; for (const h of [0, 2, 4]) for (const v of [0, 8, 16]) for (const j of [0, 1]) a.push(h | v | j); return a; })();
+function covVx(v) { return v <= -9 ? 0 : v <= -7 ? 1 : v <= -5 ? 2 : v <= -2.5 ? 3 : v < -0.5 ? 4 : v < 0.5 ? 5 : v < 2.5 ? 6 : v < 5 ? 7 : v < 7 ? 8 : v < 9 ? 9 : 10; }
+function covVy(v) { return v <= -8 ? 0 : v <= -4 ? 1 : v < -1 ? 2 : v < 1 ? 3 : v < 4 ? 4 : v < 8 ? 5 : 6; }
+function legCover(L, starts, goal, o) {
+	o = o || {};
+	const sim = o.sim || new E.EESim(L), inp = new E.EEInput();
+	const W = L.width, H = L.height;
+	const allowDeath = !!o.allowDeath;
+	const deadline = o.deadline || Infinity, stop = o.stop || null;
+	const beforeTick = o.beforeTick >= 0 ? o.beforeTick : -1;
+	const field = o.field || null, region = o.region || null;
+	const maxCells = o.maxCells > 0 ? o.maxCells : (+process.env.EEAT_COVER_CELLS || 40000);
+	const tStart = Date.now();
+	let seed = (o.seed >>> 0) || 0x9e3779b9;
+	const rnd = () => { seed = (seed + 0x6D2B79F5) >>> 0; let t = seed; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+	const order = starts.map((s, i) => i).sort((a, b) => starts[a].tick - starts[b].tick || a - b);
+	const t0 = starts[order[0]].tick;
+	let depthMax = o.depthMax > 0 ? o.depthMax : 4000;
+	if (beforeTick >= 0) depthMax = Math.min(depthMax, beforeTick - t0);
+	const dkOf = discKeyCache();
+	// the path tree: a node = its parent, the inputs from the parent's state to its own, its depth (ticks past t0)
+	const nPar = [], nSeg = [], nG = [], nStart = [];
+	// the cells: key -> index; per cell its node, snapshot, picks, seen, field distance
+	const cellIx = new Map();
+	const cNode = [], cSnap = [], cPick = [], cSeen = [], cDist = [];
+	const keyOf = () => {
+		const cx = (sim.px + 8) >> 4, cy = (sim.py + 8) >> 4;
+		return `${(cy * W + cx) * 154 + covVx(sim.speed_x) * 14 + covVy(sim.speed_y) * 2 + (sim.on_ground ? 1 : 0)}|${dkOf(sim) | 0}`;
+	};
+	const pathOf = (node, extra, n) => {
+		const segs = [];
+		let k = node;
+		while (k >= 0) { segs.push(nSeg[k]); if (nPar[k] < 0) break; k = nPar[k]; }
+		let len = n || 0;
+		for (const s of segs) len += s.length;
+		const tail = new Uint8Array(len);
+		let p = 0;
+		for (let i = segs.length - 1; i >= 0; i--) { tail.set(segs[i], p); p += segs[i].length; }
+		if (n) tail.set(extra.subarray(0, n), p);
+		return { start: nStart[node], tail };
+	};
+	const goals = [];
+	const closest = { dist: -1, start: -1, tail: null, node: -1, pop: -1 };
+	let sims = 0, picks = 0, lastPoll = 0;
+	for (const s of order) {
+		sim.restore(starts[s].snap);
+		if (sim.is_dead && !allowDeath) continue;
+		const j = nPar.length;
+		nPar.push(-1); nSeg.push(new Uint8Array(0)); nG.push(starts[s].tick - t0); nStart.push(s);
+		if (X.goalAt(goal, sim, starts[s].tick, beforeTick)) { goals.push({ start: s, tail: new Uint8Array(0), depth: starts[s].tick - t0 }); continue; }
+		const k = keyOf();
+		if (cellIx.has(k)) continue;
+		const d = distOf(field, sim);
+		cellIx.set(k, cNode.length); cNode.push(j); cSnap.push(sim.snapshot()); cPick.push(0); cSeen.push(1); cDist.push(d);
+		if (d < 1e9 && (closest.dist < 0 || d < closest.dist)) { closest.dist = d; closest.node = j; }
+	}
+	const buf = new Uint8Array(64);
+	let why = 'time';
+	if (goals.length) why = 'found';
+	else if (!cNode.length) why = 'exhausted';
+	while (!goals.length && cNode.length) {
+		if ((picks & 15) === 0) {
+			const now = Date.now();
+			if (now > deadline) { why = 'time'; break; }
+			if (stop !== null && now - lastPoll >= 20) { lastPoll = now; if (stop()) { why = 'stopped'; break; } }
+		}
+		picks++;
+		// the pick: the field's nearest of a sample (COV_PF of the picks), else novelty
+		const n = cNode.length;
+		let c = -1;
+		if (field && rnd() < COV_PF) {
+			let bd = Infinity;
+			for (let s = 0; s < 2 * COV_K; s++) { const i = (rnd() * n) | 0; const v = cDist[i] + 0.5 * Math.sqrt(cPick[i]); if (v < bd) { bd = v; c = i; } }
+		} else {
+			let bs = -1;
+			for (let s = 0; s < COV_K; s++) { const i = (rnd() * n) | 0; const v = 1 / Math.sqrt(1 + cPick[i]) + 0.5 / Math.sqrt(1 + cSeen[i]); if (v > bs) { bs = v; c = i; } }
+		}
+		cPick[c]++;
+		const node0 = cNode[c], g0 = nG[node0];
+		if (g0 >= depthMax) continue;
+		for (let r = 0; r < COV_R && !goals.length; r++) {
+			sim.restore(cSnap[c]);
+			const len = Math.min(20 + ((rnd() * 41) | 0), depthMax - g0, buf.length);
+			let m = COV_MASKS[(rnd() * COV_MASKS.length) | 0];
+			for (let k = 0; k < len; k++) {
+				if (k > 0 && rnd() > COV_KEEP) m = COV_MASKS[(rnd() * COV_MASKS.length) | 0];
+				buf[k] = m;
+				E.applyMask(inp, m); sim.tick(inp); sims++;
+				const g = g0 + k + 1;
+				if (sim.is_dead && !allowDeath) break;
+				if (!sim.is_dead && X.goalAt(goal, sim, t0 + g, beforeTick)) {
+					const p = pathOf(node0, buf, k + 1);
+					goals.push({ start: p.start, tail: p.tail, depth: g });
+					break;
+				}
+				const cx = (sim.px + 8) >> 4, cy = (sim.py + 8) >> 4;
+				if (cx < 0 || cy < 0 || cx >= W || cy >= H) break;
+				if (region !== null && !region[cy * W + cx]) break;
+				if (sim.is_dead) continue;
+				const key = keyOf();
+				const ci = cellIx.get(key);
+				if (ci !== undefined) {
+					cSeen[ci]++;
+					// (an earlier arrival takes the cell: its node and snapshot)
+					if (g < nG[cNode[ci]]) {
+						const j = nPar.length;
+						nPar.push(node0); nSeg.push(buf.slice(0, k + 1)); nG.push(g); nStart.push(nStart[node0]);
+						cNode[ci] = j; cSnap[ci] = sim.snapshot(cSnap[ci]);
+					}
+					continue;
+				}
+				if (cNode.length >= maxCells) continue;
+				const d = distOf(field, sim);
+				const j = nPar.length;
+				nPar.push(node0); nSeg.push(buf.slice(0, k + 1)); nG.push(g); nStart.push(nStart[node0]);
+				cellIx.set(key, cNode.length); cNode.push(j); cSnap.push(sim.snapshot()); cPick.push(0); cSeen.push(1); cDist.push(d);
+				if (d < 1e9 && (closest.dist < 0 || d < closest.dist)) { closest.dist = d; closest.node = j; closest.pop = picks; }
+			}
+		}
+	}
+	if (goals.length) why = 'found';
+	if (closest.node >= 0) { const p = pathOf(closest.node, null, 0); closest.start = p.start; closest.tail = p.tail; }
+	const res = { status: why, passes: [{ pops: picks, cells: cNode.length, why }], sims, closest, seconds: (Date.now() - tStart) / 1000, t0 };
+	if (goals.length) { goals.sort((a, b) => a.depth - b.depth); Object.assign(res, { tick: t0 + goals[0].depth, depth: goals[0].depth, start: goals[0].start, tail: goals[0].tail, goals }); }
+	return res;
+}
+
+module.exports = { legBFS, legBest, legCover, cellOf, eta };

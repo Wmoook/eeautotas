@@ -372,7 +372,10 @@ async function createPrims(L, o = {}) {
 		let guide = null;
 		if (ro.guide !== false && classDedup) {
 			try {
-				const gf = T.goalField(goal.wallLc || L, T.fieldTilesOf(goal), { deaths: false });   // (the executor's counterexample walls: goal.wallLc)
+				// (the plain-ball field when the first start is plain: types.js plainOf, EEAT_FX_FIELD; ordering only here)
+				let pfx = false;
+				if (sts.length) { try { sim.restore(sts[0].snap); pfx = T.plainOf(sim); } catch (e) { pfx = false; } }
+				const gf = T.goalField(goal.wallLc || L, T.fieldTilesOf(goal), { deaths: false, plainFx: pfx });   // (the executor's counterexample walls: goal.wallLc)
 				guide = (s) => { if (deadOK && s.is_dead) return 0; const c = RF.costAt(gf, s); return c < 0 ? GUIDE_FAR : c * GUIDE_K; };
 			} catch (e) { guide = null; }
 		}

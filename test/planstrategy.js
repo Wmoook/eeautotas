@@ -49,6 +49,9 @@ async function runMock(o, lines) {
 }
 async function sectionA() {
 	console.log('(a) the loop with mock parts (the toy: key, door, sealed coin, trophy)');
+	// (the job pick of the default ladder: a1-a8 pin EEAT_RUNG_BREADTH off, a9 compares both; restored at the end)
+	const rbSaved = process.env.EEAT_RUNG_BREADTH;
+	delete process.env.EEAT_RUNG_BREADTH;
 	process.env.PLANMOCK_MODE = 'normal';
 	// (a1) to the first route
 	let x = await runMock({ first: true, out: path.join(TMP, 'a1') });
@@ -162,6 +165,29 @@ async function sectionA() {
 	const st8 = x.of('step'), pl8 = x.of('plan');
 	check('steps in flight: with inflight 2 two steps of different edges run at once (the coin and the trophy from the key\'s anchor), the route found before the coin is blocked',
 		x.r.ok && st8.some((s) => s.edge === 'trophy' && s.ok) && st8.filter((s) => s.edge === 'coin').length < 4, `${st8.map((s) => `${s.edge}${s.ok ? '+' : '-'}`).join(' ')}; plans ${pl8.length}`);
+	// (a9) the rung breadth (EEAT_RUNG_BREADTH=1): two cheaper plans whose first legs never arrive ahead of the key's plan;
+	// off, the first plan's leg climbs its rungs to its block before the next plan runs (the key's plan after 8 failed
+	// steps); on, every offered first leg gets its rung 0 first (the key at the third step), then the next rung
+	process.env.PLANMOCK_MODE = 'ladder';
+	const seqOf = (st) => st.map((s) => `${s.edge}${s.rung}${s.ok ? '+' : '-'}`).join(' ');
+	delete process.env.EEAT_RUNG_BREADTH;
+	x = await runMock({ first: true, inflight: 1 });
+	const off9 = x.of('step');
+	process.env.EEAT_RUNG_BREADTH = '1';
+	const x9 = await runMock({ first: true, inflight: 1 });
+	delete process.env.EEAT_RUNG_BREADTH;
+	const on9 = x9.of('step');
+	const keyAt = (st) => st.findIndex((s) => s.edge === 'key' && s.ok);
+	check('rung breadth off: the job pick as before (the cheapest plan\'s first leg at rungs 0-3, then the next plan\'s, then the key)',
+		keyAt(off9) === 8 && off9.slice(0, 4).every((s, i) => s.edge === 'coin' && s.rung === i) && off9.slice(4, 8).every((s, i) => s.edge === 'coin2' && s.rung === i), seqOf(off9));
+	check('rung breadth on: every offered first leg its rung 0 before any rung 1 (the key\'s plan at the third step), a route, no (edge, rung) twice, no bug',
+		x9.r.ok && keyAt(on9) === 2 && on9[0].edge === 'coin' && on9[0].rung === 0 && on9[1].edge === 'coin2' && on9[1].rung === 0 &&
+		new Set(on9.map((s) => `${s.edge}|${s.nodeClass}|${s.rung}`)).size === on9.length && x9.of('bug').length === 0, seqOf(on9));
+	check('rung breadth on: after the key, the trophy\'s rung 0 before the sealed coin\'s rung 1 (the route sooner in steps)',
+		on9.length < off9.length && (() => { const k = keyAt(on9); const rest = on9.slice(k + 1); return rest.length >= 1 && rest.findIndex((s) => s.edge === 'trophy') <= rest.findIndex((s) => s.edge === 'coin' && s.rung >= 1 && s.nodeClass === 'k1') || rest.every((s) => !(s.edge === 'coin' && s.nodeClass === 'k1' && s.rung >= 1)); })(),
+		`${on9.length} steps vs ${off9.length}`);
+	process.env.PLANMOCK_MODE = 'normal';
+	if (rbSaved !== undefined) process.env.EEAT_RUNG_BREADTH = rbSaved;
 }
 function sectionB() {
 	console.log('(b) src/plan.js end to end (mock parts through --parts)');

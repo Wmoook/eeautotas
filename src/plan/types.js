@@ -264,7 +264,31 @@ function levelNow(L, sim) {
 		if (id === 50) continue;   // (the secret "appear" block: reach.js guideFlags walls it)
 		fg[i] = sim.is_tile_solid_now(i % W, (i / W) | 0) ? 9 : 0;
 	}
-	return Object.assign({}, L, { fg });
+	// (PROT_LAYER: the copy of an UNPROTECTED ball's level says so: goalField builds its protection layer for it)
+	return PROT_LAYER && !sim.is_invulnerable ? Object.assign({}, L, { fg, _unprot: true }) : Object.assign({}, L, { fg });
+}
+// THE PROTECTION LAYER (OPT-IN EEAT_PROT_LAYER=1; n5 doctor 'cold'): reach.js opens every killer a protected ball can be
+// at (protP: the 8-way walk from the protection-on tiles, portals forward) for EVERY ball, protected or not, and through
+// portals that walk is usually the whole level: Cold World's one protection tile (211,138) made every spike of chapter 2
+// air for the unprotected ball at the chapter-2 blue coin, whose field then read 16.4 tiles at (85,211) (a jump across
+// the spike columns (90 / 93, 211-214) and up the 1-wide shaft) where the executor stalled 6 rungs. For a level copy of an
+// unprotected ball (levelNow `_unprot`) goalField composes two fields, SOUND: the protected field fP (as before) and the
+// field of the level without its protection tiles (every killer deadly) whose goals are the waypoint's tiles at 0 AND
+// every protection-on tile p at fP's least cost over the states at p (a real way either never touches a protection-on
+// tile, and is then a way of the unprotected physics, or touches one first at some p, and costs at least fP's least there
+// from then on); its -1 is a proof for an unprotected ball. Off = the fields as before byte for byte.
+const PROT_LAYER = process.env.EEAT_PROT_LAYER === '1';
+/** the least cost (fifths) over the ball states centred on tile t by the reach field f (walk mode: its walk), or -1 */
+function tileMinFifths(f, t) {
+	const CUT = 0xffff;
+	if (f.mode === 'walk') { const w = f.walk[t]; return w === CUT ? -1 : w; }
+	let b = CUT;
+	const Q = f.Q, KF = 16, NL = 128;
+	for (let l = 0; l < Q + 3; l++) { const v = f.costR[t * (Q + 3) + l]; if (v < b) b = v; }
+	for (let k = 0; k <= KF; k++) { const v = f.costF[t * (KF + 1) + k]; if (v < b) b = v; const w = f.costL[t * (KF + 1) + k]; if (w < b) b = w; }
+	if (f.rowC[t] >= 0) for (let c = 0; c < NL; c++) { const v = f.costC[f.rowC[t] * NL + c]; if (v < b) b = v; }
+	if (f.rowX[t] >= 0) for (let c = 0; c < NL; c++) { const v = f.costX[f.rowX[t] * NL + c]; if (v < b) b = v; }
+	return b >= 0xfffe ? -1 : b;
 }
 /** a small hash of a level copy's foreground (the goal fields' memo key) */
 function fgHash0(fg) { let h = 0x811c9dc5; for (let i = 0; i < fg.length; i++) { h ^= fg[i]; h = Math.imul(h, 0x01000193); } return (h >>> 0).toString(36) + ':' + fg.length; }
@@ -286,6 +310,37 @@ function fgHash(fg) {
 // FIELDS_MIN fields: the planner's path checks (model.reachable), the skeleton's measures and the workers' tiers share it,
 // and 8 fields thrashed between them (EEAT_FIELDS_MB, default 256; 0: the old 8)
 const FIELDS = new Map(), FIELDS_MIN = 8, FIELDS_CAP = 64;
+// THE PLAIN-BALL FIELD (COMPILER DOCTOR 6, n5): reach.js falls back to its gravity-blind walk mode for the WHOLE level when
+// any effect tile (jump 417, fly 418, speed 419, low gravity 453, multijump 461, gravity 1517) is anywhere in it: 93 of the
+// 228 benchmark levels (4 compiled in night 4's final vs 20 of the other 135; Witch's House has ONE jump effect tile). A
+// ball with no effect on is plain physics until it touches an effect tile that changes it: goalField(Lc, tiles, {plainFx:
+// true}) (the caller's start state plain: plainOf(sim)) builds the physics field with those tiles as goals at their walk
+// cost (reach.js opts.plainFx): a lower bound still (its -1 a proof for the plain ball), the physics ordering elsewhere.
+// EEAT_FX_FIELD=1: on; unset / 0: off (the walk as before, byte for byte).
+const FX_FIELD = process.env.EEAT_FX_FIELD === '1';
+// (a level copy with no effect tile: the field is the physics one anyway, so plainFx is ignored there: the same memo key
+// and field as before, byte for byte)
+const WILD_IDS = new Set([417, 418, 419, 453, 461, 1517]), WILDM = new WeakMap();
+const wildOf = (fg) => { let w = WILDM.get(fg); if (w === undefined) { w = false; for (let i = 0; i < fg.length; i++) if (WILD_IDS.has(fg[i])) { w = true; break; } WILDM.set(fg, w); } return w; };
+// THE EFFECT-STATE FIELD (COMPILER DOCTOR 10, n5; EEAT_FX_STATE=1, OPT-IN, off = the above byte for byte): the plain-ball
+// field reads the walk for every ball with an effect on, and on the effect levels of the known routes the ball CARRIES one
+// for most of the way (Need for Steed takes max_jumps 2 on its spawn tile and keeps it for 3,720 of its 3,728 ticks; over
+// the truth set's 24 effect levels the effect is on for >= 50% of the route on 7): the executor's walk there has false nears
+// at every ceiling (from Need for Steed's route state at tick 950 its skeleton stalls at c 425 on the top row, (453, 2),
+// where the route drops to row 45 and climbs back). With the knob plainOf(sim) is the ball's effect state {mj, jb} (reach.js
+// fxStateOf: max_jumps < 1000 and the jump boost; the speed boost ignored; null: fly, low gravity, a gravity rotation,
+// infinite jumps: the walk as before) and goalField builds the physics field OF THAT STATE (reach.js opts.fxState: the jump
+// rises its mj jumps' height, the effect tiles that change the state are its exits): ordering only (its physics -1 is no
+// proof: costAt reads the walk there, reach.js FX_FAR).
+const FX_STATE = process.env.EEAT_FX_STATE === '1';
+/** the state in sim has no effect on (featValue 'fx' 0) and the plain-ball field is on; with EEAT_FX_STATE the ball's effect
+ *  state {mj, jb} (an object) or null */
+// (FX_STATE: the state after the effect tile under the ball acts, reach.js fxStateNext: Need for Steed's spawn stands on its
+// multijump, so every leg from the spawn is a max_jumps 2 leg one tick later)
+// (a level with no effect tile: its fields are the physics ones anyway, goalField ignores the state: no idle ticks)
+const plainOf = (sim) => (FX_STATE ? (sim.level && sim.level.fg && !wildOf(sim.level.fg) ? RF.fxStateOf(sim) : RF.fxStateNext(sim)) : FX_FIELD && !sim.has_levitation && sim.flip_gravity === 0 && sim.max_jumps === 1 && sim.jump_boost === 0 && sim.speed_boost === 0 && !sim.low_gravity);
+/** the memo key suffix of a field for plainOf's value p (the plain-ball field '|p', an effect state '|f<mj>.<jb>') */
+const fxSuffix = (p) => (!p ? '' : typeof p === 'object' ? `|f${p.mj}.${p.jb}` : '|p');
 const FIELDS_MB = process.env.EEAT_FIELDS_MB !== undefined ? +process.env.EEAT_FIELDS_MB : 256;
 let FIELDS_MAX = FIELDS_MIN;
 const fieldBytes = (f) => { let b = 0; for (const k in f) { const a = f[k]; if (ArrayBuffer.isView(a)) b += a.byteLength; } return b; };
@@ -297,10 +352,46 @@ const fieldBytes = (f) => { let b = 0; for (const k in f) { const a = f[k]; if (
  * o.deaths: reachField's deaths option (false: no death edges, the executor's searches drop dead balls: the default).
  */
 function goalField(Lc, tiles, o = {}) {
-	const key = `${fgHash(Lc.fg)}|${Array.from(tiles).sort((a, b) => a - b).join(',')}|${o.deaths === true ? 1 : 0}`;
+	if (Lc._unprot) {
+		// (the protection layer: PROT_LAYER above; a level without a protection-on tile: the plain field)
+		const lk = Lc.lookup0, on = [];
+		for (let i = 0; i < Lc.fg.length; i++) if (Lc.fg[i] === 420 && lk && lk[i] !== 0) on.push(i);
+		const plain = Object.assign({}, Lc); delete plain._unprot;
+		if (!on.length) return goalField(plain, tiles, o);
+		const keyU = `${fgHash(Lc.fg)}|${Array.from(tiles).sort((a, b) => a - b).join(',')}|${o.deaths === true ? 1 : 0}|u`;
+		const hadU = FIELDS.get(keyU);
+		if (hadU) { FIELDS.delete(keyU); FIELDS.set(keyU, hadU); return hadU; }
+		if (o.cachedOnly === true) return null;   // (the memo only: executor.js FIELD_MEMO)
+		const fP = goalField(plain, tiles, o);
+		const fgU = Int32Array.from(Lc.fg);
+		for (const p of on) fgU[p] = 0;
+		for (let i = 0; i < fgU.length; i++) if (fgU[i] === 420) fgU[i] = 0;   // (the off tiles too: no protection anywhere)
+		const goals = Array.from(tiles, (t) => ({ tile: t, cost: 0 }));
+		for (const p of on) { const c = tileMinFifths(fP, p); if (c >= 0) goals.push({ tile: p, cost: c / 5 }); }
+		const fU = RF.reachField(Object.assign({}, plain, { fg: fgU }), { goals, deaths: o.deaths === true });
+		FIELDS.set(keyU, fU);
+		while (FIELDS.size > FIELDS_MAX) FIELDS.delete(FIELDS.keys().next().value);
+		return fU;
+	}
+	// (EEAT_FX_STATE: o.plainFx is the ball's effect state, an object: the effect-state field)
+	const fs = o.plainFx && typeof o.plainFx === 'object' && FX_STATE && wildOf(Lc.fg) ? o.plainFx : null;
+	const pfx = fs === null && o.plainFx === true && FX_FIELD && wildOf(Lc.fg);
+	const key = `${fgHash(Lc.fg)}|${Array.from(tiles).sort((a, b) => a - b).join(',')}|${o.deaths === true ? 1 : 0}${fs ? fxSuffix(fs) + (o.fxDepth ? '|d1' : '') : pfx ? '|p' : ''}`;
 	const had = FIELDS.get(key);
 	if (had) { FIELDS.delete(key); FIELDS.set(key, had); return had; }
-	const f = RF.reachField(Lc, { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: o.deaths === true });
+	if (o.cachedOnly === true) return null;   // (the memo only: executor.js FIELD_MEMO)
+	// (FX_STATE: an exit tile seeded at the NEXT state's field there, one unit along the state change (reach.js
+	// opts.fxSeedCost); that field's own exits at their walk cost: one layer deep)
+	const seedCost = fs && !o.fxDepth ? (i, s2) => {
+		if (!s2) return -1;
+		const g = goalField(Lc, tiles, { deaths: o.deaths === true, plainFx: s2, fxDepth: 1 });
+		if (!g || !g.fx) return -1;
+		const c = RF.costAt(g, (i % Lc.width) * 16, ((i / Lc.width) | 0) * 16, 0);
+		return c < 0 ? -1 : Math.round(c * 5);
+	} : null;
+	const f = RF.reachField(Lc, fs ? { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: o.deaths === true, fxState: fs, fxSeedCost: seedCost } : pfx ? { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: o.deaths === true, plainFx: true } : { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: o.deaths === true });
+	// (FX_STATE: a ball the lookup meets in another modelled state is priced by that state's field, made here on first use)
+	if (fs) Object.defineProperty(f, 'fxOf', { value: (s2) => goalField(Lc, tiles, { deaths: o.deaths === true, plainFx: s2 }), enumerable: false });
 	if (FIELDS.size === 0 && FIELDS_MB > 0) FIELDS_MAX = Math.max(FIELDS_MIN, Math.min(FIELDS_CAP, Math.floor(FIELDS_MB * 1048576 / Math.max(1, fieldBytes(f)))));
 	FIELDS.set(key, f);
 	while (FIELDS.size > FIELDS_MAX) FIELDS.delete(FIELDS.keys().next().value);
@@ -314,4 +405,4 @@ const emitter = (stream = process.stdout) => (ev) => { try { stream.write(JSON.s
 /** the tiles a goal's ordering fields are built to, and their touch rule (the trophy's) */
 const fieldTilesOf = (goal) => (goal.fieldTiles ? goal.fieldTiles : goal.tiles);
 const fieldTouchOf = (goal) => (goal.fieldTiles ? !!goal.fieldTouch : goal.kind === 'trophy');
-module.exports = { VERSION, fieldTilesOf, fieldTouchOf, strOf, masksOf, concat, loadLevelFile, tileOf, touchedTile, playTo, featValue, featGetter, goalOf, arrivalOf, classOf, pickDiverse, levelNow, goalField, fgHash, emitter, CLOCK_DOORS };
+module.exports = { VERSION, fieldTilesOf, fieldTouchOf, strOf, masksOf, concat, loadLevelFile, tileOf, touchedTile, playTo, featValue, featGetter, goalOf, arrivalOf, classOf, pickDiverse, levelNow, goalField, plainOf, fxSuffix, wildOf, fgHash, emitter, CLOCK_DOORS };

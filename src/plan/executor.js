@@ -98,6 +98,63 @@ const LADDER = [[0.5, 0.25, 8, 2], [1, 0.5, 16, 8], [2, 1, 32, 16]];
 // (MMBA Skull Citadel's blue key 510 ticks, Polar Eclipse's team 582 / coin 438), every leg the default found too; the
 // speed coarse inside fields alone (legs.js fieldCell) 3. EEAT_COARSE_SHARE (0 off), EEAT_COARSE_RUNG.
 const COARSE_CELL = [0.5, 0.25, 2, 1];
+// THE COVERAGE FINDER (doctor 7, n5-doc-7; legs.js legCover): OPT-IN EEAT_COVER=1: from rung COVER_RUNG on the finders'
+// window starts with COVER_SHARE of it for the coverage finder (novelty-picked coarse cells, sticky random rollouts; it
+// does not follow the goal field, so a leg whose way first goes away from the goal, a run-up or a detour the relaxation
+// crosses, is not ranked behind the false near's whole region); a leg it finds goes on to the tightening (legBest bounded
+// by it) like any finder's; off = the executor byte for byte as before
+const COVER_ON = () => process.env.EEAT_COVER === '1' || process.env.EEAT_COVER === '2' || process.env.EEAT_COVER === '3';
+// COVER V2 (EEAT_COVER=2, doctor 7 after the box-6 A/B): the coverage finder is the FALLBACK, only BEFORE the compile's first
+// route (budget.fast): the field-following finders first (the core's best-first search with 1 - COVER_SHARE of its window,
+// then the cover with the rest if it found nothing; the skeleton wrapper's direct leg, then the cover slot on the whole leg
+// with COVER_SLOT of what is left, then the skeleton). V1 (EEAT_COVER=1) ran the cover FIRST on every call from rung 1 on:
+// its legs (random rollouts, 1.0-2.3x the route's own before the tightening) took the legs the best-first search finds
+// whole, and the controls' routes came 8-20% slower (box 6, 60 s: Ruins 1,614 vs 1,339, Desolate Caverns 1,923 vs 1,638,
+// Bygone Tutorial 2,397 vs 1,990; the first routes 2,851 vs 1,819 on Desolate Caverns); after the first route the calls look
+// for shorter legs, which random rollouts do not give
+const COVER_V2 = () => process.env.EEAT_COVER === '2' || process.env.EEAT_COVER === '3';
+// COVER V3 (EEAT_COVER=3): v2's core fallback, and the wrapper's slot NOT after the direct leg but after the SKELETON GOT
+// STUCK (a sub-level set failed twice: the skeleton's own evidence that the field's way is not the ball's, the detour
+// legs' signature: K Underground's sub-legs from the arrow block's face 10-52 cells each), with COVER_STUCK of what is
+// left, the coverage finder alone on the whole leg from the step's starts; a skeleton that progresses keeps all its time
+// (v1 / v2's slot took 40% / 26% of a far leg's budget from it: Accident Prone's trophy and switch legs, found by the
+// skeleton at rung 3 (skel+math), were lost with v1)
+const COVER_V3 = () => process.env.EEAT_COVER === '3';
+const COVER_STUCK = process.env.EEAT_COVER_STUCK !== undefined ? Math.max(0.1, Math.min(1, +process.env.EEAT_COVER_STUCK || 0.6)) : 0.6;
+const COVER_SHARE = process.env.EEAT_COVER_SHARE !== undefined ? Math.max(0.05, Math.min(0.95, +process.env.EEAT_COVER_SHARE || 0.4)) : 0.4;
+const COVER_RUNG = process.env.EEAT_COVER_RUNG !== undefined ? +process.env.EEAT_COVER_RUNG : 1;
+// (the skeleton wrapper's cover slot: that share of a far waypoint's budget, the coverage finder alone on the whole leg)
+// (the coverage finder's region: the tiles the goal field's walk reaches within COVER_M tiles of the starts and the goal (the other
+// finders' 24: a run-up can go 50 tiles away from both, K Underground's checkpoint (87,44) turns at (18,46)); 0 = no region)
+const COVER_M = process.env.EEAT_COVER_M !== undefined ? Math.max(0, +process.env.EEAT_COVER_M || 0) : 64;
+const COVER_SLOT = process.env.EEAT_COVER_SLOT !== undefined ? Math.max(0, Math.min(0.9, +process.env.EEAT_COVER_SLOT || 0)) : 0.4;
+// THE CLOSEST IN THE WAYPOINT'S UNIT (doctor 7, n5-doc-7): OPT-IN EEAT_CLOSEST_UNIT=1. A call with no goal field (none fit
+// its time: fieldFits, the field's measured build time x N over 0.4 of what is left) ran its finders on field null, and a
+// finder's distance with no field is 0 for every state (legs.js distOf(null) = 0: the ranking by the tick alone), so the
+// call's closest was its first child, ONE tick past the start, "closest 0 tiles". The skeleton's last leg to the waypoint
+// from the starts (both sub-legs failed at the first level: stuck at the starts) gets what is left of the call (53 ms on
+// EXPro Forgotten Veil's coin (13,110) at rung 0: a 400x200 level whose field needs more), and its report was returned
+// as the call's: 15 of 226 failing steps of doctor 7's 19 levels (60 s) read "closest 0" at the anchor's own tile. The
+// strategy read it as a near miss: the relay set at a state 1 tick from the anchor with dist 0 (then dropped with the
+// floor below 0: no relay ever again for that (anchor, edge)), the trophy's precision landing (The Burj: 2 runs of 1.7-3.3
+// s from a state 150+ tiles from the trophy, "no target"), the planner's est walls and cuts at the anchor's own tile.
+// On: (1) the finders' closest is noted only when the call has a goal field (else the start, by the all-open field, as
+// for a call that got nowhere); (2) the skeleton's last leg from the starts reports its closest re-measured on the
+// waypoint's field f0 (skelClosest), like the skeleton's other failures. Off = the executor byte for byte as before.
+const CLOSEST_UNIT = () => process.env.EEAT_CLOSEST_UNIT === '1';
+// THE FIELD MEMO (doctor 9, n5; OPT-IN EEAT_FIELD_MEMO=1): a leg call builds its goal field only when fieldFits (the thread's
+// slowest build so far x the level's tiles < 0.4 x the window); else it ran with NO field: every finder's distance reads 0
+// (legs.js distOf), legBest orders by ticks alone and its closest is 0 at whatever state it kept first. On a big level that
+// is most skeleton sub-legs: CDB Inc (400x200) in a 40-s compile: 54 leg calls without a field (sub-legs of 234-1,089 ms,
+// the estimate 568-573 ms), though the waypoint's field (the sub-legs' own: goal.fieldTiles) was built for the wrapper,
+// and the final's failure lines say "closest 0 tiles" at tiles 2,000+ field units from the target (the ball on a coin at
+// (80,1), (75,9)); the planner's relays and CEGAR cuts read that 0. 163 of the 230 levels have >= 40,000 tiles (7 of them
+// compiled in night 4's final vs 17 of the 67 smaller). With the knob: a field the thread has (the types.js memo) is used
+// whatever the window, a skeleton sub-leg's field is built even past its window (the next sub-legs read it from the memo),
+// and a call left without a field reports no closest (not a false 0). Off = the executor byte for byte as before.
+const FIELD_MEMO = () => process.env.EEAT_FIELD_MEMO === '1';
+// (EEAT_FIELD_FIT: fieldFits' share of the window a build may take, 0.4; a measurement / test knob)
+const FIELD_FIT = () => (process.env.EEAT_FIELD_FIT !== undefined ? +process.env.EEAT_FIELD_FIT : 0.4);
 const COARSE_SHARE = process.env.EEAT_COARSE_SHARE !== undefined ? +process.env.EEAT_COARSE_SHARE : 0.5;
 const COARSE_RUNG = process.env.EEAT_COARSE_RUNG !== undefined ? +process.env.EEAT_COARSE_RUNG : 1;
 // THE RATE RULE (COMPILE-ALL lane 6, block 4): before the compile's first route the strategy marks its steps' budgets fast;
@@ -257,6 +314,12 @@ const NEXT_EVAL = 64, NEXT_TRY = +process.env.EEAT_NEXT_TRY > 0 ? +process.env.E
 const NEXT_ALTS = +process.env.EEAT_NEXT_ALTS >= 0 && process.env.EEAT_NEXT_ALTS !== undefined ? +process.env.EEAT_NEXT_ALTS : 6;
 const NEXT_SLACK = +process.env.EEAT_NEXT_SLACK >= 0 && process.env.EEAT_NEXT_SLACK !== undefined ? +process.env.EEAT_NEXT_SLACK : 3;
 const PATTERNS_MAX = 400;
+// THE SETTLE TEMPLATES (tier S, doctor 5; OPT-IN EEAT_SETTLE=1, off = the executor as before): d x k x rest x jump runs
+// (reach(): settleCands), at most SETTLE_MS and SETTLE_F of the window, from the first SETTLE_STARTS live starts
+const SETTLE_ON = () => process.env.EEAT_SETTLE === '1';
+const SETTLE_MS = +process.env.EEAT_SETTLE_MS > 0 ? +process.env.EEAT_SETTLE_MS : 600;
+const SETTLE_F = 0.35, SETTLE_STARTS = 2, SETTLE_K = 80, SETTLE_IDLE = 90, SETTLE_BRANCH = 30, SETTLE_TAIL = 60;
+const SETTLE_JUMPS = [1, 4, 8, 14, 22];
 /** a leg's inputs as runs: 'mask x count' joined by spaces (the pattern's code) */
 function runsOf(tail) {
 	const out = [];
@@ -354,6 +417,7 @@ function makeCore(L, co) {
 	const mathLB = () => MLB_ || (MLB_ = require('../math/lb.js').createMathLB(L));
 	const mY = { dTry: 0, dOk: 0, cTry: 0, cOk: 0 };   // (the math's yield on this level: calls and calls with a leg)
 	const fieldMs = { n: 0, perTile: 0 };
+	let noFieldLegs = 0, noFieldMemo = 0, noFieldBuilt = 0;   // (FIELD_MEMO diagnostics: calls without a field, memo hits, sub-leg builds past the window)
 	let analysis = null;
 
 	/** the state after a masks string (a cached replay: the longest cached prefix, then the rest) */
@@ -382,10 +446,28 @@ function makeCore(L, co) {
 		sim.restore(s.snap);
 		const Lc = T.levelNow(L, sim);
 		const tiles = T.fieldTilesOf(goal);
-		const key = `${T.fgHash(Lc.fg)}|${Array.from(tiles).sort((a, b) => a - b).join(',')}|${allowDeath ? 1 : 0}`;
+		// (types.js plainOf: true = the plain-ball field (EEAT_FX_FIELD); an object = the ball's effect state (EEAT_FX_STATE))
+		return ordFieldFx(Lc, tiles, allowDeath, T.wildOf(Lc.fg) ? T.plainOf(sim) : false);
+	}
+	function ordFieldFx(Lc, tiles, allowDeath, pfx, depth) {
+		const key = `${T.fgHash(Lc.fg)}|${Array.from(tiles).sort((a, b) => a - b).join(',')}|${allowDeath ? 1 : 0}${T.fxSuffix(pfx)}${depth ? '|d1' : ''}`;
 		let f = ordMemo.get(key);
 		if (f) return f;
-		f = RF.reachField(Lc, { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: !!allowDeath, portalForced: true, oneWayEntry: true });
+		const oo = { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: !!allowDeath, portalForced: true, oneWayEntry: true };
+		if (pfx && typeof pfx === 'object') {
+			oo.fxState = pfx;
+			// (an exit seeded at the next state's ordering field there, one layer deep: types.js goalField's rule)
+			if (!depth) oo.fxSeedCost = (i, s2) => {
+				if (!s2) return -1;
+				const g = ordFieldFx(Lc, tiles, allowDeath, s2, 1);
+				if (!g || !g.fx) return -1;
+				const c = RF.costAt(g, (i % Lc.width) * 16, ((i / Lc.width) | 0) * 16, 0);
+				return c < 0 ? -1 : Math.round(c * 5);
+			};
+		} else if (pfx) oo.plainFx = true;
+		f = RF.reachField(Lc, oo);
+		// (EEAT_FX_STATE: a ball met in another modelled state: that state's ordering field, made on first use)
+		if (pfx && typeof pfx === 'object') Object.defineProperty(f, 'fxOf', { value: (s2) => ordFieldFx(Lc, tiles, allowDeath, s2), enumerable: false });
 		ordMemo.set(key, f);
 		if (ordMemo.size > 8) ordMemo.delete(ordMemo.keys().next().value);
 		return f;
@@ -425,13 +507,18 @@ function makeCore(L, co) {
 	function fieldNow(goal, allowDeath) {
 		const Lc = goal.walls ? withWalls(T.levelNow(L, sim), goal.walls) : T.levelNow(L, sim);
 		const t0 = Date.now();
-		const f = T.goalField(Lc, T.fieldTilesOf(goal), { deaths: allowDeath });
+		const f = T.goalField(Lc, T.fieldTilesOf(goal), { deaths: allowDeath, plainFx: T.plainOf(sim) });
 		const dt = Date.now() - t0;
 		if (dt > 2) { fieldMs.n++; fieldMs.perTile = Math.max(fieldMs.perTile, dt / N); }
 		return f;
 	}
 	/** a field build expected to fit the time left (an unknown level: yes) */
-	const fieldFits = (left) => fieldMs.n === 0 || fieldMs.perTile * N < 0.4 * left;
+	const fieldFits = (left) => fieldMs.n === 0 || fieldMs.perTile * N < FIELD_FIT() * left;
+	/** the goal field if this thread built it already (types.js memo), else null: no build */
+	function fieldNowCached(goal, allowDeath) {
+		const Lc = goal.walls ? withWalls(T.levelNow(L, sim), goal.walls) : T.levelNow(L, sim);
+		return T.goalField(Lc, T.fieldTilesOf(goal), { deaths: allowDeath, plainFx: T.plainOf(sim), cachedOnly: true });
+	}
 	/** the move solver of this thread (n4-math msolve.js), made on first use */
 	let msol = null;
 	function msolver() { return msol || (msol = require('./msolve.js').createSolver(L, {})); }
@@ -487,8 +574,11 @@ function makeCore(L, co) {
 		}
 		const live = starts.filter((s) => allowDeath || !s.dead);
 		if (!live.length) return out(failResult('dies', null, 'every start is dead', rung, starts, goal, { deadline }));
+		// (the coverage finder's own call, budget.cover 1 (the skeleton wrapper's COVER slot): the goal fields, then the
+		// coverage finder alone for the whole window; its find goes on to the tightening like any finder's)
+		const coverOnly = budget.cover === 1 && COVER_ON();
 		// -------- tier M: THE MATH, the direct legs (before the goal fields: a leg the mathematics evaluates needs none)
-		const mathOn = MATH_ON() && !allowDeath && !wp.dieField && !goal.fieldTiles && goal.tiles.length > 0;
+		const mathOn = !coverOnly && MATH_ON() && !allowDeath && !wp.dieField && !goal.fieldTiles && goal.tiles.length > 0;
 		const lag = touchLagOf(goal, wp);
 		const mTarget = mathOn ? { tiles: Array.from(goal.tiles), cls: 'any' } : null;
 		const mathLbE = new Map();   // start index -> the math's lower bound on its leg (the executor's ticks)
@@ -562,6 +652,25 @@ function makeCore(L, co) {
 				if (r) return out(r);
 			}
 		}
+		// -------- tier S: THE SETTLE TEMPLATES (OPT-IN EEAT_SETTLE=1; doctor 5): run d for k ticks, rest (no input) i ticks,
+		// press jump j ticks, rest; the engine plays each and the goal test decides (settleCands). The x auto-align puts a
+		// ball at rest exactly on the pixel grid only after it has stood a while (eesim.js: px = px | 0 once the remainder is
+		// under 0.2), and that grid position is what a 1-tile-wide vertical gap takes; the finders' cells (2 px, 1/8 px/tick)
+		// hold the FIRST arrival, so the later, aligned state of a resting ball is dropped. Stupid Fox's first leg (a 1-wide
+		// shaft to the protection): no tier in 1.5 / 5 s from the spawn or from the run (closest 4 tiles at the shaft's
+		// portal tile); the template from the spawn reaches it at tick 177 (the known route 181, which rests 55 ticks there).
+		if (SETTLE_ON() && !allowDeath && !wp.dieField && goal.tiles.length > 0 && Date.now() < wEnd - 20) {
+			const tS = Date.now(), sEnd = tS + Math.min(SETTLE_MS, SETTLE_F * (wEnd - tS));
+			const cands = [];
+			let n = 0;
+			for (const s of live.slice(0, SETTLE_STARTS)) { n += settleCands(starts.indexOf(s), cands, sEnd); if (Date.now() >= sEnd) break; }
+			tiers.push({ tier: 'settle', ms: Date.now() - tS, runs: n, ok: cands.length > 0 });
+			if (cands.length) {
+				cands.sort((a, b) => a.depth - b.depth);
+				const r = finishFound(cands.slice(0, 64), 'settle', null, 0, false);
+				if (r) { delete r.arrivalsRaw; return out(r); }
+			}
+		}
 		// -------- tier 0: the proof pre-check (and the goal fields for the cuts and the distances)
 		let field0 = null, proofAll = true, anyField = false;
 		const fields = new Map();   // disc -> field
@@ -570,7 +679,15 @@ function makeCore(L, co) {
 			sim.restore(s.snap);
 			let f = fields.get(s.disc);
 			if (f === undefined) {
-				f = fieldFits(wEnd - Date.now()) ? fieldNow(goal, allowDeath) : null;
+				if (fieldFits(wEnd - Date.now())) f = fieldNow(goal, allowDeath);
+				else if (FIELD_MEMO()) {
+					// (FIELD_MEMO: a field this thread has is used whatever the window; a skeleton sub-leg's field (the waypoint's
+					// own, goal.fieldTiles) is built even past the window: every next sub-leg of the waypoint reads it from the memo)
+					f = fieldNowCached(goal, allowDeath);
+					if (f === null && goal.fieldTiles) { f = fieldNow(goal, allowDeath); noFieldBuilt++; st.fieldBuilt = noFieldBuilt; }
+					else if (f !== null) { noFieldMemo++; st.fieldMemo = noFieldMemo; }
+				} else f = null;
+				if (f === null) { noFieldLegs++; st.noField = noFieldLegs; }
 				fields.set(s.disc, f);
 			}
 			if (f === null) { proofAll = false; startCost.push(-2); continue; }
@@ -580,7 +697,9 @@ function makeCore(L, co) {
 			startCost.push(c);
 			if (!(c < 0 && f.mode !== 'walk')) proofAll = false;
 		}
-		tiers.push({ tier: 'proof', ms: Date.now() - tIn, proof: anyField && proofAll });
+		tiers.push({ tier: 'proof', ms: Date.now() - tIn, proof: anyField && proofAll, field: anyField ? 1 : 0 });
+		if (!anyField && process.env.EEAT_NOFIELD_DBG === '1') console.error(`NOFIELD ${wp.label || wp.kind} left ${wEnd - Date.now()} ms est ${(fieldMs.perTile * N).toFixed(0)} ms rung ${budget.level | 0} (no field ${noFieldLegs}, memo ${noFieldMemo}, built ${noFieldBuilt})`);
+		else if (FIELD_MEMO() && process.env.EEAT_NOFIELD_DBG === '1' && (noFieldMemo + noFieldBuilt) % 20 === 1) console.error(`FIELDMEMO memo ${noFieldMemo} built ${noFieldBuilt} none ${noFieldLegs}`);
 		// (a death step's field is an ORDERING field (the tiles a death starts from, planner.js dieField), no proof)
 		if (anyField && proofAll && !wp.dieField && !walled) return out(proofFail(starts[0], goal, wp, rung, 'the goal field of the level as the doors stand is -1 at every start', deadline));
 		// (walls that cut every start off the waypoint were no counterexample of the field's way: the main thread drops them)
@@ -593,6 +712,8 @@ function makeCore(L, co) {
 		let closest = { dist: -1, masks: null };
 		const noteClosest = (dist, sIdx, tail) => {
 			if (!(dist >= 0) || tail === null || sIdx < 0) return;
+			// (no goal field in this call: every finder's distance was 0, no measure: CLOSEST_UNIT / FIELD_MEMO above)
+			if (field0 === null && (CLOSEST_UNIT() || FIELD_MEMO())) return;
 			if (closest.dist < 0 || dist < closest.dist) closest = { dist, masks: T.concat(starts[sIdx].masks, tail) };
 		};
 		// -------- tier 0b: THE EXACT END SEARCH from a NEAR state (within NEAR_T tiles of the goal by the goal field): a later
@@ -655,7 +776,7 @@ function makeCore(L, co) {
 			if (r) delete r.arrivalsRaw;
 			return r;
 		};
-		const nearOn = NEAR_ON() && !allowDeath;
+		const nearOn = NEAR_ON() && !allowDeath && !coverOnly;
 		if (nearOn && Date.now() < wEnd - 50) {
 			const near = [];
 			starts.forEach((s, i) => { const c = startCost[i]; if (s.tick > t0 && !s.dead && c >= 0 && c <= NEAR_T) near.push(i); });
@@ -736,7 +857,7 @@ function makeCore(L, co) {
 			} catch (e) { mst.error = String(e && e.message || e); mst.ms = Date.now() - tM; tiers.push(mst); }
 			return null;
 		};
-		if (MSOLVE_ON() && !allowDeath && Date.now() < wEnd - 20) {
+		if (!coverOnly && MSOLVE_ON() && !allowDeath && Date.now() < wEnd - 20) {
 			const rM = msolveTier('direct', Date.now() + MSOLVE_SHARE * (wEnd - Date.now()));
 			if (rM) return out(rM);
 		}
@@ -779,7 +900,7 @@ function makeCore(L, co) {
 			if (cands.length) { const r = finishMath(cands); if (r) return out(r); }
 		}
 		// -------- tier 1: the primitives
-		if (co.prims && typeof co.prims.route === 'function' && Date.now() < wEnd) {
+		if (!coverOnly && co.prims && typeof co.prims.route === 'function' && Date.now() < wEnd) {
 			const t1 = Date.now();
 			try {
 				// (the primitives' share of the window: PRIMS_SHARE at rung 0, PRIMS_SHARE_HI from rung 1 on: a leg the primitives
@@ -808,13 +929,14 @@ function makeCore(L, co) {
 					// (measured again in the finders' unit, field0's tiles: the primitives' own number is another field's (or
 					// the bound's ticks), and the smaller number of two units made the closest the start in every compile)
 					const m = nr.closest.masks instanceof Uint8Array ? nr.closest.masks : T.masksOf(nr.closest.masks);
-					const d = field0 && process.env.EEAT_CLOSEST_NEAR !== '0' ? fieldDistOf(m, starts, field0) : (nr.closest.dist >= 0 ? nr.closest.dist : 1e9);
+					// (no goal field in this call: the primitives' number is their own unit's, no measure: CLOSEST_UNIT / FIELD_MEMO)
+					const d = field0 && process.env.EEAT_CLOSEST_NEAR !== '0' ? fieldDistOf(m, starts, field0) : field0 === null && CLOSEST_UNIT() ? -1 : FIELD_MEMO() ? -1 : (nr.closest.dist >= 0 ? nr.closest.dist : 1e9);
 					if (d >= 0 && (closest.dist < 0 || d < closest.dist)) closest = { dist: d, masks: m };
 				}
 			} catch (e) { tiers.push({ tier: 'prims', error: String(e && e.message || e) }); }
 		}
 		// -------- tier M, the chains (OPT-IN EEAT_MSOLVE=1, from rung 1 on: the primitives found nothing)
-		if (MSOLVE_ON() && !allowDeath && rung >= 1 && Date.now() < wEnd - 50) {
+		if (!coverOnly && MSOLVE_ON() && !allowDeath && rung >= 1 && Date.now() < wEnd - 50) {
 			const rM = msolveTier('chain', Date.now() + MSOLVE_CHAIN_SHARE * (wEnd - Date.now()));
 			if (rM) return out(rM);
 		}
@@ -825,7 +947,7 @@ function makeCore(L, co) {
 		let found = null;   // {cands, tool, proven, lbAbs}
 		// (the counterexample walls: the tiles the finders reached, their region, whether the last best-first run exhausted it)
 		let visW = null, regionW = null, bestExhausted = false, closedAll = false;
-		{
+		if (!coverOnly) {
 			const t2 = Date.now();
 			// (its share: 35% where the goal can be near (the least start bound within X_NEAR ticks: the exact search's
 			// reach, each tick of slack multiplying its states), else 12%: then it proves a lower bound and the finders get the
@@ -886,9 +1008,27 @@ function makeCore(L, co) {
 			const port = +process.env.EEAT_BEST_PORT || 0;
 			// (the finders end NEAR_RES of the window early: the exact end search from their nearest state gets it, below)
 			const bEnd = nearOn ? wEnd - 3 - NEAR_RES * (wEnd - t3) : wEnd - 3;
+			// (the coverage finder first from rung COVER_RUNG on, EEAT_COVER=1: COVER_SHARE of the finders' window)
+			// (in the cover slot (coverOnly) the whole window and nothing after it; else not on a skeleton sub-leg (a sub-level
+			// set: the field-following finders' job) nor on a call whose wrapper gave the cover its slot (budget.cover 2))
+			let rV = null, rVf = null;
+			// (V2: not first; the fallback below, before the compile's first route only)
+			const coverV2 = COVER_V2() && !coverOnly && rung >= COVER_RUNG && !goal.fieldTiles && budget.cover !== 2 && !!budget.fast;
+			const bEndB = coverV2 ? t3 + (1 - COVER_SHARE) * (bEnd - t3) : bEnd;
+			if (COVER_ON() && (coverOnly || (!COVER_V2() && rung >= COVER_RUNG && !goal.fieldTiles && budget.cover !== 2)) && Date.now() < bEnd - 50) {
+				const tv = Date.now();
+				rV = LG.legCover(L, snaps, goal, { sim, deadline: tv + (coverOnly ? 0.97 : COVER_SHARE) * (bEnd - tv), stop: stopFn, allowDeath, beforeTick, field: field0, region: COVER_M > 0 ? regionOf(field0, starts, goal, COVER_M) : null, depthMax, seed: (t0 * 2654435761 + rung * 97 + goal.tiles.length) >>> 0 });
+				sims += rV.sims;
+				tiers.push({ tier: 'cover', ms: Date.now() - tv, status: rV.status, passes: rV.passes });
+				if (process.env.EEAT_COVER_DBG === '1') console.error(`cover: rung ${rung} ${Date.now() - tv} ms of ${Math.round(COVER_SHARE * (bEnd - tv))} ${rV.status} cells ${rV.passes[0].cells} picks ${rV.passes[0].pops} sims ${rV.sims} closest ${rV.closest.dist} region ${region ? region.reduce((a, b) => a + b, 0) : 'none'}`);
+				if (rV.status === 'stopped') return out(failResult('stopped', closest, 'stopped', rung, starts, goal, { deadline }));
+				if (rV.status !== 'found' && rV.closest && rV.closest.tail) noteClosest(rV.closest.dist, rV.closest.start, rV.closest.tail);
+				if (rV.status !== 'found') { rVf = rV; rV = null; }
+			}
+			if (coverOnly && rV === null) rV = rVf || { status: 'time', passes: [{ pops: 0, cells: 0, why: 'time' }], sims: 0, closest: { dist: -1, start: -1, tail: null, pop: -1 } };
 			// (the coarse grain first from rung COARSE_RUNG on: COARSE_CELL above)
 			let rC = null;
-			if (mode === 'best' && !cell0 && !port && COARSE_SHARE > 0 && rung >= COARSE_RUNG) {
+			if (rV === null && mode === 'best' && !cell0 && !port && COARSE_SHARE > 0 && rung >= COARSE_RUNG) {
 				rC = runBest(t3 + COARSE_SHARE * (bEnd - t3), COARSE_CELL);
 				sims += rC.sims;
 				tiers.push({ tier: 'best', ms: Date.now() - t3, status: rC.status, passes: rC.passes, cell: COARSE_CELL });
@@ -896,22 +1036,22 @@ function makeCore(L, co) {
 				if (rC.status !== 'found' && rC.closest && rC.closest.tail) noteClosest(rC.closest.dist, rC.closest.start, rC.closest.tail);
 			}
 			const t3b = Date.now();
-			let r = rC !== null && rC.status === 'found' ? rC : mode === 'beam' ? runBeam(bEnd, depthMax) : runBest(mode === 'best' ? (port > 0 && port < 1 ? t3 + port * (wEnd - t3) : bEnd) : t3 + 0.7 * (wEnd - t3));
+			let r = rV !== null ? rV : rC !== null && rC.status === 'found' ? rC : mode === 'beam' ? runBeam(bEndB, depthMax) : runBest(mode === 'best' ? (port > 0 && port < 1 ? t3 + port * (wEnd - t3) : bEndB) : t3 + 0.7 * (wEnd - t3));
 			// (the default grain closed every way without a death (the ladder's finer grains may still run out of time): the
 			// death leg's trigger, reachWp; an order, no claim)
-			if (mode === 'best' && r.status === 'exhausted') closedAll = true;
-			if (r !== rC) {
+			if (mode === 'best' && r.status === 'exhausted' && r !== rV) closedAll = true;
+			if (r !== rC && r !== rV) {
 				sims += r.sims;
 				tiers.push({ tier: mode === 'beam' ? 'leg' : 'best', ms: Date.now() - t3b, status: r.status, passes: r.passes });
 			}
 			// (the refinement ladder: a best-first search that ran out of open states (its cells closed every way: the first
 			// arrival's rule on coarse cells) goes again on finer cells while time is left; EEAT_BEST_LADDER=0 off)
-			if (mode === 'best' && process.env.EEAT_BEST_LADDER !== '0') {
+			if (mode === 'best' && r !== rV && process.env.EEAT_BEST_LADDER !== '0') {
 				for (const cell of LADDER) {
 					if (!(r.status === 'exhausted' || (port > 0 && r.status === 'time')) || Date.now() >= wEnd - 20) break;
 					if (r.closest && r.closest.tail) noteClosest(r.closest.dist, r.closest.start, r.closest.tail);
 					const t7 = Date.now();
-					r = runBest(bEnd, cell);
+					r = runBest(bEndB, cell);
 					sims += r.sims;
 					tiers.push({ tier: 'best', ms: Date.now() - t7, status: r.status, passes: r.passes, cell });
 				}
@@ -923,10 +1063,20 @@ function makeCore(L, co) {
 				const pops = r.passes && r.passes[0] ? r.passes[0].pops : 0;
 				const cp = r.closest && r.closest.pop >= 0 ? r.closest.pop : -1;
 				const plateau = r.status === 'time' && cp >= 0 && pops >= WALL_POPS && cp < (1 - WALL_PLATEAU) * pops && (NEAR_WALLS || r.closest.dist > WALL_NEAR);
-				bestExhausted = mode === 'best' && (r.status === 'exhausted' || plateau);
-				if (mode === 'best' && r.status === 'exhausted') closedAll = true;
+				bestExhausted = mode === 'best' && r !== rV && (r.status === 'exhausted' || plateau);
+				if (mode === 'best' && r !== rV && r.status === 'exhausted') closedAll = true;
 			}
-			if (mode === 'mix' && r.status !== 'stopped' && Date.now() < wEnd - 5) {
+			// (COVER V2: the coverage finder with the rest of the window when the field-following finders found nothing)
+			if (coverV2 && r.status !== 'found' && r.status !== 'stopped' && Date.now() < bEnd - 50) {
+				const tv = Date.now();
+				const rv2 = LG.legCover(L, snaps, goal, { sim, deadline: bEnd, stop: stopFn, allowDeath, beforeTick, field: field0, region: COVER_M > 0 ? regionOf(field0, starts, goal, COVER_M) : null, depthMax, seed: (t0 * 2654435761 + rung * 97 + goal.tiles.length) >>> 0 });
+				sims += rv2.sims;
+				tiers.push({ tier: 'cover', ms: Date.now() - tv, status: rv2.status, passes: rv2.passes });
+				if (rv2.status === 'stopped') return out(failResult('stopped', closest, 'stopped', rung, starts, goal, { deadline }));
+				if (rv2.status === 'found') { if (r.closest && r.closest.tail) noteClosest(r.closest.dist, r.closest.start, r.closest.tail); r = rv2; rV = rv2; }
+				else if (rv2.closest && rv2.closest.tail) noteClosest(rv2.closest.dist, rv2.closest.start, rv2.closest.tail);
+			}
+			if (mode === 'mix' && r !== rV && r.status !== 'stopped' && Date.now() < wEnd - 5) {
 				const ub = r.status === 'found' ? Math.min(...r.goals.map((c) => c.depth)) : depthMax + 1;
 				if (ub > 1) {
 					const t5 = Date.now();
@@ -1055,6 +1205,55 @@ function makeCore(L, co) {
 					leg: { ticks: hit, lb: lbE, proven, provenBy: proven ? res.provenBy || 'plain' : null, lbMath: lbM, tool, T: res.T } });
 				if (hit <= masks.length) break;   // (the goal within the solver's own leg: the extension did not matter)
 			}
+		}
+		/** THE SETTLE TEMPLATES from start si (tier S): for d in (none, left, right), k = 0..SETTLE_K ticks of d, then rest
+		 *  up to SETTLE_IDLE ticks, with a branch at every SETTLE_BRANCH-th rest tick (and the first tick at rest) pressing
+		 *  jump j (SETTLE_JUMPS) ticks and resting SETTLE_TAIL more; every tick the executor's goal test (and beforeTick, a
+		 *  death ends the run). The candidates (the goal's first tick of each run) go to cands; returns the runs played */
+		function settleCands(si, cands, endT) {
+			const s = starts[si];
+			if (!s || s.dead) return 0;
+			let runs = 0;
+			const play = (m, tail) => { E.applyMask(inp, m); sim.tick(inp); sims++; tail.push(m); };
+			const hitNow = (tail) => (!sim.is_dead && goal.test(sim) && !(beforeTick >= 0 && s.tick + tail.length > beforeTick));
+			const push = (tail) => { cands.push({ start: si, tail: Uint8Array.from(tail), depth: s.tick + tail.length - t0, leg: null }); };
+			// (k outer, the direction inner: the shortest runs of both directions first, so a clock cut keeps both)
+			const pres = { 2: [], 4: [] }, snaps = { 2: s.snap, 4: s.snap }, done = { 2: false, 4: false };
+			for (let k = 0; k <= SETTLE_K; k++) for (const d of k === 0 ? [0] : [2, 4]) {
+				if (d !== 0 && done[d]) continue;
+				if (Date.now() >= endT) return runs;
+				const pre = d === 0 ? [] : pres[d];
+				sim.restore(d === 0 ? s.snap : snaps[d]);
+				if (d !== 0) {
+					play(d, pre);
+					if (sim.is_dead) { done[d] = true; continue; }
+					if (hitNow(pre)) { push(pre); done[d] = true; continue; }
+					snaps[d] = sim.snapshot();
+				}
+				{
+					const snapK = sim.snapshot();
+					const idle = pre.slice();
+					let rested = false;
+					for (let i = 0; i <= SETTLE_IDLE; i++) {
+						if (i > 0) { play(0, idle); if (sim.is_dead) break; if (hitNow(idle)) { push(idle); break; } }
+						const atRest = Math.abs(sim.speed_x) < 1e-3 && Math.abs(sim.speed_y) < 1e-3;
+						if (!(i % SETTLE_BRANCH === 0 || (atRest && !rested))) continue;
+						if (atRest) rested = true;
+						const snapI = sim.snapshot();
+						for (const j of SETTLE_JUMPS) {
+							runs++;
+							sim.restore(snapI);
+							const tail = idle.slice();
+							let hit = false;
+							for (let q = 0; q < j + SETTLE_TAIL; q++) { play(q < j ? 1 : 0, tail); if (sim.is_dead) break; if (hitNow(tail)) { hit = true; break; } }
+							if (hit) push(tail);
+						}
+						sim.restore(snapI);
+					}
+					sim.restore(snapK);
+				}
+			}
+			return runs;
 		}
 		/** the math tier's result: the candidates verified and picked as every tier's (finishFound), each arrival's leg its
 		 *  own (the proof per start) */
@@ -1189,12 +1388,12 @@ function makeCore(L, co) {
 
 	/** the region of the leg search: tiles the goal field's walk reaches (dilated by a tile) in a box around the starts
 	 *  and the goal */
-	function regionOf(field, starts, goal) {
+	function regionOf(field, starts, goal, margin) {
 		let x0 = W, y0 = H, x1 = -1, y1 = -1;
 		const add = (t) => { const x = t % W, y = (t / W) | 0; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; };
 		for (const s of starts) { sim.restore(s.snap); add(T.tileOf(sim, W, H)); }
 		for (const t of goal.tiles) add(t);
-		const M = +process.env.EEAT_REGION_M || 24;   // (tiles around the starts and the goal; env: measurements)
+		const M = margin > 0 ? margin : (+process.env.EEAT_REGION_M || 24);   // (tiles around the starts and the goal; env: measurements)
 		x0 = Math.max(0, x0 - M); y0 = Math.max(0, y0 - M); x1 = Math.min(W - 1, x1 + M); y1 = Math.min(H - 1, y1 + M);
 		const reg = new Uint8Array(N);
 		const walk = field && field.walk ? field.walk : null;
@@ -1669,7 +1868,7 @@ async function createExecutor(L, opts) {
 		if (e.dead) return { f: null, c: NaN };
 		// (the waypoint's own ordering tiles: a death step's are the tiles a death starts from, planner.js dieField; its
 		// goal tiles, the respawn, are where its start stands: c0 0, no skeleton, Tutorial 2's killers 235+ tiles away)
-		const f = T.goalField(walls ? withWalls(T.levelNow(L, vsim), walls) : T.levelNow(L, vsim), T.fieldTilesOf(goal), { deaths: !!allowDeath });
+		const f = T.goalField(walls ? withWalls(T.levelNow(L, vsim), walls) : T.levelNow(L, vsim), T.fieldTilesOf(goal), { deaths: !!allowDeath, plainFx: T.plainOf(vsim) });
 		return { f, c: RF.costAt(f, vsim) };
 	}
 	/** the skeleton's closest in the WAYPOINT's unit (f0: its goal field at the step's starts, the unit of the direct
@@ -1941,17 +2140,37 @@ async function createExecutor(L, opts) {
 		// (krt: rung 1 then rung 2, both 'budget', closest 4 tiles), while a fresh rung-2 call's direct leg finds it (245
 		// ticks at 5.4 s, with EEAT_CELL_ZERO=1). With the knob the direct leg runs again whenever this call's share is
 		// REDIRECT_F times the largest direct share tried for the key)
+		// (THE COVER SLOT, EEAT_COVER=1 from rung COVER_RUNG on: the coverage finder alone on the WHOLE leg with COVER_SLOT of the
+		// budget before the direct leg and the skeleton: the skeleton's sub-level sets make every sub-leg go DOWN the field, so
+		// a leg whose way first goes up it (a run-up, a detour) is split at the false near and its sub-legs start from states
+		// that cannot go on (K Underground's checkpoint (64,84) from the known route's own state: the skeleton's sub-legs from
+		// the arrow field's edge, 10-52 cells each; the coverage finder alone on the whole leg found it in 0.5-1.3 s))
+		let coverSlot = false;
+		const slotV2 = COVER_V2() && !COVER_V3() && (budget.level | 0) >= COVER_RUNG && COVER_SLOT > 0 && !!budget.fast;
+		if (COVER_ON() && !COVER_V2() && (budget.level | 0) >= COVER_RUNG && COVER_SLOT > 0) {
+			const vMs = COVER_SLOT * (deadline - Date.now());
+			const rv = await reachLeg(starts, wp, { ms: vMs, level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline: Math.min(deadline, Date.now() + vMs), stop: budget.stop, next: budget.next || null, cover: 1 });
+			coverSlot = true;
+			if (rv.ok || (rv.fail && (rv.fail.why === 'proof' || rv.fail.why === 'stopped' || rv.fail.why === 'dies'))) return rv;
+		}
 		const sk0 = skelKey(goal, wp, startStrs, wN);
 		const dMs0 = SKEL_DIRECT * (deadline - Date.now());
 		const redirect = SKEL_REDIRECT && skelMemo.has(sk0) && dMs0 >= REDIRECT_F * (skelDirectMs.get(sk0) || Infinity);
 		if (SKEL_DIRECT > 0 && (!skelMemo.has(sk0) || redirect)) {
 			const dMs = dMs0;
 			if (SKEL_REDIRECT) { skelDirectMs.set(sk0, Math.max(skelDirectMs.get(sk0) || 0, dMs)); if (redirect) S.redirects = (S.redirects || 0) + 1; }
-			const r0 = await reachLeg(starts, wp, { ms: dMs, level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline: Math.min(deadline, Date.now() + dMs), stop: budget.stop, next: budget.next || null });
+			const r0 = await reachLeg(starts, wp, { ms: dMs, level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline: Math.min(deadline, Date.now() + dMs), stop: budget.stop, next: budget.next || null, cover: coverSlot || slotV2 ? 2 : 0 });
 			if (r0.ok || (r0.fail && (r0.fail.why === 'proof' || r0.fail.why === 'stopped' || r0.fail.why === 'dies'))) return r0;
 			const rD = await deathLeg(starts, wp, budget, r0, Date.now() + 0.5 * (deadline - Date.now()));
 			if (rD) return rD;
 			if (wRefresh()) { measure(); if (!f0 || !Number.isFinite(c0)) return r0; }
+		}
+		// (COVER V2: the cover slot after the direct leg found nothing, before the skeleton)
+		if (slotV2 && Date.now() < deadline - 200) {
+			const vMs = COVER_SLOT * (deadline - Date.now());
+			const rv = await reachLeg(starts, wp, { ms: vMs, level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline: Math.min(deadline, Date.now() + vMs), stop: budget.stop, next: budget.next || null, cover: 1 });
+			coverSlot = true;
+			if (rv.ok || (rv.fail && (rv.fail.why === 'proof' || rv.fail.why === 'stopped' || rv.fail.why === 'dies'))) return rv;
 		}
 		// (the goal basin, OPT-IN: BASIN_SHARE of what is left, before the skeleton; its basin grows call after call)
 		if (basinOn) {
@@ -2066,6 +2285,14 @@ async function createExecutor(L, opts) {
 			skelBasePush(key, cur);
 		}
 		if (emit) emit({ ev: 'exec.skel', label: wp.label || '', c0: Math.round(c0), c: Math.round(cCur), resumed: !!memo, levels, walls: wN });
+		// (COVER V3: the skeleton stuck, before the first route: the coverage finder alone on the whole leg from the step's
+		// starts with COVER_STUCK of what is left; the rest of the call as before)
+		if (COVER_V3() && stuck && !!budget.fast && (budget.level | 0) >= COVER_RUNG && deadline - Date.now() > 300) {
+			const vMs = COVER_STUCK * (deadline - Date.now());
+			const rv = await reachLeg(starts, wp, { ms: vMs, level: budget.level | 0, fast: true, k: budget.k, deadline: Math.min(deadline, Date.now() + vMs), stop: budget.stop, next: budget.next || null, cover: 1 });
+			S.coverStuck = (S.coverStuck || 0) + 1;
+			if (rv.ok || (rv.fail && (rv.fail.why === 'stopped' || rv.fail.why === 'dies'))) { if (rv.ok) S.coverStuckOk = (S.coverStuckOk || 0) + 1; return rv; }
+		}
 		// (stuck with DEAD_REST of the call or more left: the direct leg from the deepest level AND the starts with the rest
 		// (the sub-level sets' way is the relaxation's; the finders from the starts may know another: Endless Space's direct
 		// leg reached route tick ~1,000 of 1,821 in 5 s where the skeleton sat at ~350), instead of returning the time unused)
@@ -2080,7 +2307,10 @@ async function createExecutor(L, opts) {
 		// (the last leg to the waypoint itself, from the deepest arrivals reached)
 		const r = await reachLeg(cur, wp, { ms: deadline - Date.now(), level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline, stop: budget.stop, next: budget.next || null });
 		// (a failure after sub-legs is no proof: the time was split)
-		if (cur === startStrs) { if (!r.ok && levels.length && r.fail && r.fail.why !== 'stopped') r.fail = Object.assign({}, r.fail, { why: 'budget' }); return r; }
+		if (cur === startStrs) {
+			if (!r.ok && levels.length && r.fail && r.fail.why !== 'stopped') r.fail = Object.assign({}, r.fail, { why: 'budget' }, CLOSEST_UNIT() ? { closest: skelClosest(r.fail.closest, startStrs, f0) } : {});
+			return r;
+		}
 		// (the arrivals' legs are the whole way from the step's own starts: the start that prefixes each)
 		if (r.ok) {
 			r.legs = r.arrivals.map((a) => {
@@ -2150,13 +2380,13 @@ async function createExecutor(L, opts) {
 	async function dispatchLeg(startStrs, w, budget, ms, k, deadline) {
 		let res;
 		if (nW === 0) {
-			try { res = await core.reach(startStrs, w, { ms, level: budget.level | 0, fast: !!budget.fast, k, deadline, stop: budget.stop, next: budget.next || null }); }
+			try { res = await core.reach(startStrs, w, { ms, level: budget.level | 0, fast: !!budget.fast, k, deadline, stop: budget.stop, next: budget.next || null, cover: budget.cover | 0 }); }
 			catch (e) { res = { ok: false, arrivals: [], tool: null, legs: [], lb: 0, fail: { why: 'budget', closest: null, touched: [], blockedBy: [], level: budget.level | 0, note: `error: ${e && e.message || e}` } }; }
 		} else {
 			const sab = new SharedArrayBuffer(4), flag = new Int32Array(sab);
 			let poll = null;
 			if (typeof budget.stop === 'function') poll = setInterval(() => { try { if (budget.stop()) Atomics.store(flag, 0, 1); } catch (e) { /* ignore */ } }, 20);
-			const pending = dispatch({ type: 'reach', starts: startStrs, wp: w, budget: { ms, level: budget.level | 0, fast: !!budget.fast, k, deadline, next: budget.next || null }, tDisp: PROF ? Date.now() : 0 }, deadline, sab);
+			const pending = dispatch({ type: 'reach', starts: startStrs, wp: w, budget: { ms, level: budget.level | 0, fast: !!budget.fast, k, deadline, next: budget.next || null, cover: budget.cover | 0 }, tDisp: PROF ? Date.now() : 0 }, deadline, sab);
 			// (while the worker searches: the starts replayed from the level start in this thread too, for finalize's checks)
 			for (const s of startStrs) { try { core.startOf(String(s)); } catch (e) { /* finalize replays it again */ } }
 			const msg = await pending;
