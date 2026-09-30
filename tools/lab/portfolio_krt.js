@@ -17,6 +17,9 @@ const PO = require(path.join(root, 'src/plan/portfolio.js'));
 const E = require(path.join(root, 'src/eesim.js'));
 const C = require(path.join(root, 'src/common.js'));
 
+// (--vars='{"portB":{...solve options}}': more portfolio arms, paired in one process)
+const argv0 = Object.fromEntries(process.argv.slice(2).map((a) => { const m = /^--([^=]+)(?:=(.*))?$/.exec(a); return m ? [m[1], m[2] === undefined ? '1' : m[2]] : [a, '1']; }));
+const VARS = argv0.vars ? JSON.parse(argv0.vars) : {};
 const argv = Object.fromEntries(process.argv.slice(2).map((a) => { const m = /^--([^=]+)(?:=(.*))?$/.exec(a); return m ? [m[1], m[2] === undefined ? '1' : m[2]] : [a, '1']; }));
 if (argv.agg) { agg(argv.agg.split(',')); process.exit(0); }
 
@@ -54,7 +57,8 @@ function main() {
 			let r;
 			try {
 				r = arm === 'port' ? P.solve(snap, target, { ms: MSB, Tmax: 6000, resume: false, plan: argv.plan })
-					: P.solve(snap, target, { ms: MSB, Tmax: 6000, resume: false, plan: arm + ':1' });
+					: VARS[arm] ? P.solve(snap, target, Object.assign({ ms: MSB, Tmax: 6000, resume: false }, VARS[arm]))
+						: P.solve(snap, target, { ms: MSB, Tmax: 6000, resume: false, plan: arm + ':1' });
 			} catch (e) { r = { ok: false, why: 'error ' + (e && e.message || e) }; }
 			const ms = Date.now() - t0;
 			let verified = false;
@@ -65,7 +69,7 @@ function main() {
 				verified = !dead && tset.has(T.tileOf(chk, W, H));
 			}
 			const rec = { level: c.level, label: c.label, kind: c.kind, start: back > 0 ? 'hit-' + back : 'prev', routeLeg, arm, ok: !!r.ok, verified, T: r.T || 0,
-				ratio: r.ok ? +(r.T / routeLeg).toFixed(3) : null, ms, why: r.why || '', shape, by: r.arm || null, per: arm === 'port' ? r.arms : undefined };
+				ratio: r.ok ? +(r.T / routeLeg).toFixed(3) : null, ms, why: r.why || '', shape, by: r.arm || null, per: arm === 'port' || VARS[arm] ? r.arms : undefined };
 			const line = JSON.stringify(rec);
 			console.log(line);
 			if (outF !== null) fs.writeSync(outF, line + '\n');
@@ -89,7 +93,7 @@ function agg(files) {
 	}
 	const byCase = new Map();
 	for (const r of recs) { const k = r.level + '|' + r.label + '|' + r.start; if (!byCase.has(k)) byCase.set(k, {}); byCase.get(k)[r.arm] = r; }
-	const solo = arms.filter((a) => a !== 'port');
+	const solo = arms.filter((a) => !/^port/.test(a));
 	let u = 0, n = 0, onlyP = 0, onlyU = 0;
 	for (const v of byCase.values()) {
 		n++;
