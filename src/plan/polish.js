@@ -282,7 +282,8 @@ function polishRoute(L, masks0, o) {
 	// 4,616 -> 4,480, but The Blank Page 2,618 -> 2,629 and Rosa 3,680 -> 3,682 (the extra moves' time): hence a pass of
 	// their own.
 	if (!o.noMutate && !o.noLoops && LOOPS_ON) {
-		const lEnd = Math.min(deadline, Date.now() + LOOP_SHARE * (deadline - Date.now()));
+		// (o.loopsOnly: this pass alone with the whole clock, the compiler's LOOPS stage after the budget)
+		const lEnd = o.loopsOnly ? deadline : Math.min(deadline, Date.now() + LOOP_SHARE * (deadline - Date.now()));
 		for (let pass = 0; pass < 8 && Date.now() < lEnd; pass++) {
 			const cur = best.ms;
 			// (coin-blind rejoins where no coin sits on a portal entry: C.coinFreeOk; every combination is replayed by accept)
@@ -295,6 +296,7 @@ function polishRoute(L, masks0, o) {
 			if (!ok || mp.timeUp) break;
 		}
 	}
+	if (o.loopsOnly) return { masks: best.ms, runTicks: best.runTicks, saved: ev0.runTicks - best.runTicks, legs: [], steps, ms: Date.now() - t0 };
 	if (!o.noMutate) {
 		const mEnd = Math.min(deadline, Date.now() + (o.mutShare > 0 ? o.mutShare : 0.5) * (deadline - Date.now()));
 		// (the first pass searches every tick; a later one only around the spans the last one spliced in: elsewhere the route

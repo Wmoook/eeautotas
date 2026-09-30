@@ -37,7 +37,7 @@ function parse(argv) {
 // The hard watchdog (a worker thread: it runs while this thread is blocked in a part's synchronous call). Past its
 // limit it prints why (the budget, the last stage and step this thread passed it) and ends the process (exit 1).
 const WATCHDOG_MIN_S = 30, WATCHDOG_F = 0.5;
-const JOINS_MAX_S = 60, JOINS_F = 0.5;
+const JOINS_MAX_S = 60, JOINS_F = 0.5, LOOPS_MAX_S = 10;
 // (the watchdog thread's code: its own isolate, so it runs while the compile's thread is blocked)
 function watchdogThread() {
 	const { parentPort, workerData } = require('worker_threads');
@@ -128,12 +128,15 @@ async function main() {
 	// (the JOINS stage, src/plan/joins.js: its own clock after the budget; --joins=<s> or EEAT_JOINS_S, default half the
 	// budget (at most 60 s); EEAT_JOINS=0 or --joins=0: off)
 	const joinsS = process.env.EEAT_JOINS === '0' ? 0 : a.joins !== undefined ? Math.max(0, +a.joins || 0) : process.env.EEAT_JOINS_S !== undefined && process.env.EEAT_JOINS_S !== '' && +process.env.EEAT_JOINS_S >= 0 ? +process.env.EEAT_JOINS_S : Math.min(JOINS_MAX_S, JOINS_F * seconds);
-	const wdS = +process.env.EEAT_COMPILE_WATCHDOG_S > 0 ? +process.env.EEAT_COMPILE_WATCHDOG_S : seconds + Math.max(WATCHDOG_MIN_S, WATCHDOG_F * seconds) + joinsS;
+	// (n5-perfect LOOPS: the polish's loop pass alone after the budget, strategy.js; --loops=<s> / EEAT_LOOPS_S, default a
+	// sixth of the budget, at most LOOPS_MAX_S; EEAT_POLISH_LOOPS=0 / EEAT_PERFECT=0: off)
+	const loopsS = process.env.EEAT_POLISH_LOOPS === '0' || process.env.EEAT_PERFECT === '0' ? 0 : a.loops !== undefined ? Math.max(0, +a.loops || 0) : process.env.EEAT_LOOPS_S !== undefined && process.env.EEAT_LOOPS_S !== '' && +process.env.EEAT_LOOPS_S >= 0 ? +process.env.EEAT_LOOPS_S : Math.min(LOOPS_MAX_S, seconds / 6);
+	const wdS = +process.env.EEAT_COMPILE_WATCHDOG_S > 0 ? +process.env.EEAT_COMPILE_WATCHDOG_S : seconds + Math.max(WATCHDOG_MIN_S, WATCHDOG_F * seconds) + joinsS + loopsS;
 	const wd = watchdog(wdS * 1000, json);
 	const emit0 = emit;
 	const emitW = (ev) => { if (ev.ev === 'stage' || ev.ev === 'step' || ev.ev === 'plan') wd.note(ev); emit0(ev); };
 	const opts = { file: lv.file || undefined, md5: lv.md5 || undefined, seconds, workers, seed: Number.isFinite(+a.seed) ? +a.seed : 1, first: a.first === '1', polish: a.polish !== '0',
-		stallS: +a.stallS || 0, parseMs, known: a.known === '0' ? false : undefined, joinsS };
+		stallS: +a.stallS || 0, parseMs, known: a.known === '0' ? false : undefined, joinsS, loopsS };
 	if (a.inflight) opts.inflight = +a.inflight;
 	if (a.parts) opts.parts = path.resolve(a.parts);
 	if (a.runOut) opts.out = path.resolve(a.runOut);

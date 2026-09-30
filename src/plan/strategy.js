@@ -1208,6 +1208,30 @@ async function compile(L, opts = {}, emit = () => {}) {
 		stage('prove', Date.now() - tm, text);
 	} else if (best) stage('prove', 0, !proveOn ? 'off' : proveLong ? `skipped: a route of ${num(best.runTicks)} run ticks (EEAT_PERFECT: over ${PROVE_MAX_TICKS}, past the exact search's reach)` : restIdle < 0 ? `skipped: the start does not rest within ${PROVE_IDLE_MAX} idle ticks` : stopped ? 'skipped: stopped' : 'skipped: no time left');
 
+	// ---- LOOPS (n5-perfect, versus the best known: polish.js's loop pass (a1) alone, its own clock after the budget like
+	// the joins below: a route that came late had no polish (The Blank Page's at 56 s of 60, polish 0.3 s), and its loops
+	// (the portal pit and back, a climb done twice, a back-and-forth run-up, a detour to a coin nothing needs) are the
+	// biggest single savings: every cut a proven rejoin, exact or coin-blind, every combination replayed and judged (no
+	// more deaths, no lower chance, faster): never slower. opts.loopsS (compile.js --loops=<s>, EEAT_LOOPS_S; default a
+	// sixth of the budget, at most 10 s); EEAT_POLISH_LOOPS=0 / EEAT_PERFECT=0 (compile.js): off.
+	if (best && opts.loopsS > 0 && !stopped) {
+		tm = Date.now();
+		let text = '';
+		try {
+			const PL = require('./polish.js');
+			const r = PL.polishRoute(L, best.masks, { ms: opts.loopsS * 1000, loopsOnly: true, allowDeaths: false });
+			const ev = r.runTicks < best.runTicks ? C.evaluate(L, r.masks) : null;
+			if (ev && ev.deaths <= best.deaths && ev.chance >= best.chance - 1e-9 && ev.runTicks < best.runTicks) {
+				const saved = best.runTicks - ev.runTicks;
+				best = { masks: ev.ms, ticks: ev.complete, runTicks: ev.runTicks, deaths: ev.deaths, chance: ev.chance, legs: best.legs, how: `${best.how} + loops` };
+				say({ ev: 'result', kind: 'finish', ticks: ev.complete, runTicks: ev.runTicks, deaths: ev.deaths, chance: ev.chance, how: best.how, loops: saved, lb: LB, gap: gapOf(ev.runTicks), inputs: T.strOf(ev.ms) });
+				if (out) { try { C.writeEetas(path.join(out, 'route.eetas'), ev.ms); } catch (e) { /* read-only */ } }
+				text = `-${num(saved)} ticks (${r.steps.length} cut${r.steps.length === 1 ? '' : 's'} accepted)`;
+			} else text = 'no gain';
+		} catch (e) { bug('loops', { error: e.message }); text = `failed: ${e.message}`; }
+		stage('loops', Date.now() - tm, text);
+	}
+
 	// ---- JOINS (n5-perfect, src/plan/joins.js): the finished route re-derived as a chain of solved legs with the SPEED
 	// carried across its joins (a DP over the route's supports x the arrival's speed / position class, msolve legs and skips
 	// as edges, the route's own inputs always one of them), then every leg of the result against the certified bounds. Its
