@@ -49,6 +49,9 @@ async function runMock(o, lines) {
 }
 async function sectionA() {
 	console.log('(a) the loop with mock parts (the toy: key, door, sealed coin, trophy)');
+	// (the job pick of the default ladder: a1-a8 pin EEAT_RUNG_BREADTH off, a9 compares both; restored at the end)
+	const rbSaved = process.env.EEAT_RUNG_BREADTH;
+	delete process.env.EEAT_RUNG_BREADTH;
 	process.env.PLANMOCK_MODE = 'normal';
 	// (a1) to the first route
 	let x = await runMock({ first: true, out: path.join(TMP, 'a1') });
@@ -184,6 +187,7 @@ async function sectionA() {
 		on9.length < off9.length && (() => { const k = keyAt(on9); const rest = on9.slice(k + 1); return rest.length >= 1 && rest.findIndex((s) => s.edge === 'trophy') <= rest.findIndex((s) => s.edge === 'coin' && s.rung >= 1 && s.nodeClass === 'k1') || rest.every((s) => !(s.edge === 'coin' && s.nodeClass === 'k1' && s.rung >= 1)); })(),
 		`${on9.length} steps vs ${off9.length}`);
 	process.env.PLANMOCK_MODE = 'normal';
+	if (rbSaved !== undefined) process.env.EEAT_RUNG_BREADTH = rbSaved;
 }
 function sectionB() {
 	console.log('(b) src/plan.js end to end (mock parts through --parts)');
