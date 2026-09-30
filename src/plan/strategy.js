@@ -177,6 +177,9 @@ const BW_LEVEL = process.env.EEAT_BW_LEVEL === '1', BW_LEVEL_F = +process.env.EE
 // (THE WHOLE LEVEL AS LEGS, with BW_LEVEL: a trophy behind a gate gets the first plan's waypoints; each leg's new model state
 // comes back as an imported anchor; EEAT_BW_LEGS=0: the trophy alone, as before)
 const BW_LEGS = process.env.EEAT_BW_LEGS !== '0';
+// (THE CUTS, with BW_LEVEL, OPT-IN EEAT_BW_CUTS=1: a trophy leg the first clock did not solve is cut at the start walk's
+// narrowest exact cuts, bwlevel_child.js cutChain)
+const BW_CUTS = process.env.EEAT_BW_CUTS === '1';
 /** a relative deadline (a step's or a waypoint's beforeTickFrom): a number, or 'prev+N' (N ticks after the previous
  *  step's arrival, i.e. this anchor's arrival: a key's KEY_TICKS) -> ticks | NaN */
 function relOf(x) {
@@ -661,7 +664,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		say({ ev: 'bwlevel', seconds: secs, waypoints: nWp });
 		bwlDone = new Promise((resolve) => {
 			let found = null, done = null, buf = '';
-			const ch = cp.spawn(process.execPath, ['--max-old-space-size=2000', path.join(__dirname, 'lab', 'bwlevel_child.js'), String(opts.file), `--ms=${secs * 1000}`, ...(wpFile ? [`--wps=${wpFile}`] : [])], { stdio: ['ignore', 'pipe', 'ignore'] });
+			const ch = cp.spawn(process.execPath, ['--max-old-space-size=2000', path.join(__dirname, 'lab', 'bwlevel_child.js'), String(opts.file), `--ms=${secs * 1000}`, ...(wpFile ? [`--wps=${wpFile}`] : []), ...(BW_CUTS ? ['--cuts=1'] : [])], { stdio: ['ignore', 'pipe', 'ignore'] });
 			bwlChild = ch;
 			const onExit = () => { try { ch.kill('SIGKILL'); } catch (e) { /* gone */ } };
 			process.once('exit', onExit);
