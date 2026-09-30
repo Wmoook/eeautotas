@@ -88,6 +88,10 @@ function levelOf(arg) {
 }
 
 async function main() {
+	// THE AIR JUMPS (n5 lane 3): the compiler's reach fields on a level whose only effect tiles are multijumps are the
+	// physics model with an air jump anywhere (reach.js EEAT_AIRJUMP), not the gravity-blind walk; set before any worker
+	// thread or child process starts (they copy the environment); EEAT_AIRJUMP=0: off, the fields as before
+	if (process.env.EEAT_AIRJUMP === undefined) process.env.EEAT_AIRJUMP = '1';
 	const a = parse(process.argv.slice(2));
 	if (!a._.length) {
 		process.stdout.write('usage: node src/compile.js <level.eelvl | level.json | job id> [--out=<file.eetas>] [--seconds=60] [--workers=N] [--json] [--report=<file.json>] [--quiet]\n');
