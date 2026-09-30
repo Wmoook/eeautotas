@@ -4,7 +4,8 @@
 // its tool, time, why) on stderr, so a stuck leg's time can be read: which sub-leg fails, how long each one takes, how far
 // the skeleton gets. Like tools/cmp/krt.js (the same executor, prims, bounds), the start chosen by tick.
 //   node tools/cmp/legtrace.js <level.eelvl> <route.eetas> "<label>|trophy" --at=<tick>[,<tick>...] [--rungs=3] [--ms=]
-//     [--workers=0] [--quiet=1 (exec.skel lines only)]
+//     [--workers=0] [--quiet=1 (exec.skel lines only)] [--sub=c (the target field's skeleton sub-level set c as the
+//     target)] [--k=4 (the arrivals a call keeps)]
 // Prints one JSON summary line per call on stdout. Env as the compiler's (EEAT_*): an A/B of a knob on one leg.
 const path = require('path');
 const root = path.join(__dirname, '..', '..');
@@ -78,7 +79,7 @@ function tileMin(f) {
 		}
 		for (const r of rungs) {
 			const tb = Date.now();
-			const res = await ex.reach([T.strOf(masks.subarray(0, at))], wpc, { ms: msOpt || RUNG_MS[Math.max(0, Math.min(3, r))], level: r, k: 4 });
+			const res = await ex.reach([T.strOf(masks.subarray(0, at))], wpc, { ms: msOpt || RUNG_MS[Math.max(0, Math.min(3, r))], level: r, k: +opt('k', 4) || 4 });
 			const cl = res.fail && res.fail.closest;
 			console.log(JSON.stringify({ at, c0: +(+c0).toFixed(1), rung: r, ok: res.ok, ms: Date.now() - tb, tool: res.tool, ticks: res.ok ? res.arrivals[0].tick - at : null,
 				why: res.fail ? res.fail.why : null, closest: cl && cl.dist >= 0 ? +(+cl.dist).toFixed(1) : null, ctile: cl && cl.tile >= 0 ? [cl.tile % W, (cl.tile / W) | 0] : null,
