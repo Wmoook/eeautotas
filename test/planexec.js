@@ -96,6 +96,29 @@ async function unit() {
 	check('E-UNIT workers 2 = workers 0 (the same arrivals, the same proof)', ex2.workers() === 2 && s0 === s2 && !q[1].ok && q[1].fail.why === r2.fail.why, `workers ${ex2.workers()}, ${ex2.stats().notes.join('; ')}`);
 	await ex2.close();
 	await ex.close();
+	// a death step (types.js: a region at the respawn tile, expect deaths d + 1, allowDeath): touch the checkpoint, die on
+	// the spike, come back at the checkpoint
+	{
+		const rowsD = [
+			'##############',
+			'#............#',
+			'#S..C....^...#',
+			'##############',
+		];
+		const D = levelOf(rowsD, { '#': [9], S: [255], C: [360], '^': [361, 1] }, 'unitdeath');
+		const exD = await EX.createExecutor(D.L, { file: D.file, workers: 0 });
+		const wpD = { kind: 'region', tiles: [D.at(4, 2)], expect: { feat: 'deaths', value: 1 }, allowDeath: true, label: 'respawn at the checkpoint' };
+		const rD = await exD.reach([start], wpD, { ms: 5000, level: 0 });
+		const gD = T.goalOf(D.L, wpD);
+		const aD = rD.ok ? rD.arrivals[0] : null;
+		const pD = aD ? T.playTo(D.L, aD.masks, { goal: gD, allowDeath: true }) : null;
+		check('E-UNIT a death step: the respawn at the checkpoint with 1 death, the arrival replays', rD.ok && pD && pD.goalAt === aD.masks.length && pD.sim.deaths === 1,
+			rD.ok ? `${rD.tool}, ${aD.masks.length} ticks` : JSON.stringify(rD.fail && rD.fail.why));
+		// the same region without the death rule: the ball is there alive with 0 deaths, never with 1 (a proof or no leg)
+		const rN = await exD.reach([start], Object.assign({}, wpD, { allowDeath: false }), { ms: 1500, level: 0 });
+		check('E-UNIT the death step without allowDeath: no leg (deaths only rise; a dying run dropped)', !rN.ok, rN.ok ? 'found' : rN.fail.why);
+		await exD.close();
+	}
 }
 
 // ---------------------------------------------------------------- T-EXEC-EXACT

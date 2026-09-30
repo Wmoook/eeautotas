@@ -337,6 +337,9 @@ function legBest(L, starts, goal, o) {
 	// until the clock changes its cell (a key out, the time doors' phase: in the cell key there), at most WAIT ticks)
 	const CLOCK = !!L.clockSensitive && process.env.EEAT_BEST_WAIT !== '0';
 	const WAIT = CLOCK ? 600 : 0;
+	// (a dead ball (a death step's allowDeath) holds on through its dead ticks until it respawns: its cell does not change
+	// meanwhile, and the first arrival's rule dropped it: a death step was never found)
+	const DEAD_HOLD = 80;
 	const pool = [];
 	// (the finisher: the NK states nearest the goal by the field (at most 2 a tile, within FIN_D tiles) kept with their
 	// snapshots; at FIN_F of the time with no leg found, the exact search from them (solveExact over absolute ticks: the
@@ -484,7 +487,7 @@ function legBest(L, starts, goal, o) {
 				cellKey();
 				same = ka === pa && kb === pb;
 				if (!same || g + reps >= depthMax) break;
-				if (reps >= HOLD && !(reps < WAIT && sim.speed_x === 0 && sim.speed_y === 0)) break;
+				if (reps >= HOLD && !(sim.is_dead && reps < DEAD_HOLD) && !(reps < WAIT && sim.speed_x === 0 && sim.speed_y === 0)) break;
 				E.applyMask(inp, m); sim.tick(inp); sims++; reps++;
 			}
 			if (nj) noJump |= 1 << (m & 30);
