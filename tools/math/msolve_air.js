@@ -85,8 +85,10 @@ function main() {
 			const target = { tiles: [q.b.tile1], cls };
 			const base = { Tmax: q.routeT + SLACK, K: +(argv.K || 2), coupled: argv.coupled === '1', fields: argv.fields === '1', chain: false, prove: false };
 			const rec = { r: entry._idx, m: q.i, len: q.routeT, c1: q.b.c1, label: moves[q.i].label, next: moves[q.i + 1] ? moves[q.i + 1].label : null };
-			for (const [k, land] of [['on', true], ['off', false]]) {
-				const res = S.leg(snap, target, Object.assign({}, base, { land }));
+			// --arms=bonk: the land-and-act members with (on) and without (off) their bonk variants (coverage iteration 2)
+			const ARMS = argv.arms === 'bonk' ? [['on', { land: true, landBonk: true }], ['off', { land: true, landBonk: false }]] : [['on', { land: true }], ['off', { land: false }]];
+			for (const [k, armO] of ARMS) {
+				const res = S.leg(snap, target, Object.assign({}, base, armO));
 				const r = { ok: !!res.ok, T: res.T || 0, tool: res.tool || null, member: res.member, us: Math.round(res.us), why: res.ok ? undefined : res.why };
 				if (res.ok) {
 					chk.restore(snap);
