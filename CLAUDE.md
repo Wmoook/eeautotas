@@ -547,7 +547,16 @@ ways in.
   vs `+ EEAT_CORR_FIELDS=1` compiled **10 vs 13** (+ MIHB's Dream 9,595, Crypts of Anubis 3,232, INVASION 4,576; none
   lost), the 10 both compiled 32,012 vs 34,381 run ticks (faster 3, slower 7: Trick Or Treat 4,023 vs 5,824, The Ten
   Commandments 666 vs 852: its corridor chain to the blue coin, 420 ticks, taken as found, changed the route), anchors
-  on the failing: Tutorial 3 2 -> 9, Planets 1 -> 4, Frostbitten 26 -> 35, EZ Spooky Shack 11 -> 14, Tutorial 4 6 -> 2.
+  on the failing: Tutorial 3 2 -> 9, Planets 1 -> 4, Frostbitten 26 -> 35, EZ Spooky Shack 11 -> 14, Tutorial 4 6 -> 2;
+  its REPLICATE (box 6, the same 25): 13 = 13 compiled, the 13 both 52,228 vs 52,151 run ticks: pooled 23 vs 26 of 50
+  level-runs, the first run's losses on the both compiled the compile's own spread. THE EXECUTOR'S OWN LEGS (judge_legs.js
+  arm `exec`: reach() at rung 2, 20 s, from the known route's previous trigger, the 55 cases, box 5): `EEAT_CORRIDOR=1`
+  24 / 55, + `EEAT_CORR_FIELDS=1` 25, + `EEAT_CORR_MIN=0 EEAT_CORR_REPLACE=1` (the near chains through the corridor too)
+  26, + `EEAT_CORR_SHARE=0.7 EEAT_CORR_MS=15000` **29**: inside the executor the corridor has 0.4 of a window and at most
+  6 s (the standalone corridor 21 -> 28 of the same 55 at 20 s). THE PORTFOLIO (n5-s99-portfolio's portfolio.js with this
+  corridor: `EEAT_CORR_FIELDS=1` is the corridor's own default for every caller; tools/lab/portfolio_chain.js arm port, the
+  1,123 chains, 5 s, box 5 loaded): 85.7% -> 87.2% (its plan gives the corridor 0.2-0.25 of the budget, the backward
+  solver's legs 908 of 962; the corridor with the pass alone at 5 s: 87.9% on box 6).
   Still failing (the chain set): long routes (480+ ticks 60.9%: the clock), precision staircases (celeste's half-block
   steps: 52-tick chains, every copy), boost / portal chains the held-mask fans do not make.
 - **Checks**: unit tests `test/plantypes.js`, `planmodel.js`, `planplanner.js`, `planbounds.js`, `planprims.js`,
