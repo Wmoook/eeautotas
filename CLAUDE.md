@@ -551,7 +551,15 @@ ways in.
   Rosa dei Venti 3,714 -> 3,508, Bygone Tutorial 2,163 -> 2,059; 214 of 1,817 support legs proven optimal; no gain on Fish
   Gods (its legs already tight: 4 legs msolve does sooner), Frostbitten (117 such legs, none that keeps the trigger state
   and the next leg), the one-leg levels (NC Naos, the precision puzzle: 3 supports). `--routes=<dir>` stacks it on another
-  pass's routes. `tools/perfect/proveroute.js <level> <route> [--seconds=] [--cap=]`: the compile's route proof (every idle
+  pass's routes: ON THE PERFECT PASS'S 24 ROUTES (the order / polish offline pass above, 61,931) the joins take them to
+  **60,045** (-1,886; from the compile -4,336), median ticks / best known 1.22 (compiled) -> 1.20 -> **1.12**, every output
+  replayed: Ruins 1,218 (0.80 of the best known 1,522), Desolate Caverns 1,426 (0.84 of 1,700), Tree Decorating 1,175
+  (1.06), Tutorial 2 3,021 (1.03), Rosa dei Venti 3,470 (1.07), Tutorial 3 3,738 -> 3,565, Fish Gods 4,116 -> 4,015; 198 of
+  1,656 support legs proven optimal. In the compile (box 5, 60 s + the joins' 30 s, `--workers=2`, 6 levels one at a time,
+  every .eetas replayed by tools/cmp/verify.js): the stage's own before -> after Desolate Caverns 1,633 -> 1,549, Tree
+  Decorating 1,561 -> 1,545, Ruins 1,317 -> 1,316, Switch Labyrinth 27 and celeste 249 the same (Bygone Tutorial did not
+  compile at 60 s with 2 workers: before the stage). `EEAT_JOINS_TRIG=1` (opt-in): the first tick of each new trigger state
+  a waypoint too (laptop, one pair each: Gingerbread House 5,173 vs 5,131 without, Tutorial 1 2,423 vs 2,399: not kept). `tools/perfect/proveroute.js <level> <route> [--seconds=] [--cap=]`: the compile's route proof (every idle
   start 0..R, one exhaustive exact search each to the trophy within the route's cost) with a longer clock.
 - **VERSUS THE BEST KNOWN: braked rests, the loop pass, the LOOPS stage** (n5-perfect, 2026-09-30; default on, never
   without the old result; `EEAT_PERFECT=0` all off). `tools/cmp/versus.js <level> <ours.eetas> <known.eetas> [--lead=N]
