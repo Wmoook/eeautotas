@@ -316,7 +316,24 @@ function compileModel(L, o = {}) {
 	 * touch(S, X) -> {S2, changed, expect}: the state after touching trigger X (S2 === S when nothing relevant changes).
 	 * expect: the waypoint's Expect (the feature and its value right after the first effect of the touch; coins: +1).
 	 */
+	// (the touches that change the state, memoized by (S.key, X.id): S2 is a function of S's key (its values, its taken
+	// coins, its checkpoint) and X; the planner's re-plans touch the same states' triggers again (every trigger of every
+	// expansion: mkState's key strings and coin hashes were 18 of The Glitch's 60 s in the main thread, the workers
+	// waiting). The same S2 object for one key (the model's states are never written after mkState). EEAT_TOUCH_MEMO=0: none)
+	const TOUCH_ON = process.env.EEAT_TOUCH_MEMO !== '0', TOUCH_MAX = 200000;
+	const touchMemo = new Map();
 	function touch(S, X) {
+		if (!TOUCH_ON || S.show) return touch0(S, X);
+		const k = S.key + '#' + X.id;
+		const had = touchMemo.get(k);
+		if (had) return had;
+		const r = touch0(S, X);
+		if (!r.changed) return r;
+		if (touchMemo.size >= TOUCH_MAX) touchMemo.clear();
+		touchMemo.set(k, r);
+		return r;
+	}
+	function touch0(S, X) {
 		if (X.kind === 'cp') return cpTracked && S.cp !== X.id ? { S2: mkState(S.vals, S.taken, S.btaken, X.id), changed: true, expect: null } : { S2: S, changed: false, expect: null };
 		if (!X.relevant || X.kind === 'trophy' || X.kind === 'fx') return { S2: S, changed: false, expect: null };
 		const vals = S.vals.slice();

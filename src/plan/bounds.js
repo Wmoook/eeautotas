@@ -56,6 +56,11 @@ const DEATH_MIN = 54;            // ticks from "centre in a killing tile" to "ce
 const EPS = 1e-6;
 const MAX_ROUNDS = 5;            // the teleport fixpoint's rounds (each is a lower bound: the fixpoint is iterated from below, so stopping early stays sound)
 const MEMO_MAX = 24;
+// (the fields' memo by BYTES (a field is a Float32Array(N)), at least MEMO_MAX: the planner prices every trigger edge with
+// bounds.pair (a field per target and door state); with more targets than MEMO_MAX an LRU in the planner's cyclic order
+// evicts every field before its reuse: each re-plan rebuilt them (Unforgiving Climb: 21 s of Dijkstra in a 60-s compile's
+// main thread, the workers idle meanwhile). EEAT_BOUNDS_MEMO_MB (default 256; 0: MEMO_MAX alone)
+const MEMO_MB = process.env.EEAT_BOUNDS_MEMO_MB !== undefined ? +process.env.EEAT_BOUNDS_MEMO_MB : 256;
 const TROPHY = 121, CHECKPOINT = 360, PORTAL = 242, PORTAL_INV = 381;
 const CURSE = 421, ZOMBIE = 422, POISON = 1584, LAVA = 416;
 const F_SOLID = 1, F_JUMPTHRU = 2, F_ROTHALF = 4, F_HALF = 8, F_DOOR = 16, F_CLIMB = 32, F_LIQUID = 64;
@@ -309,6 +314,8 @@ function createBounds(L, o = {}) {
 	const useAxis = vmax.xp < V_CAP || vmax.xn < V_CAP || vmax.yp < V_CAP || vmax.yn < V_CAP;
 	const tiersOn = { iso: o.iso !== false, axis: o.axis !== false && useAxis, endgame: o.endgame !== false };
 	const memo = new Map();
+	// (META holds ~5 more Float32Array(N) per field: 24 bytes a tile in all)
+	const memoMax = Math.max(MEMO_MAX, MEMO_MB > 0 ? Math.floor(MEMO_MB * 1048576 / (24 * N)) : 0);
 	const META = new WeakMap();
 	const st = { fields: 0, hits: 0, ms: 0, rounds: 0, at: 0 };
 	let EG = null, egCtx = new Map();
@@ -435,7 +442,7 @@ function createBounds(L, o = {}) {
 		META.set(bound, { goals: goalArr, isGoal, iso: iso ? Float32Array.from(iso) : null, ax: ax ? Float32Array.from(ax) : null, ay: ay ? Float32Array.from(ay) : null,
 			axp: axp ? Float32Array.from(axp) : null, ayp: ayp ? Float32Array.from(ayp) : null, plainB, touch, ms, rounds, lc: !!Lc });
 		memo.set(key, bound);
-		if (memo.size > MEMO_MAX) memo.delete(memo.keys().next().value);
+		if (memo.size > memoMax) memo.delete(memo.keys().next().value);
 		return bound;
 	}
 

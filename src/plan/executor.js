@@ -892,6 +892,16 @@ async function createExecutor(L, opts) {
 	const vsim = new E.EESim(L), vinp = new E.EEInput();
 	const RM = opts.RM || null;
 	const S = { reach: 0, ok: 0, fail: 0, watchdog: 0, late: 0, hung: 0, verifyDrop: 0, polish: 0, byTool: {}, byWhy: {}, ms: 0, sims: 0, walls: 0, wallsReset: 0 };
+	// (EEAT_EXEC_PROF=1, a measurement: every worker answer's prof (execworker.js) as an exec.prof event, late ones too;
+	// this thread's RCH3 builds (the skeleton's fieldAt, the planner's) and its event-loop delay at close)
+	const PROF = process.env.EEAT_EXEC_PROF === '1';
+	const accM = { rf: 0, rfN: 0 };
+	let rfMain0 = null, eld = null;
+	if (PROF) {
+		rfMain0 = RF.reachField;
+		RF.reachField = function () { const t = Date.now(); try { return rfMain0.apply(this, arguments); } finally { accM.rf += Date.now() - t; accM.rfN++; } };
+		try { eld = require('perf_hooks').monitorEventLoopDelay({ resolution: 10 }); eld.enable(); } catch (e) { eld = null; }
+	}
 	// ---- the pool
 	const pool = [];
 	let Worker = null;
@@ -903,6 +913,7 @@ async function createExecutor(L, opts) {
 		w.on('message', (msg) => {
 			const job = slot.busy;
 			if (!job || msg.id !== job.id) return;
+			if (PROF && emit && msg.result && msg.result.prof) { const p = msg.result.prof; emit({ ev: 'exec.prof', w: i, label: job.label || '', late: !!job.late, ok: !!msg.result.ok, sims: msg.result.sims || 0, tiers: msg.result.tiers || null, queue: job.tDisp ? p.post - job.tDisp : 0, lat: p.recv - p.post, ret: Date.now() - p.end, wait: p.wait, run: p.run, init: p.init, rf: p.rf, rfN: p.rfN, bf: p.bf, bfN: p.bfN, ms: p.ms }); }
 			slot.busy = null;
 			if (job.clear) job.clear();
 			job.done(msg);
@@ -939,8 +950,9 @@ async function createExecutor(L, opts) {
 			const id = ++jobId;
 			let settled = false;
 			const done = (m) => { if (settled) return; settled = true; clearTimeout(timer); resolve(m); };
-			slot.busy = { id, done };
-			slot.w.postMessage(Object.assign({ id, stopFlag }, msg));
+			slot.busy = { id, done, label: PROF && msg.wp ? msg.wp.label : '', tDisp: msg.tDisp || 0, late: false };
+			const bj = slot.busy;
+			slot.w.postMessage(Object.assign({ id, stopFlag, tPost: Date.now() }, msg));
 			let hang = null;
 			const timer = setTimeout(() => {
 				if (settled) return;
@@ -953,6 +965,7 @@ async function createExecutor(L, opts) {
 				// 1.5-s steps: 24 kills in the first 4 rounds, sims 0; the compiles' first 15-20 s of steps 'budget' with
 				// sims 0). Only a worker silent for WORKER_HANG_MS past its deadline is replaced)
 				done({ id, error: 'watchdog', watchdog: true });
+				bj.late = true;
 				if (stopFlag) { try { Atomics.store(new Int32Array(stopFlag), 0, 1); } catch (e) { /* none */ } }
 				if (!WORKER_KEEP) { slot.dead = true; slot.busy = null; try { slot.w.terminate(); } catch (e) { /* gone */ } replace(slot); return; }
 				S.late++;
@@ -1241,7 +1254,7 @@ async function createExecutor(L, opts) {
 			const sab = new SharedArrayBuffer(4), flag = new Int32Array(sab);
 			let poll = null;
 			if (typeof budget.stop === 'function') poll = setInterval(() => { try { if (budget.stop()) Atomics.store(flag, 0, 1); } catch (e) { /* ignore */ } }, 20);
-			const pending = dispatch({ type: 'reach', starts: startStrs, wp: w, budget: { ms, level: budget.level | 0, k, deadline } }, deadline, sab);
+			const pending = dispatch({ type: 'reach', starts: startStrs, wp: w, budget: { ms, level: budget.level | 0, k, deadline }, tDisp: PROF ? Date.now() : 0 }, deadline, sab);
 			// (while the worker searches: the starts replayed from the level start in this thread too, for finalize's checks)
 			for (const s of startStrs) { try { core.startOf(String(s)); } catch (e) { /* finalize replays it again */ } }
 			const msg = await pending;
@@ -1325,6 +1338,8 @@ async function createExecutor(L, opts) {
 	}
 	function stats() { return Object.assign({ workers: nW, notes: note.slice(), core: nW === 0 ? core.stats() : null }, S); }
 	async function close() {
+		if (PROF && emit) { emit({ ev: 'exec.prof.main', rf: accM.rf, rfN: accM.rfN, eld: eld ? { mean: eld.mean / 1e6, max: eld.max / 1e6, p99: eld.percentile(99) / 1e6 } : null }); if (eld) eld.disable(); }
+		if (PROF && rfMain0) { RF.reachField = rfMain0; rfMain0 = null; }
 		closed = true;
 		for (const slot of pool) { slot.dead = true; try { await slot.w.terminate(); } catch (e) { /* gone */ } }
 		pool.length = 0;

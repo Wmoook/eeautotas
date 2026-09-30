@@ -46,6 +46,7 @@ const T = require('./types.js');
 const E = require('../eesim.js');
 
 const RUNG_MS = [1500, 5000, 15000, 45000];
+const REPLAN_FIRST = process.env.EEAT_REPLAN_FIRST === '1';
 const PROGRESS_MS = 2000, WATCH_MS = 2000, SAVE_MS = 60000;
 // the watchdog's window: STALL_F of the budget, at least STALL_MIN_S, at most STALL_S
 const STALL_S = 60, STALL_MIN_S = 5, STALL_F = 1 / 6;
@@ -560,7 +561,14 @@ async function compile(L, opts = {}, emit = () => {}) {
 		// (the plan's own budget: the planner's default (2 s first, 0.3 s after) within a quarter of the time left; a call that
 		// overran it by far is said once (a synchronous call cannot be cut here: the CLI's watchdog is the backstop))
 		// (a plan cut by its budget ('budget': no proof of anything) doubles the anchor's next budget, up to 16x)
-		const planMs = Math.max(100, Math.min((!A.plans && anchors.size <= 1 ? 2000 : 300) * (1 << Math.min(4, A.budgetCuts || 0)), (left() - (best ? endReserve : 0)) / 4));
+		// (the first plan's 2 s is the anchor's FIRST plan's: every step sets A.plans = null (the receding horizon), and a level
+		// that has only its start anchor re-planned with the first plan's 2 s after every step, synchronously, in the thread
+		// that dispatches the workers' steps and takes their answers: the moves stage's workers were idle 12-67% of their time
+		// on big levels (Moving Ice Puzzle 67%, Unforgiving Climb 34%, The Glitch 34%: every re-plan a 2.0-s gap in the event
+		// log, the workers' answers waiting in it). EEAT_REPLAN_FIRST=1: the rule before)
+		const firstPlan = REPLAN_FIRST ? !A.plans : !A.planned;
+		const planMs = Math.max(100, Math.min((firstPlan && anchors.size <= 1 ? 2000 : 300) * (1 << Math.min(4, A.budgetCuts || 0)), (left() - (best ? endReserve : 0)) / 4));
+		A.planned = true;
 		const tp = Date.now();
 		try { r = planner.plan(anchorArg(A), { k: 3, depth: depthOf(A), runBound: rb, tickBound, epoch, ms: planMs }); } catch (e) { bug('plan', { error: e.message, anchor: A.id }); r = { plans: [], why: `error: ${e.message}` }; }
 		const tpMs = Date.now() - tp;

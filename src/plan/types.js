@@ -267,8 +267,28 @@ function levelNow(L, sim) {
 	return Object.assign({}, L, { fg });
 }
 /** a small hash of a level copy's foreground (the goal fields' memo key) */
-function fgHash(fg) { let h = 0x811c9dc5; for (let i = 0; i < fg.length; i++) { h ^= fg[i]; h = Math.imul(h, 0x01000193); } return (h >>> 0).toString(36) + ':' + fg.length; }
-const FIELDS = new Map(), FIELDS_MAX = 8;
+function fgHash0(fg) { let h = 0x811c9dc5; for (let i = 0; i < fg.length; i++) { h ^= fg[i]; h = Math.imul(h, 0x01000193); } return (h >>> 0).toString(36) + ':' + fg.length; }
+// (memoized per foreground ARRAY: a level copy's fg is never written after it is built (levelNow, model.levelOf, withWalls
+// write a fresh copy first), and the planner's edge pricing hashed the SAME copy on every trigger edge of every expansion
+// (bounds.hasField / bounds.field's memo key: O(N) each): Moving Ice Puzzle (400 x 200, 3,346 triggers) spent 34 s of its
+// 60-s compile's main thread there while the workers waited on it. The same string; EEAT_FGHASH_CHECK=1 recomputes every
+// memoized hash and throws on a difference; EEAT_FGHASH_MEMO=0: none)
+const FGH = new WeakMap();
+const FGH_ON = process.env.EEAT_FGHASH_MEMO !== '0', FGH_CHECK = process.env.EEAT_FGHASH_CHECK === '1';
+function fgHash(fg) {
+	if (!FGH_ON || !fg || typeof fg !== 'object') return fgHash0(fg);
+	let h = FGH.get(fg);
+	if (h === undefined) { h = fgHash0(fg); FGH.set(fg, h); }
+	else if (FGH_CHECK && h !== fgHash0(fg)) throw new Error('fgHash: a hashed foreground was written after its hash');
+	return h;
+}
+// (the goal fields' memo: by BYTES (an RCH3 field is ~250 bytes a tile: 10 MB on 200 x 200, 20 MB on 400 x 200), at least
+// FIELDS_MIN fields: the planner's path checks (model.reachable), the skeleton's measures and the workers' tiers share it,
+// and 8 fields thrashed between them (EEAT_FIELDS_MB, default 256; 0: the old 8)
+const FIELDS = new Map(), FIELDS_MIN = 8, FIELDS_CAP = 64;
+const FIELDS_MB = process.env.EEAT_FIELDS_MB !== undefined ? +process.env.EEAT_FIELDS_MB : 256;
+let FIELDS_MAX = FIELDS_MIN;
+const fieldBytes = (f) => { let b = 0; for (const k in f) { const a = f[k]; if (ArrayBuffer.isView(a)) b += a.byteLength; } return b; };
 /**
  * goalField(Lc, tiles, o) -> the RCH3 field (src/reach.js reachField) of level copy Lc (levelNow) seeded from the goal
  * tiles at cost 0 (the trophy is no goal), memoized (8 fields, LRU). RF.costAt(field, sim) -> tiles to the goal (-1 = a
@@ -281,8 +301,9 @@ function goalField(Lc, tiles, o = {}) {
 	const had = FIELDS.get(key);
 	if (had) { FIELDS.delete(key); FIELDS.set(key, had); return had; }
 	const f = RF.reachField(Lc, { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: o.deaths === true });
+	if (FIELDS.size === 0 && FIELDS_MB > 0) FIELDS_MAX = Math.max(FIELDS_MIN, Math.min(FIELDS_CAP, Math.floor(FIELDS_MB * 1048576 / Math.max(1, fieldBytes(f)))));
 	FIELDS.set(key, f);
-	if (FIELDS.size > FIELDS_MAX) FIELDS.delete(FIELDS.keys().next().value);
+	while (FIELDS.size > FIELDS_MAX) FIELDS.delete(FIELDS.keys().next().value);
 	return f;
 }
 
