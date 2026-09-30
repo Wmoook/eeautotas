@@ -943,6 +943,16 @@ rest improves the chain and can close it. Lazy verification: an edge is a replay
 expanded. **Closed** = no open node's fa is below the best chain's T and every bound used was certified: no chain of
 these legs is shorter (the order's weight does not enter the claim).
 
+**The compiler's chains are the executor's legs one after another** (each leg from the arrivals the leg before kept),
+not this A*: which arrival a leg keeps decides the next leg. The iterate 2 lane 'chains' measured it (n4-plan's
+docs/ee_math.md 7.9; test/planexec.js T-EXEC-CHAIN `--chainRetry`, box 3, 40 known routes): with a region waypoint every
+60 route ticks, 26 of the 29 first failures are legs that DO solve from the route's own state with the same budget (17 by
+this solver), the chain's arrival being the region's first entry at its edge with the cheapest leg's speed; ranking the
+first entries by tick + the next leg's cost (this solver's leg to the next waypoint, else the endgame's sound bound) is a
+tie (1,162 vs 1,158 / 1,163 legs of 3,763): the way on needs a state deeper in the region than any first entry, so the
+next step is a leg to the NEXT waypoint through this one (a chain whose target is the pair), not a better choice among
+first entries.
+
 ### 4.7 The numbers
 
 **The real moves** (`tools/math/msolve_bench.js`, box 3, the moves study's segmentation of the truthset's 218 routes;
@@ -1056,7 +1066,11 @@ slack)`. A target: `{tiles: [tile index], cls: 'G' | 'Z' | 'W' | 'C' | 'B' | 'A'
 `--fanNodes`, `--events=0`, `--reach=0`, `--kappa`). The land-and-act members (4.11): `o.land` (default on,
 `EEAT_MSOLVE_LAND=0` off), `o.landStanding` (off), `o.landRows` (6 landings a base member), `o.plainMs` (the plain
 tier's clock); `EEAT_TRUTH_ROOT=<root> node tools/math/msolve_air.js --moves=<exact_jsonl> --out=<dir> --shard=i/n
-[--span=2] [--cls=any] [--coupled=1] [--fields=1]` then `--agg=<dir>`; `msolve_bench.js --land=0`.
+[--span=2] [--cls=any] [--coupled=1] [--fields=1] [--arms=bonk] [--every=N]` then `--agg=<dir>`; `msolve_bench.js --land=0
+[--landBonk=0] [--c0=A]`. The bonk after the act (4.13): `o.landBonk` (default on, `EEAT_MSOLVE_LANDBONK=0` off),
+`o.bonkNodes` (100 k, the variants' own node pool); `EEAT_TRUTH_ROOT=<root> node tools/math/msolve_failclass.js
+--moves=<exact_jsonl> --res=<air or bench results dir> --kind=air|bench [--plainOnly=1] --out=<file> [--shard=i/n]`,
+then `--agg=<dir or files>` (the misses by the events of the route's own leg).
 
 ### 4.10 The field legs: the coupled piece's jump families and the speed-limit cut (the fields iteration)
 
@@ -1192,7 +1206,7 @@ failures that spend the whole 150 k ticks: 1,318 -> 547 of the failing legs (<= 
 family is now exhausted there, the budget left over). The wall time: the solved sample's median 28 vs 38 ms (found
 sooner); a failing leg's 156 vs 109 ms (the hashes; its budget is ticks).
 
-**In the compiler** (box 3, n4-plan 87e1ff0 + this, the shared gate: the block-4 list src/out/n4plan/gate20.txt vs
+**In the compiler** (box 3, n4-plan 87e1ff0 + the twin cut, the shared gate: the block-4 list src/out/n4plan/gate20.txt vs
 b3_w3.json, 60 s, --workers=3, par 6): **exit 0**, compiled 14 vs the baseline's 12 of 20 (Tutorial 1 and The Blank Page
 compile now), better 8, worse 0 (progress: MIHB's Dream 27 vs 23, Level 1 Overworld 40 vs 34, Booty Return 36 vs 13,
 Starlight 22 vs 19; faster: Accident Prone 3,077 vs 3,422, My level fef0 64 vs 65; slower routes on Ruins 1,540 vs
