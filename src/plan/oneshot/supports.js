@@ -68,7 +68,7 @@ const DDX = [0, 0, -1, 1], DDY = [1, -1, 0, 0];
 
 // surface support flags
 const SF_EDGE = 1, SF_NEAR = 2, SF_BINADE = 4, SF_HALF = 8, SF_ICE = 16, SF_KILL = 32, SF_ONEWAY = 64, SF_OWSPEED = 128,
-	SF_DOOR = 256, SF_OWIN = 512, SF_BORDER = 1024, SF_XPULL = 2048;
+	SF_DOOR = 256, SF_OWIN = 512, SF_BORDER = 1024, SF_XPULL = 2048, SF_FXFLIP = 4096;
 const SF_EXACT = SF_EDGE | SF_NEAR | SF_BINADE;
 // span end kinds
 const END_WALL = 0, END_DROP = 1, END_PULL = 2, END_COND = 3, END_BORDER = 4;
@@ -385,6 +385,8 @@ function buildSupports(L, o = {}) {
 		pc.cond = conds.id(open, shut);
 		if (pc.cond !== 0) fl |= SF_DOOR;
 		if ((L.gFlags[c.cur] & 4) !== 0) fl |= SF_KILL;
+		// a gravity effect of another flip at the centre: its touch turns gravity at the end of the tick (transitional)
+		if (c.cur === EFFECT_GRAVITY && (L.lookup0[c.cy * W + c.cx] | 0) !== f) fl |= SF_FXFLIP;
 		pc.valid = true; pc.cell = (c.cx >= 0 && c.cy >= 0 && c.cx < W && c.cy < H) ? c.cy * W + c.cx : -1;
 		pc.fl = fl;
 		return pc;
@@ -759,6 +761,88 @@ function keyOf(S, c, sim, level = 2) {
 	return `${base}|${f16 === 0 ? 'A' : Math.floor(f16 * 16)}`;
 }
 
+// ------------------------------------------------------------------ the supports as part 2's records (edges.js o.supports)
+/**
+ * edgeSupports(S, o) -> [{i, tile, cls, vc, kind: 'start' | 'rest', px, py, sup: {kind, id}}]: the records
+ * src/plan/oneshot/edges.js takes as o.supports (its index 0 the level's start). One REST representative per surface
+ * support (flip 0: edges.js places from the start state; XPULL supports are grounded only on an arriving tick: none), per
+ * field entry cell, per respawn: the ball placed at rest there (speeds 0) and o.settle (2) ticks without input, the
+ * placement edges.js makes (supportState 'rest'), kept only when the engine agrees (alive, the tile and class it names:
+ * G on its rest line for a surface). The surface point: the aligned one (a multiple of 16, where a resting ball's
+ * auto-align takes it) when the interval holds it, else the interval's middle. o.fields / o.respawns false: surfaces only.
+ */
+function edgeSupports(S, o = {}) {
+	const L = S.L, W = S.W, H = S.H;
+	const sim = new E.EESim(L), inp = new E.EEInput();
+	sim.reset();
+	const start = sim.snapshot();
+	const flags = sim._flags, settle = o.settle || 2;
+	const vcOf = (vx, vy) => (vx > 0.25 ? '+' + Math.min(7, Math.round(vx)) : vx < -0.25 ? '-' + Math.min(7, Math.round(-vx)) : '0') + (vy < -0.25 ? 'u' : vy > 0.25 ? 'd' : 'n');
+	const clsOf = () => { if (sim.is_dead) return 'D'; const id = sim.current_tile, f = flags[id] | 0; return f & F_LIQUID ? 'W' : f & F_CLIMB ? 'C' : (id === 4 || id === 414) ? 'Z' : f & F_BOOST ? 'B' : sim.on_ground ? 'G' : 'A'; };
+	const tileOf = () => { let x = Math.trunc(sim.px + 8) >> 4, y = Math.trunc(sim.py + 8) >> 4; x = Math.max(0, Math.min(W - 1, x)); y = Math.max(0, Math.min(H - 1, y)); return y * W + x; };
+	// (edges.js place(ctx, px, py, q, flip): the gravity queue set to the tile resting there, the flip set: the same rule)
+	const place = (px, py, q, flip) => {
+		sim.restore(start);
+		sim.modifier_x = 0; sim.modifier_y = 0; sim.speed_x = 0; sim.speed_y = 0;
+		sim._tileQueue.length = 0;
+		if (q !== undefined) { sim._q0 = q; sim._q1 = q; }
+		if (flip !== undefined) sim.flip_gravity = flip;
+		sim.px = px; sim.py = py; sim.teleported = true;
+		E.applyMask(inp, 0);
+		for (let t = 0; t < settle; t++) { sim.tick(inp); if (sim.is_dead) return false; }
+		return true;
+	};
+	sim.restore(start);
+	const out = [{ i: 0, tile: tileOf(), cls: clsOf(), vc: vcOf(sim.speed_x, sim.speed_y), kind: 'start' }];
+	const sf = S.surf;
+	let tried = 0, kept = 0;
+	const why = {};
+	for (let r = 0; r < sf.n; r++) {
+		if (sf.flags[r] & (SF_XPULL | SF_FXFLIP)) continue;
+		const lo = sf.lo[r], hi = sf.hi[r], cl = sf.closed[r];
+		let q = Math.ceil(lo / 16) * 16;
+		if (q === lo && !(cl & 1)) q += 16;
+		if (!(q < hi || (q === hi && (cl & 2)))) q = lo === hi ? lo : (lo + hi) / 2;
+		const vert = sf.dir[r] === D_DOWN || sf.dir[r] === D_UP;
+		const px = vert ? q : sf.rest[r], py = vert ? sf.rest[r] : q;
+		const qt = centreOf(L, px, py).cur, flip = sf.flip[r];
+		tried++;
+		if (!place(px, py, qt, flip) || clsOf() !== 'G' || (vert ? sim.py : sim.px) !== sf.rest[r]) {
+			const f = sf.flags[r];
+			const k = f & SF_KILL ? 'kill' : f & SF_DOOR ? 'door' : f & (SF_ONEWAY | SF_OWIN) ? 'oneway' : 'other';
+			why[k] = (why[k] || 0) + 1;
+			if (k === 'other' && o.debug && why[k] <= 8) console.log('edgeSupports other:', r, DIR_NAMES[sf.dir[r]], 'flip', flip, 'rest', sf.rest[r], 'lo', lo, 'hi', hi, 'at', px, py, 'q', qt, '->', sim.px, sim.py, clsOf(), 'cur', sim.current_tile, 'flipNow', sim.flip_gravity);
+			continue;
+		}
+		kept++;
+		const rec = { i: out.length, tile: tileOf(), cls: 'G', vc: vcOf(sim.speed_x, sim.speed_y), kind: 'rest', px, py, q: qt, sup: { kind: 'surf', id: r } };
+		if (flip !== 0) rec.flip = flip;
+		out.push(rec);
+	}
+	if (o.fields !== false) {
+		for (const F of S.fields) {
+			for (const t of F.entries) {
+				const px = (t % W) * 16, py = ((t / W) | 0) * 16;
+				if (!place(px, py) || tileOf() !== t) continue;
+				const c = clsOf();
+				if (c === 'A' || c === 'D') continue;
+				out.push({ i: out.length, tile: t, cls: c, vc: vcOf(sim.speed_x, sim.speed_y), kind: 'rest', px, py, sup: { kind: 'field', id: F.id, cell: t } });
+			}
+		}
+	}
+	if (o.respawns !== false) {
+		for (const R of S.respawns) {
+			if (!place(R.x, R.y)) continue;
+			const c = clsOf();
+			if (c === 'A' || c === 'D') continue;
+			out.push({ i: out.length, tile: tileOf(), cls: c, vc: vcOf(sim.speed_x, sim.speed_y), kind: 'rest', px: R.x, py: R.y, sup: { kind: 'respawn', id: R.id } });
+		}
+	}
+	out.surfWhy = why;
+	out.surfTried = tried; out.surfKept = kept;
+	return out;
+}
+
 // ------------------------------------------------------------------ counts and memory
 function bytesOf(S) {
 	let b = 0;
@@ -777,7 +861,7 @@ function stats(S) {
 	const sf = S.surf;
 	const byDir = [0, 0, 0, 0], exactByDir = [0, 0, 0, 0];
 	const fc = {};
-	const fl = { edge: 0, near: 0, binade: 0, half: 0, ice: 0, kill: 0, oneway: 0, owspeed: 0, door: 0, xpull: 0, exact: 0 };
+	const fl = { edge: 0, near: 0, binade: 0, half: 0, ice: 0, kill: 0, oneway: 0, owspeed: 0, door: 0, xpull: 0, fxflip: 0, exact: 0 };
 	const cellsWith = new Set();
 	for (let r = 0; r < sf.n; r++) {
 		byDir[sf.dir[r]]++;
@@ -792,6 +876,7 @@ function stats(S) {
 		if (f & SF_OWSPEED) fl.owspeed++;
 		if (f & SF_DOOR) fl.door++;
 		if (f & SF_XPULL) fl.xpull++;
+		if (f & SF_FXFLIP) fl.fxflip++;
 		if (f & SF_EXACT) { fl.exact++; exactByDir[sf.dir[r]]++; }
 		cellsWith.add(sf.cell[r]);
 	}
@@ -820,8 +905,8 @@ function stats(S) {
 }
 
 module.exports = {
-	buildSupports, classify, keyOf, vclass, vclassName, VCLASS, RUN, VSTAR, stats, bytesOf, pullDir, flipsOf, makeProbe, centreOf,
+	buildSupports, classify, keyOf, edgeSupports, vclass, vclassName, VCLASS, RUN, VSTAR, stats, bytesOf, pullDir, flipsOf, makeProbe, centreOf,
 	D_DOWN, D_UP, D_LEFT, D_RIGHT, DIR_NAMES, END_NAMES, FC_NAMES,
-	SF_EDGE, SF_NEAR, SF_BINADE, SF_HALF, SF_ICE, SF_KILL, SF_ONEWAY, SF_OWSPEED, SF_DOOR, SF_OWIN, SF_BORDER, SF_XPULL, SF_EXACT, lineIndex,
+	SF_EDGE, SF_NEAR, SF_BINADE, SF_HALF, SF_ICE, SF_KILL, SF_ONEWAY, SF_OWSPEED, SF_DOOR, SF_OWIN, SF_BORDER, SF_XPULL, SF_FXFLIP, SF_EXACT, lineIndex,
 	NK_ARROW, NK_DOT, NK_CLIMB, NK_LIQUID, NK_BOOST, NK_PORTAL, NK_KILL, NK_EFFECT, NK_TRIGGER, NK_ICE,
 };
