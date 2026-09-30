@@ -55,6 +55,29 @@ function units() {
 		check('P-UNIT keyDoor: from the key\'s arrival the plan is the passage then the trophy, beforeTick = the key\'s + 499',
 			p2 && kindsOf(m, p2).join(',') === 'region,trophy' && p2.steps[0].waypoint.beforeTick === kt + 499, p2 && `${planStr(m, p2)} beforeTick ${p2.steps[0].waypoint.beforeTick} key at ${kt}`);
 	}
+	// ---- ANY MEMBER (o.anyMember / EEAT_PLAN_ANY=1): two red keys = one move, its waypoint the union of their tiles
+	{
+		const L = require('./planmodel.js').level([
+			'########################',
+			'#..........#...........#',
+			'#S..k...k..d.........T.#',
+			'########################',
+		], { k: [6], d: [23] }), W = L.width, at = (x, y) => y * W + x;
+		const m = M.compileModel(L);
+		const off = P.createPlanner(m, F.createFacts(), { anyMember: false }).plan({}, { k: 3 })[0];
+		const pl = P.createPlanner(m, F.createFacts(), { anyMember: true });
+		const on = pl.plan({}, { k: 3 })[0];
+		const t0 = on ? on.steps[0].waypoint : null;
+		check('P-UNIT anyMember off: the first key waypoint is one tile group', !!off && off.steps[0].waypoint.tiles.length === 1 && !/any of/.test(off.steps[0].waypoint.label), off ? planStr(m, off) : 'no plan');
+		check('P-UNIT anyMember on: key -> past the door -> trophy, the key waypoint = both keys, the expect key0 on',
+			!!on && kindsOf(m, on).join(',') === 'key,region,trophy' && t0.tiles.length === 2 && t0.tiles.includes(at(4, 2)) && t0.tiles.includes(at(8, 2)) && /any of 2/.test(t0.label) && t0.expect && t0.expect.feat === 'key0' && t0.expect.value === 1,
+			on ? planStr(m, on) : 'no plan');
+		const a = pl._anchorOf({});
+		const es = pl._edgesOf(a.S, a.pos, a.base, 'plan', true, a.cls).filter((e) => e.X && e.X.kind === 'key');
+		const keyIds = m.triggers.filter((X) => X.kind === 'key').map((X) => X.id);
+		check('P-UNIT anyMember on: one key edge, its id the least member id, its lb <= the nearer key\'s', es.length === 1 && es[0].edge === 'trig:' + Math.min(...keyIds) && es[0].anyOf === 2,
+			es.map((e) => `${e.edge} lb ${e.lb} est ${e.est} any ${e.anyOf}`).join('; '));
+	}
 	// ---- the coin door: both coins, then the trophy
 	{
 		const L = LEVELS.coinDoor(), m = M.compileModel(L), pl = P.createPlanner(m, F.createFacts(), {});

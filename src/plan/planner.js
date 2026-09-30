@@ -83,6 +83,22 @@ function createPlanner(model, facts, o = {}) {
 	// (the crumbs: coins no gate reads, relevant only with EEAT_CRUMBS=1 (model.js); left out of the plan search, offered
 	// one at a time by crumbPlan)
 	const crumbs = model.triggers.filter((X) => X.relevant && X.crumb);
+	// ANY MEMBER (doctor 3, COMPILER-PUSH-2): the triggers whose touch makes the SAME abstract state from S (every tile
+	// group of one key colour, of one switch id, one team, the crown: model.touch gives one S2) are ONE move. Before, each
+	// tile group was an edge of its own and a waypoint of its own tiles: NC Naos Antediluvian (145 triggers, ~100 red-key
+	// groups, most of them single tiles) planned 'red key (95,148) x29' / 'red key (75,163) x20' (the est walk's nearest
+	// groups), the executor ended 6-13 tiles short of them from the spawn at every rung, the next plans took the next
+	// group, and the compile ended with gain 0-1 in 60 and 180 s, where the known route takes the red key at (86,170) (a
+	// single-tile group ~15 tiles from the spawn) at tick 374. Now one edge per (kind, S2): its tiles the UNION of the
+	// members' live tiles (the goal field seeded at all of them: the finder takes whichever member the physics reaches),
+	// its lb / est the least over them (admissible: a min of admissible bounds), its edge id the least member id (stable
+	// for the facts whatever member is nearest), its pos2 the nearest member's (the plan's est goes on from there; the
+	// next anchor is the real arrival, anchorOf). Coins never merge (their taken bits make S2 differ). o.anyMember /
+	// EEAT_PLAN_ANY=1: on; off (the default until measured) = the planner as before, byte for byte.
+	const ANY = o.anyMember !== undefined ? !!o.anyMember : process.env.EEAT_PLAN_ANY === '1';
+	// (the SET kinds only: a touch sets the feature whatever it was; the toggles (psw / osw: a member the ball just
+	// pressed is in the union at cost 0 where it stands) and the coins (their own taken bits) stay one edge a trigger)
+	const ANY_KINDS = new Set(['key', 'team', 'prot', 'reset', 'fx', 'crown', 'pswR', 'oswR']);
 	const trophyTiles = model.trophyTiles;
 	const openS = { key: '__open__', dkey: '__open__', vals: [], feats: {} };
 	// ---------------------------------------------------------------- floors (a count gate the way STANDS on)
@@ -560,7 +576,7 @@ function createPlanner(model, facts, o = {}) {
 			// it), 'rch' (RCH3 -1 at rest / rising), 'floor' / 'zone' (a count floor not reached))
 			return { lb, est, steps, viaDeath, relaxOnly, pen: relaxOnly ? 'relax' : '' };
 		};
-		const finish = (X, tiles, edge, tr) => {
+		const finish = (X, tiles, edge, tr, anyOf) => {
 			const g = leg(tiles);
 			if (!g) return;
 			if (wantEst) {
@@ -577,8 +593,11 @@ function createPlanner(model, facts, o = {}) {
 				if (bad === 'proof' && root) return;
 				if (bad) { g.est += PENALTY; g.pen = (g.pen ? g.pen + '+' : '') + 'rch'; }
 			}
-			out.push({ X, S2: tr ? tr.S2 : S, pos2: X ? posOf(X, S, tr ? tr.S2 : S) : null, expect: tr ? tr.expect : null, lb: g.lb, est: g.est, steps: g.steps, viaDeath: g.viaDeath, relaxOnly: g.relaxOnly, pen: g.pen || '', edge, live: tiles });
+			const e = { X, S2: tr ? tr.S2 : S, pos2: X ? posOf(X, S, tr ? tr.S2 : S) : null, expect: tr ? tr.expect : null, lb: g.lb, est: g.est, steps: g.steps, viaDeath: g.viaDeath, relaxOnly: g.relaxOnly, pen: g.pen || '', edge, live: tiles };
+			if (anyOf > 1) e.anyOf = anyOf;
+			out.push(e);
 		};
+		const groups = ANY ? new Map() : null;
 		for (const X of (only || relevant)) {
 			if (pos.trig === X.id && !(X.kind === 'psw' || X.kind === 'osw')) continue;
 			const live = model.liveTiles(S, X);
@@ -589,7 +608,29 @@ function createPlanner(model, facts, o = {}) {
 			if (sL >= INF && !dvL) continue;
 			const tr = model.touch(S, X);
 			if (!tr.changed) continue;
+			if (groups && ANY_KINDS.has(X.kind) && tr.S2 && tr.S2.key !== undefined) {
+				const gk = X.kind + '|' + tr.S2.key;
+				const g = groups.get(gk);
+				if (g) g.push({ X, live, tr }); else groups.set(gk, [{ X, live, tr }]);
+				continue;
+			}
 			finish(X, live, 'trig:' + X.id, tr);
+		}
+		if (groups) {
+			for (const g of groups.values()) {
+				if (g.length === 1) { finish(g[0].X, g[0].live, 'trig:' + g[0].X.id, g[0].tr); continue; }
+				// (the representative: the member nearest by the est walk (else the lb walk); the edge id: the least id)
+				const dd = dE || dL;
+				let rep = g[0], repD = INF, minId = g[0].X.id;
+				const seen = new Set(), all = [];
+				for (const m of g) {
+					if (m.X.id < minId) minId = m.X.id;
+					let d = INF;
+					for (const t of m.live) { if (dd[t] < d) d = dd[t]; if (!seen.has(t)) { seen.add(t); all.push(t); } }
+					if (d < repD) { repD = d; rep = m; }
+				}
+				finish(rep.X, all, 'trig:' + minId, rep.tr, g.length);
+			}
 		}
 		if (only) return out;
 		finish(null, trophyTiles, 'trophy', null);
@@ -892,7 +933,7 @@ function createPlanner(model, facts, o = {}) {
 					waypoint: dieField({ kind: 'region', tiles: DIE_ANY && model.respawn && model.respawn.length ? model.respawn.slice() : e.live.slice(), expect: e.expect, allowDeath: true, label: X.label }) });
 				continue;
 			}
-			const wp = X ? { kind: 'trigger', tiles: e.live.slice(), trig: X.id, expect: e.expect, label: X.label } : { kind: 'trophy', label: 'trophy' };
+			const wp = X ? { kind: 'trigger', tiles: e.live.slice(), trig: X.id, expect: e.expect, label: e.anyOf > 1 ? `${X.label} (any of ${e.anyOf})` : X.label } : { kind: 'trophy', label: 'trophy' };
 			push({ edge: e.edge, nodeClass: cls, rung: facts ? facts.rungOf(e.edge, cls) : 0, waypoint: wp, estTicks: Math.round(e.est), lb: e.lb, pen: e.pen || '' });
 			// a key followed by its door: the passage while the key is on
 			if (X && X.kind === 'key' && i + 1 < path.length) {
