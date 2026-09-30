@@ -669,6 +669,46 @@ async function buildGraph(src, o = {}) {
 	return g;
 }
 
+// ------------------------------------------------------------------ the lazy source (the edges a search asks for)
+/**
+ * edgeSource(src, o) -> {ctx, sups, supAt, edgesOf(i), stats()}: the same supports and edge families, built on demand in
+ * this thread and memoised per support (a search that visits few supports of a big level pays for those alone; the
+ * whole-level build is buildGraph). o.supports: part 1's records instead of the default set. edgesOf(i) links each edge
+ * to a support of the same (tile, class, speed class) where one exists (e.to, e.x = 1 for a (tile, class) match only).
+ */
+function edgeSource(src, o = {}) {
+	const L = levelOf(src);
+	const ctx = ctxOf(L, o);
+	const sups = o.supports || staticSupports(ctx);
+	ctx.sups = sups;
+	const byKey = new Map(sups.map((u) => [`${u.tile},${u.cls},${u.vc}`, u.i]));
+	const byTC = new Map();
+	for (const u of sups) { const k = `${u.tile},${u.cls}`; if (!byTC.has(k)) byTC.set(k, []); byTC.get(k).push(u.i); }
+	const supAt = new Map();
+	for (const u of sups) { if (!supAt.has(u.tile)) supAt.set(u.tile, []); supAt.get(u.tile).push(u.i); }
+	const memo = new Map();
+	let ms = 0, n = 0;
+	const edgesOf = (i) => {
+		let es = memo.get(i);
+		if (es) return es;
+		const t0 = Date.now();
+		es = edgesFrom(ctx, i);
+		for (const e of es) {
+			if (e.cls === 'R') e.to = -1;
+			else if (e.k === 'touch') e.to = -2 - e.trig;
+			else {
+				const k = byKey.get(`${e.tile},${e.cls},${e.vc}`);
+				if (k !== undefined) e.to = k;
+				else { const l = byTC.get(`${e.tile},${e.cls}`); if (l && l.length) { e.to = l[0]; e.x = 1; } else e.to = -3; }
+			}
+		}
+		memo.set(i, es);
+		ms += Date.now() - t0; n++;
+		return es;
+	};
+	return { ctx, L, sups, supAt, edgesOf, stats: () => ({ sups: sups.length, built: n, edges: Array.from(memo.values()).reduce((a, l) => a + l.length, 0), ms }) };
+}
+
 // ------------------------------------------------------------------ the graph's use (the one-shot search, part 3)
 /**
  * indexGraph(g) -> {out, supAt, byP1, respawnEdges, touchEdges}: the adjacency the search walks. out[i] = the edge
@@ -727,7 +767,7 @@ if (WT && !WT.isMainThread && WT.workerData && WT.workerData.oneshotEdges && WT.
 	});
 }
 
-module.exports = { buildGraph, buildLocal, indexGraph, ctxOf, staticSupports, supportState, edgesFrom, reachFamily, landFamily, eventFamily, oneFamily, touchFamily, factsOf, applyEdge, resolveEdge, rleOf, masksOf, clsOf, tileOf, loadGraph, saveGraph, cacheFile, md5OfLevel, DEF };
+module.exports = { buildGraph, buildLocal, edgeSource, indexGraph, ctxOf, staticSupports, supportState, edgesFrom, reachFamily, landFamily, eventFamily, oneFamily, touchFamily, factsOf, applyEdge, resolveEdge, rleOf, masksOf, clsOf, tileOf, loadGraph, saveGraph, cacheFile, md5OfLevel, DEF };
 
 // ------------------------------------------------------------------ CLI
 if (require.main === module && (!WT || WT.isMainThread)) {
