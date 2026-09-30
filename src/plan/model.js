@@ -263,13 +263,17 @@ function compileModel(L, o = {}) {
 		for (const g of gates) if (g.feat === fk) set.add(g.param);
 		return [...set].sort((x, y) => x - y);
 	});
+	const deathIdx = process.env.EEAT_GAIN_DEATHS === '1' ? -1 : (fIdx.has('deaths') ? fIdx.get('deaths') : -1);
 	function mkState(vals, taken, btaken, cp = -1) {
 		const dkey = vals.join(',');
 		let pkey = dkey;
 		for (let n = 0; n < countTh.length; n++) if (countTh[n]) { pkey = vals.map((v, i) => { const th = countTh[i]; if (!th) return v; let c = 0; for (const t of th) if (v >= t) c++; return 'c' + c; }).join(','); break; }
 		const key = dkey + (taken ? '|' + hashBytes(taken) : '') + (btaken ? '|' + hashBytes(btaken) : '') + (canDie ? '|c' + cp : '');
 		let gain = 0;
-		if (initV) for (let n = 0; n < vals.length; n++) if (vals[n] !== initV[n]) gain++;
+		// (a death is a cost, not progress: the count opens a door, and the trigger reached past it is the gain; counted, a
+		// death step's arrival outranked the anchors it came from and the strategy stayed on it: The Ten Commandments lost its
+		// 666-tick trophy leg to the anchor after a death, box 3, 2 of 2 runs)
+		if (initV) for (let n = 0; n < vals.length; n++) if (n !== deathIdx && vals[n] !== initV[n]) gain++;
 		if (taken) for (let k = 0; k < taken.length; k++) gain += taken[k];
 		if (btaken) for (let k = 0; k < btaken.length; k++) gain += btaken[k];
 		return { key, dkey, pkey, feats: new FeatObj(vals), vals, taken, btaken, gain, cp };

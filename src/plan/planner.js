@@ -463,12 +463,13 @@ function createPlanner(model, facts, o = {}) {
 			if (!tr.changed) continue;
 			finish(X, live, 'trig:' + X.id, tr);
 		}
+		finish(null, trophyTiles, 'trophy', null);
 		// DEATHS AS MOVES (lane 2's die edge, lane 5): where a death door (1011) or gate (1012) reads the death count, a death
 		// is an edge of its own (plan mode: the est walk to the nearest killer, the dead ticks, back at the respawn with one
 		// death more), so the door that needs N deaths opens in the plan: Tutorial 2's est walk passed its death door only in
 		// the relaxation, every plan carried the 1e6 penalty and no death step. The lb needs none (it keeps 1011 open).
 		// EEAT_PLAN_DIE=0: none
-		if (wantEst && DIE_EDGE && dieIdx !== undefined && dvE && S.vals[dieIdx] < model.deathT && dieNear(S.vals[dieIdx])) {
+		if (wantEst && DIE_EDGE && dieIdx !== undefined && dvE && S.vals[dieIdx] < model.deathT && dieNear(S.vals[dieIdx]) && (DIE_ALWAYS || out.some((e) => e.relaxOnly))) {
 			const vals = S.vals.slice();
 			vals[dieIdx] = S.vals[dieIdx] + 1;
 			const S2 = model.mkState(vals, S.taken, S.btaken, S.cp);
@@ -482,7 +483,6 @@ function createPlanner(model, facts, o = {}) {
 				out.push({ X, S2, pos2: diePos(rp), expect: { feat: 'deaths', value: vals[dieIdx] }, lb: lbD, est, steps: dvE.dk, viaDeath: false, relaxOnly: false, edge, live: rp.tiles });
 			}
 		}
-		finish(null, trophyTiles, 'trophy', null);
 		return out;
 	}
 	const DIE_EDGE = process.env.EEAT_PLAN_DIE !== '0';
@@ -492,6 +492,11 @@ function createPlanner(model, facts, o = {}) {
 	// spawn" never held (every leg 'budget', closest 0 at a killer, rungs 2-3 spent). A viaDeath step (a death as a
 	// teleport to its respawn) keeps its respawn. EEAT_PLAN_DIE_ANY=0: the state's own respawn)
 	const DIE_ANY = process.env.EEAT_PLAN_DIE_ANY !== '0';
+	// (a death is offered only where an edge of the node is reachable in the relaxation alone (a shut death door is what
+	// the relaxation opens): The Ten Commandments' trophy is reachable without a death (666 run ticks), and offered at every
+	// node the death became its plan after one failed trophy rung (2,212 run ticks, 2 of 2; before the gain fix: its
+	// compile lost, 3 of 3); Tutorial 2's trophy is behind its death door (relaxation only): offered. EEAT_PLAN_DIE_WHEN=always)
+	const DIE_ALWAYS = process.env.EEAT_PLAN_DIE_WHEN === 'always';
 	// (a death is a move only toward a death door / gate threshold at most DIE_GAP deaths on: First Person Maze's 999-death
 	// door made "die" its first plan step (est 138), a way no route takes; each death costs 54 dead ticks at least)
 	const DIE_GAP = +process.env.EEAT_PLAN_DIE_GAP || 3;
