@@ -1,0 +1,28 @@
+moves 49846, tried 49431
+class       n     F0 same-or-earlier  F1 same-or-earlier (F1 tried)  F1 strictly earlier  F1 same tick & not slower (dvx >= 0)  builder same-or-earlier
+   ALL: F2 (<= 2 changes, per tick, plain masks) same-or-earlier 87.2% of 49324 tried (F2 not tried: 107)
+ALL       49431      62.3%            86.1% (48794)               16.1%               66.1%                          84.4% of 28975
+   walk: F2 (<= 2 changes, per tick, plain masks) same-or-earlier 100.0% of 42 tried (F2 not tried: 0)
+walk         42     100.0%           100.0% (42)               90.5%               97.6%                          -
+   jump: F2 (<= 2 changes, per tick, plain masks) same-or-earlier 99.2% of 7610 tried (F2 not tried: 13)
+jump       7623      74.2%            96.0% (7617)               22.3%               81.6%                          86.2% of 7623
+   hop: F2 (<= 2 changes, per tick, plain masks) same-or-earlier 99.7% of 17021 tried (F2 not tried: 52)
+hop       17073      72.6%            97.1% (17067)                1.0%               55.7%                          86.5% of 17072
+   fall: F2 (<= 2 changes, per tick, plain masks) same-or-earlier 93.8% of 4569 tried (F2 not tried: 3)
+fall       4572      56.8%            87.3% (4529)               11.6%               72.0%                          73.1% of 4280
+   airjump: F2 (<= 2 changes, per tick, plain masks) same-or-earlier 10.1% of 148 tried (F2 not tried: 14)
+airjump     162       6.8%            10.3% (146)                9.6%               10.3%                          -
+   arrow: F2 (<= 2 changes, per tick, plain masks) same-or-earlier 59.3% of 9879 tried (F2 not tried: 0)
+arrow      9879      37.8%            61.5% (9522)               25.6%               55.7%                          -
+   boost: F2 (<= 2 changes, per tick, plain masks) same-or-earlier 82.1% of 2284 tried (F2 not tried: 13)
+boost      2297      70.3%            82.4% (2262)               12.7%               78.1%                          -
+   swim: F2 (<= 2 changes, per tick, plain masks) same-or-earlier 87.0% of 293 tried (F2 not tried: 0)
+swim        293      53.2%            90.1% (283)               62.9%               88.7%                          -
+   climb: F2 (<= 2 changes, per tick, plain masks) same-or-earlier 87.4% of 390 tried (F2 not tried: 0)
+climb       390      56.9%            90.5% (377)               55.7%               85.1%                          -
+   dot: F2 (<= 2 changes, per tick, plain masks) same-or-earlier 81.8% of 5317 tried (F2 not tried: 0)
+dot        5317      58.4%            83.9% (5184)               41.2%               80.0%                          -
+   portal: F2 (<= 2 changes, per tick, plain masks) same-or-earlier 82.1% of 1711 tried (F2 not tried: 12)
+portal     1723      72.1%            81.8% (1707)               10.5%               78.8%                          -
+   death: F2 (<= 2 changes, per tick, plain masks) same-or-earlier 85.0% of 60 tried (F2 not tried: 0)
+death        60      68.3%            86.2% (58)               15.5%               86.2%                          -

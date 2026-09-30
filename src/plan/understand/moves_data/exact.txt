@@ -1,0 +1,96 @@
+routes 219 (ok 218, stale 1, err 0), levels 106, moves 49846, ticks 2013028
+
+== 1. classes: moves, ticks, length (median / p90), raw direction runs (median / p90), essential direction runs (median / p90), capped
+class      moves   %mov   %ticks  len50 len90  raw50 raw90  ess50 ess90  capped
+walk          42    0.1       0      4    19      2     2      2     2  0%
+jump        7626   15.3      12     28    62      3     8      1     6  0%
+hop        17073   34.3    16.8     15    42      2     7      1     6  0%
+fall        4613    9.3     9.3     26    67      3     9      2     8  0.2%
+airjump      178    0.4     1.3     81   354      8    62      8    31  1.7%
+arrow      10078   20.2    38.3     44   138      5    18      3    13  1.6%
+boost       2305    4.6     3.3      9    74      2    10      1     8  0.5%
+swim         297    0.6     1.2     52   132      5    20      3    17  1.7%
+climb        395    0.8     1.1     29   118      4    16      3    12  1.8%
+dot         5391   10.8    13.6     26   106      4    15      3    11  0.8%
+portal      1726    3.5     2.8     16    70      2     8      1     5  0.5%
+death         61    0.1     0.1     32    96      2     8      1     6  0%
+respawn       61    0.1     0.2     54    54      3     6      1     1  0%
+bad (canonical masks changed the end state): 0
+
+== 2. coverage of F_k = "at most k direction changes (any tick), jump presses free" (essential k from the greedy simplification: an upper bound of the minimum, so these are LOWER bounds of the coverage)
+class      k<=0   k<=1   k<=2   k<=3   k<=4   k<=6   k<=8   | air k<=0  <=1  <=2  <=3 | ground k<=0 <=1 <=2
+walk          50   95.2   95.2    100    100    100    100   |    50  95.2  95.2   100 |   100   100   100
+jump        51.2   60.9   74.7   81.3   87.1   92.9   96.6   |  58.8  71.1  81.8  87.2 |  76.8    88  94.2
+hop         58.1   68.5   78.8   84.6   89.1   94.3     97   |  58.1  68.5  78.8  84.6 |   100   100   100
+fall        41.1   54.7   68.1   76.7   83.3   89.7   93.3   |  47.1  63.6  75.5  83.1 |  76.5  88.1  93.6
+airjump      6.7   13.5   20.8   28.7     36   47.2     59   |   8.4  15.2  24.7  34.8 |  74.7  86.5  93.3
+arrow       28.3   42.7   54.3   63.2   70.1   79.1   84.5   |  30.3  45.5  56.8  65.6 |  88.7  94.3  97.4
+boost       60.8   72.4   79.3   82.8   85.7   89.1   91.7   |  62.3  73.3  79.8  83.4 |  97.2  98.6  99.3
+swim        20.9     37   50.8   59.3     64   71.4   77.8   |  20.9    37  50.8  59.3 |   100   100   100
+climb       30.1   46.1   59.2   66.3   72.4     79   83.8   |  30.1  46.1  59.2  66.3 |   100   100   100
+dot         29.5   44.9   59.1   68.5   74.8   83.3   87.7   |  29.5  44.9  59.1  68.5 |   100   100   100
+portal      60.3   75.1   83.8   88.3   91.3   94.4   95.8   |    63  77.1  85.3  89.6 |  95.3  97.5  98.6
+death       52.5   65.6   70.5     77   88.5   93.4   93.4   |  55.7  72.1  75.4  80.3 |  85.2  95.1  95.1
+respawn      100    100    100    100    100    100    100   |   100   100   100   100 |   100   100   100
+ALL           46   58.2   69.8   76.9   82.3   88.7   92.4   |  48.3  61.3  72.2    79 |  91.6  95.7  97.9
+ALL-no-respawn   45.9   58.1   69.8   76.8   82.3   88.7   92.4   |  48.2  61.2  72.1  78.9 |  91.6  95.7  97.9
+ticks-weighted (no respawn): 17.5 / 27 / 37.7 / 45.4 / 51.9 / 60.3 / 65.9
+
+== 2b. jump presses per move (essential) and their lengths
+essential jump runs per move: {"0":22357,"1":23781,"2":3182,"3":83,"4":55,"5":40,"6":37,"7":22,"8":21,"9":17,"10":27,"11":15,"12":14,"13":12,"14":5,"15":8,"16":10,"17":10,"18":7,"19":3,"20":9,"21":9,"22":4,"23":2,"24":3,"25":5,"26":5,"27":8,"28":4,"29":3,"31":1,"32":1,"33":4,"34":2,"35":4,"37":1,"38":3,"40":1,"41":4,"43":2,"44":1,"46":1,"47":1,"49":3,"50":2,"51":2,"52":4,"53":1,"55":4,"56":2,"57":2,"59":3,"60":2,"65":3,"67":3,"68":2,"70":1,"71":2,"73":2,"74":1,"76":2,"87":2,"94":1,"95":1,"105":1,"108":2,"109":1,"110":1,"112":2,"124":2,"125":1,"156":1,"159":2,"178":2,"180":1,"325":1}
+essential jump run lengths: {"1":33316,"2":988,"3":757,"4":555,"20+":1227,"5-19":3660}
+
+== 3. timing: essential change points with NO +-1 tick slack (a 1-tick shift breaks the exact end state)
+walk     change points 25: no slack 100.0%
+jump     change points 12346: no slack 94.2%
+fall     change points 8517: no slack 93.8%
+airjump  change points 635: no slack 96.4%
+arrow    change points 24366: no slack 84.2%
+dot      change points 12141: no slack 87.8%
+swim     change points 779: no slack 92.9%
+climb    change points 919: no slack 91.5%
+boost    change points 2690: no slack 89.1%
+portal   change points 1851: no slack 81.4%
+death    change points 80: no slack 98.8%
+ALL      change points 86717: no slack 90.8%
+
+== 4. the primitives builder family (origin/n4plan-primitives 2e70a92) vs per-tick shapes, from the route's own takeoff
+landings 40072: with a HOP (jump pressed on the landing tick itself) 21428 (53.5%); ground-start moves launched by a hop 21458 of 40153
+jump  plain moves 7422 (end in a hop 46.4%): builder macro as is 34.2% | builder macro + hop start/end option 61.1% | per-tick <= 1 air change + hop 70.8% | essential air changes <= 1 72.2%, <= 2 82.7%, <= 3 88.0%
+      one-change hits by kind {"late-hold":1003,"release":248,"turn":399}; change tick median 1 p90 28; on the builder's grid {2,4,8,12,16,24}: 21.2%
+hop   plain moves 16714 (end in a hop 68.3%): builder macro as is 0.0% | builder macro + hop start/end option 60.9% | per-tick <= 1 air change + hop 69.9% | essential air changes <= 1 69.5%, <= 2 79.9%, <= 3 85.7%
+      one-change hits by kind {"late-hold":1216,"turn":915,"release":437}; change tick median 3 p90 29; on the builder's grid {2,4,8,12,16,24}: 12.7%
+fall  plain moves 3500 (end in a hop 26.1%): builder macro as is 36.5% | builder macro + hop start/end option 46.5% | essential air changes <= 0 44.2%, <= 1 62.2%, <= 2 75.3%
+single-jump moves on plain support: 7422; one builder JUMP macro exact: 2538 (34.2%); per-tick <=1 air change (exhaustive: d0 at the press, d1 from tick c, d in {-,L,R}): 5253 (70.8%); essential air changes <= 1: 72.2%
+builder hits by macro: {"JUMP(2,relInfinity)":954,"JUMP(4,relInfinity)":1330,"JUMP(4,turn4)":32,"JUMP(2,rel12)":3,"JUMP(-)":67,"JUMP(2,turn4)":97,"JUMP(4,turn8)":5,"JUMP(2,turn8)":5,"JUMP(4,rel2)":20,"JUMP(2,rel2)":9,"JUMP(4,rel16)":1,"JUMP(2,turn16)":6,"JUMP(4,rel4)":2,"JUMP(4,rel24)":1,"JUMP(4,turn16)":1,"JUMP(2,rel4)":4,"JUMP(2,rel24)":1}
+per-tick hits: constant 3603 one change 1650
+per-tick one-change hits: change tick median 1 p90 28 max 92; on the builder's grid {2,4,8,12,16,24}: 21.2%
+air ticks (press -> next support): median 16 p90 43
+walk-off falls on plain support: 3500; one builder WALKOFF macro (from any of the last 48 ground ticks) exact: 1279 (36.5%); essential air changes <= 0: 44.2%, <= 1: 62.2%
+jump moves with > 1 jump (rejump on landing inside one move / multijump): 29
+
+== 5. support quantisation: start perturbed inside a class, the route's inputs replayed: X = the same exact state, c = same tile + ground + |dpx| < 1 + |dvx| < 1/16, t = same tile + ground only, - = other
+ALL     n=47734  px1e-9: X27.6 c68.1 t0.1 | px1/64: X27.1 c67.7 t0.2 | px1/4: X21.1 c61.1 t1.9 | vx1/256: X27.8 c69.0 t0.5 | vx1/32: X25.0 c58.6 t4.4
+walk    n=42  px1e-9: X2.4 c97.6 t0.0 | px1/64: X2.4 c95.2 t2.4 | px1/4: X2.4 c95.2 t2.4 | vx1/256: X2.4 c95.2 t2.4 | vx1/32: X2.4 c95.2 t2.4
+jump    n=7625  px1e-9: X25.5 c73.7 t0.0 | px1/64: X25.3 c73.5 t0.1 | px1/4: X20.6 c68.3 t1.9 | vx1/256: X22.8 c74.7 t0.4 | vx1/32: X20.5 c62.1 t7.0
+fall    n=3938  px1e-9: X30.5 c68.8 t0.0 | px1/64: X30.2 c67.9 t0.1 | px1/4: X23.6 c56.7 t1.7 | vx1/256: X26.9 c69.3 t0.4 | vx1/32: X23.3 c57.7 t4.5
+arrow   n=9605  px1e-9: X42.9 c49.4 t0.2 | px1/64: X41.7 c48.8 t0.4 | px1/4: X33.2 c39.8 t2.3 | vx1/256: X45.7 c48.0 t0.7 | vx1/32: X39.3 c31.8 t6.4
+dot     n=5338  px1e-9: X30.4 c62.6 t0.1 | px1/64: X29.5 c62.6 t0.4 | px1/4: X21.6 c57.1 t2.2 | vx1/256: X32.7 c64.4 t0.6 | vx1/32: X28.9 c53.9 t4.6
+swim    n=293  px1e-9: X21.2 c77.8 t0.0 | px1/64: X20.8 c77.8 t0.0 | px1/4: X19.5 c64.2 t3.8 | vx1/256: X21.8 c74.1 t2.7 | vx1/32: X21.2 c65.5 t5.1
+climb   n=391  px1e-9: X28.9 c61.9 t0.0 | px1/64: X27.9 c61.6 t1.0 | px1/4: X20.2 c50.9 t4.9 | vx1/256: X30.9 c66.5 t1.3 | vx1/32: X28.4 c57.5 t3.3
+portal  n=1171  px1e-9: X67.2 c23.5 t0.1 | px1/64: X67.0 c23.3 t0.1 | px1/4: X53.0 c21.3 t1.6 | vx1/256: X67.8 c30.0 t0.5 | vx1/32: X62.7 c27.0 t2.0
+boost   n=2049  px1e-9: X23.8 c62.8 t0.6 | px1/64: X23.4 c62.5 t0.7 | px1/4: X16.5 c53.1 t1.1 | vx1/256: X36.6 c59.3 t1.0 | vx1/32: X35.4 c51.7 t2.6
+
+== 6. support states: how canonical are the move starts (landings etc.)
+ground starts 40153: vx = 0 10.2%, px integer 9.7%, py integer 93.0%, vy = 0 42.4%
+|vx| at ground starts: median 2.041 p90 5.296; distinct exact (px, vx) pairs 21646; distinct (tile, round(vx*16)) 21199; distinct (tile, round(vx*2)) 17133
+
+== 7. table sizes per level (states x inputs): standable cells (free tile over a solid), speed classes, family members
+levels 106: standable cells median 1494 p90 5342 max 10732
+air window A (p90 of the single-jump air ticks) = 43; per-tick F_k members from one takeoff: F0 3, F1 258, F2 11094, F3 318028
+the builder's plain family: 21 JUMP + 4 WALKOFF + 22 RUN + 5 IDLE = 52 macros per node
+states x inputs per level (median standable 1494 x 109 vx classes): F1 4.20e+7, F2 1.81e+9 (each an up-to-A-tick simulation)
+
+== 8. per-source split (jobs = the user's TASes, god = the AutoTAS benchmark runs): essential k <= 1 / <= 2 / <= 3, no respawn
+job: moves 35459: 59.6 / 70.0 / 76.5
+god: moves 14326: 54.7 / 69.2 / 77.8
