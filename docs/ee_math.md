@@ -1086,11 +1086,12 @@ answer replayed again by the bench's separate EESim: **0 rejected**):
 
 | legs | the first version | the jump families + cut | in <= the route's ticks |
 |---|---:|---:|---:|
-| unsolved field legs <= 120 ticks (1,992) | 0 | **339 (17.0%)** | 0 -> 285 |
+| unsolved field legs <= 120 ticks (1,992) | 0 | **339 (17.0%)** | 0 -> 280 |
 | of them arrow / dot / boost / portal / climb / swim | 0 / 0 / 0 / 0 / 0 / 0 | 260 / 28 / 25 / 25 / 0 / 1 | |
-| solved field legs, every 6th (2,713) | 2,651 | **2,662** (only the first 6, only this 17) | 2,473 -> 2,486 |
+| solved field legs, every 6th (2,713) | 2,651 | **2,663** (only the first 5, only this 17) | 2,473 -> 2,486 |
 
-On the legs both solve the new T is lower on 19, higher on 5 (the budget's order: the same family explored in another
+(The final code: the second family only for an unsolved leg, the edge rule of the cut.) On the legs both solve the
+new T is lower on 17, higher on 5 (the budget's order: the same family explored in another
 order within 150 k ticks). Of the 339 legs it adds 306 hold one direction and press the jump inside the leg (family 1),
 33 press it at a change of direction (family 2).
 
