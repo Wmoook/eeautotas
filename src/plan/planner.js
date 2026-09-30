@@ -883,7 +883,9 @@ function createPlanner(model, facts, o = {}) {
 		if (plans.length && NEAR_K > 0 && facts) {
 			try { const near = nearPlans(a, plans); if (near.length) plans.unshift(...near); } catch (e) { /* the rule is ordering only */ }
 		}
-		if (plans.length && crumbs.length) {
+		// (the crumbs are a way to the first route: once a route is known (po.runBound finite) the plans are the plan
+		// search's own: box 5, Ruins (2 crumbs), 60 s: 1,597 run ticks with them vs 1,347 without, a crumb's detour kept)
+		if (plans.length && crumbs.length && !(po.runBound !== undefined && Number.isFinite(+po.runBound))) {
 			try { const cp = crumbPlan(a, plans); if (cp.length) plans.unshift(...cp); } catch (e) { if (process.env.EEAT_CRUMB_DBG === '1') console.error('crumbPlan', e.stack); }
 		}
 		if (!plans.length) {
