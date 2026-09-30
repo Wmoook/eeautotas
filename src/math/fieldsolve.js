@@ -200,6 +200,7 @@ function solveLeg(L, sim, goal, o = {}) {
 			const pool = failed.splice(0, failed.length).slice(0, 12);
 			if (!pool.length) break;
 			for (const c of pool) {
+				if (Date.now() >= deadline) return false;
 				const S2 = engineSchedule(c.masks);
 				if (doneSch.has(S2.key)) continue;
 				doneSch.add(S2.key);
@@ -300,6 +301,9 @@ function solveLeg(L, sim, goal, o = {}) {
 				const [gl, gh] = win(gc), [il, ih] = win(ic);
 				const plane = 16 * gc;
 				for (let T = 1; T <= maxT; T++) {
+					// (the clock inside the option too: one option's axis solves at every tick of a long floor window ran
+					// 1.3-2.1 s on MIHB's Dream, where o.maxMs was 120 ms; a generation the clock cut proves no bound)
+					if ((T & 7) === 0 && Date.now() >= deadline) { cutG = true; break; }
 					// in the goal tile's window, or (a support G) a landing on its floor plane: the free step of tick T passes
 					// the plane toward the pull (the engine stops the box on it), or the walk on that floor
 					const inWin = gp[T] >= gl && gp[T] <= gh;
