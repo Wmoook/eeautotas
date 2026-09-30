@@ -179,6 +179,49 @@ function units() {
 			check(`P-UNIT killer squeeze (C ${c === 'x' ? 'a spike' : 'a wall'}): the est walk ${open ? 'reaches' : 'does not reach'} the trophy`, open ? d < M.INF : d >= M.INF, `${d >= M.INF ? 'INF' : d} steps`);
 		}
 	}
+	// ---- a protected ball cannot die (model deathVia under prot 1; EEAT_PROT_NODIE=0: the old death shortcut): the
+	// protection-on effect p, the protection-off effect q, spikes x, a checkpoint c; the engine check: protected, the ball
+	// falls through the spikes alive; unprotected, it dies there
+	{
+		const on = process.env.EEAT_PROT_NODIE !== '0';
+		const rows = ['##################', '#................#', '#S.p...q...c....T#', '#########xxx######', '##################'];
+		const L = level(rows, { p: [420, 1], q: [420, 0], x: [361, 1], c: [360] }), W = L.width, at = (x, y) => y * W + x;
+		const m = M.compileModel(L);
+		const pOn = m.triggers.find((X) => X.kind === 'prot' && X.param === 1), pOff = m.triggers.find((X) => X.kind === 'prot' && X.param === 0);
+		const pos = { id: 'pd', tiles: [at(5, 2)] };
+		const S1 = pOn ? m.touch(m.S0, pOn).S2 : null, S2 = S1 && pOff ? m.touch(S1, pOff).S2 : null;
+		const dv0 = m.deathVia(m.S0, pos, 'est'), dv1 = S1 ? m.deathVia(S1, pos, 'est') : 'x', dl1 = S1 ? m.deathVia(S1, pos, 'lb') : 'x', dv2 = S2 ? m.deathVia(S2, pos, 'est') : null;
+		check('P-UNIT protection: the model tracks prot on / off', m.canDie && !!pOn && !!pOff && S1 && S1.feats.prot === 1 && S2 && S2.feats.prot === 0,
+			`canDie ${m.canDie} feats ${m.feats} prot ${S1 && S1.feats.prot} / ${S2 && S2.feats.prot}`);
+		check(`P-UNIT protection: the death shortcut ${on ? 'only unprotected' : 'in every state (EEAT_PROT_NODIE=0)'}`, !!dv0 && !!dv2 && (on ? dv1 === null && dl1 === null : !!dv1 && !!dl1),
+			`S0 ${dv0 ? dv0.dk : 'none'} S1 ${dv1 ? dv1.dk : 'none'} (lb ${dl1 ? dl1.dk : 'none'}) S2 ${dv2 ? dv2.dk : 'none'}`);
+		// (the engine: right along the floor over p into the spike pit (9..11, 3): with protection (p touched, q never) no
+		// death; a copy without p dies)
+		const run = (Lx) => { let died = 0; play(Lx, new Uint8Array(160).fill(4), (s) => { if (s.is_dead) died++; }); return died; };
+		const rowsNoP = rows.map((r) => r.replace('p', '.').replace('q', '.'));
+		const rowsP = rows.map((r) => r.replace('q', '.'));
+		const dP = run(level(rowsP, { p: [420, 1], x: [361, 1], c: [360] })), dN = run(level(rowsNoP, { x: [361, 1], c: [360] }));
+		check('P-UNIT protection: the engine (protected: no death in the spikes; unprotected: a death)', dP === 0 && dN > 0, `dead ticks ${dP} / ${dN}`);
+	}
+	// ---- the est death on a timed-killer level (model deathVia est / walk: the walk to a real death source + its delay;
+	// EEAT_DIE_EST=0: dieTile, every tile of a timed level, as before): a poison effect of 3 s 12 tiles from the spawn, no
+	// killer: est dk = the steps to it, dt = its timer ((3 + 0.4) x 100 + 1 ticks); lb dk 0 (a running timer kills anywhere)
+	{
+		const on = process.env.EEAT_DIE_EST !== '0';
+		const rows = ['##################', '#................#', '#S...........p...#', '##################'];
+		const L = level(rows, { p: [1584, 3] }), W = L.width, at = (x, y) => y * W + x;
+		const m = M.compileModel(L);
+		const pos = { id: 'de', tiles: [at(1, 2)] };
+		const dvE = m.deathVia(m.S0, pos, 'est'), dvL = m.deathVia(m.S0, pos, 'lb');
+		check('P-UNIT timed death: the level is timed and can die', m.timed && m.canDie, `timed ${m.timed} canDie ${m.canDie}`);
+		check(`P-UNIT timed death: est ${on ? 'walks to the poison and waits its timer' : 'free (EEAT_DIE_EST=0)'}, lb free`,
+			!!dvE && !!dvL && dvL.dk === 0 && (on ? dvE.dk === 12 && dvE.dt === 341 : dvE.dk === 0 && !dvE.dt),
+			`est dk ${dvE && dvE.dk} dt ${dvE && dvE.dt}, lb dk ${dvL && dvL.dk}`);
+		// (the engine: the poison kills 341 ticks after its pickup)
+		let pick = -1, died = -1;
+		play(L, new Uint8Array(700).fill(4), (s, t) => { if (pick < 0 && s.is_poisoned) pick = t; if (died < 0 && s.is_dead) died = t; });
+		check('P-UNIT timed death: the engine kills 341 ticks after the pickup', pick > 0 && died - pick === 341, `pickup ${pick} death ${died}`);
+	}
 	// ---- facts
 	{
 		const f = F.createFacts();
