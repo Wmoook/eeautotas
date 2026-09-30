@@ -722,6 +722,11 @@ async function compile(L, opts = {}, emit = () => {}) {
 		A.picks++; picksN++;
 		const budget = budgetOf(step.rung);
 		const wp = waypointOf(step, A);
+		// (the plan's next waypoint: the executor ranks this step's arrivals by the next leg's cost from them, executor.js
+		// NEXT_ON; a death step, a synthetic step or a plan of one step: none)
+		const nx = !step.synthetic && Array.isArray(plan.steps) && plan.steps[0] === step && plan.steps[1] ? plan.steps[1] : null;
+		const nwp = nx && !nx.synthetic ? (nx.waypoint || { kind: 'trophy', label: 'trophy' }) : null;
+		if (nwp && !nwp.allowDeath && !wp.allowDeath && (nwp.kind === 'trophy' || (Array.isArray(nwp.tiles) || ArrayBuffer.isView(nwp.tiles)) && nwp.tiles.length)) budget.next = { kind: nwp.kind, tiles: nwp.kind === 'trophy' ? undefined : Array.from(nwp.tiles), expect: nwp.expect || null, label: nwp.label || '' };
 		const starts = A.arrivals.slice();
 		// (the relay start: this (anchor, edge)'s nearest state from its failed rungs, a start too: the next rung goes on from
 		// the frontier the last one reached instead of only from the anchor; before a route only: no bound to keep)
