@@ -39,6 +39,10 @@ const PENALTY = 1e6;          // est of an edge only the relaxation reaches (no 
 const LM_W = 60;              // ticks of the plan search's f per landmark not yet achieved (src/landmarks.js, LAMA's count)
 const GAIN_BONUS = 3;         // walk steps of the plan search's f per unit of gain (the relevant triggers achieved)
 const KEY_TICKS = 500;
+// the floor probe's time (steer.js buildSteer on a level with count gates: the plan the steer's physics layers walk, run
+// again with the gates the model leaves open as floors; env EEAT_PLAN_FLOOR=0: off)
+const FLOOR_MS = +process.env.EEAT_PLAN_FLOOR_MS || 8000;
+const COUNT_GATES = new Set([165, 214]);
 const COLOURS = ['red', 'green', 'blue', 'cyan', 'magenta', 'yellow'];
 
 /** a heap on f (then g) */
@@ -60,6 +64,30 @@ function createPlanner(model, facts, o = {}) {
 	const relevant = model.triggers.filter((X) => X.relevant && X.kind !== 'trophy');
 	const trophyTiles = model.trophyTiles;
 	const openS = { key: '__open__', dkey: '__open__', vals: [], feats: {} };
+	// ---------------------------------------------------------------- floors (a count gate the way STANDS on)
+	// The est walk is 8-way and gravity-blind: a coin gate (165 / blue 214, solid from its count on) is a wall in it, never
+	// the floor a jump needs, and below its count it is air, so no plan collected the coins that make it solid first
+	// (Springopolis, Aedan Garden, MoonBase, Rotcil Illusions: the trophy only from a count gate; the plan went straight to
+	// the trophy, est 68 / 556 / 492 / 384 ticks, and every leg ran out of its budget). steer.js's floor probe (buildSteer:
+	// its layered physics plan replayed with those gates as floors, a jump whose only support is such a gate names it)
+	// gives the count; the trophy edge from a state below it gets the PENALTY (a price, never a drop: the probe is no proof)
+	const floorNeeds = [];
+	if (process.env.EEAT_PLAN_FLOOR !== '0' && L && L.fg) {
+		let has = false;
+		for (let i = 0; i < L.fg.length && !has; i++) if (COUNT_GATES.has(L.fg[i])) has = true;
+		if (has && model.feats && (model.feats.includes('coins') || model.feats.includes('bcoins'))) {
+			const tf = Date.now();
+			try {
+				const st = require('../steer.js').buildSteer(L, { maxMs: FLOOR_MS, noDP: true });
+				const fl = (st && st.info && st.info.floors) || [];
+				const most = new Map();
+				for (const x of fl) if ((x.feat === 'coins' || x.feat === 'bcoins') && x.param > 0 && model.feats.includes(x.feat)) most.set(x.feat, Math.max(most.get(x.feat) || 0, x.param));
+				for (const [feat, min] of most) floorNeeds.push({ feat, min });
+			} catch (e) { /* the probe is optional */ }
+			ST.floorMs = Date.now() - tf;
+		}
+	}
+	ST.floors = floorNeeds.map((n) => `${n.feat}>=${n.min}`).join(' ') || '';
 	// ---------------------------------------------------------------- positions
 	const posOfTrig = new Map();
 	/**
@@ -176,7 +204,27 @@ function createPlanner(model, facts, o = {}) {
 		return b;
 	}
 	let openResp = null;
-	const hMemo = new Map();
+	const hMemo = new Map(), hdMemo = new Map();
+	/** the est walk steps from pos to the trophy on the open level, the death shortcut included (a death and a respawn
+	 *  where no walk reaches the trophy: hSteps alone is INF there, and INF x pace became a partial plan's est of ~4.3e9:
+	 *  The Square). The partial plans' cost only: the plan search's f keeps hSteps (with this in f The Square's first plan
+	 *  reached the trophy, 9 steps, but Stupid Fox's first plan changed and lost its progress in the shared gate) */
+	function hStepsD(pos) {
+		const had = hdMemo.get(pos.id);
+		if (had !== undefined) return had;
+		let best = hSteps(pos);
+		if (model.canDie) {
+			const d = openDist.get(pos.id);
+			let dk = INF;
+			for (let i = 0; i < model.N; i++) if (model.dieTile[i] && d[i] < dk) dk = d[i];
+			if (dk < INF) {
+				if (openResp === null) openResp = hSteps(respawnPos);
+				if (openResp < INF) best = Math.min(best, dk + openResp + Math.ceil(DEAD_TICKS / PACE0));
+			}
+		}
+		hdMemo.set(pos.id, best);
+		return best;
+	}
 	/** the admissible ticks from pos to the trophy on the open level (the death shortcut included) */
 	function hLb(pos) {
 		const had = hMemo.get(pos.id);
@@ -304,7 +352,12 @@ function createPlanner(model, facts, o = {}) {
 			if (wantEst) {
 				if (sE < INF) { est = sE * P + extra; steps = sE; }
 				else if (drE && rE < INF) { est = (dvE.dk + rE) * P + DEAD_TICKS + extra; steps = dvE.dk + rE; viaDeath = true; }
-				else { est = sL * P * 3 + PENALTY + extra; relaxOnly = true; }
+				else {
+					// (only the relaxation reaches it: its walk, else its death shortcut; sL is INF when only the lb's
+					// death way reaches it, and INF x pace overflowed the plan's est to ~4.3e9: The Square)
+					const sR = sL < INF ? sL : drL && rL < INF ? dvL.dk + rL : INF;
+					est = (sR < INF ? sR * P * 3 + (sL < INF ? 0 : DEAD_TICKS) : 0) + PENALTY + extra; relaxOnly = true;
+				}
 				est = Math.max(lb, est);
 			}
 			return { lb, est, steps, viaDeath, relaxOnly };
@@ -319,6 +372,7 @@ function createPlanner(model, facts, o = {}) {
 					const ok = facts.okTicks(edge, cls);
 					if (ok !== undefined) g.est = Math.max(g.lb, ok);
 				}
+				if (X === null) for (const n of floorNeeds) if (!((S.feats[n.feat] || 0) >= n.min)) { g.est += PENALTY; break; }
 				const bad = rchBad.get(rchKey(S, pos, edge));
 				if (bad === 'proof' && root) return;
 				if (bad) g.est += PENALTY;
@@ -612,7 +666,7 @@ function createPlanner(model, facts, o = {}) {
 			const steps = stepsOf(a, node);
 			if (!steps.length) break;
 			const lbTail = res.found ? 0 : hLb(node.pos);
-			plans.push({ id: `p${ST.plans}.${r}`, steps, cost: Math.round(node.g + (res.found ? 0 : pace() * hSteps(node.pos))), lb: node.gl + lbTail, partial: !res.found, why: res.found ? 'trophy' : 'budget: the most gain', expanded: res.expanded });
+			plans.push({ id: `p${ST.plans}.${r}`, steps, cost: Math.round(node.g + (res.found ? 0 : pace() * hStepsD(node.pos))), lb: node.gl + lbTail, partial: !res.found, why: res.found ? 'trophy' : 'budget: the most gain', expanded: res.expanded });
 			exclude.add(steps[0].edge);
 			// (the first step's own edge: a death or passage step was inserted before the real first edge)
 			let n = node; while (n.parent && n.parent.parent) n = n.parent;
