@@ -26,7 +26,25 @@ try {
 	const M = MD.compileModel(L);
 	const sim = new E.EESim(L); sim.reset();
 	const B = BW.createBackward(L);
-	const r = B.solve(sim.snapshot(), { tiles: M.trophyTiles.slice() }, { ms });
+	// (a solve that ends with time left (its relay's candidates spent: 'budget', or 'exhausted') goes again on the time left
+	// with a longer relay, then finer x speeds: its clock's shares and its commitments differ; the closure memo is reused)
+	const tgt = { tiles: M.trophyTiles.slice() }, snap = sim.snapshot();
+	// (--sched=a,b,..: restarts on those clocks, ms each (the solve's shares are fractions of its clock: its quick meet, the
+	// closure's, the relay's steps; a longer clock is not a superset of a shorter one), the last one the time left)
+	// the default: 0.4 of the clock, then the rest (box 5, 150 s, Stone Ruin + the sweep's 4 finishers: 4 of 5 with the two
+	// clocks, On And On And On and Gravity's Rainbow on the second; one clock of 150 s lost On And On in 1 of 2 runs and
+	// Stone Ruin in 2 of 2, which a 90-s clock had solved in 37 s; --sched=0: one solve on the whole clock, then the relay /
+	// speed variants on the time left)
+	const sched = opt('sched', '') === '0' ? [] : opt('sched', '') ? String(opt('sched', '')).split(',').map(Number).filter((x) => x > 0) : [Math.round(ms * 0.4), ms];
+	const tries = sched.length ? sched.map((c) => ({ clock: c })) : [{}, { relay: 16, relayMin: 10 }, { relay: 16, relayMin: 10, vxq: 4, ladder: 1 }];
+	let r = null;
+	for (let i = 0; i < tries.length; i++) {
+		const rest = ms - (Date.now() - t0);
+		if (i > 0 && (rest < 15000 || !r || r.ok || /walk|bug|target/.test(r.why || ''))) break;
+		const tr = Object.assign({}, tries[i]), clock = tr.clock; delete tr.clock;
+		r = B.solve(snap, tgt, Object.assign({ ms: clock && i < tries.length - 1 ? Math.min(clock, rest) : rest }, tr));
+		out({ ev: 'try', n: i + 1, ok: !!r.ok, why: r.why || null, ms: Date.now() - t0 });
+	}
 	if (r.ok) {
 		// (the trophy is touched a tick after the centre is in its tile: the last direction held, then released)
 		const last = r.masks.length ? r.masks[r.masks.length - 1] & 30 : 0;
