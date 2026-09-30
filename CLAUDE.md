@@ -486,24 +486,35 @@ ways in.
   (watch it, optimize it like any run) and copies its `/loadtas` line. `src/plan.js` is the headless runner (JSON lines):
   Find a route's OPT-IN strategy `plan` ("the planner (compile)", `EEAT_PLAN=1` or the solve body's `plan: true`; off = main's
   strategies, arguments and events byte for byte).
-- **Where it stands** (the final compile, 2026-09-30, box 3, 60 s, `--workers=3`): **16 / 230 compile at 60 s** (campaign 9 / 203,
-  hard 7 / 25, Bad EE Level 9 and Cold World 0 / 2), **24 / 230 at <= 180 s**; the same code's 60-s runs 13-17 (the run-to-run
-  spread); every .eetas replayed from the level alone; median ticks / best known 1.26, a few at or under the best known
-  (Desolate Caverns 1,619 vs 1,700, My level 730c 98 vs 101, Switch Labyrinth 27 = 27). Every compile spends its budget. THE
-  GOAL (all 230, < 1 min) IS NOT REACHED: the MOVES stage is the wall (long legs through fields, arrivals: from the known route's
-  own state at the previous trigger 31 of 78 stuck legs are found, `tools/cmp/krt.js`). The chief's records: `src/out/n4plan/`
-  (`FINAL.md`, `brief.md`; gitignored).
+- **Where it stands** (2026-09-30, **300 s**, `--workers=3`, one full compile an arm, every .eetas read back to its finish):
+  **28 / 230** with the perfect pass (DEFAULT ON since: the idle full compile of n5-perfect 7defe99 with `EEAT_PERFECT=1` =
+  this tree with its default; box 6, par 20; campaign 21 / 203, hard 7 / 25, Bad EE Level 9 and Cold World 0 / 2) vs **24 / 230**
+  for the compiler before it (d12bb0c, box 5 `f300`); median ticks / best known **1.116** (the 25 routed levels with a known
+  TAS; before 1.208), **6 AT OR UNDER THE BEST KNOWN TAS**: INFINITE 3,788 vs 5,063 (0.75), Desolate Caverns 1,404 vs 1,700
+  (0.83), Ruins 1,266 vs 1,522 (0.83), My level 730c 98 vs 101, Frostbitten 8,405 vs 8,417, Switch Labyrinth 27 = 27. On the
+  22 levels both routed 58,546 -> 54,405 run ticks: faster 15 (Level 1 Overworld 12,341 -> 10,464, Fish Gods 4,050 -> 3,628,
+  NC Naos d3c6 / the precision puzzle 319 / 358 -> 153), the same 5, slower 2 within the run-to-run spread (Trick Or Treat
+  4,101 -> 4,214; My level fef0 60 -> 65: its runs give 60-67); new: Tutorial 3, On And On And On, INFINITE, Gravity's
+  Rainbow, Frostbitten, K Underground; not routed this run: One Minute Descent, TPs The Horror (both flicker between runs of
+  one code; the perfect reserve is kept only once a route is known, so it takes no time from a first route). A 300-s
+  compile ends at ~360 s (the LOOPS and JOINS stages' own clocks after the budget). Earlier (the final compile, box 3,
+  60 s): 16 / 230 at 60 s, 24 / 230 at <= 180 s, the same code's 60-s runs 13-17 (the spread). Every compile spends its
+  budget. THE GOAL (all 230, < 1 min) IS NOT REACHED: the MOVES stage is the wall (194 of the 202 failures end 'budget' on
+  a leg, 61 on the first leg, `tools/cmp/summ.js`; long legs through fields, arrivals: from the known route's own state at
+  the previous trigger 31 of 78 stuck legs are found, `tools/cmp/krt.js`). The records: `src/out/n4plan/`
+  (`FINAL.md`, `brief.md`), `src/out/n5/` (`f300_*`, `idle/`; gitignored).
 - **Checks**: unit tests `test/plantypes.js`, `planmodel.js`, `planplanner.js`, `planbounds.js`, `planprims.js`,
   `planexec.js --only=unit,fail`, `planstrategy.js`, `plancompile.js` (the CLI and the Compile API with the mock parts
-  `test/planmock.js`), `plantruth.js`, `msolve.js --quick`, `kin.js --quick`, `mathsep.js`. The truth checkers on the known routes
-  (`src/plan/truthset.js`; a worktree sets `EEAT_TRUTH_ROOT` to a checkout with `src/jobs` / `src/out`): T-MODEL-EXACT
+  `test/planmock.js`), `plantruth.js`, `msolve.js --quick`, `kin.js --quick`, `mathsep.js`, `joins.js`, `precision.js`. The truth checkers on
+  the known routes (`src/plan/truthset.js`; a worktree sets `EEAT_TRUTH_ROOT` to a checkout with `src/jobs` / `src/out`): T-MODEL-EXACT
   `tools/n4u/modelexact.js`, T-PLAN-ORACLE `test/planoracle.js`, T-LB-ADMISSIBLE `test/planbounds.js --truth`. A full compile:
   `node tools/cmp/fullc.js <code dir> <levels dir> <out dir> [--par=] [--workers=3] [--seconds=60]`, then `tools/cmp/summ.js`
   (classes), `tools/cmp/verify.js` (every .eetas replayed from the level file) and `tools/cmp/gate.js` (no level worse than a
   baseline on a gate list). Levels and routes of third parties never go into git.
-- **PERFECT: order and polish** (n5-perfect, 2026-09-30; `src/plan/perfect.js`, OPT-IN `EEAT_PERFECT=1`, off = the compile byte
-  for byte as before): `perfectRoute(ctx, masks, o)` = (1) THE ORDER B&B: the route the incumbent, its own states at every
-  model-state change the seeds, a node = verified arrivals of one model state, f = tick + the planner's admissible
+- **PERFECT: order and polish** (n5-perfect, 2026-09-30; `src/plan/perfect.js`, **DEFAULT ON** since the 300-s full compile
+  (Where it stands); `EEAT_PERFECT=0` off = the compile as before, and it also turns off the braked rests and the LOOPS stage;
+  the joins stage has its own `EEAT_JOINS=0`): `perfectRoute(ctx, masks, o)` = (1) THE ORDER B&B: the route the incumbent,
+  its own states at every model-state change the seeds, a node = verified arrivals of one model state, f = tick + the planner's admissible
   lowerBound (a node at or past the incumbent's finish dropped: a proof), expanded depth first from the route's end, each of
   the planner's plans' first step run by `exec.reach` (arrivals replayed from the level start), a finish sooner the new
   incumbent (C.evaluate + the acceptance rule); (2) the polish with the route's JOINS as its window marks (`joinTicks`;
@@ -529,7 +540,9 @@ ways in.
   then)): compiled 13 vs 16 (Bygone Tutorial, Accident Prone, The Blank Page not routed with it: the base found them at
   32-60 s), on the 13 both routed 15,152 vs 15,372 run ticks, better 4 (Rosa 3,814 vs 4,219, Fish Gods 3,657 vs 3,742),
   worse 4 (Tree Decorating 1,722 vs 1,476: its route came at 59 s), the same 5: the moves stage's run-to-run spread, no
-  gain shown. So OPT-IN: the pass never makes a GIVEN route slower, but in a compile its reserve comes out of the moves.
+  gain shown. So OPT-IN then: the pass never makes a GIVEN route slower, but in a compile its reserve comes out of the moves.
+  At 300 s the reserve (20 s) is small next to the moves' time and the full compile gained (28 vs 24 / 230, median 1.116 vs
+  1.208): DEFAULT ON.
 - **JOINS: the speed carried across the joins, and the leg proofs** (n5-perfect, 2026-09-30; `src/plan/joins.js`, the stage
   `joins` after prove (and after the perfect pass), DEFAULT ON in `src/compile.js` with its own clock AFTER the budget:
   `--joins=<s>` / `EEAT_JOINS_S`, default half the budget, at most 60 s; `EEAT_JOINS=0` / `--joins=0` off, the watchdog's

@@ -59,11 +59,11 @@ const POLISH_MS = 15000, POLISH_F = 0.25;
 // the proof's share once a route is known (a static level start only): min(PROVE_MS, PROVE_F x the budget) kept for the
 // PROVE stage (one exact search from the level start bounded by the route's own arrival), and all the time the moves leave
 const PROVE_MS = 30000, PROVE_F = 0.2;
-// THE PERFECT PASS (n5-perfect, src/plan/perfect.js; OPT-IN EEAT_PERFECT=1, off = the compile as before): once a route is
+// THE PERFECT PASS (n5-perfect, src/plan/perfect.js; DEFAULT ON, EEAT_PERFECT=0 off = the compile as before): once a route is
 // known, min(PERFECT_MS, PERFECT_F x the budget) is kept for it (like the polish's reserve): branch and bound over the
 // planner's trigger orders from the route's own states with the route as the incumbent, then the polish with the route's
 // joins (its model-state changes and its legs' starts) as its window marks
-const PERFECT = process.env.EEAT_PERFECT === '1';
+const PERFECT = process.env.EEAT_PERFECT !== '0';
 const PERFECT_MS = +process.env.EEAT_PERFECT_MS || 20000, PERFECT_F = 0.25;
 // (with it, the PROVE stage only for a route the exact search from the start can bound: at most PROVE_MAX_TICKS run
 // ticks (its reach in the final compile: ~70 layers in 10 s on NC Naos; no route of the 24 compiled was proven by it, and
@@ -1070,7 +1070,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		if (!ev) { bug('verify', { why: 'the best route does not finish on its replay' }); best = null; }
 		stage('verify', Date.now() - tm, ev ? `finishes: ${fmt(ev.runTicks)} (${num(ev.runTicks)} run ticks), ${ev.deaths} death${ev.deaths === 1 ? '' : 's'}${ev.chance < 1 ? `, ${Math.round(ev.chance * 1000) / 10}% of EEO plays (random portals)` : ''}` : 'the route does not finish: dropped (a bug)');
 	}
-	// ---- PERFECT (EEAT_PERFECT=1): the order B&B from the route's own states, the route the incumbent (src/plan/perfect.js)
+	// ---- PERFECT (default on; EEAT_PERFECT=0 off): the order B&B from the route's own states, the route the incumbent (src/plan/perfect.js)
 	let perfectInfo = null;
 	if (best && perfectOn && exec && typeof exec.reach === 'function' && !stopped) {
 		tm = Date.now();
