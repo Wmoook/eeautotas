@@ -28,6 +28,8 @@ const OUT = argv.out || 'src/out/msolve/bench';
 fs.mkdirSync(OUT, { recursive: true });
 const SLACK = +(argv.slack || 10), EVERY = +(argv.every || 1);
 const LABELS = argv.labels ? new Set(argv.labels.split(',')) : null;
+// --only=<jsonl of {r, m}>: those legs alone (a failure list); --coupledTicks / --fieldMs / --chain=0: the executor's budgets
+const ONLY = argv.only ? new Set(fs.readFileSync(argv.only, 'utf8').split('\n').filter(Boolean).map((l) => { const o = JSON.parse(l); return o.r + ':' + o.m; })) : null;
 
 function loadMoves(dir) {
 	const byR = new Map();
@@ -65,7 +67,7 @@ function main() {
 	const byR = loadMoves(argv.moves || path.join(process.env.EEAT_TRUTH_ROOT || '.', 'src/out/n4plan/understand/moves/exact_jsonl'));
 	const all = TS.knownRoutes({});
 	all.forEach((e, i) => { e._idx = i; });
-	const mine = all.filter((e) => e._idx % NSH === SH && byR.has(e._idx)).slice(0, +(argv.limit || 1e9));
+	const mine = all.filter((e) => e._idx % NSH === SH && byR.has(e._idx) && (!ONLY || [...ONLY].some((k) => k.startsWith(e._idx + ':')))).slice(0, +(argv.limit || 1e9));
 	const outF = fs.openSync(path.join(OUT, `legs_${SH}.jsonl`), 'w');
 	let nMoves = 0;
 	const t00 = Date.now();
@@ -93,12 +95,14 @@ function main() {
 			if (mi % EVERY !== 0) continue;
 			const mv = moves[mi];
 			if (LABELS && !LABELS.has(mv.label)) continue;
+			if (ONLY && !ONLY.has(entry._idx + ':' + mi)) continue;
 			if (mv.c0 === 'D' || mv.c1 === 'D' || mv.label === 'respawn' || mv.len > 400) continue;
 			const tele = mv.endKind === 'portal';
 			const target = { tiles: [mv.tile1], cls: mv.c1, tele };
 			if (tele) target.via = portalVia(L, mv.tile1);
 			const snap = snaps.get(mv.t0);
-			const res = S.leg(snap, target, { Tmax: mv.len + SLACK, K: +(argv.K || 2), coupled: argv.coupled !== '0', plain: argv.plain !== '0', fields: argv.fields !== '0', prove: argv.prove !== '0' });
+			const res = S.leg(snap, target, { Tmax: mv.len + SLACK, K: +(argv.K || 2), coupled: argv.coupled !== '0', plain: argv.plain !== '0', fields: argv.fields !== '0', prove: argv.prove !== '0',
+				coupledTicks: argv.coupledTicks ? +argv.coupledTicks : undefined, fieldMs: argv.fieldMs ? +argv.fieldMs : undefined, chain: argv.chain === '0' ? false : undefined });
 			const rec = { r: entry._idx, m: mi, label: mv.label, len: mv.len, c0: mv.c0, c1: mv.c1, ok: !!res.ok, tool: res.tool || null, T: res.T || 0,
 				lb: res.lb, cert: !!res.cert, proven: !!res.proven, us: Math.round(res.us), cands: res.cands, ver: res.verifies, items: res.items, ticks: res.ticks,
 				k: res.k, member: res.member, why: res.ok ? undefined : res.why,
