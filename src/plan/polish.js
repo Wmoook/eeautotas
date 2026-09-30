@@ -275,6 +275,98 @@ function polishRoute(L, masks0, o) {
 		}
 		}
 	}
+	// (a25) THE LOOPS (lane 5, TAS-perfect): a stretch where the ball comes back within LOOP_R px of where it was with nothing
+	// collected or toggled in between (src/loops.js revisits: the optimizer's loop windows) is a detour the mutation's local
+	// moves and the 150-tick segments cannot remove when it is longer than their reach: from the route's state LOOP_PRE ticks
+	// before the loop, best-first (legs.js legBest) to the route's state region LOOP_POST ticks after it, sooner than the
+	// route; spliced and re-anchored like a segment, judged. The 300-s baseline's routes hold 200-1,500 ticks of such loops
+	// (Trick Or Treat 1,380, TPs The Horror 1,478, One Minute Descent 475, Tree Decorating 248, Accident Prone 201).
+	// (o.noLoops or EEAT_POLISH_LOOPS=0: off; o.loopShare)
+	if (!o.noLoops && process.env.EEAT_POLISH_LOOPS !== '0' && Date.now() < deadline) {
+		const LG = require('./legs.js');
+		const lEnd = Math.min(deadline, Date.now() + (o.loopShare > 0 ? o.loopShare : 0.25) * ms);
+		const LOOP_R = 48, LOOP_PRE = 10, LOOP_POST = 40, LOOP_MS = 2000;
+		const lsim = new E.EESim(L), linp = new E.EEInput();
+		const grav = (x) => x.gravity_dir.x * 3 + x.gravity_dir.y;
+		let loops = [];
+		try { loops = require('../loops.js').revisits(L, best.ms, { coins: true, radius: LOOP_R, min: 40, max: 900, keep: 24 }); } catch (e) { loops = []; }
+		// (the loops' ticks are the route's as it was when they were found; every accepted change [at, to) shifts the ticks
+		// after it by its saving, and a loop overlapping a changed span is not searched)
+		const edits = [];
+		const mapT = (p) => { let q = p; for (const e of edits) { if (p >= e.to) q -= e.saved; else if (p > e.at) return -1; } return q; };
+		for (let li = 0; li < loops.length && Date.now() < lEnd && !(stop && stop()); li++) {
+			const cur = best.ms;
+			const lp = loops[li];
+			const a0 = mapT(Math.max(0, lp.a - LOOP_PRE)), b0 = mapT(lp.b + LOOP_POST);
+			if (a0 < 0 || b0 < 0) continue;
+			const a = a0, b = Math.min(cur.length - 1, b0);
+			if (b - a < 20) continue;
+			const R4 = traceRoute(L, cur);
+			const sB = stateAt(R4, cur, b);
+			if (sB.is_dead) continue;
+			const W0 = L.width, H0 = L.height, tile = T.tileOf(sB, W0, H0), dk = X.discKey(sB);
+			const goal = { kind: 'region', tiles: Int32Array.of(tile), mask: null, allowDeath: false, test: (x) => !x.is_dead && T.tileOf(x, W0, H0) === tile && X.discKey(x) === dk };
+			const sA = stateAt(R4, cur, a);
+			if (sA.is_dead) continue;
+			const snapA = sA.snapshot();
+			const field = T.goalField(T.levelNow(L, sA), goal.tiles);
+			const r = LG.legBest(L, [{ snap: snapA, tick: a }], goal, { sim: lsim, field, deadline: Math.min(lEnd, Date.now() + LOOP_MS), stop, depthMax: b - a - 1, kbOn: true, w: 3, noFinish: true });
+			if (r.status !== 'found' || !(r.depth < b - a)) continue;
+			const tail = r.tail;
+			const cands = [];
+			{ const c = new Uint8Array(a + tail.length + (cur.length - b)); c.set(cur.subarray(0, a), 0); c.set(tail, a); c.set(cur.subarray(b), a + tail.length); cands.push(['plain', c]); }
+			lsim.restore(snapA);
+			for (let t = 0; t < tail.length; t++) { E.applyMask(linp, tail[t]); lsim.tick(linp); }
+			const px = lsim.px, py = lsim.py, vx = lsim.speed_x, vy = lsim.speed_y, g = grav(lsim);
+			const q0 = Math.max(a + 1, b - 8), q1 = Math.min(cur.length - 1, b + 150);
+			const rs = stateAt(R4, cur, q0), ranked = [];
+			for (let q = q0; q <= q1; q++) {
+				if (grav(rs) === g) ranked.push([Math.abs(px - rs.px) + Math.abs(py - rs.py) + 3 * (Math.abs(vx - rs.speed_x) + Math.abs(vy - rs.speed_y)), q]);
+				E.applyMask(R4.inp, cur[q]); rs.tick(R4.inp);
+			}
+			ranked.sort((x, y) => x[0] - y[0]);
+			for (const [, q] of ranked.slice(0, 6)) { if (q === b) continue; const c = new Uint8Array(a + tail.length + (cur.length - q)); c.set(cur.subarray(0, a), 0); c.set(tail, a); c.set(cur.subarray(q), a + tail.length); cands.push([`anchor ${q}`, c]); }
+			for (const [how, c] of cands) {
+				if (Date.now() > deadline) break;
+				const n0 = cur.length;
+				// (in the loops' own ticks: the change spans the loop's window; the route after it is shorter by the saving)
+				if (accept(c, `loop ${a}->${b} in ${tail.length} (${how})`)) { edits.push({ at: Math.max(0, lp.a - LOOP_PRE), to: lp.b + LOOP_POST + (how === 'plain' ? 0 : 150), saved: n0 - best.ms.length }); break; }
+			}
+		}
+	}
+	// (a28) THE TROPHY TAILS (lane 5, TAS-perfect): the route's last W ticks (W = TAIL_WINS 200, 400, 800, 1600, ... up to
+	// the route) searched again from the route's state at F - W with the TROPHY as the goal (not the route's state region:
+	// that holds the route's door-reading state, keys and coins taken included, so a segment keeps every detour the route
+	// made for an optional trigger), best-first (legs.js legBest, the kinematic bound in its ranking), depth W - 1: any
+	// finish it finds is faster; judged. Tutorial 1's route takes 2 keys after its 3rd coin (key doors on the executor's
+	// way: 965 ticks to the trophy, the best known 790 without keys). OPT-IN (o.tails or EEAT_POLISH_TAILS=1; o.tailShare):
+	// NEGATIVE as measured (tools/cmp/polcurve.js, box 5, 60 s on the 300-s baseline's routes of 6 levels): one tail found
+	// (TPs The Horror -2), and the time it took from the segments lost Accident Prone's -88 (3,206 vs 3,118) and One Minute
+	// Descent's -18: best-first over 200-1,600 ticks in 1.5-30 s does not find the other ways.
+	if ((o.tails || process.env.EEAT_POLISH_TAILS === '1') && Date.now() < deadline) {
+		const LG = require('./legs.js');
+		const tEnd = Math.min(deadline, Date.now() + (o.tailShare > 0 ? o.tailShare : 0.2) * ms);
+		const TAIL_MS = 1500;
+		const tsim = new E.EESim(L);
+		let bt = null;
+		try { bt = X.boundFor(L, { kind: 'trophy', tiles: [] }); } catch (e) { bt = null; }
+		const cells = bt && bt.cells ? Int32Array.from(bt.cells) : null;
+		for (let W = 200; cells && cells.length && Date.now() < tEnd && !(stop && stop()); W *= 2) {
+			const cur = best.ms;
+			const F = cur.length;
+			const a = Math.max(0, F - W);
+			const R5 = traceRoute(L, cur);
+			const sA = stateAt(R5, cur, a);
+			if (sA.is_dead) { if (a === 0) break; continue; }
+			const snapA = sA.snapshot();
+			const goal = { kind: 'trophy', tiles: cells, mask: null, allowDeath: false, test: (x) => !!x.has_silver_crown };
+			const field = T.goalField(T.levelNow(L, sA), goal.tiles);
+			const share = Math.max(TAIL_MS, (tEnd - Date.now()) / 2);
+			const r = LG.legBest(L, [{ snap: snapA, tick: a }], goal, { sim: tsim, field, deadline: Math.min(tEnd, Date.now() + share), stop, depthMax: F - a - 1, kbOn: true, w: 3, noFinish: true });
+			if (r.status === 'found' && r.depth < F - a) accept(T.concat(cur.subarray(0, a), r.tail), `tail ${a}->${F} to the trophy in ${r.tail.length}`);
+			if (a === 0) break;
+		}
+	}
 	// (a3) the segments: from the route's state at a, best-first (legs.js legBest: the kinematic bound in its ranking,
 	// w 3) to the route's state region at b = a + SEG (the tile, the door-reading state) sooner, windows from the end back
 	// every SEG_STEP ticks, SEG_MS each at most; spliced with the route's inputs from b, else re-anchored at the nearest

@@ -38,6 +38,7 @@ const EST_W = 1.5;            // the plan search's heuristic weight (est only; t
 const PENALTY = 1e6;          // est of an edge only the relaxation reaches (no est walk) or RCH3 calls impossible
 const LM_W = 60;              // ticks of the plan search's f per landmark not yet achieved (src/landmarks.js, LAMA's count)
 const GAIN_BONUS = 3;         // walk steps of the plan search's f per unit of gain (the relevant triggers achieved)
+const INC_ON = process.env.EEAT_PLAN_INC !== '0';   // the plan search's incumbent (search(): a generated goal at the budget's end)
 const KEY_TICKS = 500;
 // the diversification rule (nearPlans): one-step plans to the nearest untried triggers once every plan's first leg
 // failed its rung; DEFAULT 1 since COMPILE-ALL block 3 lane 4 (with the executor's true skeleton closest,
@@ -476,7 +477,7 @@ function createPlanner(model, facts, o = {}) {
 			let est = lb, steps = sL, viaDeath = false, relaxOnly = false;
 			if (wantEst) {
 				if (sE < INF) { est = sE * P + extra; steps = sE; }
-				else if (drE && rE < INF) { est = (dvE.dk + rE) * P + DEAD_TICKS + extra; steps = dvE.dk + rE; viaDeath = true; }
+				else if (drE && rE < INF) { est = (dvE.dk + rE) * P + (dvE.dt || 0) + DEAD_TICKS + extra; steps = dvE.dk + rE; viaDeath = true; }
 				else {
 					// (only the relaxation reaches it: its walk, else its death shortcut; sL is INF when only the lb's
 					// death way reaches it, and INF x pace overflowed the plan's est to ~4.3e9: The Square)
@@ -532,7 +533,7 @@ function createPlanner(model, facts, o = {}) {
 			if (rp && !(facts && facts.blocked(edge, cls, proofKey(S, pos)))) {
 				const ok = facts ? facts.okTicks(edge, cls) : undefined;
 				const lbD = (dvL ? lbOfSteps(dvL.dk) : 0) + DEAD_TICKS + extra;
-				const est = Math.max(lbD, ok !== undefined ? ok : dvE.dk * P + DEAD_TICKS + extra);
+				const est = Math.max(lbD, ok !== undefined ? ok : dvE.dk * P + (dvE.dt || 0) + DEAD_TICKS + extra);
 				const X = { id: -1 - vals[dieIdx], kind: 'die', tiles: rp.tiles, label: `die, back at a respawn (deaths ${vals[dieIdx]})` };
 				out.push({ X, S2, pos2: diePos(rp), expect: { feat: 'deaths', value: vals[dieIdx] }, lb: lbD, est, steps: dvE.dk, viaDeath: false, relaxOnly: false, edge, live: rp.tiles });
 			}
@@ -679,6 +680,14 @@ function createPlanner(model, facts, o = {}) {
 		// (the partial plan's end: the fewest landmarks left, then the most gain, then the least f)
 		const better = (x, y) => { const hx = hLM(x.S), hy = hLM(y.S); return hx < hy || (hx === hy && (x.S.gain > y.S.gain || (x.S.gain === y.S.gain && x.f < y.f))); };
 		let rootEdges = -1, bestRootChild = null;   // (-1: the budget ended before the root was expanded: no proof of anything)
+		// (THE INCUMBENT, lane 6 n5 block 1: the cheapest goal node GENERATED so far, a complete plan to the trophy by the est
+		// walk; the budget's end returns it instead of a partial plan (EEAT_PLAN_INC=0: off). The heuristic hSteps is the
+		// relaxed walk's, far below the est of the edges (First Person Maze from the route's own state at tick 676: the
+		// root's f 300, its children 158-170, the trophy edge est 584), and the gain bonus lowers every toggle's f by
+		// GAIN_BONUS x pace: on a switch level the open list never drains to the goal's f, and the budget's end handed the
+		// strategy the "most gain" partial plan (a column of switch toggles) while the trophy leg (486 route ticks) was never
+		// planned. Ordering only: the incumbent is a plan the search generated (its est walk), no edge dropped)
+		let inc = null;
 		while (open.size) {
 			const n = open.pop();
 			if (n.goal) { found = n; break; }
@@ -705,7 +714,9 @@ function createPlanner(model, facts, o = {}) {
 				const g2 = n.g + e.est, gl2 = n.gl + e.lb;
 				if (!e.X) {
 					if (gl2 >= budget) { pruned++; continue; }
-					open.push({ S: n.S, pos: null, g: g2, gl: gl2, f: gw < 1 ? -1e12 + g2 : g2, parent: n, e, depth: n.depth + 1, seq: seq++, goal: true });
+					const gn = { S: n.S, pos: null, g: g2, gl: gl2, f: gw < 1 ? -1e12 + g2 : g2, parent: n, e, depth: n.depth + 1, seq: seq++, goal: true };
+					open.push(gn);
+					if (INC_ON && g2 < PENALTY && (!inc || g2 < inc.g)) inc = gn;
 					continue;
 				}
 				const hl = hLb(e.pos2);
@@ -720,6 +731,7 @@ function createPlanner(model, facts, o = {}) {
 			}
 		}
 		ST.expands += expanded;
+		if (!found && inc) { found = inc; ST.incumbents = (ST.incumbents || 0) + 1; }
 		// (the budget out before any child was expanded: the root's best child, a one-step partial plan)
 		if (bestPartial === root && bestRootChild) bestPartial = bestRootChild;
 		return { found, bestPartial: bestPartial === root ? null : bestPartial, expanded, ms: Date.now() - t0, pruned, rootEdges, exhausted: !open.size && !found };

@@ -125,6 +125,16 @@ function fxStateNext(a) {
 const FX_IDLE = 40, FX_IDLE_IN = new E.EEInput();
 // (a state the physics part of an effect-state field has no way from: its walk + this, behind every way it has)
 const FX_FAR = 4000;
+// THE AIR JUMPS (n5 lane 3, OPT-IN: EEAT_AIRJUMP=1 or opts.airJumps true): a level whose only effect tiles are multijumps
+// (461, any number) and whose gravity is the default no longer falls back to the walk: the physics model with an AIR JUMP
+// at every normal tile (eesim.js 1385-1398: with jumps left a jump in the air sets speed_y to the jump's -6.7 whatever the
+// ball was doing): from any R / F / L / XR state R(the jump's rise from the tile's top edge, +8 px of margin), and in the
+// fields that pull (climbables, liquids, up arrows) the fastest C and the jump down F(KJD). The jumps left are not
+// counted (an unlimited count), so the field stays a RELAXATION for every ball of such a level (1, 2, ... or 1000 jumps,
+// or none): its costs lower bounds, its -1 a proof. The side-arrow prices (an added cost) are off with it. Unset / 0:
+// the walk as before, byte for byte. (9 of the 230 levels: Springopolis, On And On And On, Just One More Time,
+// Sandcastle Safari, First Person Maze, Frolic, Floating Temples, Golden Nightingale, Be gone.)
+const AIRJ_ENV = () => process.env.EEAT_AIRJUMP === '1';
 const COINDOOR = 43, BLUECOINDOOR = 213, COIN_GOLD = 100;
 
 /**
@@ -303,8 +313,10 @@ function reachField(level, opts) {
 	const fxS = opts.fxState && opts.goals ? opts.fxState : null;
 	const plainFx = (!!opts.plainFx && !!opts.goals) || fxS !== null;
 	const fxExit = plainFx ? [] : null;
+	let mjTiles = 0, wildOther = false;   // (the air jumps: multijump tiles, any other effect tile)
 	for (let i = 0; i < N; i++) {
 		const id = fg[i];
+		if (WILD.has(id)) { if (id === 461) mjTiles++; else wildOther = true; }
 		if (WILD.has(id) || (fxS !== null && id === FX_RESET)) {
 			if (!plainFx) wild = true;
 			else if (fxS !== null ? fxChanges(id, lk[i], fxS) : (id === 461 ? lk[i] !== 1 : lk[i] !== 0)) fxExit.push(i);
@@ -490,6 +502,10 @@ function reachField(level, opts) {
 			if (ok) { if (!exitE) exitE = new Uint8Array(N); exitE[p] = 1; }
 		}
 	}
+	// (the air jumps: multijumps the only effect, the default gravity: the physics model with air jumps, not the walk)
+	// (not in a plain-ball / effect-state field (opts.plainFx / opts.fxState): those model the ball's own jumps)
+	const airJ = !plainFx && (opts.airJumps !== undefined ? opts.airJumps === true : AIRJ_ENV()) && mjTiles > 0 && !wildOther && level.gravityMult === 1;
+	if (airJ) wild = false;
 	let mode = wild ? 'walk' : 'physics';
 	if (mode === 'physics' && N * (Q + 20) * 2 > 128 * 1048576) mode = 'walk';
 	// the field transit tables (the n3 rise-exit-apex fix: ORDERING fields only, see exitApexOn; on ice only the classes
@@ -627,6 +643,19 @@ function reachField(level, opts) {
 			if (sp[n] === LOWER) e = Math.max(e, rj);
 		}
 		if (e > -1e9) J[i] = fxS !== null && e + TOL > 8 * Q ? INF : qOf(e, Q);   // (opts.fxState: past Q's rows, anywhere up)
+	}
+	// (the air jumps: the rise of a jump anywhere in a normal tile, the centre up to the tile's top edge: the stand jump's
+	// rise from a floor + 8, and 8 px of margin; the gravity queue as the stand jump's)
+	const JA = airJ ? new Int8Array(N).fill(-128) : null;
+	if (JA !== null) for (let i = 0; i < N; i++) {
+		if (cls[i] !== NORM) continue;
+		const x = i % W, y = (i / W) | 0;
+		let m = G;
+		for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+			const nx = x + dx, ny = y + dy;
+			if (nx >= 0 && ny >= 0 && nx < W && ny < H) m = Math.min(m, modCur(ny * W + nx));
+		}
+		JA[i] = qOf(riseQ(JV, m, G, nIce) + 8, Q);
 	}
 	// landing-tick jump sites: a field tile over a floor (or beside a floor under a neighbour that is not a wall)
 	const lj = new Uint8Array(N);
@@ -775,6 +804,7 @@ function reachField(level, opts) {
 		const c = cls[t];
 		if (c === NORM) {
 			if (J[t] !== -128 && ((ty === R_ && l >= 0) || ty === F_ || ty === X_)) emit(R_, J[t]);   // stand, jump
+			if (JA !== null && JA[t] !== -128) emit(R_, JA[t]);   // (the air jumps: from any state here)
 			if ((ty === R_ && l >= 0) || ty === X_) emit(F_, 1);   // the apex (at or above the middle)
 			if (ty === R_ && l === -1) emit(L_, 0);               // the apex in the lower half
 			if (ty === F_) emit(L_, l);                           // (a falling ball may be in the lower half)
@@ -782,6 +812,7 @@ function reachField(level, opts) {
 			if (ty === F_) emit(C_, c === UP ? bounceC(t, l) : stopC(t));   // stop and rise / bounce
 			if (ty === C_) emit(F_, 0);                                     // turn round
 			if (ceilJ[t] && (ty === F_ || ty === C_)) emit(F_, KJD);         // the jump down from a ceiling in up arrows
+			if (JA !== null && c !== DOTS && (ty === F_ || ty === C_)) { emit(C_, NL - 1); emit(F_, KJD); }   // (the air jumps in a pulling field)
 		} else if (c === BDOWN) emit(F_, KF);
 		else if (c === BUP) emit(R_, rcT[t]);
 	}
@@ -849,7 +880,7 @@ function reachField(level, opts) {
 		return tab;
 	}
 	// ---- the side-arrow and slot prices (ordering only: the -1 set is the plain model's, only the prices of moves change)
-	const SA = sideArrowPrices(level, opts, { N, W, H, cls, curOf, passable, isFloor, fg, srcOf, trophy });
+	const SA = sideArrowPrices(level, airJ ? Object.assign({}, opts, { sideArrow: false }) : opts, { N, W, H, cls, curOf, passable, isFloor, fg, srcOf, trophy });
 	// ---- the backward label-setting search in cost buckets (integer costs; edges cost 0, 5 or 7, a priced move more)
 	let seeds = [];
 	if (goalF) seeds = [...goalF].sort((a, b) => a[1] - b[1]);
@@ -865,9 +896,9 @@ function reachField(level, opts) {
 	const srcList = new Array(N).fill(null);
 	for (const [e, ps] of srcOf) srcList[e] = Int32Array.from(ps);
 	const { labels, maxFin } = labelSearch({ N, W, H, NR, NL, KF, cls, J, ceilJ, KJD, pid, srcP, rowC, rowX, COST, NLV, LO, front, XB, CB, LB,
-		invArr, invTable, nP, stopT, bounceT, srcList, respawnT, dsrc: Int32Array.from(deaths ? dsrc : []), seeds, maxF, rcT, rpT, pen: SA.pen, penCost: SA.cost, blk, exitE, Q, INF });
+		invArr, invTable, nP, stopT, bounceT, srcList, respawnT, dsrc: Int32Array.from(deaths ? dsrc : []), seeds, maxF, rcT, rpT, pen: SA.pen, penCost: SA.cost, blk, exitE, Q, INF, JA });
 	const kinds = invArr.reduce((a, x) => a + (x !== null ? 1 : 0), 0);
-	const field = Object.assign(base, { ms: 0, labels, kinds, profiles: nP, prioShift: 0, KJD, sideArrow: SA.info,
+	const field = Object.assign(base, { ms: 0, labels, kinds, profiles: nP, prioShift: 0, KJD, sideArrow: SA.info, airJumps: airJ,
 		seg: segOf, segPush: Float64Array.from(segPush), segCap: Float64Array.from(segCap), rowC, rowX, costR, costF, costL, costC, costX, nC, nX,
 		modMin: mm0 });
 	field.prioShift = Math.max(0, bitLen(Math.min(maxFin, FAR)) - 12);
@@ -952,6 +983,7 @@ function labelSearch(S) {
 	const { N, W, H, NR, NL: L, cls, J, ceilJ, KJD, pid, srcP, rowC, rowX, COST, NLV, LO, front, XB, CB, LB, invArr, invTable, nP,
 		stopT, bounceT, srcList, respawnT, dsrc, seeds, maxF, rcT, rpT } = S;
 	const blk = S.blk || null, exitE = S.exitE || null, Q = S.Q, INF = S.INF;   // (the half-block quadrants' closed moves; the exit from the entry)
+	const JA = S.JA || null;   // (the air jumps: reachField's JA)
 	const K1 = S.KF + 1;
 	// (a ring of cost buckets longer than the dearest edge: 8 for 5 / 7; with the side-arrow prices a power of two past the
 	// price, its buckets made when first used)
@@ -1003,6 +1035,7 @@ function labelSearch(S) {
 			// same-tile edges into (t2, ty2, >= l2) (the inverse of sameTile)
 			if (c2 === NORM) {
 				if (ty2 === R_ && J[t2] !== -128 && l2 <= J[t2]) { push(t2, R_, 1, cur); push(t2, F_, 0, cur); push(t2, X_, 0, cur); }
+				if (JA !== null && ty2 === R_ && JA[t2] !== -128 && l2 <= JA[t2]) { push(t2, R_, 0, cur); push(t2, F_, 0, cur); push(t2, X_, 0, cur); push(t2, L_, 0, cur); }
 				if (ty2 === F_ && l2 <= 1) { push(t2, R_, 1, cur); push(t2, X_, 0, cur); }
 				if (ty2 === L_) { if (l2 <= 0) push(t2, R_, 0, cur); push(t2, F_, l2, cur); }
 			} else if (c2 >= DOTS && c2 <= UP) {
@@ -1014,6 +1047,8 @@ function labelSearch(S) {
 					if (l2 <= 0) push(t2, C_, 0, cur);
 					if (ceilJ[t2] && l2 <= KJD) { push(t2, F_, 0, cur); push(t2, C_, 0, cur); }
 				}
+				// (the air jumps in a pulling field: C(fastest) and F(KJD) from any F / C state here)
+				if (JA !== null && c2 !== DOTS && ((ty2 === C_) || (ty2 === F_ && l2 <= KJD))) { push(t2, F_, 0, cur); push(t2, C_, 0, cur); }
 			} else if (c2 === BDOWN) { if (ty2 === F_) pushAllLow(t2, cur); }
 			else if (c2 === BUP) { if (ty2 === R_ && l2 <= rcT[t2]) pushAllLow(t2, cur); }
 			// portals: (portal tile p, any but C) -> (exit, R(rpT[p]) (R(INF) on a down boost: crossEdges), F(16), and C(16 px/tick) in a field)
