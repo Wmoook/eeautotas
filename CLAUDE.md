@@ -545,9 +545,13 @@ ways in.
   240-480 / 480+, FIELD chains 93.2%; the plan's shares move the 20-s rate by +-1 chain (paired); (b) the chains lab's 55
   known-route legs from the previous trigger, 30 s each: msolve.chain 13, corridor 22, profile 27, leg finder 31, backward
   39 (union 42), the portfolio 36-38; through THE EXECUTOR (`tools/cmp/krt.js` rungs 1-2, the tier on vs off, one tree):
-  prev 32 -> 33, hit-300 23 -> 25, hit-120 36 -> 39 (91 -> 97 legs, 1 lost: Forgotten Helix hit-300); whole levels: the
-  shared gate (60 s, W3) 14 / 20 = 14 / 20, the same levels, run ticks 22,706 vs 22,941. `node test/portfolio.js` (20: the
-  run-up room, each arm replayed, the session's long piece, class targets, the executor's tier).
+  prev 32 -> 33, hit-300 23 -> 25, hit-120 36 -> 39 (91 -> 97 legs, 1 lost: Forgotten Helix hit-300); WHOLE LEVELS: the
+  shared gate (60 s, W3) 14 / 20 = 14 / 20, the same levels, run ticks 22,706 vs 22,941; the chains lab's 48 levels (120 s,
+  W3, par 3 an arm, side by side, box 5 at load 150-190) compiled 20 / 48 = 20 / 48 (+ INVASION, - Tutorial 2), the 19 both
+  routed 34,156 -> 30,345 run ticks (-11.2%: faster 14, slower 0, same 5). LOAD: every budget is wall clock; the 40-s chain
+  run replicated beside that compile A/B (its finds 1.8x slower) gave 94.2% (the 480+ bucket 66.7 vs 76.8%). Not a default:
+  the compile count is a tie. `node test/portfolio.js` (20: the run-up room, each arm replayed, the session's long piece,
+  class targets, the executor's tier).
 - **Checks**: unit tests `test/plantypes.js`, `planmodel.js`, `planplanner.js`, `planbounds.js`, `planprims.js`,
   `planexec.js --only=unit,fail`, `planstrategy.js`, `plancompile.js` (the CLI and the Compile API with the mock parts
   `test/planmock.js`), `plantruth.js`, `msolve.js --quick`, `kin.js --quick`, `mathsep.js`. The truth checkers on the known routes
