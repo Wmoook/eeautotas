@@ -127,8 +127,9 @@ Checked facts (test/kin_lemmas.js, on the model that 1.11 ties to the engine):
 - water: drift -0.9053176290607918 (up), swim 1.8106352581215837 across / 0.9053176290607918 down; mud: drift
   0.16515987972806034, swim 0.41289969932015064 / 0.5780595790482113; lava: 0.10446175820026755, 0.5223087910013383 /
   0.6267705492016059; toxic: -0.4075965445496944, 1.0189913613742367 / 0.6113948168245416 (all fixed points);
-- dots: the air run (no pull: the key's axis gets `B` only while held, `B ⊗ N` released); climbables: `B ⊗ N` on both
-  axes always (climb up -1.0189913613742367);
+- dots (no pull, both keys act): held along the motion the air run; RELEASED only `⊗ B` (the no-modifier drag needs a
+  pull on the other axis: a ball coasts 590 ticks from v* to 0 in a dot field, 94 in air); against the motion
+  `⊗ B ⊗ N`; climbables: `B ⊗ N` on both axes always (climb up -1.0189913613742367);
 - ice (slip > 0): a held key is the air run; released `⊗ Ino` (0.99318 a tick: the slide from v* stops after 1626
   ticks); reversed `⊗ Ino ⊗ I`;
 - the ice timer (kin.js `slipStep`): 2 while `below` is ice (not in a climbable or a dot), 0 over any other solid, else
