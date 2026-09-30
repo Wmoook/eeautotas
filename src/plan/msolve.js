@@ -1353,7 +1353,7 @@ const F2 = process.env.EEAT_MATH_F2 !== '0';
 	 * there free, inside the rectangle the plain extremes can reach in `ticks`; sorted by the tile distance to the
 	 * target's nearest tile (the order of the fan-out), at most `max`
 	 */
-	function supportsNear(s, ticks, ctx, tg, max) {
+	function supportsNear(s, ticks, ctx, tg, max, over) {
 		const sol = solidOf(s), Hd = holdTables(ctx), G = K1.ga(ctx);
 		let xlo = s.px, xhi = s.px;
 		for (let n = 1; n <= Math.min(ticks, HOLD_T); n++) {
@@ -1369,7 +1369,10 @@ const F2 = process.env.EEAT_MATH_F2 !== '0';
 		const out = [];
 		for (let cy = r0; cy <= r1; cy++) for (let cx = c0; cx <= c1; cx++) {
 			const t = cy * W + cx;
-			if (t === here || sol[t] !== 0 || sol[t + W] === 0) continue;
+			if (t === here || sol[t] !== 0) continue;
+			// o.overhang (the one-shot graph's fan-out): also a tile whose floor is a neighbour's (the box on the ledge beside, the
+			// centre over a gap: landWins' windows take it); off = the standable tiles as before
+			if (sol[t + W] === 0 && !(over && ((cx > 0 && sol[t + W - 1] !== 0) || (cx < W - 1 && sol[t + W + 1] !== 0)))) continue;
 			if (!(s.tiles[t] < plainId.length && plainId[s.tiles[t]] === 1)) continue;
 			if (!boxFree(sol, 16 * cx, 16 * cy)) continue;
 			let d = Infinity;
@@ -1392,9 +1395,9 @@ const F2 = process.env.EEAT_MATH_F2 !== '0';
 		const Tmax = o.Tmax || 60;
 		// the fan-out's tiles: the nearest to the target and the nearest to the ball (half each: the target's side and the way out)
 		const mx = o.max || 400;
-		let tiles = supportsNear(sim, Tmax, ctx, o.toward || { tiles: [] }, mx);
+		let tiles = supportsNear(sim, Tmax, ctx, o.toward || { tiles: [] }, mx, !!o.overhang);
 		if (o.toward) {
-			const near = supportsNear(sim, Tmax, ctx, { tiles: [(Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)] }, mx);
+			const near = supportsNear(sim, Tmax, ctx, { tiles: [(Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)] }, mx, !!o.overhang);
 			const set = new Set(tiles.slice(0, mx >> 1));
 			for (const t of near) { if (set.size >= mx) break; set.add(t); }
 			tiles = Array.from(set);
