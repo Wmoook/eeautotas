@@ -495,6 +495,13 @@ function createPlanner(model, facts, o = {}) {
 	// spawn" never held (every leg 'budget', closest 0 at a killer, rungs 2-3 spent). A viaDeath step (a death as a
 	// teleport to its respawn) keeps its respawn. EEAT_PLAN_DIE_ANY=0: the state's own respawn)
 	const DIE_ANY = process.env.EEAT_PLAN_DIE_ANY !== '0';
+	// (a viaDeath step (a death as a teleport) holds back at ANY respawn too: the way to a killer may pass a checkpoint the
+	// model state's respawn does not know (the est walk is checkpoint-blind), and the engine puts the ball back THERE: The
+	// Square's one spike (21, 73) is reached only past checkpoints, so "back at the state's own respawn (2, 168)" never held
+	// (every rung 'budget', closest 0: the dead ball), and from the level's start the executor finds the death back at
+	// any respawn in 294 ticks (0.8 s). The arrival is a real state: the strategy re-anchors and plans from it.
+	// EEAT_PLAN_VIADEATH_ANY=0: the state's own respawn, as before)
+	const VIA_ANY = DIE_ANY && process.env.EEAT_PLAN_VIADEATH_ANY !== '0';
 	// (a death is offered only where an edge of the node is reachable in the relaxation alone (a shut death door is what
 	// the relaxation opens): The Ten Commandments' trophy is reachable without a death (666 run ticks), and offered at every
 	// node the death became its plan after one failed trophy rung (2,212 run ticks, 2 of 2; before the gain fix: its
@@ -692,7 +699,7 @@ function createPlanner(model, facts, o = {}) {
 			if (e.viaDeath) {
 				if (deathsNow === null) deathsNow = a.sim ? a.sim.deaths : 0;
 				const edge = `death:${deathsNow}`;
-				const wpD = { kind: 'region', tiles: model.respawnOf(from.S).tiles.slice(), expect: { feat: 'deaths', value: deathsNow + 1 }, allowDeath: true, label: `die, back at a respawn (deaths ${deathsNow + 1})` };
+				const wpD = { kind: 'region', tiles: VIA_ANY && model.respawn && model.respawn.length ? model.respawn.slice() : model.respawnOf(from.S).tiles.slice(), expect: { feat: 'deaths', value: deathsNow + 1 }, allowDeath: true, label: `die, back at a respawn (deaths ${deathsNow + 1})` };
 				dieField(wpD);
 				push({ edge, nodeClass: cls, rung: facts ? facts.rungOf(edge, cls) : 0, estTicks: DEAD_TICKS, lb: DEAD_TICKS, waypoint: wpD });
 				deathsNow++;
