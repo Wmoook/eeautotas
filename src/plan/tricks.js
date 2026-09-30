@@ -17,7 +17,17 @@
 //            tier is the one before the tricks)
 // o.tricks (true / false / a list / a comma string) overrides the environment per call where a part takes options.
 const NAMES = ['airjump', 'frame', 'fentry', 'fseed', 'fpull', 'idle', 'warp', 'exh', 'chain', 'chaintricks'];
-const DEFAULT = '';
+// DEFAULT 'idle' (C6 tricks, 2026-09-30, box 6, the compile A/B at 300 s, W3, 3 arms side by side): idle alone gains and
+// loses nothing (its candidates are judged; 4-72 ms a compiled route): INFINITE 3,790 -> 3,377 in the compile (551 idle
+// ticks before the first input keep the time doors' phase; offline on the base arm's 25 routes: INFINITE -550, the
+// other 24 no rest, unchanged; the 218 known routes: 66 faster, 4,242 ticks). The move tricks (airjump, frame, fentry,
+// fseed, fpull) solve more of the routes' own moves (legab: 27 legs only with them, 72 faster, 1 slower; fieldlegs:
+// 262 field passages only with them) but not more of the compile's: 25 vs 25 of 48 levels (+Trick Or Treat, Endless
+// Space, -INFINITE, One Minute Descent), ticks 69,428 vs 69,848; the executor's legs from the known routes' own states
+// (krtall, 40 routes, 501 legs) 356-357 vs 357-358 found, inside the A/A spread: opt-in. warp / exh / chain (with idle:
+// 12 vs 12 of 24, progress +2 on 3 levels, -2 on none; the rounds at 90 s lost Gingerbread House / Ten Commandments to
+// the warp): no route gained: opt-in.
+const DEFAULT = 'idle';
 
 function parseList(v) {
 	if (v === undefined || v === null || v === false) return null;
