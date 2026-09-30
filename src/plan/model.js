@@ -42,6 +42,13 @@ const DX8 = [-1, 0, 1, -1, 1, -1, 0, 1], DY8 = [-1, -1, -1, 0, 0, 1, 1, 1];
 // 2,494), but no compile gain at 60 s and I Wanna be the Guy 11 / 1 / 1 / 11 triggers -> 1 in 6 of 6 runs (its spike
 // checkerboards: chains of squeezes the est walk passes and a ball does not), OCTO'S FUN CASTLE 2 -> 0 in 2 of 2)
 const KILL_SQUEEZE = process.env.EEAT_KILL_SQUEEZE === '1';
+// THE BOOST'S WAY (C6 push 3 lane 3 block 2; OPT-IN EEAT_EST_BOOSTDIR=1, off = the model byte for byte): the engine sets the
+// speed to 16 px/tick along a boost (114 left, 115 right, 116 up, 117 down) every tick the ball's centre is in it, so a
+// ball never leaves a boost tile against its push: the est walk (the planner's order, never the lb) did, and Daybreak's
+// purple switch 44 (293,218) was '1 tile' from its right boost (294,218): the wrong side (the way in is from the left,
+// through switch 45's door). With the knob the est / estNW walks (bfs) take no step out of a boost tile with a component
+// against its push; the lb, the proofs and the regions ('walk') are untouched.
+const EST_BOOSTDIR = process.env.EEAT_EST_BOOSTDIR === '1';
 // A PROTECTED BALL CANNOT DIE (n5 doctor 2): the engine kills on a killer tile only `!is_invulnerable` (eesim.js
 // gFlags & 4), lava and the curse / zombie / poison effects set nothing on an invulnerable ball, and turning protection on
 // clears the running ones (Me.as:300-315), so under S.feats.prot === 1 no death exists until a protection-off effect or an
@@ -81,6 +88,9 @@ function compileModel(L, o = {}) {
 	const t0 = Date.now();
 	const A = ST.analyze(L, {});
 	const W = A.W, H = A.H, N = A.N, fg = L.fg, lk = L.lookup0;
+	// (THE BOOST'S WAY: per tile the push of its boost, 0 none, 1 left, 2 right, 3 up, 4 down)
+	let boostOf = null;
+	if (EST_BOOSTDIR) for (let i = 0; i < N; i++) { const id = fg[i]; if (id >= 114 && id <= 117) { if (!boostOf) boostOf = new Uint8Array(N); boostOf[i] = id - 113; } }
 	// ---------------------------------------------------------------- features some gate reads
 	const featSet = new Set();
 	for (const [k, f] of A.feats) if (f.gates > 0 && k !== 'fx') featSet.add(k);
@@ -637,7 +647,7 @@ function compileModel(L, o = {}) {
 	 * bfs(m, src) -> Int32Array(N) of walk steps from the source tiles (INF: none): 0-1 BFS, a step 1, the step into a
 	 * portal tile with exits followed by its hop 0 (the hop lands on each exit), a start on a portal: its exits at 0.
 	 */
-	function bfs(m, src) {
+	function bfs(m, src, bc = null) {
 		const dist = new Int32Array(N).fill(INF);
 		let cur = new Int32Array(N), nxt = new Int32Array(N), nc = 0, nn = 0;
 		for (const s of src) {
@@ -651,7 +661,9 @@ function compileModel(L, o = {}) {
 			for (let k = 0; k < nc; k++) {
 				const t = cur[k];
 				if (dist[t] !== level) continue;
+				const bt = bc ? bc[t] : 0;
 				for (let d = 0; d < 8; d++) {
+					if (bt && ((bt === 1 && DX8[d] > 0) || (bt === 2 && DX8[d] < 0) || (bt === 3 && DY8[d] > 0) || (bt === 4 && DY8[d] < 0))) continue;
 					const j = moveOK(m, t, d);
 					if (j < 0) continue;
 					if (dist[j] > level + 1) { dist[j] = level + 1; nxt[nn++] = j; }
@@ -720,7 +732,8 @@ function compileModel(L, o = {}) {
 	let distBuilds = 0, distMs = 0;
 	/** dist(S, pos, mode, base) -> the walk steps from pos.tiles under S (memo: 96 fields, LRU) */
 	function dist(S, pos, mode = 'est', base = null) {
-		const key = doorKey(S, mode, base) + '#' + pos.id;
+		const bcut = boostOf && (mode === 'est' || mode === 'estNW');
+		const key = doorKey(S, mode, base) + '#' + pos.id + (bcut ? '#B' : '');
 		const had = distMemo.get(key);
 		if (had) { distMemo.delete(key); distMemo.set(key, had); return had; }
 		const t1 = Date.now();
@@ -728,7 +741,7 @@ function compileModel(L, o = {}) {
 		// (a position's grace gates: shut by the touch that made it, still passable for the ball that overlaps them)
 		if (pos.grace && pos.grace.length) { msk = Uint8Array.from(msk); for (const t of pos.grace) msk[t] = 1; }
 		// (the lb's sources: a position's deferral region, where a deferred change's event can happen)
-		const d = bfs(msk, mode === 'lb' && pos.lbTiles ? pos.lbTiles : pos.tiles);
+		const d = bfs(msk, mode === 'lb' && pos.lbTiles ? pos.lbTiles : pos.tiles, bcut ? boostOf : null);
 		distBuilds++; distMs += Date.now() - t1;
 		distMemo.set(key, d);
 		if (distMemo.size > DIST_CAP) distMemo.delete(distMemo.keys().next().value);
@@ -754,7 +767,7 @@ function compileModel(L, o = {}) {
 		if (!canDie) return null;
 		if (PROT_NODIE && S.feats && S.feats.prot === 1) return null;
 		const est = DIE_EST && timed && mode !== 'lb' && dieSrc.length > 0;
-		const key = (est ? 's' : '') + doorKey(S, mode, base) + '#' + pos.id;
+		const key = (est ? 's' : '') + doorKey(S, mode, base) + '#' + pos.id + (boostOf && (mode === 'est' || mode === 'estNW') ? '#B' : '');
 		let m = deathMemo.get(key);
 		if (m === undefined) {
 			const d = dist(S, pos, mode, base);
