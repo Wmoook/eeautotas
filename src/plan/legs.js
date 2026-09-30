@@ -337,6 +337,27 @@ function legBest(L, starts, goal, o) {
 	const CLOCK = !!L.clockSensitive && process.env.EEAT_BEST_WAIT !== '0';
 	const WAIT = CLOCK ? 600 : 0;
 	const pool = [];
+	// (the finisher: the NK states nearest the goal by the field (at most 2 a tile, within FIN_D tiles) kept with their
+	// snapshots; at FIN_F of the time with no leg found, the exact search from them (solveExact over absolute ticks: the
+	// fastest way on from every one of them at once) takes the rest: a precise last approach the cells merge away, a
+	// 1-tile pocket; EEAT_FINISH=0 off)
+	const FIN = process.env.EEAT_FINISH !== '0' && !o.noFinish && deadline < Infinity;
+	const FIN_D = +process.env.EEAT_FIN_D || 6, FIN_F = +process.env.EEAT_FIN_F || 0.75, NK = 24;
+	const near = [];
+	const finAt = FIN ? tStart + FIN_F * (deadline - tStart) : Infinity;
+	let finR = null;
+	const keepNear = (j, d, tile) => {
+		let nt = 0, wt = -1, wa = -1;
+		for (let k = 0; k < near.length; k++) {
+			const e = near[k];
+			if (e.tile === tile) { nt++; if (wt < 0 || e.d > near[wt].d) wt = k; }
+			if (wa < 0 || e.d > near[wa].d) wa = k;
+		}
+		const k = nt >= 2 ? wt : near.length < NK ? -1 : wa;
+		if (k >= 0 && near[k].d <= d) return;
+		if (k < 0) near.push({ d, node: j, tile, snap: sim.snapshot() });
+		else { const e = near[k]; e.d = d; e.node = j; e.tile = tile; e.snap = sim.snapshot(e.snap); }
+	};
 	// the open heap of node indices by f
 	const heap = [], hf = [];
 	const hpush = (i, f) => {
@@ -411,6 +432,14 @@ function legBest(L, starts, goal, o) {
 			const now = Date.now();
 			if (now > deadline) { why = 'time'; break; }
 			if (stop !== null && now - lastPoll >= 20) { lastPoll = now; if (stop()) { why = 'stopped'; break; } }
+			if (now > finAt && found < 0 && near.length && finR === null) {
+				const fst = near.map((e) => ({ snap: e.snap, tick: t0 + gg[e.node] }));
+				finR = X.solveExact(L, fst, goal, { sim, deadline, stop, allowDeath, beforeTick, collect: 64 });
+				for (const r of finR.runs || []) sims += r.ticks;
+				if (finR.status === 'found') { why = 'found'; break; }
+				if (finR.status === 'stopped') { why = 'stopped'; break; }
+				if (Date.now() > deadline) { why = 'time'; break; }
+			}
 		}
 		const i = hpop();
 		pops++;
@@ -461,6 +490,7 @@ function legBest(L, starts, goal, o) {
 			sn.push(sim.snapshot(pool.length ? pool.pop() : undefined));
 			hpush(j, g + reps + w * scoreOf(d));
 			if (d < 1e9 && (closest.dist < 0 || d < closest.dist)) { closest.dist = d; closest.node = j; }
+			if (FIN && d <= FIN_D && finR === null) keepNear(j, d, cy * W + cx);
 		}
 		pool.push(snap);
 		if (heap.length > heapMax) {
@@ -476,8 +506,22 @@ function legBest(L, starts, goal, o) {
 	}
 	const res = (status, extraF) => {
 		if (closest.node >= 0) { const p = pathOfNode(closest.node, -1); closest.start = p.start; closest.tail = p.tail; }
-		return Object.assign({ status, passes: [{ pops, open: heap.length, closed: closed.size, why: status, drop }], sims, closest, seconds: (Date.now() - tStart) / 1000, t0 }, extraF || {});
+		const fin = finR ? { status: finR.status, starts: near.length, lb: finR.lb, depth: finR.depth, runs: (finR.runs || []).length } : null;
+		return Object.assign({ status, passes: [{ pops, open: heap.length, closed: closed.size, why: status, drop, fin }], sims, closest, seconds: (Date.now() - tStart) / 1000, t0 }, extraF || {});
 	};
+	if (finR !== null && finR.status === 'found' && !goals.length) {
+		// (the finisher's legs: the path to its start state, then its exact tail)
+		const out = [];
+		for (const c of finR.goals) {
+			const e = near[c.start];
+			const p = pathOfNode(e.node, -1);
+			const tail = new Uint8Array(p.tail.length + c.tail.length);
+			tail.set(p.tail, 0); tail.set(c.tail, p.tail.length);
+			out.push({ start: p.start, tail, depth: gg[e.node] + c.tail.length });
+		}
+		out.sort((a, b) => a.depth - b.depth);
+		return res('found', { tick: t0 + out[0].depth, depth: out[0].depth, start: out[0].start, tail: out[0].tail, goals: out, finisher: true });
+	}
 	if (goals.length) {
 		const out = goals.map((x) => { const p = pathOfNode(x.node, x.mask, x.reps); return { start: p.start, tail: p.tail, depth: x.depth }; });
 		out.sort((a, b) => a.depth - b.depth);

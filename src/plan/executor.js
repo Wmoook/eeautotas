@@ -259,9 +259,10 @@ function makeCore(L, co) {
 				}
 			}
 			if (r.status === 'found') found = { cands: r.goals, tool: 'leg', proven: false, lbAbs };
-			// (EEAT_TIGHTEN=1, a measurement knob: a leg found, the best-first search again with the kinematic bound in its
-			// order and only legs shorter than it, half of what is left)
-			if (found && process.env.EEAT_TIGHTEN === '1' && Date.now() < wEnd - 50) {
+			// (the tightening: a leg found, the best-first search again with the kinematic bound in its order and only legs
+			// shorter than it, half of what is left: T-EXEC-LEGS, box 3, 3 s: 77.0% vs 76.6%, the legs found 1.020 vs 1.046 of
+			// the route's (median), shorter in 91 of the 202 both found, longer in none; EEAT_TIGHTEN=0 off)
+			if (found && process.env.EEAT_TIGHTEN !== '0' && Date.now() < wEnd - 50) {
 				const t8 = Date.now();
 				const ub = Math.min(...found.cands.map((c) => c.depth));
 				const r3 = LG.legBest(L, snaps, goal, { sim, deadline: t8 + 0.5 * (wEnd - t8), stop: stopFn, allowDeath, beforeTick, field: field0, region, bounds: co.bounds || null, depthMax: ub - 1, w: +process.env.EEAT_BEST_W || 0, cell: cell0, kbOn: true });
@@ -342,7 +343,8 @@ function makeCore(L, co) {
 			const good = [];
 			for (const a of picked) {
 				const c = a._c;
-				if (verifyLeg(L, a.masks, goal, starts[c.start].tick, beforeTick, allowDeath)) good.push(a);
+				const s0 = starts[c.start];
+				if (verifyTail(sim, inp, s0.snap, s0.tick, c.tail, goal, beforeTick, allowDeath)) good.push(a);
 			}
 			if (!good.length) return null;
 			const md = minDepth !== undefined ? minDepth : Math.min(...cands.map((c) => c.depth));
@@ -533,6 +535,22 @@ const sumTicks = (r) => (r && r.runs ? r.runs.reduce((a, x) => a + (x.ticks || 0
  * goal state). (types.js playTo(...).goalAt === masks.length is the same test when the start's own masks never held the
  * goal: CONTRACT REQUEST in the report.)
  */
+/** the verification of a leg from its start state (a snapshot of the state this thread reached by replaying the start's
+ *  masks from the level start: startOf): the tail played, no death (unless allowed), the goal first at its end, beforeTick;
+ *  the sim holds the arrival after a true */
+function verifyTail(sim, inp, snap, startTick, tail, goal, beforeTick, allowDeath) {
+	sim.restore(snap);
+	const n = startTick + tail.length;
+	for (let t = 0; t < tail.length; t++) {
+		E.applyMask(inp, tail[t] & 31);
+		sim.tick(inp);
+		const u = startTick + t + 1;
+		if (sim.is_dead && !allowDeath) return false;
+		if (u < n && !sim.is_dead && (beforeTick < 0 || u <= beforeTick) && goal.test(sim)) return false;
+	}
+	return !sim.is_dead && goal.test(sim) && (beforeTick < 0 || n <= beforeTick);
+}
+
 function verifyLeg(L, masks, goal, startTick, beforeTick, allowDeath) {
 	const sim = new E.EESim(L), inp = new E.EEInput();
 	sim.reset();
@@ -575,6 +593,7 @@ async function createExecutor(L, opts) {
 	const note = [];
 	if (nW > 0 && !opts.file) { note.push('no level file: the executor runs in-process'); nW = 0; }
 	const core = makeCore(L, { prims: opts.prims || null, bounds: opts.bounds || null, model: opts.model || null });
+	const vsim = new E.EESim(L), vinp = new E.EEInput();
 	const RM = opts.RM || null;
 	const S = { reach: 0, ok: 0, fail: 0, watchdog: 0, verifyDrop: 0, polish: 0, byTool: {}, byWhy: {}, ms: 0, sims: 0 };
 	// ---- the pool
@@ -685,9 +704,11 @@ async function createExecutor(L, opts) {
 			for (const a of res.arrivals) {
 				const masks = T.masksOf(a.masks);
 				const st = starts[a.start];
-				const startTick = st && st.masks ? st.masks.length : (typeof st === 'string' ? st.length : 0);
-				const vs = verifyLeg(L, masks, goal, startTick, beforeTick, !!wp.allowDeath);
-				if (!vs) { S.verifyDrop++; continue; }
+				// (the start's state as this thread replayed it from the level start (core.startOf: cached, the longest
+				// replayed prefix reused), then the leg's own inputs)
+				const e = st === undefined ? null : core.startOf(typeof st === 'string' ? st : T.strOf(st.masks));
+				const vs = e && masks.length >= e.tick && a.masks.startsWith(e.str) ? vsim : null;
+				if (!vs || !verifyTail(vs, vinp, e.snap, e.tick, masks.subarray(e.tick), goal, beforeTick, !!wp.allowDeath)) { S.verifyDrop++; continue; }
 				const arr = T.arrivalOf(L, vs, masks, RM);
 				arr.leg = { start: a.start, ticks: a.ticks, tool: res.tool };
 				out.arrivals.push(arr);
@@ -734,4 +755,4 @@ async function createExecutor(L, opts) {
 	return { reach, polish, stats, close, workers: () => nW };
 }
 
-module.exports = { createExecutor, makeCore, verifyLeg, fingerprint, wpData, BASE_FEATS };
+module.exports = { createExecutor, makeCore, verifyLeg, verifyTail, fingerprint, wpData, BASE_FEATS };
