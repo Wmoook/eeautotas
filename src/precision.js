@@ -440,10 +440,111 @@ function restsOf(ctx, anchors, floor, n1) {
 }
 const decode = (code, len) => { const a = new Array(len); for (let k = len - 1; k >= 0; k--) { a[k] = LAT[code % 3]; code = Math.floor(code / 3); } return a; };
 
+// ---------------------------------------------------------------- FAST RESTS (n5-perfect, part 5: the known TASes' way)
+// The rest anchors above are the attempts' states COASTED to rest (no input: from a run at 3.5 px/tick ~85 ticks) and
+// every piece after them coasts to rest too (~60 ticks each): the compiled routes of the precision puzzle took 319-358
+// run ticks where the best known TAS takes 111 (src/jobs test-precision-puzzle, replayed: it brakes with opposite presses
+// from full speed at tick 57 to a speed of 0.0006 at tick 75, the speed snaps to exactly 0 at tick 90, and ONE 20-tick
+// piece from that rest lands on x = 5720.0 exactly while moving). A rest is any state whose speed is exactly 0 (the
+// engine's 0.0001 snap), and the fastest rests come from BRAKING, not coasting: from the attempts' MOVING states on the
+// floor every lateral pattern of up to FAST_K ticks (the model, bit for bit the engine's: latTick) followed by at most
+// FAST_COAST ticks of no input, cut where the ball can no longer stop on the floor (the least stopping distance of its
+// speed, a table from the model), cut where it reaches rest (the rest's continuations are the library's and the F
+// table's), within FAST_NODES model ticks. Each rest keeps its fewest ticks from the level start, and the pieces after it
+// are capped too (the library's and the arrivals' coasts at FAST_LIB_COAST / FAST_AT), so every exact landing found is
+// a short one; the hits are then replayed in order of their ticks (the first that finishes is the fastest found).
+const FAST_K = 22, FAST_COAST = 30, FAST_NODES = 2e8, FAST_NODES_MIN = 2e7, FAST_NS = 2.5e6, FAST_LIB_COAST = 40, FAST_AT = 48, FAST_ANCHORS = 48;
+const BRAKE_L = [2, 1, 0], BRAKE_R = [0, 1, 2], FAST_SLACK = 12, FAST_OVER_MS = 8000, FAST_STEPS = [0, 2];
+/** the least distance a ball at lateral speed v (|v| in 1/1024 px/tick steps, rounded down) travels before its speed
+ *  is exactly 0, braking with the opposite input every tick (a lower bound for every input word: the model) */
+let STOP_TABLE = null;
+function stopTable() {
+	if (STOP_TABLE) return STOP_TABLE;
+	const n = 17 * 1024, t = new Float64Array(n);
+	const st = { px: 0, sx: 0 };
+	for (let k = 0; k < n; k++) {
+		const v = k / 1024;
+		st.px = 0; st.sx = v;
+		let far = 0, c = 0;
+		while (st.sx !== 0 && c < 4000) { latTick(st, st.sx > 0 ? -1 : 0, false); if (st.px > far) far = st.px; c++; }
+		t[k] = far;
+	}
+	// (monotone: a faster ball never stops sooner; the rounding down keeps it a lower bound)
+	for (let k = 1; k < n; k++) if (t[k] < t[k - 1]) t[k] = t[k - 1];
+	STOP_TABLE = t;
+	return t;
+}
+const stopDist = (v) => { const t = stopTable(); const k = Math.min(t.length - 1, Math.floor(Math.abs(v) * 1024)); return t[k] * 0.999; };
+/** the moving anchors: the attempts' kept states on this floor (on the ground, the lateral model applies), the latest
+ *  FAST_ANCHORS of each attempt: [{snap, px, py, a, t, coast: 0, sx}] */
+function movingAnchorsOf(ctx, states, floor) {
+	const sim = ctx.sim, out = [];
+	for (let a = 0; a < states.length; a++) {
+		let k = 0;
+		for (let t = states[a].length - 1; t >= 0 && k < FAST_ANCHORS; t--) {
+			if (!states[a][t]) continue;
+			sim.restore(states[a][t]);
+			if (!sim.on_ground || sim.is_dead || sim.py !== floor.py || !inFloor(floor, sim.px) || !plainX(ctx)) continue;
+			out.push({ snap: states[a][t], px: sim.px, py: sim.py, a, t, coast: 0, sx: sim.speed_x });
+			k++;
+		}
+	}
+	return out;
+}
+/** the fast rests: [{px, anchor, code, len, coast, total}] (distinct rest x, each with its fewest ticks from the start) */
+function fastRestsOf(anchors, floor, o) {
+	const K = o && o.k || FAST_K, CO = o && o.coast || FAST_COAST, budget = o && o.nodes || FAST_NODES;
+	const best = new Map();
+	const st = { px: 0, sx: 0 };
+	let nodes = 0;
+	const lo = floor.loOpen ? floor.lo : floor.lo - 1e-9, hi = floor.hiOpen ? floor.hi : floor.hi + 1e-9;
+	const snapMax = 0.0001 / Math.pow(BD * ND, CO) * 1.02;
+	const keep = (px, ai, code, len, coast, total) => {
+		const old = best.get(px);
+		if (!old || total < old.total) best.set(px, { px, anchor: ai, code, len, coast, total });
+	};
+	// (the latest anchors first: they are nearest their rests; each anchor gets an equal share of what is left)
+	const order = anchors.map((_, i) => i).sort((x, y) => anchors[y].t - anchors[x].t);
+	for (let oi = 0; oi < order.length && nodes < budget; oi++) {
+		const ai = order[oi], A = anchors[ai];
+		const cap = nodes + (budget - nodes) / (order.length - oi);
+		const rec = (px, sx, d, code) => {
+			// (the brake first: the fastest rests brake from the run's speed)
+			const ord = sx < 0 ? BRAKE_L : BRAKE_R;
+			for (let q = 0; q < 3 && nodes < cap; q++) {
+				const i = ord[q];
+				st.px = px; st.sx = sx;
+				latTick(st, i - 1, true);
+				nodes++;
+				const px2 = st.px, sx2 = st.sx;
+				if (!(px2 > lo && px2 < hi)) continue;
+				// (it can no longer stop on the floor)
+				if (sx2 < 0 ? px2 - stopDist(sx2) <= lo : sx2 > 0 ? px2 + stopDist(sx2) >= hi : false) continue;
+				const c2 = code * 3 + i;
+				if (sx2 === 0) { keep(px2, ai, c2, d + 1, 0, A.t + d + 1); continue; }
+				// the coast to rest after this pattern (only after a press: an idle tick's coast is the idle branch)
+				// (a coast of CO ticks can snap only a speed below 0.0001 / q^CO: q the idle drag, a margin for the roundings)
+				if (i !== 1 && Math.abs(sx2) < snapMax) {
+					st.px = px2; st.sx = sx2;
+					let c = 0, ok = true;
+					while (st.sx !== 0 && c < CO) { latTick(st, 0, true); c++; nodes++; if (!(st.px > lo && st.px < hi)) { ok = false; break; } }
+					if (ok && st.sx === 0) keep(st.px, ai, c2, d + 1, c, A.t + d + 1 + c);
+				}
+				if (d + 1 < K) rec(px2, sx2, d + 1, c2);
+			}
+		};
+		rec(A.px, A.sx, 0, 0);
+	}
+	const out = [...best.values()];
+	out.sort((x, y) => x.total - y.total);
+	return { rests: out, nodes };
+}
+
 // ---------------------------------------------------------------- the model's tables (relative pieces)
 /** the rest-to-rest library: every lateral pattern of 1..n ticks (ending with a press) from rest, coasted to rest, no
  *  auto-align; in grid units of g: {du, lo, hi (the excursion, px), code, len, coast} (distinct du) */
-function libraryOf(g, ref, n) {
+function libraryOf(g, ref, n, coastMax) {
+	const CM = coastMax || COAST_MAX;
 	const du = [], lo = [], hi = [], code = [], len = [], coast = [];
 	const seen = new Set();
 	const st = { px: 0, sx: 0 };
@@ -458,7 +559,7 @@ function libraryOf(g, ref, n) {
 			if (i === 1 || sx2 === 0) continue;
 			let t = 0, a = mn2, b = mx2;
 			st.px = px2; st.sx = sx2;
-			while (st.sx !== 0 && t < COAST_MAX) { latTick(st, 0, false); t++; if (st.px < a) a = st.px; if (st.px > b) b = st.px; }
+			while (st.sx !== 0 && t < CM) { latTick(st, 0, false); t++; if (st.px < a) a = st.px; if (st.px > b) b = st.px; }
 			if (st.sx !== 0) continue;
 			const u = (st.px - ref) / g.ulp;
 			if (u === 0 || seen.has(u)) continue;
@@ -501,7 +602,8 @@ function hashGet(keys, vals, log, u) {
  *  the ball comes nearer X than ever before (side 'right': moving left, a new least x; 'left' the mirror) no faster than
  *  VMAX: the exact start Q = X - (x - ref) as the hash key (grid units of g) -> the F entry {code, len (pattern ticks),
  *  at (ticks to the arrival), far (the excursion away from X, px from the start)} */
-function arrivalsOf(g, ref, X, side, n, H, limit) {
+function arrivalsOf(g, ref, X, side, n, H, limit, atMax) {
+	const AM = atMax || Infinity;
 	clearHash(H);
 	const { code, len, at, far } = H;
 	limit = Math.min(limit || H.limit, H.limit);
@@ -534,7 +636,7 @@ function arrivalsOf(g, ref, X, side, n, H, limit) {
 			// the coast (no input) after the pattern
 			st.px = px2; st.sx = sx2;
 			let t = d + 1, nr = near2;
-			while (st.sx !== 0 && t < d + 1 + COAST_MAX && !full) {
+			while (st.sx !== 0 && t < d + 1 + COAST_MAX && t < AM && !full) {
 				latTick(st, 0, false); t++;
 				if (dir < 0 ? st.px < nr : st.px > nr) { nr = st.px; cand(st.px, st.sx, c2, d + 1, t, far2); }
 			}
@@ -619,6 +721,24 @@ async function realizeOn(ctx, t, st, F0, side, o, res, emit) {
 	// (the pieces add up within one binade of doubles: the stretch cut to it)
 	const fl = { py: floor.py, lo: Math.max(floor.lo, g.base), loOpen: floor.lo >= g.base ? floor.loOpen : false, hi: Math.min(floor.hi, g.top - 1), hiOpen: floor.hi <= g.top - 1 ? floor.hiOpen : false };
 	const restsBy = new Map();
+	// (fast: the rests braked from the attempts' moving states, once: FAST RESTS above)
+	let FF = null;
+	if (o.fast) {
+		const fa = movingAnchorsOf(ctx, st.states, F0.floor).filter((A) => (side === 'right' ? A.px > t.x : A.px < t.x));
+		// (the braking search's share: FAST_NS model ticks a second of the stage's budget, within FAST_NODES_MIN..MAX)
+		const secsLeft = Math.max(0, (o.deadline - Date.now()) / 1000);
+		const fr = fastRestsOf(fa, fl, { nodes: o.fastNodes || Math.max(FAST_NODES_MIN, Math.min(FAST_NODES, secsLeft * FAST_NS)) });
+		emit({ ev: 'progress', phase: 'fast', anchors: fa.length, rests: fr.rests.length, nodes: fr.nodes, first: fr.rests.length ? fr.rests[0].total : null, sec: o.sec() });
+		FF = { floor: F0.floor, anchors: fa, rests: fr.rests };
+	}
+	if (FF) {
+		// (the fast rests with the first table sizes, then the larger F table; nothing: the coasted rests below, as before)
+		for (const step of FAST_STEPS) {
+			const why = await realizeStep(ctx, t, st, FF, side, o, res, emit, g, fl, FF.rests, GROW[step], step);
+			if (res.routes.length || why !== 'exhausted' || Date.now() > o.deadline || (o.stopped && o.stopped())) return;
+		}
+		o = Object.assign({}, o, { fast: false });
+	}
 	for (let step = 0; step < GROW.length; step++) {
 		const sz = step === 0 ? { n1: o.n1 || GROW[0].n1, lib: o.n2lib || GROW[0].lib, f: o.n2f || GROW[0].f } : GROW[step];
 		if (!restsBy.has(sz.n1)) restsBy.set(sz.n1, restsOf(ctx, F0.anchors, fl, sz.n1));
@@ -631,13 +751,13 @@ async function realizeStep(ctx, t, st, F0, side, o, res, emit, g, fl, rests, sz,
 	emit({ ev: 'progress', phase: 'tables', target: t.x, side, step, floor: [fl.lo, fl.hi, fl.py], anchors: anchors.length, rests: rests.length, sec: o.sec() });
 	if (!rests.length || Date.now() > o.deadline) return 'none';
 	const ref = Math.floor((fl.lo + fl.hi) / 2) + 0.3713;
-	const lib = libraryOf(g, ref, sz.lib);
+	const lib = libraryOf(g, ref, sz.lib, o.fast ? FAST_LIB_COAST : 0);
 	const H = o.hash;
-	const F = arrivalsOf(g, ref, t.x, side, sz.f, H);
+	const F = arrivalsOf(g, ref, t.x, side, sz.f, H, 0, o.fast ? FAST_AT : 0);
 	emit({ ev: 'progress', phase: 'tables', step, library: lib.n, arrivals: H.n, sec: o.sec() });
 	// (the rests nearest X first: the library's moves are short, so only rests near X can meet the F table; then in order
 	// of their ticks)
-	rests.sort((a, b) => Math.abs(a.px - t.x) - Math.abs(b.px - t.x) || (anchors[a.anchor].t + a.len + a.coast) - (anchors[b.anchor].t + b.len + b.coast));
+	if (!o.fast) rests.sort((a, b) => Math.abs(a.px - t.x) - Math.abs(b.px - t.x) || (anchors[a.anchor].t + a.len + a.coast) - (anchors[b.anchor].t + b.len + b.coast));
 	const D = {
 		restU: Float64Array.from(rests, (r) => (r.px - g.base) / g.ulp), restPx: Float64Array.from(rests, (r) => r.px),
 		du: lib.du, lo: lib.lo, hi: lib.hi, keys: H.keys, vals: H.vals, log: H.log, far: F.far,
@@ -684,6 +804,7 @@ async function realizeStep(ctx, t, st, F0, side, o, res, emit, g, fl, rests, sz,
 		workers.push(wk);
 	}
 	let next = 0, busy = 0, done = false, end = '';
+	const pending = [];
 	const over = () => o.stopped && o.stopped() ? 'stopped' : Date.now() > o.deadline ? 'time' : res.firstAt && Date.now() - res.firstAt > (o.afterMs || AFTER_MS) ? 'finish' : '';
 	await new Promise((resolve) => {
 		const finish = (why) => { if (done) return; done = true; res.end = end = why; resolve(); };
@@ -699,6 +820,13 @@ async function realizeStep(ctx, t, st, F0, side, o, res, emit, g, fl, rests, sz,
 			wk.on('message', (m) => {
 				busy--;
 				res.lookups += m.n;
+				if (o.fast) {
+					// (every hit kept with its ticks from the level start; replayed in that order after the scan)
+					for (const [i, j, f] of m.hits) pending.push([rests[i].total + (j >= 0 ? lib.len[j] + lib.coast[j] : 0) + F.at[f], i, j, f]);
+					emit({ ev: 'progress', phase: 'search', target: t.x, side, step, hits: pending.length, lookups: res.lookups, done: next, rests: rests.length, sec: o.sec() });
+					give(wk);
+					return;
+				}
 				for (const [i, j, f] of m.hits) {
 					const r = check(i, j, f);
 					if (!r) continue;
@@ -716,6 +844,28 @@ async function realizeStep(ctx, t, st, F0, side, o, res, emit, g, fl, rests, sz,
 		for (const wk of workers) give(wk);
 	});
 	for (const wk of workers) { try { wk.postMessage({ stop: true }); } catch (e) { /* gone */ } }
+	if (o.fast && pending.length) {
+		// the fewest ticks first: the first hit that finishes is the fastest of this pass (the landing's way on from X, the
+		// local search, adds about the same to each); a few more within FAST_SLACK ticks of it are tried too
+		pending.sort((a, b) => a[0] - b[0]);
+		let bestLen = Infinity, first = -1;
+		for (let k = 0; k < pending.length; k++) {
+			if (Date.now() > o.deadline + FAST_OVER_MS || (o.stopped && o.stopped())) break;
+			if (first >= 0 && pending[k][0] > pending[first][0] + FAST_SLACK) break;
+			const [, i, j, f] = pending[k];
+			const r = check(i, j, f);
+			if (!r) continue;
+			const masks = prefixOf(r.A).concat(r.masks);
+			if (first < 0) first = k;
+			if (masks.length >= bestLen) continue;
+			bestLen = masks.length;
+			res.routes.push(masks);
+			if (!res.firstAt) res.firstAt = Date.now();
+			emit({ ev: 'route', masks });
+		}
+		res.end = end = res.routes.length ? 'finish' : 'exhausted';
+		emit({ ev: 'progress', phase: 'fastcheck', hits: pending.length, tried: res.hits, landed: res.landed, best: bestLen, sec: o.sec() });
+	}
 	return end;
 }
 
@@ -746,7 +896,7 @@ async function round(level, attempts, o) {
 	for (const t of nt.targets.slice(0, MAX_TARGETS)) {
 		if (Date.now() > deadline || (o.stopped && o.stopped())) { out.end = o.stopped && o.stopped() ? 'stopped' : 'time'; break; }
 		if (!hash) hash = makeHash(o.hashLog || HASH_LOG);
-		const r = await realize(ctx, t, st, { deadline, workers: o.workers, emit, sec, stopped: o.stopped, firstOnly: o.firstOnly, afterMs: o.afterMs, hash, n1: o.n1, n2lib: o.n2lib, n2f: o.n2f, grow: o.grow });
+		const r = await realize(ctx, t, st, { deadline, workers: o.workers, emit, sec, stopped: o.stopped, firstOnly: o.firstOnly, afterMs: o.afterMs, hash, n1: o.n1, n2lib: o.n2lib, n2f: o.n2f, grow: o.grow, fast: o.fast, fastNodes: o.fastNodes });
 		out.routes.push(...r.routes);
 		if (r.closest && (!out.closest || r.closest.cost < out.closest.cost)) out.closest = r.closest;
 		out.end = r.end;
@@ -755,7 +905,7 @@ async function round(level, attempts, o) {
 	return out;
 }
 
-module.exports = { latSpeed, latMove, latAlign, latTick, gridOf, localSearch, stallStates, nudged, nudgeTest, floorOf, anchorsOf, floorsOf, restsOf, libraryOf,
+module.exports = { latSpeed, latMove, latAlign, latTick, gridOf, stopDist, movingAnchorsOf, fastRestsOf, localSearch, stallStates, nudged, nudgeTest, floorOf, anchorsOf, floorsOf, restsOf, libraryOf,
 	arrivalsOf, makeHash, hashPut, hashGet, scanChunk, realize, round, makeCtx, VMAX, NUDGE_STEP, NUDGE_EPS, PREC_REACH };
 
 // ---------------------------------------------------------------- CLI (the editor's child)
@@ -808,7 +958,8 @@ if (isMainThread && require.main === module) {
 		const ctx = makeCtx(level);
 		out({ ev: 'start', attempts: attempts.length, workers, startCost: ctx.startCost < 0 ? null : ctx.startCost });
 		const r = await round(level, attempts, { ctx, seconds: +a.seconds || 120, workers, emit, stopped: () => stop, firstOnly: a.first === '1',
-			n1: +a.n1 || undefined, n2lib: +a.n2lib || undefined, n2f: +a.n2f || undefined, hashLog: +a.hashLog || undefined, grow: a.grow !== '0', afterMs: +a.after >= 0 && a.after !== undefined ? +a.after * 1000 : undefined });
+			n1: +a.n1 || undefined, n2lib: +a.n2lib || undefined, n2f: +a.n2f || undefined, hashLog: +a.hashLog || undefined, grow: a.grow !== '0', afterMs: +a.after >= 0 && a.after !== undefined ? +a.after * 1000 : undefined,
+			fast: a.fast === undefined ? process.env.EEAT_PREC_FAST === '1' : a.fast === '1', fastNodes: +a.fastNodes || undefined });
 		out({ ev: 'done', end: best ? 'finish' : r.end, targets: r.targets.length, routes: r.routes.length, sec: Math.round((Date.now() - t0) / 100) / 10 });
 		process.exit(0);
 	})().catch((e) => { out({ ev: 'warning', text: String(e && e.stack || e) }); out({ ev: 'done', end: 'error' }); process.exit(1); });

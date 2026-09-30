@@ -76,6 +76,9 @@ const PROVE_MAX_TICKS = +process.env.EEAT_PROVE_MAX || 300, PERFECT_POLISH = 0.5
 // the exact landing (precision.js): a trophy leg's nearest state within PREC_NEAR tiles (the goal field's), at most
 // PREC_RUNS runs a compile of at most PREC_S s (at least PREC_MIN_S left), its PREC_ATTEMPTS nearest attempts
 const PREC_NEAR = 8, PREC_RUNS = 3, PREC_S = 40, PREC_MIN_S = 6, PREC_ATTEMPTS = 8;
+// n5-perfect (versus the best known): the exact landing's rests braked from the attempts' moving states (precision.js FAST
+// RESTS) instead of coasted to rest; the precision puzzle 358 -> 153 run ticks from the same attempt (the known TAS 111)
+const PREC_FAST = process.env.EEAT_PREC_FAST !== '0' && process.env.EEAT_PERFECT !== '0';
 // the proof's starts: the level start after k = 0..R idle ticks, R = the idle ticks until the state rests (the timer starts
 // at the first input: waiting is free); at most PROVE_IDLE_MAX (one exact search each)
 const PROVE_IDLE_MAX = 64;
@@ -475,13 +478,15 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const att = [...precAtt].sort((a, b) => a[1] - b[1]).slice(0, PREC_ATTEMPTS).map((e) => e[0]);
 		const file = path.join(os.tmpdir(), `eeat_prec_${process.pid}_${precRuns}.txt`);
 		const t1 = Date.now();
-		let found = null, done = null;
+		let found = null, foundRun = Infinity, done = null;
 		try {
 			fs.writeFileSync(file, att.join('\n') + '\n');
 			say({ ev: 'precision', run: precRuns, attempts: att.length, nearest: Math.round(+precAtt.get(att[0]) * 10) / 10, seconds: secs });
 			await new Promise((resolve) => {
 				const pw = Math.max(1, Math.min(workers, 4));
-				const ch = cp.spawn(process.execPath, [path.join(__dirname, '..', 'precision.js'), String(opts.file), `--attempts=${file}`, `--workers=${pw}`, `--seconds=${secs}`, '--first=1'], { stdio: ['ignore', 'pipe', 'ignore'] });
+				// (n5-perfect: the fast rests, braked from the attempts' moving states: EEAT_PREC_FAST=0 / EEAT_PERFECT=0 off)
+				const fast = PREC_FAST ? ['--fast=1'] : [];
+				const ch = cp.spawn(process.execPath, [path.join(__dirname, '..', 'precision.js'), String(opts.file), `--attempts=${file}`, `--workers=${pw}`, `--seconds=${secs}`, '--first=1', ...fast], { stdio: ['ignore', 'pipe', 'ignore'] });
 				precChild = ch;
 				const onExit = () => { try { ch.kill('SIGKILL'); } catch (e) { /* gone */ } };
 				process.once('exit', onExit);
@@ -496,7 +501,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 						const line = buf.slice(0, k); buf = buf.slice(k + 1);
 						let ev = null;
 						try { ev = JSON.parse(line); } catch (e) { continue; }
-						if (ev.ev === 'result' && ev.kind === 'finish' && typeof ev.inputs === 'string' && !found) found = ev.inputs;
+						// (the fewest run ticks of its results: the fast pass prints each faster one)
+						if (ev.ev === 'result' && ev.kind === 'finish' && typeof ev.inputs === 'string' && (!found || +ev.runTicks < foundRun)) { found = ev.inputs; foundRun = +ev.runTicks; }
 						else if (ev.ev === 'done') done = ev.end;
 					}
 				});
