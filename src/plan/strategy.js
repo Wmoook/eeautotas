@@ -635,7 +635,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	let bwlChild = null, bwlDone = null;
 	const wholeLevel = () => {
 		if (!(BW_LEVEL || BW_CHAIN) || !opts.file || bwlDone) return;
-		const secs = BW_CHAIN ? Math.floor(Math.min(BWC_MAX_S, (+seconds || 60) * BWC_F, (left() - endReserve - 2000) / 1000))
+		const secs = BW_CHAIN ? Math.floor(Math.min(BWC_MAX_S, (+seconds || 60) * BWC_F, (left() - 3000) / 1000))   // (the chain: to the budget's end; with no route the loop waits for it there)
 			: Math.floor(Math.min(BW_LEVEL_MAX_S, (+seconds || 60) * BW_LEVEL_F, (left() - endReserve - 2000) / 1000));
 		if (!(secs >= 5)) return;
 		const cp = require('child_process'), t1 = Date.now();
