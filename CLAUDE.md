@@ -525,3 +525,31 @@ ways in.
   Gingerbread House (9 of 14 in order), Frostbitten (11 of 16) and MIHB's Dream's coin clusters. Tools: `tools/perf/plans.js`
   (the planner's plans from a route's state), `stages.js` (a reports dir's stage times), `ladder.js` (the trophy leg from the
   start under tight deadlines), `table.js` (the before / after table).
+- **JOINS: the speed carried across the joins, and the leg proofs** (n5-perfect, 2026-09-30; `src/plan/joins.js`, the stage
+  `joins` after prove (and after the perfect pass), DEFAULT ON in `src/compile.js` with its own clock AFTER the budget:
+  `--joins=<s>` / `EEAT_JOINS_S`, default half the budget, at most 60 s; `EEAT_JOINS=0` / `--joins=0` off, the watchdog's
+  limit grows by it; the stages before it are byte for byte as without it, and its route is kept only when the engine
+  replays it faster with no more deaths and no lower chance: never slower). A chain of individually optimal legs is not
+  optimal: `joinRoute(L, masks, o)` cuts the finished route at its SUPPORTS (the moves study's boundaries: a landing, a
+  field entered, a teleport, a death / respawn; kept where the route's own first arrival at the centre tile + class +
+  TRIGGER STATE (`progKey`: discKey + which coins + switches + checkpoint + effects) is the boundary; in every other pass
+  also TILE-ENTRY waypoints every 24 ticks of a support-free stretch) and runs a forward DP over (waypoint, the arrival
+  CLASS: the speed to 1/2 px/tick, grounded, the jump count, the position in 4 px cells), the earliest exact engine state
+  per class, at most F = 6 classes a waypoint (the route's own state always kept); edges = the route's own inputs (FOLLOW)
+  and msolve legs to the next 1..M = 4 waypoints (SKIPS over supports, <= 120 route ticks) with the landing hop and 3 alts
+  (distinct end states: the speed carried), every candidate replayed and kept only when it arrives at the waypoint's tile,
+  class and trigger state alive; passes on the route the last one made while they gain; once a pass's clock is out the
+  route's state and the earliest other state go on (the route's inputs, else a short leg). PROOFS (`proveRoute`): every
+  support leg of the result from its exact start state against lb.js `certify` (the event-graph bound) and msolve's
+  certified plain bound: lb = the leg's ticks = PROVEN OPTIMAL from that state; `fasterLegs` = the legs msolve alone does
+  in fewer ticks from the same state (joins the chain could not use). The report: `report.joins` {before, after, saved,
+  passes, waypoints, legs, proven, provenTicks, lbSum, fasterLegs}. THE MEASURE (box 5, the pass offline on the final
+  compile's 24 routes, 90 s each, one process, 2 threads, `tools/perfect/joins.js --final=src/out/n4plan
+  --levels=<levels> --out=<dir> --threads=2`, then `--agg=<dir>`; every output replayed from the level file): 64,381 ->
+  63,135 run ticks, median ticks / best known 1.22 -> 1.14, at or under the best known 4 of 22 (Desolate Caverns 1,619 ->
+  1,465 vs 1,700; Ruins 1,543 -> 1,479 vs 1,522), Tree Decorating 1,509 -> 1,212 (1,108), The Blank Page 3,190 -> 2,919,
+  Rosa dei Venti 3,714 -> 3,508, Bygone Tutorial 2,163 -> 2,059; 214 of 1,817 support legs proven optimal; no gain on Fish
+  Gods (its legs already tight: 4 legs msolve does sooner), Frostbitten (117 such legs, none that keeps the trigger state
+  and the next leg), the one-leg levels (NC Naos, the precision puzzle: 3 supports). `--routes=<dir>` stacks it on another
+  pass's routes. `tools/perfect/proveroute.js <level> <route> [--seconds=] [--cap=]`: the compile's route proof (every idle
+  start 0..R, one exhaustive exact search each to the trophy within the route's cost) with a longer clock.
