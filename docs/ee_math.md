@@ -1243,13 +1243,14 @@ that are one.
 
 **The event segments of `test/admbounds_truth.js`** (the n4 study's harness: the route's trigger events, every tick of
 every segment plus every earlier segment start to every target, the `math` column next to adm / prim / eg; 30 ms a
-query; the 14 routes of the 7 ice levels run again after the jump fix below, every other route's bound unchanged by it):
-207 of the 218 routes so far (the last 11, Egg Quest II and Wine Quest I, running): **math 0 violations in 1,140,970
-checks** (adm / prim / eg / max 0 as well). The segments are long (4,461 of them, 404 ticks on average: a trigger to the
-next), and there the bound adds little: math median 0.151 (>= 10 ticks 0.141) where it is defined (2,543 segment
-starts: plain), prim (bounds.js) 0.160 / 0.148, the max of adm / prim / eg 0.164 / 0.150; the max with math (`best`)
-0.167 / 0.150, mean 0.263 vs 0.253; math above every other bound on 620 segments. The event graph's strength is the
-free-air leg; a segment of hundreds of ticks through fields, walls and detours is the other bounds' ground (5.8).
+query; the 14 routes of the 7 ice levels run again after the jump fix below, every other route's bound unchanged by
+it): all 218 routes (the 219th file is stale: it does not finish its level): **math 0 violations in 1,301,347 checks**
+(adm / prim / eg / max 0 as well; `src/out/mathlb/at_agg.js`). The segments are long (4,638 of them, 433 ticks on
+average: a trigger to the next), and there the bound adds little: math median 0.146 (>= 10 ticks 0.134) where it is
+defined (2,704 segment starts: plain), prim (bounds.js) 0.158 / **0.145**, the max of adm / prim / eg 0.161 / 0.148;
+the max with math (`best`) 0.163 / 0.149, mean 0.260 vs 0.249, the sum over the segments 0.127 vs 0.124 of the routes'
+ticks; math above every other bound on 644 segments. The event graph's strength is the free-air leg; a segment of
+hundreds of ticks through fields, walls and detours is the other bounds' ground (5.8).
 
 **What the checks found** (each an error of an earlier version, fixed and checked again): the world's edges block (a
 ball at the top edge: Infinity Pain); the engine RETRIES a blocked step (Ice Slide Ride: a landing 0.256 px past the
