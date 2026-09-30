@@ -180,7 +180,7 @@ const BW_LEVEL = process.env.EEAT_BW_LEVEL === '1', BW_LEVEL_F = +process.env.EE
 // leg a trigger, the end states carried exactly: bwchain.js); every chain node goes to the loop as an import (an anchor the
 // executor goes on from); at most BWC_F of the budget and BWC_MAX_S (the child is one thread next to the workers)
 const BW_CHAIN = process.env.EEAT_BW_CHAIN === '1', BWC_F = +process.env.EEAT_BWC_F || 0.9, BWC_MAX_S = +process.env.EEAT_BWC_MAX_S || 900;
-const BWC_IMPORT = process.env.EEAT_BWC_IMPORT !== '0';
+const BWC_IMPORT = process.env.EEAT_BWC_IMPORT !== '0';   // (the child reads it too: 1 the chain's frontier only (the default), 2 every node)
 /** a relative deadline (a step's or a waypoint's beforeTickFrom): a number, or 'prev+N' (N ticks after the previous
  *  step's arrival, i.e. this anchor's arrival: a key's KEY_TICKS) -> ticks | NaN */
 function relOf(x) {

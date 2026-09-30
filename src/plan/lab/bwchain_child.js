@@ -22,6 +22,8 @@ const argv = process.argv.slice(2);
 const opt = (k, d) => { const a = argv.find((s) => s.startsWith('--' + k + '=')); return a ? a.slice(k.length + 3) : d; };
 const file = argv.find((s) => !s.startsWith('--'));
 const ms = +opt('ms', 120000);
+const IMPORT = process.env.EEAT_BWC_IMPORT !== undefined && process.env.EEAT_BWC_IMPORT !== '' ? +process.env.EEAT_BWC_IMPORT : 1;
+let topGain = 0;
 const t0 = Date.now();
 const out = (o) => process.stdout.write(JSON.stringify(o) + '\n');
 const left = () => ms - (Date.now() - t0);
@@ -64,7 +66,13 @@ try {
 		mode = mode ? 'one+chain' : 'chain';
 		const c = BC.chainLevel(L, {
 			ms: left() - 500, model: M, backward: B, file,
-			onAnchor: (masks, info) => out({ ev: 'anchor', inputs: T.strOf(masks), gain: info.gain, tick: info.tick, label: info.label }),
+			// (EEAT_BWC_IMPORT: 1 (the default) only the chain's FRONTIER (a node of more gain than every one printed before: the
+			// executor goes on from the chain's progress, not from every order it tried), 2 every node, 0 none)
+			onAnchor: (masks, info) => {
+				if (IMPORT === 0 || (IMPORT === 1 && !(info.gain > topGain))) return;
+				topGain = Math.max(topGain, info.gain);
+				out({ ev: 'anchor', inputs: T.strOf(masks), gain: info.gain, tick: info.tick, label: info.label });
+			},
 		});
 		out({ ev: 'chain', ok: c.ok, why: c.why, legs: c.stats.legs, legsOk: c.stats.legsOk, nodes: c.stats.nodes, gain: c.gain, ms: Date.now() - t0 });
 		if (c.ok) { out({ ev: 'result', kind: 'finish', inputs: T.strOf(c.masks), runTicks: c.runTicks, deaths: c.deaths }); end = 'finish'; }
