@@ -507,7 +507,8 @@ ways in.
   `node tools/cmp/fullc.js <code dir> <levels dir> <out dir> [--par=] [--workers=3] [--seconds=60]`, then `tools/cmp/summ.js`
   (classes), `tools/cmp/verify.js` (every .eetas replayed from the level file) and `tools/cmp/gate.js` (no level worse than a
   baseline on a gate list). Levels and routes of third parties never go into git.
-- **PERFECT: order and polish** (n5-perfect, 2026-09-30; `src/plan/perfect.js`, OPT-IN `EEAT_PERFECT=1`, off = the compile byte
+- **PERFECT: order and polish** (n5-perfect, 2026-09-30; `src/plan/perfect.js`; opt-in on n5-perfect, DEFAULT ON since the
+  merge into n5-plan (PERFECT IN n5-plan, the last bullet): `EEAT_PERFECT_PASS=0` this pass off; as first written: OPT-IN `EEAT_PERFECT=1`, off = the compile byte
   for byte as before): `perfectRoute(ctx, masks, o)` = (1) THE ORDER B&B: the route the incumbent, its own states at every
   model-state change the seeds, a node = verified arrivals of one model state, f = tick + the planner's admissible
   lowerBound (a node at or past the incumbent's finish dropped: a proof), expanded depth first from the route's end, each of
@@ -672,3 +673,34 @@ ways in.
   Space 2,313 vs 1,789 (1.29: 2 gold coin detours, another checkpoint), MIHB's Dream 9,651 vs 7,973 and Gingerbread House
   4,815 vs 4,032 (1.21 / 1.19: another coin ORDER), Bygone Tutorial 2,016 vs 1,680 (1.20: the key doors in another
   order), My level fef0 65 vs 59.
+- **PERFECT IN n5-plan** (the C6 merge, 2026-09-30: n5-perfect 7defe99 into n5-plan be7d6f4, then n5-plan db2774f, the one
+  shot, merged in): the compile's schedule once a route is known = lane 5's (the polish's grown reserve, THE REST, the long
+  route's proof capped at 3 s, THE LAST to the budget's end, PROVE_TINY) + the perfect reserve and stage before the polish;
+  under the pass the polish's window marks are the joins (`joinTicks`) in every polish round, and a route over
+  `EEAT_PROVE_MAX` (300) run ticks skips the prove stage (its reserve goes back to the moves and THE LAST); THE LAST is the
+  last stage inside the budget, then the one shot's thread ends, then LOOPS and JOINS on their own clocks; precision.js
+  with the fast rests (the default) is called `--first=1 --fast=1` (its `--after` clock would cut the fast pass short),
+  without them (`EEAT_PREC_FAST=0`) lane 5's `--after=10`. THE PERFECT PASS IS DEFAULT ON (`EEAT_PERFECT_PASS=0`: the pass
+  and its reserve off, the rest as it is; `EEAT_PERFECT=0`: every n5-perfect compile-time knob off, the precision fast
+  rests, the loop cuts and the LOOPS stage too; with `EEAT_JOINS=0` as well the compile is n5-plan be7d6f4's). THE SHARED
+  GATE (box 5, 20 levels, 60 s, W3, both arms of the merge): the pass off compiled 13 vs the baseline's 11 (worse 1,
+  better 13), on 15 vs 11 (worse 1, better 16); the one WORSE (First Person Maze, progress 33 -> 4) and The Ten
+  Commandments' slower route are the base's own spread (side by side, 2 runs each: n5-plan be7d6f4 progress 4 / 4 and
+  1,913 / 1,892 ticks, the merge 34 / 34 and 743 / 753); the merged tree with the one shot: the gate again (below). THE
+  300-S A/B (box 5 `~/c6_perf`, the 31 levels either idle 300-s run compiled, W3, the pass off vs on side by side, one run
+  an arm; every .eetas replayed by tools/cmp/verify.js): compiled 27 vs 26 (Frostbitten only off: before the first route
+  the code is the same, the moves' spread), both compiled 26: better 12 / worse 7 / same 7, 77,343 -> 74,380 run ticks
+  (-3.8%), median ticks / best known 1.139 -> 1.098 (22 levels with one; at or under it 4 both), the gain after the moves
+  stage 8.2% -> 11.1% of the moves' route on average (larger on 14 levels, smaller on 5: Gingerbread House 6.3 vs 4.0%,
+  INVASION 1.8 vs 0.7%, Rosa 16.2 vs 14.5% (its moves ran 59 s longer), Tutorial 3, Ruins by 0.4-0.6 points); Level 1
+  Overworld 13,284 -> 11,320, Fish Gods 4,099 -> 3,576, MIHB's Dream 10,074 -> 9,843, Tutorial 1 2,196 -> 1,993; the 7
+  slower mostly another moves route (Trick Or Treat 5,029 vs 5,614 at the moves' end, Tree Decorating 1,493 vs 1,575).
+  SAMPLE 2 of those 7 + Frostbitten (the same arms, the default-on tree): Ruins 1,360 -> 1,301 (the same moves route,
+  1,451), Desolate Caverns 1,465 vs 1,472, Gingerbread House 4,987 vs 4,990, Tree Decorating 1,318 vs 1,549, Frostbitten
+  9,782 vs 10,635, Rosa 3,591 vs 3,599, INVASION 4,300 vs no route, Trick Or Treat no route either: the pass's arm's moves
+  ended on a worse route on 4 of them (Desolate 1,615 vs 1,745, Tree 1,458 vs 1,637, Frostbitten 10,271 vs 11,453, Rosa
+  4,218 vs 4,414) and gained more after them on 4 of 6. So: the pass never makes a given route slower and gains more after
+  the moves, but a level's final route is the moves stage's run-to-run spread first: "no compiled level slower" is NOT shown
+  per level (one or two runs an arm), only in the sums. LEFT: more runs an arm; the reserve (the pass's 20 s come out of
+  THE REST / THE LAST's time on a long route: Ruins' same moves route 6.9% vs 6.5% in sample 1); the pass's own gains are
+  the polish at the joins (the order B&B: 0 / 6 legs on most levels at 300 s).
