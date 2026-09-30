@@ -47,6 +47,10 @@ const X_NEAR = +process.env.EEAT_X_NEAR || 40;   // ticks: the exact tier's full
 const X_SHARE_NEAR = +process.env.EEAT_X_SHARE_NEAR || 0.35, X_SHARE_FAR = +process.env.EEAT_X_SHARE_FAR || 0.12;   // (env: measurements)
 const VERIFY_MARGIN_MS = 60;    // the worker's clock ends this much before the deadline (this thread's replays)
 const WATCHDOG_MS = 150;        // past the deadline + this, an unanswered worker call is answered 'budget'
+// (the late worker keeps its slot and its memos until it answers; replaced only when silent this long past the deadline;
+// EEAT_WORKER_KEEP=0: the old rule, a late worker terminated and replaced at once)
+const WORKER_HANG_MS = +process.env.EEAT_WORKER_HANG_MS || 30000;
+const WORKER_KEEP = process.env.EEAT_WORKER_KEEP !== '0';
 const REPLAY_CACHE = 64;
 const K_DEFAULT = 4;
 // the best-first search's cells after one that ran out of open states: finer vy, then everything 2x, then 4x
@@ -630,7 +634,7 @@ async function createExecutor(L, opts) {
 	const core = makeCore(L, { prims: opts.prims || null, bounds: opts.bounds || null, model: opts.model || null });
 	const vsim = new E.EESim(L), vinp = new E.EEInput();
 	const RM = opts.RM || null;
-	const S = { reach: 0, ok: 0, fail: 0, watchdog: 0, verifyDrop: 0, polish: 0, byTool: {}, byWhy: {}, ms: 0, sims: 0 };
+	const S = { reach: 0, ok: 0, fail: 0, watchdog: 0, late: 0, hung: 0, verifyDrop: 0, polish: 0, byTool: {}, byWhy: {}, ms: 0, sims: 0 };
 	// ---- the pool
 	const pool = [];
 	let Worker = null;
@@ -643,6 +647,7 @@ async function createExecutor(L, opts) {
 			const job = slot.busy;
 			if (!job || msg.id !== job.id) return;
 			slot.busy = null;
+			if (job.clear) job.clear();
 			job.done(msg);
 			pump();
 		});
@@ -679,15 +684,31 @@ async function createExecutor(L, opts) {
 			const done = (m) => { if (settled) return; settled = true; clearTimeout(timer); resolve(m); };
 			slot.busy = { id, done };
 			slot.w.postMessage(Object.assign({ id, stopFlag }, msg));
+			let hang = null;
 			const timer = setTimeout(() => {
 				if (settled) return;
 				S.watchdog++;
-				// (the worker did not answer in time: answer 'budget' and replace it)
+				// (the worker did not answer in time: the caller gets 'budget' now, and the worker is told to stop (its next
+				// clock check); it KEEPS its slot until its late answer (a synchronous part that overran: a goal field, a
+				// bounds field, the primitives' tables, all memoized in that worker). It used to be terminated and replaced
+				// here: the new worker's start-up (the level, the bounds, the primitives) and the fields it rebuilt overran
+				// the next short budget too, killed again: a spiral with no simulation at all (Late christmas, 3 workers,
+				// 1.5-s steps: 24 kills in the first 4 rounds, sims 0; the compiles' first 15-20 s of steps 'budget' with
+				// sims 0). Only a worker silent for WORKER_HANG_MS past its deadline is replaced)
 				done({ id, error: 'watchdog', watchdog: true });
-				slot.dead = true; slot.busy = null;
-				try { slot.w.terminate(); } catch (e) { /* gone */ }
-				replace(slot);
+				if (stopFlag) { try { Atomics.store(new Int32Array(stopFlag), 0, 1); } catch (e) { /* none */ } }
+				if (!WORKER_KEEP) { slot.dead = true; slot.busy = null; try { slot.w.terminate(); } catch (e) { /* gone */ } replace(slot); return; }
+				S.late++;
+				hang = setTimeout(() => {
+					if (slot.dead || !slot.busy || slot.busy.id !== id) return;
+					S.hung++;
+					slot.dead = true; slot.busy = null;
+					try { slot.w.terminate(); } catch (e) { /* gone */ }
+					replace(slot);
+				}, WORKER_HANG_MS);
+				if (hang.unref) hang.unref();
 			}, Math.max(10, deadline - Date.now()) + WATCHDOG_MS);
+			slot.busy.clear = () => { if (hang) clearTimeout(hang); };
 		});
 	}
 	function pump() {
@@ -891,7 +912,7 @@ async function createExecutor(L, opts) {
 			const msg = await pending;
 			if (poll) clearInterval(poll);
 			if (msg.error || !msg.result) {
-				const why = Atomics.load(flag, 0) ? 'stopped' : 'budget';
+				const why = !msg.watchdog && Atomics.load(flag, 0) ? 'stopped' : 'budget';   // (a late worker told to stop by the watchdog: 'budget', not the caller's stop)
 				res = { ok: false, arrivals: [], tool: null, legs: [], lb: 0, fail: { why, closest: null, touched: [], blockedBy: [], level: budget.level | 0, note: msg.error || 'no answer' } };
 			} else res = msg.result;
 		}
