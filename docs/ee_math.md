@@ -1863,6 +1863,23 @@ no better than from the earliest (the route's own state is a state the region's 
 middle of the region, on its way on). **So the rule stays OPT-IN** (`EEAT_NEXT=1`; off = the executor as before byte
 for byte; strategy.js passes `budget.next` either way, test/planexec.js T-EXEC-CHAIN too).
 
+**The shared gate with the rule ON** (`EEAT_NEXT=1`, the tie arm's settings, on n4-plan 87e1ff0 + this; box 3, 60 s, W3,
+par 6, gate20.txt vs b3_w3.json): **exit 0, compiled 14 vs the baseline's 12**, better 8 (Tutorial 1 and The Blank Page
+compile, Ruins 1,343 vs 1,444, Accident Prone 3,139 vs 3,422, MIHB's Dream progress 30 vs 23, Booty Return 29 vs 13,
+Starlight 21 vs 19, My level fef0 64 vs 65), worse 1 (Level 1 Overworld progress 31 vs 34: its spread, 34-42 in the
+lanes' runs), slower Desolate Caverns 1,678, Fish Gods 3,929, Rosa dei Venti 4,053; 14 / 14 .eetas replayed
+(tools/cmp/verify.js); one arm, no off arm beside it (the lanes' gate of 87e1ff0 alone: compiled 13). test/planstrategy.js
+24/0 with the strategy's `budget.next`.
+
+**The proofs in that gate run** (the compile reports' route legs; `provenBy` of the route: search = a search tier's leg
+at lb.js's bound, exact = the exact search): 108 of the 316 route legs of the 14 compiled levels PROVEN OPTIMAL from
+their starts (The Ten Commandments 30 / 41, NC Naos 11 / 12, Accident Prone 33 / 97, Ruins 15 / 43, Desolate Caverns 10 /
+53, Rosa dei Venti 4 / 41, Tutorial 1 2 / 11, Fish Gods 2 / 12, Switch Labyrinth 1 / 1); the level's gap (run ticks -
+the level's admissible lb) 33-95% of the route (median 85%: Switch Labyrinth 27 vs 18, NC Naos 358 vs 48, Ten
+Commandments 669 vs 30, Rosa dei Venti 4,053 vs 931): the per-leg proofs do not add up to a level bound (a leg's bound
+holds from ITS start state, and the optimum need not pass it), so the level's gap is the level lb's looseness, not the
+legs'.
+
 **Left (the class):** ARRIVAL on region waypoints = the first-entry contract (an arrival is where the goal FIRST holds,
 finalize's `verifyTail`), not the ranking among first entries: the way on needs a state deeper in the region (a
 pass-through arrival, or the region and the next waypoint as one leg), which the executor's contract excludes; the
