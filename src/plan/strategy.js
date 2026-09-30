@@ -56,12 +56,24 @@ const FAIL_TICKS = 200, UCB_C = 100;
 const ARRIVALS_K = 4, MAX_DEEPEN = 4, STEER_MISS = 6000;
 // the polish's share of the budget once a route is known: min(POLISH_MS, POLISH_F x the budget)
 const POLISH_MS = 15000, POLISH_F = 0.25;
+// (lane 5, TAS-perfect: time is secondary, the ticks are not) past 60 s the polish's reserve grows by POLISH_LONG_F of the
+// budget past 60 s (at most POLISH_F of it): 60 s 15 s (as before), 300 s 63 s, 900 s 183 s; then THE REST polishes again
+// (REST_ROUNDS rounds while they gain, each at least REST_MIN_MS, all in REST_F of the time left; the proof gets what they
+// leave). EEAT_POLISH_REST=0: as before (15 s, the proof to the end).
+const POLISH_REST = process.env.EEAT_POLISH_REST !== '0';
+const POLISH_LONG_F = 0.2, REST_F = 0.5, REST_ROUNDS = 8, REST_MIN_MS = 1500;
 // the proof's share once a route is known (a static level start only): min(PROVE_MS, PROVE_F x the budget) kept for the
 // PROVE stage (one exact search from the level start bounded by the route's own arrival), and all the time the moves leave
 const PROVE_MS = 30000, PROVE_F = 0.2;
 // the exact landing (precision.js): a trophy leg's nearest state within PREC_NEAR tiles (the goal field's), at most
 // PREC_RUNS runs a compile of at most PREC_S s (at least PREC_MIN_S left), its PREC_ATTEMPTS nearest attempts
 const PREC_NEAR = 8, PREC_RUNS = 3, PREC_S = 40, PREC_MIN_S = 6, PREC_ATTEMPTS = 8;
+// (lane 5, TAS-perfect) the child's landings: the FASTEST of them, not the first (precision.js without --first: after its
+// first route its lookups go on PREC_AFTER_S s for faster ones and it ends when its tables are searched). Measured (box 5,
+// precision.js alone from the compiled route's approach): NC Naos d3c6 routes 358, 319, ... in 9 s (the first 358, the
+// fastest 319), the precision puzzle 358, 335, 333 (the first 358): the compiles took 319 or 358 by which hit came first.
+// EEAT_PREC_FIRST=1: the first, as before.
+const PREC_FIRST = process.env.EEAT_PREC_FIRST === '1', PREC_AFTER_S = 10;
 // the proof's starts: the level start after k = 0..R idle ticks, R = the idle ticks until the state rests (the timer starts
 // at the first input: waiting is free); at most PROVE_IDLE_MAX (one exact search each)
 const PROVE_IDLE_MAX = 64;
@@ -235,7 +247,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	const progressMs = +opts.progressMs > 0 ? +opts.progressMs : PROGRESS_MS;
 	const maxDeepen = Number.isFinite(+opts.maxDeepen) ? +opts.maxDeepen : MAX_DEEPEN;
 	const polishOn = opts.polish !== false;
-	const polishReserve = polishOn ? Math.min(POLISH_MS, POLISH_F * total) : 0;
+	const polishReserve = polishOn ? Math.min(POLISH_MS + (POLISH_REST ? POLISH_LONG_F * Math.max(0, total - 60000) : 0), POLISH_F * total) : 0;
 	const proveOn = opts.prove !== false;
 	// (the reserve kept once a route is known: the polish's, and the proof's where the start is static (set below))
 	let proveReserve = 0, endReserve = polishReserve;
@@ -459,13 +471,13 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const att = [...precAtt].sort((a, b) => a[1] - b[1]).slice(0, PREC_ATTEMPTS).map((e) => e[0]);
 		const file = path.join(os.tmpdir(), `eeat_prec_${process.pid}_${precRuns}.txt`);
 		const t1 = Date.now();
-		let found = null, done = null;
+		let found = null, done = null, foundRun = Infinity;
 		try {
 			fs.writeFileSync(file, att.join('\n') + '\n');
 			say({ ev: 'precision', run: precRuns, attempts: att.length, nearest: Math.round(+precAtt.get(att[0]) * 10) / 10, seconds: secs });
 			await new Promise((resolve) => {
 				const pw = Math.max(1, Math.min(workers, 4));
-				const ch = cp.spawn(process.execPath, [path.join(__dirname, '..', 'precision.js'), String(opts.file), `--attempts=${file}`, `--workers=${pw}`, `--seconds=${secs}`, '--first=1'], { stdio: ['ignore', 'pipe', 'ignore'] });
+				const ch = cp.spawn(process.execPath, [path.join(__dirname, '..', 'precision.js'), String(opts.file), `--attempts=${file}`, `--workers=${pw}`, `--seconds=${secs}`, ...(PREC_FIRST ? ['--first=1'] : [`--after=${PREC_AFTER_S}`])], { stdio: ['ignore', 'pipe', 'ignore'] });
 				precChild = ch;
 				const onExit = () => { try { ch.kill('SIGKILL'); } catch (e) { /* gone */ } };
 				process.once('exit', onExit);
@@ -480,7 +492,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 						const line = buf.slice(0, k); buf = buf.slice(k + 1);
 						let ev = null;
 						try { ev = JSON.parse(line); } catch (e) { continue; }
-						if (ev.ev === 'result' && ev.kind === 'finish' && typeof ev.inputs === 'string' && !found) found = ev.inputs;
+						if (ev.ev === 'result' && ev.kind === 'finish' && typeof ev.inputs === 'string' && (!found || (Number.isFinite(+ev.runTicks) && +ev.runTicks < foundRun))) { found = ev.inputs; foundRun = Number.isFinite(+ev.runTicks) ? +ev.runTicks : Infinity; }
 						else if (ev.ev === 'done') done = ev.end;
 					}
 				});
@@ -1045,9 +1057,9 @@ async function compile(L, opts = {}, emit = () => {}) {
 		if (!ev) { bug('verify', { why: 'the best route does not finish on its replay' }); best = null; }
 		stage('verify', Date.now() - tm, ev ? `finishes: ${fmt(ev.runTicks)} (${num(ev.runTicks)} run ticks), ${ev.deaths} death${ev.deaths === 1 ? '' : 's'}${ev.chance < 1 ? `, ${Math.round(ev.chance * 1000) / 10}% of EEO plays (random portals)` : ''}` : 'the route does not finish: dropped (a bug)');
 	}
-	if (best && polishOn && !stopped) {
-		tm = Date.now();
-		const ms = Math.max(200, Math.min(polishReserve, left() - 200 - (best ? proveReserve : 0)));
+	/** one polish of the best route for ms (the executor's, else the route cleanup): the best replaced when it is faster
+	 *  (or as fast and shorter) -> {saved, text} */
+	const polishBest = async (ms) => {
 		let how = '', pr = null;
 		try {
 			if (exec && typeof exec.polish === 'function') { pr = await exec.polish(best.masks, { ms, legs: best.legs, bound: LB }); how = 'the executor'; }
@@ -1057,23 +1069,49 @@ async function compile(L, opts = {}, emit = () => {}) {
 				pr = r ? { masks: r.ms, runTicks: r.ev.runTicks } : null; how = 'the route cleanup';
 			}
 		} catch (e) { say({ ev: 'warning', text: `the polish: ${e.message}` }); pr = null; }
-		let text = 'no gain';
+		let text = 'no gain', saved = 0;
 		if (pr && pr.masks) {
 			const masks = pr.masks instanceof Uint8Array ? pr.masks : T.masksOf(pr.masks);
 			const ev = C.evaluate(L, masks);
 			if (ev && ev.deaths <= best.deaths && ev.chance >= best.chance - 1e-9 && (ev.runTicks < best.runTicks || (ev.runTicks === best.runTicks && ev.complete < best.ticks))) {
-				const saved = best.runTicks - ev.runTicks;
+				saved = best.runTicks - ev.runTicks;
 				const lg = Array.isArray(pr.legs) && pr.legs.length ? pr.legs.map((g) => ({ label: g.label || '?', fromTick: g.fromTick, ticks: g.ticks, lb: Number.isFinite(+g.lb) ? +g.lb : null, proven: !!g.proven, tool: g.tool || null })) : best.legs;
-				best = { masks: ev.ms, ticks: ev.complete, runTicks: ev.runTicks, deaths: ev.deaths, chance: ev.chance, legs: lg, how: `${best.how} + polish` };
+				best = { masks: ev.ms, ticks: ev.complete, runTicks: ev.runTicks, deaths: ev.deaths, chance: ev.chance, legs: lg, how: String(best.how || '').endsWith(' + polish') ? best.how : `${best.how} + polish` };
 				say({ ev: 'result', kind: 'finish', ticks: ev.complete, runTicks: ev.runTicks, deaths: ev.deaths, chance: ev.chance, how: best.how, polish: saved, lb: LB, gap: gapOf(ev.runTicks), inputs: T.strOf(ev.ms) });
 				if (out) { try { C.writeEetas(path.join(out, 'route.eetas'), ev.ms); } catch (e) { /* read-only */ } }
 				text = saved > 0 ? `-${num(saved)} ticks (${how})` : `the same time, ${num(best.ticks)} ticks (${how})`;
 			} else if (ev) text = `no gain (${how}: ${fmt(ev.runTicks)}, ${ev.deaths} deaths: kept the route)`;
 			else text = `refused (${how}: it does not finish)`;
 		}
-		stage('polish', Date.now() - tm, text);
+		return { saved, text };
+	};
+	if (best && polishOn && !stopped) {
+		tm = Date.now();
+		const ms = Math.max(200, Math.min(polishReserve, left() - 200 - (best ? proveReserve : 0)));
+		const r = await polishBest(ms);
+		stage('polish', Date.now() - tm, r.text);
 	} else stage('polish', 0, best ? 'off' : 'no route');
 
+	// ---- THE REST (lane 5, TAS-perfect): the polish again, rounds while they gain, with at most REST_F of the time left (the
+	// proof gets the rest, and all of it where the polish gains nothing): a polished route has new states, so the mutation
+	// pass and the segments find new rejoins. Before, a compile whose moves stage ended early gave the proof all its time
+	// (Rosa dei Venti 264 s of 300 s, no proof, where the polish's 15 s had saved 354 ticks; celeste 176 s, My level fef0
+	// 110 s). Measured: a second polish of 60 s on the 300-s baseline's routes of lane 5's levels: Tutorial 1 -88, TPs The
+	// Horror -354, Trick Or Treat -282, Accident Prone -45, Tree Decorating -31 (tools/cmp/polcurve.js).
+	if (best && polishOn && POLISH_REST && !stopped && left() > REST_MIN_MS) {
+		tm = Date.now();
+		const notes = [];
+		let saved = 0;
+		const restEnd = Date.now() + REST_F * left();
+		for (let round = 0; round < REST_ROUNDS && !stopped && restEnd - Date.now() > REST_MIN_MS; round++) {
+			const r = await polishBest(restEnd - Date.now());
+			if (!(r.saved > 0)) { if (!round) notes.push(r.text); break; }
+			saved += r.saved;
+			notes.push(r.text);
+		}
+		if (saved > 0) stage('repolish', Date.now() - tm, `-${num(saved)} ticks in ${notes.length} round${notes.length === 1 ? '' : 's'} (${notes.join('; ')})`);
+		else say({ ev: 'repolish', ms: Date.now() - tm, text: notes.join('; ') || 'no gain' });
+	}
 	// ---- PROVE: the route optimal where the exact search can say so. The run timer starts at the first input, so waiting is
 	// free; the start rests after R idle ticks (restIdle). The route costs C = its arrival tick - its idle ticks. From each
 	// S_k (the start after k = 0..R idle ticks) one exact search to the trophy bounded by beforeTick = k + C - 1: every route
@@ -1155,6 +1193,25 @@ async function compile(L, opts = {}, emit = () => {}) {
 		} catch (e) { bug('prove', { error: e.message }); text = `no proof: ${e.message}`; }
 		stage('prove', Date.now() - tm, text);
 	} else if (best) stage('prove', 0, !proveOn ? 'off' : restIdle < 0 ? `skipped: the start does not rest within ${PROVE_IDLE_MAX} idle ticks` : stopped ? 'skipped: stopped' : 'skipped: no time left');
+
+	// ---- THE LAST (lane 5, TAS-perfect): the time the proof leaves (it ends early where its exact search's bound is far
+	// below the route: no proof possible) goes to the polish again, rounds while they gain, to the budget's end. Before, the
+	// compile ended there: the 300-s runs of THE REST ended at 284.5 s on Tutorial 1 (its repolish round had just saved 134
+	// ticks in 16 s, the proof took 0.5 s) and at 282-300 s elsewhere. Not after a proof (the route is optimal).
+	// EEAT_POLISH_LAST=0: off.
+	if (best && polishOn && POLISH_REST && process.env.EEAT_POLISH_LAST !== '0' && !proveProof && !stopped && left() - 300 > REST_MIN_MS) {
+		tm = Date.now();
+		const notes = [];
+		let saved = 0;
+		for (let round = 0; round < REST_ROUNDS && !stopped && left() - 300 > REST_MIN_MS; round++) {
+			const r = await polishBest(left() - 300);
+			if (!(r.saved > 0)) { if (!round) notes.push(r.text); break; }
+			saved += r.saved;
+			notes.push(r.text);
+		}
+		if (saved > 0) stage('lastpolish', Date.now() - tm, `-${num(saved)} ticks in ${notes.length} round${notes.length === 1 ? '' : 's'} (${notes.join('; ')})`);
+		else say({ ev: 'lastpolish', ms: Date.now() - tm, text: notes.join('; ') || 'no gain' });
+	}
 
 	// ---- the bound again (the planner's facts may have raised it), the report
 	// (a proof of optimality: the route is one exact leg from the level start, proven the fewest ticks, and the start is
