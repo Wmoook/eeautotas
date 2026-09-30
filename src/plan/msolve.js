@@ -508,13 +508,16 @@ function createSolver(L, opts = {}) {
 		// at a tick o2 > T1 + 1, or walks on. The member = the base member to T1 + the standing family from (line, T1): a
 		// two-parameter gravity family, still a closed form of the tables (gravTrace from the line). The x axis is one
 		// pattern across the landing; the tube checks the floor under the box on the ground ticks (row fr). Airborne
-		// starts get every act (jump / off / walk); standing starts' members (a jump, a walk-off) the walk and the hop.
+		// starts get every act (jump / off / walk); standing starts' members (a jump, a walk-off) the walk and the hop, with
+		// o.landStanding only.
 		if ((o.land !== undefined ? o.land : LAND_DEF) && !o.each && Tmax > 4) {
 			const landMax = o.landRows || 6;
 			const jmpFrom = new Map(), fallFromL = new Map();
 			const jmpL = (yl) => { if (!jmpFrom.has(yl)) jmpFrom.set(yl, gravTrace(yl, G.J, Tmax, G)); return jmpFrom.get(yl); };
 			const fallL = (yl) => { if (!fallFromL.has(yl)) fallFromL.set(yl, gravTrace(yl, 0, Tmax, G)); return fallFromL.get(yl); };
-			const bases = members.filter((m) => m.kind === 'air' || ((m.kind === 'jump' || m.kind === 'off') && standing));
+			// (a standing start's jump / walk-off members as bases only with o.landStanding: on the single real moves they cost
+			// the jump legs' node budget, 39 lost of 11,747, and won 5 hops; its 2-move legs are the chains')
+			const bases = members.filter((m) => m.kind === 'air' || (o.landStanding && (m.kind === 'jump' || m.kind === 'off') && standing));
 			const canJ2 = s.max_jumps >= 1;
 			const rowHasFloor = (fr, lo, hi) => {
 				if (fr >= Hh) return true;
