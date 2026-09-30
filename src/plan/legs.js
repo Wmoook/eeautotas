@@ -826,7 +826,7 @@ const distOf = (field, sim) => {
 const COV_K = 16, COV_PF = +process.env.EEAT_COVER_PF >= 0 && process.env.EEAT_COVER_PF !== undefined ? +process.env.EEAT_COVER_PF : 0.25;
 const COV_R = 4, COV_KEEP = +process.env.EEAT_COVER_KEEP > 0 ? +process.env.EEAT_COVER_KEEP : 0.9;
 const COV_MASKS = (() => { const a = []; for (const h of [0, 2, 4]) for (const v of [0, 8, 16]) for (const j of [0, 1]) a.push(h | v | j); return a; })();
-function covVx(v) { return v <= -5 ? 0 : v <= -2.5 ? 1 : v < -0.5 ? 2 : v < 0.5 ? 3 : v < 2.5 ? 4 : v < 5 ? 5 : 6; }
+function covVx(v) { return v <= -9 ? 0 : v <= -7 ? 1 : v <= -5 ? 2 : v <= -2.5 ? 3 : v < -0.5 ? 4 : v < 0.5 ? 5 : v < 2.5 ? 6 : v < 5 ? 7 : v < 7 ? 8 : v < 9 ? 9 : 10; }
 function covVy(v) { return v <= -8 ? 0 : v <= -4 ? 1 : v < -1 ? 2 : v < 1 ? 3 : v < 4 ? 4 : v < 8 ? 5 : 6; }
 function legCover(L, starts, goal, o) {
 	o = o || {};
@@ -852,7 +852,7 @@ function legCover(L, starts, goal, o) {
 	const cNode = [], cSnap = [], cPick = [], cSeen = [], cDist = [];
 	const keyOf = () => {
 		const cx = (sim.px + 8) >> 4, cy = (sim.py + 8) >> 4;
-		return `${(cy * W + cx) * 98 + covVx(sim.speed_x) * 14 + covVy(sim.speed_y) * 2 + (sim.on_ground ? 1 : 0)}|${dkOf(sim) | 0}`;
+		return `${(cy * W + cx) * 154 + covVx(sim.speed_x) * 14 + covVy(sim.speed_y) * 2 + (sim.on_ground ? 1 : 0)}|${dkOf(sim) | 0}`;
 	};
 	const pathOf = (node, extra, n) => {
 		const segs = [];
