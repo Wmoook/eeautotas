@@ -779,6 +779,205 @@ evalGA, holdX, rangeIA, minT, minTSafe, solveIA, buildTable, lookup, summary, wr
 the resolution table and the hold R / hold L / release offsets and speeds to 240 ticks as hex doubles), `ga.json` (the
 gravity axis per (gm, jm) and start class 0 / J, 240 ticks, hex doubles).
 
+## 4 The move solver: a leg evaluated, its bound, chains
+
+(build / solver.) Code: `src/plan/msolve.js` (the solver, the bound, the fan-out, the chains), `test/msolve.js` (the
+engine checks), `tools/math/msolve_bench.js` (the 49,846 real moves as legs), `tools/math/msolve_chain.js` (chains on
+the real routes). It puts sections 1-3 and 6 to work: a LEG is solved, not searched, wherever the plain regime holds,
+by the gravity axis' one-parameter family (3.1) and the input axis' exact branch and bound (3.2-3.3); field legs go to
+section 6's solver; what neither covers goes to a small engine family (the coupled piece). Every answer is the engine's
+own replay.
+
+### 4.1 A leg
+
+A leg starts at a REAL engine state (an `EESnapshot`: the exact position, speeds, jump count, effects, the doors as
+they stand) and asks for a TARGET: centre tiles and the support class the ball must be in there, the moves study's
+letters (G on the ground: this tick's movement hit the floor; Z dots, W liquid, C climbable, B boost; `any`), or a
+teleport onto an exit tile (a portal move: the solver enters one of the portals whose exits lead there, `via`, and the
+goal tick must teleport). The goal test is exact on a real state (`S.goal`): the centre tile `((x + 8) >> 4, (y + 8)
+>> 4)`, the class letter (the CURRENT tile's physics, read at the tick's start: a field entered at tick t reads as
+that class at t + 1), alive. The answer: the input masks of the leg, its ticks T, the landing hop (the same masks with
+the jump on the last tick: the same support, another state; 54% of real landings are hops), the lower bound, whether T
+is PROVEN optimal, and which tier found it.
+
+### 4.2 The plain regime: the gravity axis is a family, the landing tick a closed form
+
+The start is PLAIN when section 2's environment is: gravity down (flip 0), no levitation, no ice timer, the current and
+both queued tiles of default gravity (no field, effect, portal or killer: `plainIds`), the centre on such a tile.
+Inside it (section 3.1) y has NO input in the air with max_jumps 1, so the whole y history of a leg is one of a few
+MEMBERS, each a table of doubles computed once per leg from the real (y0, vy0) by the recurrence (`gravTrace`: kin1d's
+axis step, the raw y before the align kept too):
+
+| member | y(t) | x must |
+|---|---|---|
+| jump at tick j (a standing ball) | y0 for t <= j, then the free trajectory from (y0, J) | stand on the floor at ticks 1..j |
+| walk off at tick o | y0 for t < o, then the fall from (y0, 0) | stand at 1..o-1, be off the floor at o |
+| walk | y0 | stand every tick |
+| launched (a hop, a fall) | the one free trajectory from (y0, vy0) | nothing |
+| BONK at (b, line) (a rise member) | the member to b - 1, the ceiling line at b (vy = 0), then the fall | be under the ceiling at b |
+
+A bonk member exists for every ceiling line (a multiple of 16) the rise crosses; its blocked y is the line (the 1 px
+steps from a fractional y end there) or, from a whole y, the start itself (the move is ONE add there: blocked, y
+stays: Player.as's sub-step rule, section 1.5).
+
+**THEOREM S1 (the landing tick).** For a member and a floor row fr (the floor line l = 16 fr - 16, where a standing
+ball's y is), the ball lands on that row at the one tick T = the first t after the member's air start with
+y(t - 1) <= l < y_raw(t) and v(t) > 0 (y_raw: before the align, which the collision probe precedes), provided the x
+path keeps the box free and puts a landable tile under it there. *Proof:* the y recurrence has no term in x (section
+2, THEOREM 1) and no input (3.1); the move is one add (T-ADD) until a probe collides; descending from y(t-1) <= l the
+1 px steps reach l and the next step overlaps row fr, so y stops at l, vy = 0 and grounded holds (section 1.5).
+Low gravity arms the y align (|a| < 0.1): the aligned y may sit back on the line while the raw y crossed it, hence
+y_raw (the engine check below found this: 12 legs where the aligned test missed the landing).
+
+So the candidates of a leg are the (T, member, row) ITEMS, T computed in closed form from the member's table, sorted by
+T: **cheapest T first**. For a field-entry target the items are the ticks at which y is in the target row's centre
+range.
+
+### 4.3 The input axis at T: the exact branch and bound
+
+At an item's T the x axis must end in the target's WINDOW (the target columns' centre range `[16 c - 8, 16 c + 8)`,
+narrowed to where a landable tile lies under the box, widened by the align slack: the landing probe sees the raw x
+and the first sub-step) and pass the TUBE every tick: the 16 x 16 box at (x_t, y_t) free of solids (the level's
+bitmask with the doors as they stand: one-ways pass, half blocks block), the centre on plain tiles, on the floor while
+the member stands (tested at the engine's first x sub-step: the walk-off rule), off it at the walk-off tick, under the
+ceiling at a bonk tick. `solveX` enumerates the x patterns with <= K changes (kin1d's runs of -, L, R; K = 2 by
+default: section 3.5 found every real landing within 2 changes) as a branch and bound:
+
+- each tick is the exact recurrence (axisStep, the one add, the align) with the member's WALLS: a box that would enter a
+  solid at the member's y stops at its last free sub-step (the 1 px steps from a fractional x; from a whole x a short
+  move is one add and stays), vx = 0: section 2's THEOREM 5 (a contact's independent axis) made a function of the tick;
+- a node is cut when THEOREM M's interval from its state misses the window: here as THE HOLD TABLES (`holdTables`),
+  the offsets of n ticks of hold R / hold L from every start speed on a 1/64 px/tick grid (n <= 160; ~2 M doubles,
+  built once per (sm, gm) in ~10 ms). The speed map is monotone in v (1.4), so a speed between two grid points has its
+  offset between theirs: `holdRange` is an O(1) SOUND interval (+ the 2 px align slack), and a cut is a proof;
+- the last change is binary-searched (LEMMA L) where both runs are held keys, scanned otherwise;
+- a per-item share of the node budget (40 k) keeps one item from eating the leg's budget (400 k).
+
+Each emitted pattern with its member is one input string; it is replayed ONCE by the engine from the start's snapshot
+(~0.6 us a tick). A miss (a corner of the sub-step staircase, a one-way, a door, a trigger) goes on to the next
+pattern. The first replay that meets the goal is the answer (its first goal tick), so every answer is exact by
+construction.
+
+### 4.4 Three tiers: plain, field, coupled
+
+1. plain: 4.2-4.3.
+2. field (not plain, or no plain answer; not for a teleport target): section 6's `solveLeg` (the start field's axis
+   roles, the gravity axis' options, the input axes by `fields.solveAxis`, the schedule iteration across field
+   boundaries), its answer replayed by this solver's goal test.
+3. coupled: the per-tick one-change family over the 9 direction masks, with and without a press at the first tick, the
+   prefix played once and snapshotted every tick (the moves study's F1): only where neither tier found an answer, or
+   BELOW the field answer's T (the cheapest T across the tiers).
+
+### 4.5 THE PLAIN BOUND and its certificate
+
+**THEOREM B.** Let the start be plain with max_jumps 1 and the target tiles T*. Every input sequence that stays in the
+plain regime needs at least `lb = max(tx, ty)` ticks to put the centre on a target tile (and at least 1 for G):
+
+- tx = min over the target columns of the least n with `hold toward from (x0, max(v0 toward, 0))` reaching the column's
+  centre range less the align slack (0 when x0 is within it), the 1D minimum time of 3.2;
+- ty = min over the target rows r of: 0 when y0 is within `[16 r - 8 - 2, 16 r + 8 + 2)`; below it, the first n at which
+  the fall from `max(vy0, 0)` reaches `16 r - 8 - 2`; above it, the first n at which the rise of a jump pressed now (a
+  standing ball: y moves from tick 2) or the current rise reaches `16 r + 8 + 2`, +1 for a landing (the rise must end
+  first); past one jump's reach `ceil(dy / |J|)` (no tick rises more than |J|: stairs re-jump).
+
+*Proof.* Per axis (the axes do not meet in the plain regime but through collisions, which only stop motion): x under
+any input is at most hold toward (THEOREM M) and a wall can only zero a speed (the clamp to max(v0, 0) covers a wall
+absorbing a speed away from the target: without it a ball moving away from the target, stopped by a wall, beats the
+free bound); the y speed has no input but the jump, which only lowers it, and a floor or a bonk only stop it; the
+align moves a coordinate by < 2 px (1.7); the centre range covers every floor height (half blocks, one-ways: the
+first version tested the floor line and was beaten by a real landing on a half block). Qed for the plain regime.
+
+**The certificate** (`certify`): the bound is claimed for EVERY input sequence only when no non-plain, non-solid tile
+lies in the rectangle the plain extremes can reach in lb ticks (x: hold L / R from the clamped speeds, y: lb x |J| of
+rise to the fall): leaving the plain regime first needs the centre on such a tile. **A leg found at a certified lb is
+PROVEN OPTIMAL.**
+
+*Engine checks.* (a) The 49,846 real moves (4.7): on every leg with a certified bound, lb <= the route's own ticks
+(the route is a real input sequence): **0 violations** in the final run (16,297 certified legs; the first run
+had 12 violations, which found the two errors above: the low-gravity align and the landing height); (b) test/msolve.js:
+random input words (sticky, jump presses anywhere) from 3 starts on a room with a gap, a step and a ceiling: no word
+ever stands on a tile sooner than its certified bound or its proven leg (88 pairs, 24 proven: 0 violations); (c) the
+bound's parts are section 3's checked THEOREM M / minT and the recurrence.
+
+### 4.6 Chains: A* over support states
+
+`chain(start, target)`: a node is an exact engine state at a support (its snapshot, the masks from the chain's start,
+g = its ticks), merged by stateHash (a state reached again no sooner is dropped). Its edges are solved legs: the
+direct leg to the target (plain at a plain node; the field and coupled tiers where the node is not plain) and THE
+FORWARD FAN-OUT `landings(node)`: the plain solver in its EACH mode, one item per (T, member, tile) over the standable
+tiles the plain extremes reach in 60 ticks (half the nearest to the target, half the nearest to the ball, 80 at most),
+the earliest verified landing on each tile, and its hop. h = the plain bound to the target; the search is A* (o.w > 1:
+weighted). Lazy verification: an edge is a replayed answer, made when its node is expanded. **Closed** = the open
+list's least f reached the best chain with every h certified and w = 1: no chain of these legs is shorter.
+
+### 4.7 The numbers
+
+**The real moves** (`tools/math/msolve_bench.js`, box 3, the moves study's segmentation of the truthset's 218 routes;
+every move but deaths / respawns and moves over 400 ticks = 49,280 legs; the start = the route's exact state at the
+move's start, the target = the route's next support (its centre tile and class letter; a teleport onto it for a
+portal move), Tmax = the route's ticks + 10; every answer replayed AGAIN by a separate EESim with the moves study's own
+test: **0 answers rejected**):
+
+| class | legs | solved | <= route | < route | exact end | proven optimal | plain / field / coupled / chain (% of the class) |
+|---|---:|---:|---:|---:|---:|---:|---|
+| **all** | 49,280 | **92.0%** | **88.6%** | 23.2% | 20.7% | 3.3% | 55.1 / 15.5 / 21.3 / 0.0 |
+| hop | 17,068 | 99.2% | 98.3% | 0.9% | 21.4% | 2.0% | 92.8 / 4.8 / 1.6 / 0 |
+| jump | 7,623 | 97.4% | 93.5% | 57.7% | 17.5% | 15.4% | 91.3 / 5.1 / 0.8 / 0.2 |
+| fall | 4,550 | 94.1% | 91.7% | 15.2% | 26.9% | 1.8% | 69.8 / 17.0 / 7.3 / 0 |
+| walk | 41 | 100% | 100% | 90.2% | 2.4% | 19.5% | 78.0 / 22.0 / 0 / 0 |
+| airjump | 162 | 16.7% | 12.3% | 11.7% | 0.6% | 0 | 8.6 / 0.6 / 5.6 / 1.9 |
+| arrow | 9,867 | 76.7% | 70.1% | 29.9% | 17.2% | 0.2% | 6.4 / 22.1 / 48.1 / 0 |
+| dot | 5,314 | 89.3% | 83.1% | 41.1% | 13.4% | 0 | 0 / 43.3 / 46.0 / 0 |
+| boost | 2,297 | 91.2% | 87.7% | 16.1% | 35.7% | 0 | 3.7 / 42.9 / 44.5 / 0 |
+| portal | 1,697 | 94.6% | 93.3% | 15.4% | 40.9% | 0 | 24.1 / 0 / 70.5 / 0 |
+| climb | 370 | 92.2% | 88.9% | 54.9% | 13.0% | 0 | 0 / 35.1 / 57.0 / 0 |
+| swim | 291 | 90.4% | 87.6% | 61.5% | 12.7% | 0 | 0 / 19.6 / 70.8 / 0 |
+
+- **solved** = an input string the engine replays onto the target support; **<= route** = in no more ticks than the
+  route's own move (the TAS-optimised one), **< route** strictly fewer (at the support class: the route may have bought
+  its exact state with those ticks); **exact end** = the answer's end state (or its hop's) = the route's end state
+  (stateHash) at the same tick; **proven optimal** = T equals a certified plain bound (4.5): no input sequence reaches
+  the target sooner.
+- The tiers: plain 27,154 legs (the mathematics of 4.2-4.3: one engine replay per leg at the median), field 7,650
+  (section 6), coupled 10,501, chain 22 (a long plain leg as a chain, 4.6, within a 400 ms clock).
+- **Microseconds per leg** (the laptop, one thread, 1,053 legs of 3 routes, unloaded): the plain tier's legs median
+  **80 us**, p90 1.0 ms (1 engine verify at the median, 2 at p90); the field tier median 9.2 ms, the coupled piece 28 ms.
+  On box 3 under the compiler program's load (load 130 on 192 threads): plain median 372 us, field 9.7 ms, coupled 48
+  ms.
+- **The bound**: a plain bound on 33,411 legs, certified on 16,297; on every certified leg lb <= the route's own
+  ticks (**0 violations**); lb / route median 0.50 (the admissible bounds of the n4 study: median 0.145); on 532 legs
+  the ROUTE'S OWN MOVE is proven optimal (its ticks = a certified bound). **1,624 legs PROVEN OPTIMAL** (jump 1,173, hop
+  343, fall 81, arrow 19, walk 8), 1,092 of them strictly faster than the route (at the support class).
+- The route beaten: 11,440 legs in fewer ticks than the route's own, 104,213 ticks in all.
+- Where it fails: arrow legs across fields (the ball enters and leaves arrow tiles inside the move: 23% unsolved),
+  long plain legs (> 60 ticks: the most of the plain classes' failures), multi-jump (airjump 14.8%).
+
+**Chains** (`tools/math/msolve_chain.js`, box 3: from the route's state at every 48th move's start to the support 4
+moves ahead, 5 s a chain, the route's own ticks over those 4 moves as the yardstick):
+
+(pending the box run)
+
+### 4.8 What the solver does not cover yet
+
+- Multi-jump in the plain regime (the air-jump tick is a second member parameter: not listed; airjump legs 14.8%).
+- Long plain legs (> 60 ticks: the most failures of the plain classes): the K = 2 tree grows as T^2 per item and the
+  budget runs out; the chain (4.6) is the way for them (supports in between).
+- The flip-gravity levels in the plain tier (the plain regime rotated: 162 moves of the 9,756 arrow moves; the rest are
+  arrow tiles, the field tier's).
+- The bound across fields (the field tier's own bound is section 6's `lb`, reported there, not certified here).
+- A fan-out from a non-plain node (chains pass through fields only by their direct legs).
+
+### 4.9 API (`src/plan/msolve.js`)
+
+`createSolver(L, {K, Tmax})` -> `S`: `S.leg(start, target, o)` -> `{ok, masks, T, hop, lb, cert, proven, tool,
+member, k, cands, verifies, us, why}` (o: `Tmax`, `K`, `plain` / `fields` / `coupled` (each on by default), `nodes`,
+`itemNodes`, `fieldMs`, `coupledTicks`, `debug(item)`); `S.chain(start, target, o)` -> `{ok, masks, T, closed,
+expanded, legs, nodes, ms}` (o: `ms`, `legT`, `w`, `fanT`, `fanMax`); `S.landings(start, o)` -> `[{tile, T, masks,
+hop}]`; `S.lowerBound(start, target)`; `S.goal(target)`; `S.replay(start, masks, target)`; `clsOf(sim, flags)`;
+`holdTables(ctx)`, `holdRange(H, x, v, n, slack)`. `node test/msolve.js [--quick] [--samples=N]`;
+`EEAT_TRUTH_ROOT=<root> node tools/math/msolve_bench.js --moves=<exact_jsonl> --out=<dir> --shard=i/n` then `--agg=<dir>`;
+`tools/math/msolve_chain.js` likewise (`--chain=4 --every=24 --ms=3000`).
+
 ## 6 Field kinematics: every field as one recurrence with its own coefficients
 
 (build / fields.) Code: `src/math/fields.js` (the axis contexts, the recurrences, the envelope, the axis solver, the
