@@ -48,6 +48,24 @@ const LM_W = 60;              // ticks of the plan search's f per landmark not y
 const GAIN_BONUS = 3;         // walk steps of the plan search's f per unit of gain (the relevant triggers achieved)
 const INC_ON = process.env.EEAT_PLAN_INC !== '0';   // the plan search's incumbent (search(): a generated goal at the budget's end)
 const KEY_TICKS = 500;
+// THE STATE TRICKS (n5-tricks, TRICK MINING 3; tools/cmp/tricks3.js over the 218 known routes that replay: 61 deaths in
+// 22 routes, 30 of them RESPAWN SKIPS in 7 levels: the respawn nearer the route's next trigger by more than the dead
+// ticks' worth of running, 23 walk tiles: Good Egg Galaxy, Katwalk 74 / 86, Operation Planet X 254, Your Decision 37,
+// Ice Slide Ride 39, Inferno 43, First Person Maze (its switch column fallen twice: a death back to the checkpoint above
+// it)). OPT-IN EEAT_TRICKS: '1' / 'all' every rule, else a list of names; unset = the planner before, byte for byte.
+//   warp  DEATH WARP: an edge the est walk reaches is taken as a death (the nearest killer, the dead ticks, the state's
+//         respawn) when that is cheaper by WARP_MIN est ticks and WARP_F of the walk (before: a death step only where no
+//         est walk reached the target)
+//   exh   EXHAUSTED -> DEATH: an edge whose leg the executor's exact search EXHAUSTED from a node class (no way there
+//         without a death: a fall that cannot be climbed back, a one-way drop, a door shut behind) is offered from that
+//         class only as its death variant (edge + '~w': a death back at a respawn, then the trigger; its own rungs), where
+//         the level can kill and respawn; the claim was a claim about deathless ways only (goalOf: allowDeath false)
+const TRICKS = new Set(String(process.env.EEAT_TRICKS || '').split(',').map((s) => s.trim()).filter(Boolean));
+const TR_ALL = TRICKS.has('1') || TRICKS.has('all');
+const TR_WARP = TR_ALL || TRICKS.has('warp');
+const TR_EXH = TR_ALL || TRICKS.has('exh');
+const WARP_MIN = +process.env.EEAT_WARP_MIN || 30;       // est ticks a warp must save at least
+const WARP_F = +process.env.EEAT_WARP_F || 0.8;          // and the death's est at most this share of the walk's
 // the diversification rule (nearPlans): one-step plans to the nearest untried triggers once every plan's first leg
 // failed its rung; DEFAULT 1 since COMPILE-ALL block 3 lane 4 (with the executor's true skeleton closest,
 // EEAT_SKEL_CLOSEST): EEAT_PLAN_NEAR=K (K near plans; 0: off, the planner as before)
@@ -111,6 +129,8 @@ function createPlanner(model, facts, o = {}) {
 	const ST = { rchChecks: 0, plans: 0, planMs: 0, expands: 0, lbCalls: 0, lbMs: 0, lbExpands: 0, learned: 0, costOf: 0 };
 	const paceSamples = [];
 	let lastPlans = [], lastWhy = '';
+	// (EEAT_TRICKS exh: the (edge, node class) pairs whose leg the exact search exhausted: learn())
+	const exhausted = new Set();
 	const relevant = model.triggers.filter((X) => X.relevant && X.kind !== 'trophy' && !X.crumb);
 	// (the crumbs: coins no gate reads, relevant only with EEAT_CRUMBS=1 (model.js); left out of the plan search, offered
 	// one at a time by crumbPlan)
@@ -642,7 +662,7 @@ function createPlanner(model, facts, o = {}) {
 		const cls = root ? rootCls : S.key + '|*';
 		let dNW = null;
 		const nwDist = () => dNW || (dNW = model.dist(S, pos, 'estNW', base));
-		const leg = (tiles) => {
+		const leg = (tiles, forceDeath) => {
 			let sL = INF, rL = INF, sE = INF, rE = INF;
 			const drL = dvL ? dvL.dr : null, drE = dvE ? dvE.dr : null;
 			for (const t of tiles) {
@@ -657,7 +677,14 @@ function createPlanner(model, facts, o = {}) {
 			if (useBounds) { try { const lvl = model.levelOf(S); if (pairOK(tiles, lvl)) { const bb = bounds.pair(pos.tiles, tiles, lvl); if (Number.isFinite(bb)) lb = Math.max(lb, bb + extra); } } catch (e) { /* the tier-0 bound */ } }
 			let est = lb, steps = sL, viaDeath = false, relaxOnly = false;
 			if (wantEst) {
-				if (sE < INF) { est = sE * P + extra; steps = sE; }
+				if (sE < INF) {
+					est = sE * P + extra; steps = sE;
+					// (THE DEATH WARP, EEAT_TRICKS warp: the death's est clearly below the walk's)
+					if ((TR_WARP || forceDeath) && drE && rE < INF) {
+						const eD = (dvE.dk + rE) * P + (dvE.dt || 0) + DEAD_TICKS + extra;
+						if (forceDeath || (eD + WARP_MIN <= est && eD <= WARP_F * est)) { est = eD; steps = dvE.dk + rE; viaDeath = true; }
+					}
+				}
 				else if (drE && rE < INF) { est = (dvE.dk + rE) * P + (dvE.dt || 0) + DEAD_TICKS + extra; steps = dvE.dk + rE; viaDeath = true; }
 				else {
 					// (the walled price: the est walk reaches it once the CEGAR walls are left out: WALL_F x that walk)
@@ -683,7 +710,14 @@ function createPlanner(model, facts, o = {}) {
 			return { lb, est, steps, viaDeath, relaxOnly, pen: relaxOnly ? 'relax' : '' };
 		};
 		const finish = (X, tiles, edge, tr, anyOf) => {
-			const g = leg(tiles);
+			// (EXHAUSTED -> DEATH, EEAT_TRICKS exh: the leg exhausted from this class; its death variant only, where one
+			// exists: a level that can kill and a respawn the death way reaches the target from)
+			let g = null;
+			if (TR_EXH && wantEst && exhausted.has(edge + '\u0001' + cls)) {
+				const gd = leg(tiles, true);
+				if (gd && gd.viaDeath) { g = gd; edge += '~w'; }
+			}
+			if (!g) g = leg(tiles);
 			if (!g) return;
 			if (wantEst) {
 				if (facts) {
@@ -1416,6 +1450,7 @@ function createPlanner(model, facts, o = {}) {
 			return out;
 		}
 		const fail = (result && result.fail) || { why: 'budget' };
+		if (TR_EXH && fail.why === 'exhausted' && model.canDie && !/~w$/.test(edge)) exhausted.add(edge + '\u0001' + cls);
 		const sKey = a ? proofKey(a.S, a.pos) : (cls || '').split('|')[0];
 		if (fail.why === 'proof') out.push(facts.add({ kind: 'proof', edge, sKey }));
 		for (const b of fail.blockedBy || []) {
