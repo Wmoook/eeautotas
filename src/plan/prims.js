@@ -112,7 +112,28 @@ async function createPrims(L, o = {}) {
 	// was 12.5% of a leg's time; model.keyOf = model.stateOf(s).key without the state object: the same key)
 	const fget = feats ? feats.map((f) => T.featGetter(f)) : null;
 	const fsig = fget ? (s) => { let h = 0x811c9dc5; for (let i = 0; i < fget.length; i++) { h ^= (fget[i](s) | 0); h = Math.imul(h, 0x01000193); } return h >>> 0; } : featSig;
-	const featKey = model && model.keyOf ? (s) => model.keyOf(s) : model && model.stateOf ? (s) => model.stateOf(s).key : (s) => fsig(s).toString(36);
+	const featKey0 = model && model.keyOf ? (s) => model.keyOf(s) : model && model.stateOf ? (s) => model.stateOf(s).key : (s) => fsig(s).toString(36);
+	// the parent's key for its children (an expansion's): a child with the parent's feature values, coin counts and
+	// checkpoint has the parent's key (the key = the values, the taken coins' bitmaps and the checkpoint; within one edge a
+	// coin is only ever taken, which raises its count, so equal counts = the same coins taken). keyOf was 12.9% of a coin
+	// level's leg (Booty Return: the taken bitmaps over its coin tiles, hashed per child). EEAT_PRIMS_KEYCACHE=0: off.
+	const KEYCACHE = process.env.EEAT_PRIMS_KEYCACHE !== '0' && fget !== null;
+	let kc = null;   // {vals, coins, bcoins, cpx, cpy, key} of the parent being expanded, or null
+	const KEYCHECK = process.env.EEAT_PRIMS_KEYCHECK === '1';   // (tests: every cached key checked against keyOf)
+	let kcChecks = 0;
+	const kcOf = (s) => ({ vals: fget.map((g) => g(s)), coins: s.coins, bcoins: s.blue_coins, cpx: s.checkpoint.x, cpy: s.checkpoint.y, key: featKey0(s) });
+	const featKey = !KEYCACHE ? featKey0 : (s) => {
+		const c = kc;
+		if (c !== null && c.coins === s.coins && c.bcoins === s.blue_coins && c.cpx === s.checkpoint.x && c.cpy === s.checkpoint.y) {
+			let same = true;
+			for (let i = 0; i < fget.length; i++) if (fget[i](s) !== c.vals[i]) { same = false; break; }
+			if (same) {
+				if (KEYCHECK) { const k0 = featKey0(s); if (k0 !== c.key) throw new Error(`prims key cache: ${c.key} vs ${k0}`); kcChecks++; }
+				return c.key;
+			}
+		}
+		return featKey0(s);
+	};
 	let bounds = o.bounds || null;
 	if (!bounds) { const BO = require('./bounds.js'); bounds = BO.createBounds(L, { model }); }
 	let tables = null;
@@ -261,6 +282,14 @@ async function createPrims(L, o = {}) {
 
 	/** the children of a node (the navgraph's expand): learned edges first, the family, STEP */
 	function expandNode(node, s, ctx, fo) {
+		try {
+			kc = null;
+			s.restore(node.snap);
+			if (KEYCACHE) kc = kcOf(s);   // (the parent's key for its children: featKey)
+			return expandNode0(node, s, ctx, fo);
+		} finally { kc = null; }
+	}
+	function expandNode0(node, s, ctx, fo) {
 		st.expands++;
 		const snap = node.snap;
 		s.restore(snap);
@@ -455,7 +484,7 @@ async function createPrims(L, o = {}) {
 
 	return {
 		L, bounds, support, expand, route, routeAsync, learn,
-		stats: () => Object.assign({}, st, { learned: learned.size, tables: !!tables }),
+		stats: () => Object.assign({}, st, { learned: learned.size, tables: !!tables, keyChecks: kcChecks }),
 		close: () => { if (pool) { pool.close(); pool = null; } },
 	};
 }
