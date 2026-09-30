@@ -5,7 +5,8 @@
 // or failing: skipped). Messages: {id, type 'fp'} -> {id, fp} (the fingerprint: the level's state hashes after a fixed
 // input sequence, the main thread's check that the level is the same); {id, type 'reach', starts (mask strings), wp
 // (plain data), budget {ms, level, k, deadline}, stopFlag (SharedArrayBuffer: 1 = stop)} -> {id, result}; {id, type
-// 'polish', masks (string), o} -> {id, result}. Arrivals leave as mask strings: snapshots never cross threads.
+// 'polish', masks (string), o} -> {id, result}; {id, type 'mutscan', masks, o {ranges, deadline}} -> {id, result {shortcuts}}
+// (polish.js mutatePass on those ranges: the executor's parallel first pass). Arrivals leave as mask strings: snapshots never cross threads.
 const { parentPort, workerData } = require('worker_threads');
 const T = require('./types.js');
 const EX = require('./executor.js');
@@ -38,6 +39,13 @@ parentPort.on('message', async (msg) => {
 		if (msg.type === 'reach') {
 			const result = await core.reach(msg.starts, msg.wp, Object.assign({}, msg.budget, { stop }));
 			parentPort.postMessage({ id, result });
+			return;
+		}
+		if (msg.type === 'mutscan') {
+			// (a range of polish.js's first mutation pass: the shortcuts found, their inputs as strings)
+			const P = require('./polish.js');
+			const r = P.mutatePass(L, T.masksOf(msg.masks), Object.assign({}, msg.o, { stop }));
+			parentPort.postMessage({ id, result: { shortcuts: r.shortcuts.map((c) => ({ t: c.t, j: c.j, saved: c.saved, ins: T.strOf(c.ins) })), timeUp: r.timeUp, ticks: r.ticks } });
 			return;
 		}
 		if (msg.type === 'polish') {

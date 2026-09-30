@@ -735,6 +735,25 @@ async function createExecutor(L, opts) {
 		const str = typeof masks === 'string' ? masks : T.strOf(masks);
 		const po = { ms: o.ms > 0 ? o.ms : 30000, legs: o.legs || null, allowDeaths: o.allowDeaths !== false };
 		let r;
+		// (with 2+ workers the first mutation pass (polish.js (a2)) scans the route's ranges on every worker at once, its
+		// shortcuts handed to the polish in one worker (o.first); the time it took is taken off the polish)
+		if (nW >= 2 && process.env.EEAT_PAR_POLISH !== '0') {
+			const t1 = Date.now();
+			const n = T.masksOf(str).length;
+			const parts = Math.min(nW, Math.max(1, Math.floor(n / 64)));
+			const dl = t1 + 0.5 * po.ms;
+			const jobs = [];
+			for (let k = 0; k < parts; k++) {
+				const a = Math.floor((k * n) / parts), b = Math.floor(((k + 1) * n) / parts);
+				jobs.push(dispatch({ type: 'mutscan', masks: str, o: { ranges: [[a, b]], deadline: dl } }, dl + 5000, new SharedArrayBuffer(4)));
+			}
+			const res = await Promise.all(jobs);
+			if (res.every((m) => m && m.result)) {
+				po.first = [].concat(...res.map((m) => m.result.shortcuts));
+				po.firstTimeUp = res.some((m) => m.result.timeUp);
+			}
+			po.ms = Math.max(1, po.ms - (Date.now() - t1));
+		}
 		if (nW === 0) r = await core.polish(str, po);
 		else {
 			const msg = await dispatch({ type: 'polish', masks: str, o: po }, Date.now() + po.ms + 5000, new SharedArrayBuffer(4));

@@ -1,15 +1,18 @@
 'use strict';
 // THE POLISH (n4plan, the compiler's last stage, part 'executor'): a finished route made faster by exact local search,
 // never slower, every candidate replayed by the engine (common.js evaluate + judge).
-//   (a) src/cleanroute.js cleanRoute (0.4 of the time): useless presses and flips dropped, rejoins and shortcuts kept;
-//   (a2) the mutation pass (mutatePass; half of the time left, passes while they gain): src/mutate.js's classic moves at
+//   (a2) FIRST the mutation pass (mutatePass; half of the time, passes while they gain; its first pass o.first when the
+//       caller has it: the executor's workers scan the route's ranges in parallel): src/mutate.js's classic moves at
 //       every tick (delete one or two ticks, replace an input by any other, delete one and replace the next), each
 //       followed by the route's own inputs until an exact rejoin with a LATER route state (a proven shortcut), a rejoin
 //       that is not later, 200 ticks or 96 px of drift; the shortcuts combined by DP (weighted interval scheduling), the
 //       combination judged (else the largest one alone); re-anchoring at landings and wall stops (mutate.js --anchor):
-//       T-POLISH's 10 routes (8 s each) saved 430 ticks (176 without the anchors, 3 without the pass);
+//       T-POLISH's 10 routes (8 s each) saved 513 ticks (430 with the cleanup's 0.4 first, 176 without the anchors, 3
+//       without the pass);
 //       a raw Find a route route (Are You A God's 7,290) 6,918 in 30 s vs 7,255 (o.noMutate: off; o.horizon, o.drift,
 //       o.anchors);
+//   (a) then src/cleanroute.js cleanRoute (0.15 of the time): useless presses and flips dropped, rejoins and shortcuts
+//       kept (it had 0.4 of the time first: no change on T-POLISH's routes);
 //   (b) per leg (the route's feature changes, or o.legs: tick marks), from the route's exact state at a window's start
 //       (windows of o.win ticks, from the end of the route backwards: an accepted change leaves every earlier window as it
 //       was), exact.js exactLeg toward the route's state region at the window's end: the centre in the same tile and the
@@ -238,14 +241,6 @@ function polishRoute(L, masks0, o) {
 		best = ev;
 		return true;
 	};
-	// (a) the cleanup
-	if (!o.noClean) {
-		try {
-			const CR = require('../cleanroute.js');
-			const r = CR.cleanRoute(L, best.ms, { ms: Math.max(50, 0.4 * ms) });
-			if (r && r.changed) accept(r.ms, 'clean');
-		} catch (e) { steps.push({ how: 'clean', error: String(e && e.message || e) }); }
-	}
 	// (a2) the mutation pass: the classic moves everywhere, exact rejoins combined by DP (a combination the judge refuses:
 	// its shortcuts one at a time, the largest first); passes while they find time and there is time (o.mutShare of it)
 	if (!o.noMutate) {
@@ -255,7 +250,10 @@ function polishRoute(L, masks0, o) {
 		let ranges = null;
 		for (let pass = 0; pass < 64 && Date.now() < mEnd; pass++) {
 			const cur = best.ms;
-			const mp = mutatePass(L, cur, { deadline: mEnd, stop, horizon: o.horizon, drift: o.drift, ranges });
+			// (o.first: the first pass's shortcuts on this very route, found by the caller (the executor's workers in parallel))
+			const mp = pass === 0 && Array.isArray(o.first)
+				? { shortcuts: o.first.map((c) => ({ t: c.t, j: c.j, saved: c.saved, ins: typeof c.ins === 'string' ? T.masksOf(c.ins) : Uint8Array.from(c.ins) })).filter((c) => c.j <= cur.length), timeUp: !!o.firstTimeUp }
+				: mutatePass(L, cur, { deadline: mEnd, stop, horizon: o.horizon, drift: o.drift, ranges });
 			if (!mp.shortcuts.length) break;
 			const set = bestShortcutSet(cur.length, mp.shortcuts);
 			const saved = set.reduce((a, c) => a + c.saved, 0);
@@ -270,6 +268,14 @@ function polishRoute(L, masks0, o) {
 			if (!applied || mp.timeUp) break;
 			ranges = spansOf(applied, 100, best.ms.length);
 		}
+	}
+	// (a) the cleanup (src/cleanroute.js: presses and flips dropped where they rejoin or finish sooner)
+	if (!o.noClean && Date.now() < deadline) {
+		try {
+			const CR = require('../cleanroute.js');
+			const r = CR.cleanRoute(L, best.ms, { ms: Math.max(50, Math.min(deadline - Date.now(), 0.15 * ms)) });
+			if (r && r.changed) accept(r.ms, 'clean');
+		} catch (e) { steps.push({ how: 'clean', error: String(e && e.message || e) }); }
 	}
 	// (b) + (c) the windows, from the end backwards
 	const legs = [];
