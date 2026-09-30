@@ -701,6 +701,8 @@ async function createExecutor(L, opts) {
 	const SKEL_ON = process.env.EEAT_SKEL !== '0';
 	const SKEL_STEP = +process.env.EEAT_SKEL_STEP > 0 ? +process.env.EEAT_SKEL_STEP : 12;
 	const SKEL_MIN = +process.env.EEAT_SKEL_MIN > 0 ? +process.env.EEAT_SKEL_MIN : 30;
+	// the plateau tail (below): on unless EEAT_SKEL_TAIL=0; only with at least SKEL_TAIL_MIN_MS of the step left
+	const SKEL_TAIL = process.env.EEAT_SKEL_TAIL !== '0', SKEL_TAIL_MIN_MS = 1000;
 	const skelMemo = new Map();   // key (goal, first start) -> [{c, cur: [mask strings]}] (the levels reached, deepest last)
 	const tileMinMemo = new WeakMap();
 	/** per tile the least cost (fifths) of any ball state centred on it by the goal field f (walk mode: its walk); CUT none */
@@ -791,6 +793,17 @@ async function createExecutor(L, opts) {
 			skelMemo.get(key).push({ c: cCur, cur: cur.slice() });
 		}
 		if (emit) emit({ ev: 'exec.skel', label: wp.label || '', c0: Math.round(c0), c: Math.round(cCur), resumed: !!memo, levels });
+		// (THE PLATEAU TAIL, lane 1: stuck past a level (two sub-legs failed), the rest of the step's time goes to the waypoint
+		// itself from the deepest arrivals AND the step's own starts: the goal field is a relaxation, and its sub-level sets
+		// have plateaus the real way climbs out of (Tutorial 1's trophy leg: the field reads 89.8 at (268, 19), a ladder top
+		// it thinks can rise over the block, while the way drops into the pit at x 281 (122 tiles) and rides the up arrows
+		// at x 301; from the plateau's state the plain tiers get 14 tiles from the trophy in 13 s, from the leg's start 133);
+		// before, the step gave the time up here; EEAT_SKEL_TAIL=0: as before)
+		if (stuck && cur !== startStrs && SKEL_TAIL && Date.now() < deadline - SKEL_TAIL_MIN_MS) {
+			const seen = new Set(startStrs);
+			cur = startStrs.concat(cur.filter((s) => !seen.has(s)));
+			stuck = false;
+		}
 		if (Date.now() >= deadline - 100 || (stuck && cur !== startStrs)) {
 			const fail = (lastFail && lastFail.fail) || { why: 'budget', closest: null, touched: [], blockedBy: [], level: budget.level | 0, note: 'skeleton: out of time' };
 			return { ok: false, arrivals: [], tool: null, ms: Date.now() - tIn, sims, legs: [], lb: 0, fail: Object.assign({}, fail, { why: 'budget' }) };
