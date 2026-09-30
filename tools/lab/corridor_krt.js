@@ -53,6 +53,12 @@ function main() {
 				const X = CR.createCorridor(L, { solver: S });
 				const co = { ms: num('ms', 5000), fan: argv.fan !== '0', legs: argv.legs !== '0', legMode: argv.legMode || undefined, plainStops: argv.plainStops, fieldStops: argv.fieldStops, dom: argv.dom, airKey: argv.airKey, legNew: !!argv.legNew, lazyWide: !!argv.lazyWide, lazyLegs: argv.lazyLegs !== '0', wideStops: argv.wideStops, directOnce: !!argv.directOnce };
 				for (const k of ['K', 'Ka', 'delta', 'legT', 'alts', 'D', 'w', 'w1', 'beta', 'M', 'RX', 'RU', 'RD', 'legNodes', 'itemNodes', 'coupledTicks', 'fieldMs', 'Mu', 'Ma', 'plainMs', 'subStop', 'fanT', 'lazyStall', 'lazyM', 'lazyRX', 'lazyRU', 'landMax', 'landT', 'landNodes', 'Tmax']) if (argv[k] !== undefined) co[k] = +argv[k];
+				// (the fields pass, n5-s99-fields: --goalFan=1 --directShare= --fieldKey=sub --restKey=1, or --fieldsPass=1 for all four)
+				if (argv.fieldsPass === '1') Object.assign(co, { goalFan: true, directShare: 0.15, fieldKey: 'sub', restKey: true });
+				if (argv.goalFan === '1') co.goalFan = true;
+				if (argv.restKey === '1') co.restKey = true;
+				if (argv.fieldKey) co.fieldKey = argv.fieldKey;
+				if (argv.directShare !== undefined) co.directShare = +argv.directShare;
 				const q = X.solve(snap, target, co);
 				r = Object.assign({}, q);
 			} else throw new Error('arm ' + arm);
