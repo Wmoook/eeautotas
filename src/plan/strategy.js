@@ -1201,6 +1201,39 @@ async function compile(L, opts = {}, emit = () => {}) {
 		stage('prove', Date.now() - tm, text);
 	} else if (best) stage('prove', 0, !proveOn ? 'off' : proveLong ? `skipped: a route of ${num(best.runTicks)} run ticks (EEAT_PERFECT: over ${PROVE_MAX_TICKS}, past the exact search's reach)` : restIdle < 0 ? `skipped: the start does not rest within ${PROVE_IDLE_MAX} idle ticks` : stopped ? 'skipped: stopped' : 'skipped: no time left');
 
+	// ---- JOINS (n5-perfect, src/plan/joins.js): the finished route re-derived as a chain of solved legs with the SPEED
+	// carried across its joins (a DP over the route's supports x the arrival's speed / position class, msolve legs and skips
+	// as edges, the route's own inputs always one of them), then every leg of the result against the certified bounds. Its
+	// own clock (opts.joinsS, after the budget and after the perfect pass: the stages before it are unchanged), kept only when
+	// the engine replays it faster with no more deaths and no lower chance: never slower. EEAT_JOINS=0 (compile.js): off.
+	let joinsInfo = null;
+	if (best && opts.joinsS > 0 && !stopped) {
+		tm = Date.now();
+		let text = '';
+		try {
+			const JN = require('./joins.js');
+			const r = JN.joinRoute(L, best.masks, { ms: opts.joinsS * 1000, maxDeaths: best.deaths });
+			joinsInfo = { before: r.before, after: r.runTicks, saved: r.saved, passes: (r.passes || []).map((p) => ({ gap: p.gap, from: p.from, to: p.to, waypoints: p.waypoints, skips: p.skips, legs: p.legsUsed, ms: p.ms })),
+				waypoints: r.waypoints, legs: (r.legs || []).length, proven: r.proven, provenTicks: r.provenTicks, lbSum: r.lbSum, fasterLegs: r.fasterLegs, stats: r.stats, ms: r.ms };
+			let took = false;
+			if (r.accepted && r.runTicks < best.runTicks) {
+				const ev = C.evaluate(L, r.masks);
+				if (ev && ev.deaths <= best.deaths && ev.chance >= best.chance - 1e-9 && ev.runTicks < best.runTicks) {
+					const lg = (r.legs || []).map((g) => ({ label: `${g.finish ? 'trophy' : `support ${g.cls}`}`, fromTick: g.from, ticks: g.ticks, lb: Number.isFinite(g.lb) ? g.lb : null, proven: !!g.proven, provenBy: g.provenBy || null, lbMath: null, tool: 'joins' }));
+					const saved = best.runTicks - ev.runTicks;
+					best = { masks: ev.ms, ticks: ev.complete, runTicks: ev.runTicks, deaths: ev.deaths, chance: ev.chance, legs: lg.length ? lg : best.legs, how: `${best.how} + joins` };
+					say({ ev: 'result', kind: 'finish', ticks: ev.complete, runTicks: ev.runTicks, deaths: ev.deaths, chance: ev.chance, how: best.how, joins: saved, lb: LB, gap: gapOf(ev.runTicks), inputs: T.strOf(ev.ms) });
+					if (out) { try { C.writeEetas(path.join(out, 'route.eetas'), ev.ms); } catch (e) { /* read-only */ } }
+					took = true;
+					text = `-${num(saved)} ticks (${r.passes.length} pass${r.passes.length === 1 ? '' : 'es'} over ${num(r.waypoints)} supports)`;
+				}
+			}
+			if (!took) text = `no gain (${(r.passes || []).length} pass${(r.passes || []).length === 1 ? '' : 'es'})`;
+			text += `; ${r.proven} of ${(r.legs || []).length} support legs proven optimal (${num(r.provenTicks)} ticks)${r.fasterLegs ? `, ${r.fasterLegs} solved sooner alone` : ''}`;
+		} catch (e) { bug('joins', { error: e.message }); text = `failed: ${e.message}`; }
+		stage('joins', Date.now() - tm, text);
+	}
+
 	// ---- the bound again (the planner's facts may have raised it), the report
 	// (a proof of optimality: the route is one exact leg from the level start, proven the fewest ticks, and the start is
 	// static: no route has fewer run ticks)
@@ -1233,7 +1266,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		bugs, deepenings, stalls, bnbPlans, bnbArrivals, layers: Math.max(0, ...[...anchors.values()].map((A) => A.firstTick)), ...(why ? { why } : {}) });
 	saveFiles();
 	return { ok: !!best, masks: best ? best.masks : null, route: best ? best.masks : null, runTicks: best ? best.runTicks : null, ticks: best ? best.ticks : null, deaths: best ? best.deaths : null, chance: best ? best.chance : null,
-		lb: LB, lbComplete, lbProof, gap: best ? gapOf(best.runTicks) : null, legs: best ? best.legs : [], stages, known, why, end, anchors: anchors.size, steps, okSteps, bugs, deepenings, stalls, bnbPlans, bnbArrivals, relayRuns, relaySet, relayDrop, exec: execStats, perfect: perfectInfo };
+		lb: LB, lbComplete, lbProof, gap: best ? gapOf(best.runTicks) : null, legs: best ? best.legs : [], stages, known, why, end, anchors: anchors.size, steps, okSteps, bugs, deepenings, stalls, bnbPlans, bnbArrivals, relayRuns, relaySet, relayDrop, exec: execStats, perfect: perfectInfo, joins: joinsInfo };
 }
 
 /** run(L, opts, emit): the compile loop as a Find a route strategy (src/plan.js): 300 s by default, the source events'

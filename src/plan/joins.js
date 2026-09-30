@@ -205,68 +205,83 @@ function joinOnce(L, ev0, o, deadline, S) {
 		targets[j] = { tiles: [w.tile], cls: w.finish ? 'any' : w.cls };
 	}
 	let timeUp = false;
+	/** a leg from node nd to waypoint j (msolve, its hop and alts), each arrival replayed and put */
+	const legTo = (nd, k, j, wEnd, legMs) => {
+		const w = wps[j];
+		const span = w.t - wps[k].t;
+		// (worth it only when it can arrive before the best arrival there + the diversity slack)
+		const Tmax = Math.min(Math.max(span + 4, 8), Math.max(0, best[j] + DIV - nd.g));
+		if (Tmax < 1) return false;
+		const lt = Date.now();
+		let r = null;
+		try {
+			r = S.leg(nd.snap, targets[j], { Tmax, chain: false, prove: false, alts: A, altSlack: 4, fieldMs: Math.min(40, legMs), coupledTicks: 150000, nodes: 60000, deadline: Math.min(wEnd, lt + legMs) });
+		} catch (e) { r = null; }
+		stats.legs++; stats.legMs += Date.now() - lt;
+		if (!r || !r.ok) return false;
+		stats.legOk++;
+		if (j > k + 1) stats.skips++;
+		const cands = [r.masks];
+		if (r.hop) cands.push(r.hop);
+		if (Array.isArray(r.alts)) for (const x of r.alts) cands.push(x.masks);
+		let any = false;
+		for (const c of cands) {
+			stats.cands++;
+			const h = replayTo(nd.snap, c, j, w.finish ? 3 : 0);
+			if (h <= 0) continue;
+			const ms_ = new Uint8Array(h);
+			for (let t = 0; t < h; t++) ms_[t] = t < c.length ? c[t] : (c[c.length - 1] & 30);
+			put(j, child(j, nd, ms_, j > k + 1 ? `leg skip ${j - k}` : 'leg', r.tool));
+			any = true;
+		}
+		return any;
+	};
 	for (let k = 0; k < m; k++) {
 		if (Date.now() > deadline || (stop && stop())) { timeUp = true; }
-		// the frontier: the route's state first, then the earliest classes (F in all)
-		const all = Array.from(front[k].values()).sort((a, b) => (b.route - a.route) || a.g - b.g);
-		const keep = timeUp ? all.filter((x) => x.route).slice(0, 1) : all.slice(0, F);
+		// the frontier: the route's state first, then the earliest classes (F in all); once the clock is out, the route's
+		// state and the earliest other one (its gain so far carried to the finish by the route's own inputs, else a leg)
+		const all = Array.from(front[k].values()).sort((x, y) => (y.route - x.route) || x.g - y.g);
+		const keep = timeUp ? all.filter((x, i) => x.route || i === all.findIndex((q) => !q.route)).slice(0, 2) : all.slice(0, F);
 		stats.pruned += all.length - keep.length;
 		stats.nodes += keep.length;
-		// (no route state kept at k (a faster chain replaced it): the route's inputs from the earliest kept state still follow)
-		// the time left for this waypoint's legs
 		const share = timeUp ? 0 : Math.max(5, (deadline - Date.now()) / Math.max(1, m - k));
 		const wEnd = Date.now() + share;
+		// FOLLOW: the route's own inputs to waypoint k + 1, from every kept state
+		const followed = new Set();
 		for (const nd of keep) {
-			// FOLLOW: the route's own inputs to waypoint k + 1
-			{
-				const j = k + 1;
-				const seg = masks.subarray(wps[k].t, wps[j].t);
-				if (nd.route) {
-					sim.restore(rSnap[j]);
-					put(j, { snap: rSnap[j], g: wps[j].t, hash: rHash[j], route: true, par: nd, ms: seg, how: 'follow', tool: 'route', k: j, key: 'route' });
-					stats.follow++;
-				} else if (nd.g + 1 <= best[j] + DIV) {
-					const h = replayTo(nd.snap, seg, j, 8);
-					if (h > 0) {
-						const ms_ = new Uint8Array(h);
-						for (let t = 0; t < h; t++) ms_[t] = t < seg.length ? seg[t] : (seg[seg.length - 1] & 30);
-						put(j, child(j, nd, ms_, 'follow', 'route'));
-						stats.follow++;
-					}
+			const j = k + 1;
+			const seg = masks.subarray(wps[k].t, wps[j].t);
+			if (nd.route) {
+				put(j, { snap: rSnap[j], g: wps[j].t, hash: rHash[j], route: true, par: nd, ms: seg, how: 'follow', tool: 'route', k: j, key: 'route' });
+				stats.follow++; followed.add(nd);
+			} else if (nd.g + 1 <= best[j] + DIV) {
+				const h = replayTo(nd.snap, seg, j, 8);
+				if (h > 0) {
+					const ms_ = new Uint8Array(h);
+					for (let t = 0; t < h; t++) ms_[t] = t < seg.length ? seg[t] : (seg[seg.length - 1] & 30);
+					put(j, child(j, nd, ms_, 'follow', 'route'));
+					stats.follow++; followed.add(nd);
 				}
 			}
-			if (timeUp || Date.now() > wEnd) continue;
-			// LEGS to k + 1 .. k + M (never across a fixed waypoint: a death / respawn is followed, not solved)
-			if (nd.snap && (() => { sim.restore(nd.snap); return sim.is_dead; })()) continue;
-			for (let j = k + 1; j <= Math.min(m, k + M); j++) {
+		}
+		const live = keep.filter((nd) => { sim.restore(nd.snap); return !sim.is_dead; });
+		if (timeUp) {
+			// (the clock is out: a leg only for the earliest other state whose follow failed, on a short clock)
+			for (const nd of live) if (!nd.route && !followed.has(nd) && !wps[k + 1].fixed && !wps[k + 1].tele) legTo(nd, k, k + 1, Date.now() + 40, 40);
+		} else {
+			// LEGS from every kept state (the route's first, then the earliest) to k + 1 and the SKIPS to k + 2 .. k + M (never
+			// across a fixed waypoint: a death / respawn is followed, not solved); per state all its targets: the skips are
+			// where the chain gains (a first try that went over the targets first, then the states, gained less on the same clock)
+			for (const nd of live) {
 				if (Date.now() > wEnd) break;
-				const w = wps[j];
-				if (wps[j - 1].fixed && j - 1 > k) break;
-				if (w.fixed || w.tele) { if (w.fixed) break; continue; }
-				const span = w.t - wps[k].t;
-				if (span > SPAN && j > k + 1) break;
-				// the leg is worth it only when it can arrive before the best arrival there + the diversity slack
-				const Tmax = Math.min(Math.max(span + 4, 8), Math.max(0, best[j] + DIV - nd.g));
-				if (Tmax < 1) continue;
-				const lt = Date.now();
-				let r = null;
-				try {
-					r = S.leg(nd.snap, targets[j], { Tmax, chain: false, prove: false, alts: A, altSlack: 4, fieldMs: Math.min(40, LEG_MS), coupledTicks: 150000, nodes: 60000, deadline: Math.min(wEnd, lt + LEG_MS) });
-				} catch (e) { r = null; }
-				stats.legs++; stats.legMs += Date.now() - lt;
-				if (!r || !r.ok) continue;
-				stats.legOk++;
-				if (j > k + 1) stats.skips++;
-				const cands = [r.masks];
-				if (r.hop) cands.push(r.hop);
-				if (Array.isArray(r.alts)) for (const a of r.alts) cands.push(a.masks);
-				for (const c of cands) {
-					stats.cands++;
-					const h = replayTo(nd.snap, c, j, w.finish ? 3 : 0);
-					if (h <= 0) continue;
-					const ms_ = new Uint8Array(h);
-					for (let t = 0; t < h; t++) ms_[t] = t < c.length ? c[t] : (c[c.length - 1] & 30);
-					put(j, child(j, nd, ms_, j > k + 1 ? `leg skip ${j - k}` : 'leg', r.tool));
+				for (let j = k + 1; j <= Math.min(m, k + M); j++) {
+					if (Date.now() > wEnd) break;
+					const w = wps[j];
+					if (j > k + 1 && wps[j - 1].fixed) break;
+					if (w.fixed) break;
+					if (w.tele) continue;
+					if (j > k + 1 && w.t - wps[k].t > SPAN) break;
+					legTo(nd, k, j, wEnd, LEG_MS);
 				}
 			}
 		}
