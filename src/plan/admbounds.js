@@ -349,7 +349,9 @@ function dijkstra(W, H, block, srcT, srcI, cost, out) {
 // ---------------------------------------------------------------- createAdmBounds
 function createAdmBounds(L, o = {}) {
 	const S = staticOf(L);
-	const W = S.W, H = S.H, N = S.N, vm = S.vmax;
+	const W = S.W, H = S.H, N = S.N;
+	// o.vmax: a what-if override of the sups (NOT admissible unless the level really has them: diagnostics only)
+	const vm = o.vmax ? Object.assign({}, S.vmax, o.vmax) : S.vmax;
 	const memo = new Map(), META = new WeakMap();
 	const st = { fields: 0, hits: 0, ms: 0 };
 	const tiers = { fb: o.fb !== false, accX: o.accX !== false, up: o.up !== false };

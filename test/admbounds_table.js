@@ -11,7 +11,7 @@ const q = (a, p) => { if (!a.length) return NaN; const s = a.slice().sort((x, y)
 const f2 = (x) => (Number.isFinite(x) ? x.toFixed(3) : '-');
 const out = { routes: rows.length, ok: ok.length, errors: rows.filter((r) => r.error).map((r) => ({ name: r.name, error: String(r.error).split('\n')[0] })), stale: rows.filter((r) => r.stale).length };
 // violations
-const NAMES = ['adm', 'fb', 'prim', 'eg', 'max'];
+const NAMES = ['adm', 'fb', 'prim', 'eg', 'max', 'whatif'];
 const viol = {}, checks = {}, worst = {};
 for (const b of NAMES) { viol[b] = 0; checks[b] = 0; worst[b] = []; }
 for (const r of ok) for (const kind of ['tick', 'pair', 'leg']) for (const b of NAMES) {
@@ -22,9 +22,10 @@ for (const r of ok) for (const kind of ['tick', 'pair', 'leg']) for (const b of 
 }
 out.violations = viol; out.checks = checks; out.worst = worst;
 // leg tightness (the segment start's bound over the leg's ticks), legs of 10+ ticks
-const legR = { adm: [], prim: [], eg: [], maxAP: [], maxAll: [] };
+const legR = { adm: [], prim: [], eg: [], maxAP: [], maxAll: [], whatif: [] };
 for (const r of ok) for (const l of r.legs) {
-	const [a, bA, bP, bE] = l;
+	const [a, bA, bP, bE, , bW] = l;
+	if (bW !== undefined && bW !== null && a >= 10) legR.whatif.push(bW / a);
 	if (a < 10) continue;
 	legR.adm.push(bA / a);
 	if (bP !== null) legR.prim.push(bP / a);

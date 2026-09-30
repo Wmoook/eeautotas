@@ -41,7 +41,8 @@ if (arg('shard', null)) { const [i, n] = arg('shard').split('/').map(Number); li
 if (flag('quick')) list = list.slice(0, 3);
 if (arg('limit', null)) list = list.slice(0, +arg('limit'));
 
-const NAMES = ['adm', 'fb', 'prim', 'eg', 'max'];
+const NAMES = ['adm', 'fb', 'prim', 'eg', 'max', 'whatif'];
+const WHATIF = arg('whatif', '0') === '1';   // a what-if: the fallback with the PLAIN sups on every level (not admissible: how much the sups cost)
 function newAgg() { const a = {}; for (const b of NAMES) a[b] = { n: 0, viol: 0, sumR: 0, hist: new Array(21).fill(0), worst: [] }; return a; }
 function note(agg, b, bound, actual, ctx) {
 	if (bound === null || bound === undefined || Number.isNaN(bound)) return;
@@ -83,6 +84,7 @@ function runRoute(entry) {
 	const diedIn = (a, b) => deathPS[b + 1] - deathPS[a] > 0;   // a dead tick in [a, b]
 	const adm = A.createAdmBounds(L, { memo: 4 });
 	const prim = P ? P.createBounds(L, {}) : null;
+	const whatif = WHATIF ? A.createAdmBounds(L, { memo: 4, accX: false, up: false, vmax: { xp: A.terminal(1 / E.constants.MULT, E.constants.BASE_DRAG) + 0.02, xn: A.terminal(1 / E.constants.MULT, E.constants.BASE_DRAG) + 0.02, yp: A.terminal(2 / E.constants.MULT, E.constants.BASE_DRAG) + 0.02, yn: (2 * 26) / E.constants.MULT + 0.02 } }) : null;
 	const trophies = [];
 	for (let i = 0; i < N; i++) if (L.fg[i] === 121) trophies.push(i);
 	const aggLeg = newAgg(), aggPair = newAgg(), aggTick = newAgg();
@@ -113,6 +115,7 @@ function runRoute(entry) {
 		admMs += Date.now() - ta;
 		ta = Date.now();
 		const fP = prim ? prim.field(goal, Lc) : null;
+		const fW = whatif ? whatif.field(goal, Lc) : null;
 		primMs += Date.now() - ta;
 		const isLast = j === evTicks.length - 1;
 		const fAT = isLast ? adm.field(trophies, null, { touch: true }) : null;
@@ -132,8 +135,10 @@ function runRoute(entry) {
 			if (bP !== null) note(aggTick, 'prim', bP, actual, ctx);
 			if (bE !== null) note(aggTick, 'eg', bE, actual, ctx);
 			note(aggTick, 'max', bM, actual, ctx);
+			const bW = fW ? whatif.at(fW, sim) : null;
+			if (bW !== null) note(aggTick, 'whatif', bW, actual, ctx);
 			if (t === s0) {
-				legs.push([actual, bA, bP, bE, j]);
+				legs.push([actual, bA, bP, bE, j, bW]);
 				note(aggLeg, 'adm', bA, actual, ctx);
 				if (bP !== null) note(aggLeg, 'prim', bP, actual, ctx);
 				if (bE !== null) note(aggLeg, 'eg', bE, actual, ctx);
