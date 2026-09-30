@@ -470,6 +470,16 @@ function createPlanner(model, facts, o = {}) {
 	// EEAT_PLAN_STONE_MAX (120: more irrelevant coins than this, no stones).
 	const STONES = o.stones !== undefined ? !!o.stones : process.env.EEAT_PLAN_STONES === '1';
 	const STONE_LONG = +process.env.EEAT_PLAN_STONE_LONG || 1000, STONE_MAX = +process.env.EEAT_PLAN_STONE_MAX || 120;
+	// (THE STONES' WAY, EEAT_PLAN_STONE_WAY=1 (o.stoneWay): a stone is a plan edge only where it lies on the way to the
+	// trophy (the est walk to it + the open level's walk from it to the trophy within max(STONE_SLACK, STONE_SLACK_F x the
+	// node's own) of the node's walk to the trophy) and only the STONE_NEAR nearest of those: every stone of a level of many
+	// was an edge of every node, and each new position is one more walk to build, so the plan search ran out of its budget
+	// on one stone (Treasure Trove Cove's first plan 'blue coin (49,173)', PARTIAL, 2.3 s; Perilous Endeavor's 'coin
+	// (158,37)', 3.1 s; Endeavor's switch plan cut after 3 steps))
+	const STONE_WAY = o.stoneWay !== undefined ? !!o.stoneWay : process.env.EEAT_PLAN_STONE_WAY === '1';
+	const STONE_NEAR = process.env.EEAT_PLAN_STONE_NEAR !== undefined ? +process.env.EEAT_PLAN_STONE_NEAR : 4;
+	const STONE_SLACK = process.env.EEAT_PLAN_STONE_SLACK !== undefined ? +process.env.EEAT_PLAN_STONE_SLACK : 8;
+	const STONE_SLACK_F = process.env.EEAT_PLAN_STONE_SLACK_F !== undefined ? +process.env.EEAT_PLAN_STONE_SLACK_F : 0.15;
 	let stones = STONES ? model.triggers.filter((X) => !X.relevant && (X.kind === 'coin' || X.kind === 'bcoin') && X.tiles && X.tiles.length) : [];
 	if (stones.length > STONE_MAX) stones = [];
 	const stoneIds = new Set(stones.map((X) => X.id));
@@ -582,16 +592,31 @@ function createPlanner(model, facts, o = {}) {
 		finish(null, trophyTiles, 'trophy', null);
 		// (the stepping stones: an irrelevant coin / blue coin as a step of its own, the state unchanged; plan mode only)
 		if (wantEst && STONES && stones.length) {
+			// (STONE_WAY: the node's walk to the trophy on the open level, the stones' detour against it)
+			let hPos = INF;
+			if (STONE_WAY && REVH) { hPos = hSteps(pos); if (!revTro) revTro = model.revDist(openOf(), trophyTiles); }
+			const cand = [];
 			for (const X of stones) {
 				if (pos.trig === X.id) continue;
 				// (a stone the anchor's own run took already is none: the model state does not track irrelevant coins)
 				const live = stoneLive ? stoneLive.get(X.id) : X.tiles;
 				if (!live || !live.length) continue;
-				let sE = INF;
-				if (dE) for (const t of live) if (dE[t] < sE) sE = dE[t];
+				let sE = INF, det = INF;
+				if (dE) for (const t of live) { if (dE[t] < sE) sE = dE[t]; if (hPos < INF && dE[t] + revTro[t] < det) det = dE[t] + revTro[t]; }
 				if (sE >= INF) continue;
-				finish(X, live, 'trig:' + X.id, { S2: S, expect: null });
+				if (STONE_WAY && REVH) {
+					if (!(hPos < INF) || !(det <= hPos + Math.max(STONE_SLACK, STONE_SLACK_F * hPos))) { ST.stoneOff = (ST.stoneOff || 0) + 1; continue; }
+				}
+				cand.push({ X, live, sE });
 			}
+			// (the STONE_NEAR nearest, then the ones at 2, 4, 8, ... x STONE_NEAR by distance and the farthest on the way: the
+			// plan search can still split a long leg once near its end, as with every stone an edge, at O(log n) edges a node)
+			let pick = cand;
+			if (STONE_WAY && STONE_NEAR > 0 && cand.length > STONE_NEAR) {
+				cand.sort((x, y) => x.sE - y.sE || x.X.id - y.X.id);
+				pick = cand.filter((c, i) => { if (i < STONE_NEAR || i === cand.length - 1) return true; const q = (i + 1) / STONE_NEAR; return Number.isInteger(q) && (q & (q - 1)) === 0; });
+			}
+			for (const c of pick) finish(c.X, c.live, 'trig:' + c.X.id, { S2: S, expect: null });
 		}
 		// DEATHS AS MOVES (lane 2's die edge, lane 5): where a death door (1011) or gate (1012) reads the death count, a death
 		// is an edge of its own (plan mode: the est walk to the nearest killer, the dead ticks, back at the respawn with one

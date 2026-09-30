@@ -169,6 +169,27 @@ function units() {
 			const q0 = run(false), q1 = run(true);
 			check('P-UNIT walled price: off = the penalty past a severing cut, on = a finite 3x price', !!q0 && q0.cost >= 1e6 && !!q1 && q1.cost < 1e6 && q1.cost >= 3 * 50 && q1.lb === q0.lb, `${q0 && q0.cost} vs ${q1 && q1.cost}`);
 		}
+		// (THE STONES' WAY, EEAT_PLAN_STONE_WAY=1: the spawn at x 40, a coin behind it at x 5, 7 coins on the way at x 50-110:
+		// with the way only the 4 nearest of those on the way and the farthest are root edges, never the one behind; the plan goes through the
+		// corridor's coins in order to the trophy)
+		{
+			const g3 = [];
+			for (let y = 0; y < Hd; y++) g3.push(Array(Wd).fill('.'));
+			for (let x = 0; x < Wd; x++) { g3[0][x] = '#'; g3[Hd - 1][x] = '#'; }
+			for (let y = 0; y < Hd; y++) { g3[y][0] = '#'; g3[y][Wd - 1] = '#'; }
+			g3[10][40] = 'S'; g3[10][120] = 'T';
+			for (const x of [5, 50, 60, 70, 80, 90, 100, 110]) g3[10][x] = 'c';
+			const L3 = level(g3.map((r) => r.join('')), { c: [100] }), m3 = M.compileModel(L3);
+			const noWay = P.createPlanner(m3, F.createFacts(), { stones: true, stoneWay: false });
+			const way = P.createPlanner(m3, F.createFacts(), { stones: true, stoneWay: true });
+			const rootXs = (pl) => { const a3 = pl._anchorOf({}); return pl._edgesOf(a3.S, a3.pos, a3.base, 'plan', true, a3.S.key + '|' + a3.cls).filter((e) => e.X && e.X.kind === 'coin').map((e) => e.X.tiles[0] % Wd).sort((x, y) => x - y); };
+			const xn = rootXs(noWay), xw = rootXs(way);
+			check('P-UNIT stones\' way: off = every stone a root edge (the one behind the spawn too)', xn.length === 8 && xn.includes(5), xn.join(','));
+			check('P-UNIT stones\' way: on = the 4 nearest stones on the way and the farthest, never the one behind', xw.join(',') === '50,60,70,80,110', xw.join(','));
+			const pw = way.plan({}, { k: 1 })[0];
+			const xsw = pw ? pw.steps.filter((s) => s.waypoint.kind === 'trigger').map((s) => s.waypoint.tiles[0] % Wd) : [];
+			check('P-UNIT stones\' way: the plan = the corridor\'s coins in order, then the trophy', !!pw && kindsOf(m3, pw).pop() === 'trophy' && xsw.length >= 1 && xsw.every((x, i) => x > 40 && (i === 0 || x > xsw[i - 1])), pw && planStr(m3, pw));
+		}
 		const lbOff = off.lowerBound({}), lbOn = on.lowerBound({});
 		check('P-UNIT stepping stones: lowerBound unchanged (stones never in the lb)', lbOff.ticks === lbOn.ticks && lbOff.complete === lbOn.complete, `${lbOff.ticks} ${lbOn.ticks}`);
 	}
