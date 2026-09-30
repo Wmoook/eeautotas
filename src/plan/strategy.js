@@ -353,7 +353,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	const chainOf = (id) => {
 		const list = [];
 		for (let k = id, n = 0; k && n < 10000; n++) { const g = legs.get(k); if (!g) break; list.push(g); k = g.prev; }
-		return list.reverse().map((g) => ({ label: g.label, fromTick: g.fromTick, ticks: g.ticks, lb: Number.isFinite(g.lb) ? g.lb : null, proven: !!g.proven, tool: g.tool || null }));
+		return list.reverse().map((g) => ({ label: g.label, fromTick: g.fromTick, ticks: g.ticks, lb: Number.isFinite(g.lb) ? g.lb : null, proven: !!g.proven, provenBy: g.provenBy || null, lbMath: Number.isFinite(g.lbMath) ? g.lbMath : null, tool: g.tool || null }));
 	};
 
 	// ---- anchors
@@ -680,7 +680,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 			const masks = a.masks instanceof Uint8Array ? a.masks : T.masksOf(a.masks);
 			const { s, lg } = startOf(starts, masks, i, res);
 			const leg = addLeg({ label: labelOf(step), fromTick: s ? s.tick : 0, ticks: masks.length - (s ? s.tick : 0), lb: lg && Number.isFinite(+lg.lb) ? +lg.lb : Number.isFinite(+res.lb) ? +res.lb : null,
-				proven: !!(lg && lg.proven), tool: (lg && lg.tool) || res.tool || null, prev: s && s.leg ? s.leg : null });
+				proven: !!(lg && lg.proven), provenBy: (lg && lg.provenBy) || null, lbMath: lg && Number.isFinite(+lg.lbMath) && lg.lbMath !== null ? +lg.lbMath : null, tool: (lg && lg.tool) || res.tool || null, prev: s && s.leg ? s.leg : null });
 			const r = replay(masks, goal, !!(goal && goal.allowDeath));
 			if (r.finished > 0) { routes.push({ masks: masks.subarray(0, r.finished), leg }); return; }
 			if (trophy) { bug('arrival', { label: labelOf(step), tick: masks.length, why: 'a trophy arrival that does not finish on its replay' }); return; }
@@ -1111,9 +1111,9 @@ async function compile(L, opts = {}, emit = () => {}) {
 					const lg0 = (faster.r.legs || [])[0] || {};
 					if (ev && ev.runTicks < best.runTicks && (!noDeath || ev.deaths === 0) && ev.chance >= best.chance - 1e-9) {
 						const saved = best.runTicks - ev.runTicks;
-						const proven = !!lg0.proven && lg0.tool === 'exact';
+						const proven = !!lg0.proven && (lg0.tool === 'exact' || String(lg0.tool || '').startsWith('math'));   // (a math leg's proof: its certified bound = its ticks)
 						best = { masks: ev.ms, ticks: ev.complete, runTicks: ev.runTicks, deaths: ev.deaths, chance: ev.chance,
-							legs: [{ label: 'trophy', fromTick: faster.k, ticks: ev.complete - faster.k, lb: proven ? ev.complete - faster.k : null, proven, tool: lg0.tool || faster.r.tool || null }], how: 'the proof search' };
+							legs: [{ label: 'trophy', fromTick: faster.k, ticks: ev.complete - faster.k, lb: proven ? ev.complete - faster.k : null, proven, provenBy: proven ? lg0.provenBy || 'exact' : null, tool: lg0.tool || faster.r.tool || null }], how: 'the proof search' };
 						say({ ev: 'result', kind: 'finish', ticks: ev.complete, runTicks: ev.runTicks, deaths: ev.deaths, chance: ev.chance, how: best.how, lb: LB, gap: gapOf(ev.runTicks), inputs: T.strOf(ev.ms) });
 						if (out) { try { C.writeEetas(path.join(out, 'route.eetas'), ev.ms); } catch (e) { /* read-only */ } }
 						notes.push(`-${num(saved)} (${lg0.tool || faster.r.tool || '?'}, +${faster.k} idle)`);
@@ -1147,8 +1147,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 	if (proveProof && best && best.runTicks > LB) { LB = best.runTicks; lbComplete = true; }
 	// (the exact search drops dying runs: only where nothing kills (goexplore.js deathsOf: no killing tile, no timed killer)
 	// is its minimum every route's; a death back to the one spawn keeps the keys and coins taken: a move)
-	if (!lbProof && best && startStatic && noDeath && best.legs.length === 1 && best.legs[0].fromTick === 0 && best.legs[0].proven && best.legs[0].tool === 'exact' && !String(best.how || '').includes('polish')) {
-		if (best.runTicks > LB) { LB = best.runTicks; lbComplete = true; lbProof = 'one exact leg from the static level start, proven the fewest ticks'; }
+	if (!lbProof && best && startStatic && noDeath && best.legs.length === 1 && best.legs[0].fromTick === 0 && best.legs[0].proven && (best.legs[0].tool === 'exact' || String(best.legs[0].tool || '').startsWith('math')) && !String(best.how || '').includes('polish')) {
+		if (best.runTicks > LB) { LB = best.runTicks; lbComplete = true; lbProof = `one ${best.legs[0].tool === 'exact' ? 'exact' : 'math'} leg from the static level start, proven the fewest ticks${best.legs[0].provenBy ? ` (${best.legs[0].provenBy})` : ''}`; }
 	}
 	if (!lbSlow && !lbProof && planner.lowerBound) {
 		try {
@@ -1159,6 +1159,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 		} catch (e) { /* the first one stands */ }
 	}
 	if (best && LB > best.runTicks) { bug('bound', { why: `the lower bound ${LB} is above the route's ${best.runTicks} run ticks: inadmissible`, lb: LB, planner: lbPlanner, bounds: lbBounds }); LB = Math.max(0, ...[lbPlanner, lbBounds].filter((x) => Number.isFinite(x) && x <= best.runTicks)); }
+	let execStats = null;
+	try { execStats = exec && exec.stats ? exec.stats() : null; } catch (e) { execStats = null; }
 	try { if (exec && exec.close) await exec.close(); } catch (e) { /* closed */ }
 	try { if (prims && prims.close) await prims.close(); } catch (e) { /* closed */ }
 	let known = null;
@@ -1170,7 +1172,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		bugs, deepenings, stalls, bnbPlans, bnbArrivals, layers: Math.max(0, ...[...anchors.values()].map((A) => A.firstTick)), ...(why ? { why } : {}) });
 	saveFiles();
 	return { ok: !!best, masks: best ? best.masks : null, route: best ? best.masks : null, runTicks: best ? best.runTicks : null, ticks: best ? best.ticks : null, deaths: best ? best.deaths : null, chance: best ? best.chance : null,
-		lb: LB, lbComplete, lbProof, gap: best ? gapOf(best.runTicks) : null, legs: best ? best.legs : [], stages, known, why, end, anchors: anchors.size, steps, okSteps, bugs, deepenings, stalls, bnbPlans, bnbArrivals, relayRuns, relaySet, relayDrop };
+		lb: LB, lbComplete, lbProof, gap: best ? gapOf(best.runTicks) : null, legs: best ? best.legs : [], stages, known, why, end, anchors: anchors.size, steps, okSteps, bugs, deepenings, stalls, bnbPlans, bnbArrivals, relayRuns, relaySet, relayDrop, exec: execStats };
 }
 
 /** run(L, opts, emit): the compile loop as a Find a route strategy (src/plan.js): 300 s by default, the source events'

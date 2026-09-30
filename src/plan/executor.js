@@ -16,6 +16,9 @@
 //      (fail 'proof', blockedBy = the shut gates the all-open field's way crosses);
 //   0b. (OPT-IN, EEAT_NEAR=1) the exact end search: solveExact from a near start alone (the relay) and from this call's
 //      own nearest state and its ancestors (tier 0b below: measured, no gain on the near-miss levels);
+//   M. THE MATH (before the proof pre-check's goal fields: the MATH TIER below): the move solver's direct legs
+//      (src/plan/msolve.js, proofs by its certified bound / src/math/lb.js), a short unproven one checked by the exact
+//      search bounded by it; after the goal fields (M2), msolve's chains ordered by them; EEAT_MATH=0 off;
 //   1. the primitives (opts.prims: prims.route) when given;
 //   2. EXACT (exact.js solveExact): the breadth-first branch and bound over absolute ticks from every start (exact dedup,
 //      the admissible bound, deaths dropped unless wp.allowDeath, the -1 cut, the monotone counter cut, a jump that
@@ -133,6 +136,67 @@ const WALL_POPS = +process.env.EEAT_WALL_POPS > 0 ? +process.env.EEAT_WALL_POPS 
 const WALL_PLATEAU = +process.env.EEAT_WALL_PLATEAU > 0 ? +process.env.EEAT_WALL_PLATEAU : 0.5;
 const WALL_NEAR = 3;
 const PORTAL_IDS = new Set([242, 381, 374]);
+
+// ---- THE MATH TIER (the MATH program's Wire stage, 2026-09-30): the leg EVALUATED by the mathematics of docs/ee_math.md
+// before any search: src/plan/msolve.js (the move solver: the plain regime's closed-form gravity family x the input axis'
+// exact 1D solver, the field extension src/math/fieldsolve.js, the coupled one-change piece; every answer replayed by the
+// engine) from each start to the waypoint's tiles (the centre there: its 'any' class), then the executor's own goal test
+// on the engine's replay (a trigger's touch is read at the next tick's start: the leg + 1 tick); the proof by the solver's
+// certified plain bound or src/math/lb.js's event-graph bound (a leg of T = the bound ticks is PROVEN OPTIMAL). When no
+// direct leg exists: CHAINS, msolve's A* (Dijkstra with an admissible claim) over support states with solved legs as
+// edges, ordered by the goal field the executor built anyway. The search tiers (primitives, exact, finders) only for
+// what the math does not cover; each leg they find is recorded as a PATTERN (its run-length inputs, its start's support
+// class and speeds: the legs the mathematics must learn to evaluate) and gets the math's bound (lb.js certify: a proof
+// where the bound reaches its ticks). EEAT_MATH=0: off (the executor as before, byte for byte).
+// Its cost is kept in check (the gate's first two versions lost levels: the math took half of every window where it had
+// nothing, and its cheapest entries into the skeleton's level sets were poor footholds): the direct legs get MATH_DIRECT
+// of the window (at most MATH_DIRECT_MS), only from starts the endgame's sound bound puts within the solver's horizon,
+// the coupled piece only where it puts the goal within MATH_COUPLED_NEAR ticks; the chains only from a start the goal
+// field puts within MATH_CHAIN_TILES tiles; both shares follow the math's yield on the level (mathShare); no math on the
+// skeleton's sub-legs (a sub-level set of the waypoint's field: the search tiers), on death steps or allowDeath legs.
+// (lane 2's opt-in move-solver tier, EEAT_MSOLVE=1, takes its place: one math tier at a time)
+const MATH_ON = () => process.env.EEAT_MATH !== '0' && process.env.EEAT_MSOLVE !== '1';
+const MATH_DIRECT = +process.env.EEAT_MATH_DIRECT > 0 ? +process.env.EEAT_MATH_DIRECT : 0.15;   // the direct legs' share of the window
+const MATH_CHAIN_SHARE = process.env.EEAT_MATH_CHAIN !== undefined ? +process.env.EEAT_MATH_CHAIN : 0.2;   // the chains' share (0: no chain)
+const MATH_TMAX = +process.env.EEAT_MATH_TMAX > 0 ? +process.env.EEAT_MATH_TMAX : 120;   // a direct leg's horizon (the hold tables' 160 at most)
+const MATH_CHAIN_TMAX = +process.env.EEAT_MATH_CHAIN_TMAX > 0 ? +process.env.EEAT_MATH_CHAIN_TMAX : 1200;
+const MATH_STARTS = 4;
+const MATH_DIRECT_MS = +process.env.EEAT_MATH_DIRECT_MS > 0 ? +process.env.EEAT_MATH_DIRECT_MS : 600;   // a call's direct legs at most this long
+const MATH_CHAIN_MS = +process.env.EEAT_MATH_CHAIN_MS > 0 ? +process.env.EEAT_MATH_CHAIN_MS : 800;      // a call's chain at most this long
+const MATH_CHAIN_TILES = +process.env.EEAT_MATH_CHAIN_TILES > 0 ? +process.env.EEAT_MATH_CHAIN_TILES : 30;   // a chain only from a start the goal field puts this near
+/** the math's share of a window by its yield on this level so far (per core): the base share until minTries calls,
+ *  then scaled by 4 x its success rate, between 0.15 and 1 of the base (a level whose legs the mathematics does not
+ *  cover gives the search tiers their time back: First Person Maze's switch legs, 58 chains and direct calls, 0 legs,
+ *  half of every window) */
+function mathShare(base, tries, ok, minTries) {
+	if (tries < minTries) return base;
+	const rate = (ok + 0.5) / (tries + 1);
+	return base * Math.max(0.15, Math.min(1, 4 * rate));
+}
+// an unproven math leg this short (ticks from the first start): the exact search bounded by it (a shorter leg, proven,
+// or the proof that the math's leg is the minimum), at most MATH_UB_MS and a fifth of the window
+const MATH_UB_MAX = process.env.EEAT_MATH_UB !== undefined ? +process.env.EEAT_MATH_UB : 40;
+const MATH_UB_MS = +process.env.EEAT_MATH_UB_MS > 0 ? +process.env.EEAT_MATH_UB_MS : 500;
+// the coupled piece (the one-change family over the 9 direction masks, the engine's replays: the solver's last resort)
+// only where the endgame's sound bound puts the goal this near (ticks), at most MATH_COUPLED_TICKS simulated ticks
+const MATH_COUPLED_NEAR = +process.env.EEAT_MATH_COUPLED_NEAR > 0 ? +process.env.EEAT_MATH_COUPLED_NEAR : 40;
+const MATH_COUPLED_TICKS = +process.env.EEAT_MATH_COUPLED_TICKS > 0 ? +process.env.EEAT_MATH_COUPLED_TICKS : 150000;
+const MATH_CERT = () => process.env.EEAT_MATH_CERT !== '0';   // the math bound on the search tiers' legs
+const PATTERNS_MAX = 400;
+/** a leg's inputs as runs: 'mask x count' joined by spaces (the pattern's code) */
+function runsOf(tail) {
+	const out = [];
+	for (let i = 0; i < tail.length;) { let j = i; while (j < tail.length && (tail[j] & 31) === (tail[i] & 31)) j++; out.push(`${tail[i] & 31}x${j - i}`); i = j; }
+	return out.join(' ');
+}
+/** the goal's extra tick after the centre enters its tiles: a coin or the trophy is TOUCHED at the next tick's start
+ *  (1); a region is the centre's own tile (0); other triggers: null (their Expect may hold before the touch: no proof
+ *  across the extra tick) */
+function touchLagOf(goal, wp) {
+	if (goal.kind === 'trophy') return 1;
+	if (!wp.expect) return 0;
+	return wp.expect.feat === 'coins' || wp.expect.feat === 'bcoins' ? 1 : null;
+}
 /** a level copy with the counterexample walls (tiles) made plain solids (9, as levelNow's shut doors): ordering only */
 function withWalls(Lc, walls) {
 	if (!walls || !walls.length) return Lc;
@@ -210,6 +274,11 @@ function makeCore(L, co) {
 	sim.reset();
 	const cache = new Map();
 	const st = { calls: 0, ok: 0, fail: 0, byTool: {}, byWhy: {}, sims: 0, ms: 0, proven: 0 };
+	// (the math: the move solver and the event-graph bound of this level, made on first use)
+	let MS_ = null, MLB_ = null;
+	const mathSolver = () => MS_ || (MS_ = require('./msolve.js').createSolver(L, { prove: true }));
+	const mathLB = () => MLB_ || (MLB_ = require('../math/lb.js').createMathLB(L));
+	const mY = { dTry: 0, dOk: 0, cTry: 0, cOk: 0 };   // (the math's yield on this level: calls and calls with a leg)
 	const fieldMs = { n: 0, perTile: 0 };
 	let analysis = null;
 
@@ -305,6 +374,70 @@ function makeCore(L, co) {
 		}
 		const live = starts.filter((s) => allowDeath || !s.dead);
 		if (!live.length) return out(failResult('dies', null, 'every start is dead', rung, starts, goal, { deadline }));
+		// -------- tier M: THE MATH, the direct legs (before the goal fields: a leg the mathematics evaluates needs none)
+		const mathOn = MATH_ON() && !allowDeath && !wp.dieField && !goal.fieldTiles && goal.tiles.length > 0;
+		const lag = touchLagOf(goal, wp);
+		const mTarget = mathOn ? { tiles: Array.from(goal.tiles), cls: 'any' } : null;
+		const mathLbE = new Map();   // start index -> the math's lower bound on its leg (the executor's ticks)
+		if (mathOn && Date.now() < wEnd - 20) {
+			const tM = Date.now(), mEnd = tM + Math.min(MATH_DIRECT_MS, mathShare(MATH_DIRECT, mY.dTry, mY.dOk, 8) * (wEnd - tM));
+			const cands = [];
+			let tries = 0, why = '', best = null, far = 0;
+			const MS = mathSolver();
+			let B0 = null;
+			// (not for a skeleton sub-leg: its bound context is the waypoint's tiles, not the sub-level set's)
+			if (!goal.fieldTiles) { try { B0 = X.boundFor(L, goal); } catch (e) { B0 = null; } }
+			for (const s of live.slice(0, MATH_STARTS)) {
+				const left = mEnd - Date.now();
+				if (left < 5) { why = why || 'time'; break; }
+				const si = starts.indexOf(s);
+				const Tmax = Math.min(MATH_TMAX, beforeTick >= 0 ? beforeTick - s.tick : Infinity);
+				if (!(Tmax >= 1)) continue;
+				// (a start the endgame's sound bound puts past the horizon: no direct leg exists there)
+				let hb = 0;
+				if (B0) { sim.restore(s.snap); hb = require('../endgame.js').lowerBound(B0, sim, Tmax + 1); if (hb > Tmax) { far++; continue; } }
+				const near = B0 !== null && hb <= MATH_COUPLED_NEAR;
+				let r;
+				try {
+					r = MS.leg(s.snap, mTarget, { Tmax, chain: false, prove: true, proveMs: Math.max(2, Math.min(50, left / 4)), fieldMs: Math.max(5, Math.min(120, left / 2)),
+						coupled: near, coupledTicks: Math.max(5000, Math.min(MATH_COUPLED_TICKS, Math.round(800 * left))), nodes: 400000 });
+				} catch (e) { why = `error: ${e && e.message || e}`; continue; }
+				tries++;
+				sims += r.ticks || 0;
+				// (the bound: the solver's plain bound only with its certificate, the event-graph bound when it has one)
+				const lbE = Math.max(r.cert ? r.lb || 0 : 0, r.lbMath > 0 ? r.lbMath : 0) + (lag === 1 ? 1 : 0);
+				if (lbE > (lag === 1 ? 1 : 0)) mathLbE.set(si, lbE);
+				if (!r.ok) { why = r.why || why; continue; }
+				const n0 = cands.length;
+				mathCands(si, r.masks, r, cands, 'math:' + r.tool);
+				if (r.hop) mathCands(si, r.hop, r, cands, 'math:' + r.tool);
+				for (let i = n0; i < cands.length; i++) if (!best || cands[i].depth < best.depth) best = cands[i];
+			}
+			if (tries > 0) { mY.dTry++; if (cands.length) mY.dOk++; }
+			tiers.push({ tier: 'math', ms: Date.now() - tM, tries, far, ok: cands.length > 0, tool: best ? best.leg.tool : null, T: best ? best.leg.ticks : null, proven: !!(best && best.leg.proven), provenBy: best ? best.leg.provenBy || null : null, why: cands.length ? null : why });
+			if (cands.length) {
+				// (a short leg the math found but did not prove: the exact search bounded by it (the tier 2b of the finders'
+				// legs), a shorter leg (proven the minimum) or the proof that the math's leg is the minimum; the math's
+				// families are not every input sequence (a key leg 39 ticks by the coupled piece, 37 by the exact search))
+				const ub = best.depth;
+				if (!best.leg.proven && MATH_UB_MAX > 0 && ub <= MATH_UB_MAX && Date.now() < wEnd - 20) {
+					const tX = Date.now();
+					const d0 = starts[0].disc;
+					const rx = X.exactLeg(L, starts.map((s) => ({ snap: s.snap, tick: s.tick })), goal, { sim, allowDeath, beforeTick, bounds: co.bounds || null, field: null, discKey: X.discKey, disc0: d0,
+						stop: () => (stop !== null && stop()), cap: rung <= 0 ? 150000 : 250000, maxDepth: ub - 1, deadline: tX + Math.min(MATH_UB_MS, 0.2 * (wEnd - tX)) });
+					sims += rx.stats && rx.stats.ticks || 0;
+					tiers.push({ tier: 'math-exact-ub', ms: Date.now() - tX, status: rx.status, maxDepth: ub - 1 });
+					if (rx.status === 'found' && rx.goals && rx.goals.length) {
+						const r = finishFound(rx.goals, 'exact', null, rx.depth, true, rx.depth);
+						if (r) { delete r.arrivalsRaw; return out(r); }
+					} else if (rx.status === 'proof') {
+						for (const c of cands) if (c.depth === ub) { c.leg.proven = true; c.leg.provenBy = 'exact'; c.leg.lb = c.leg.ticks; }
+					}
+				}
+				const r = finishMath(cands);
+				if (r) return out(r);
+			}
+		}
 		// -------- tier 0: the proof pre-check (and the goal fields for the cuts and the distances)
 		let field0 = null, proofAll = true, anyField = false;
 		const fields = new Map();   // disc -> field
@@ -483,6 +616,34 @@ function makeCore(L, co) {
 			const rM = msolveTier('direct', Date.now() + MSOLVE_SHARE * (wEnd - Date.now()));
 			if (rM) return out(rM);
 		}
+		// -------- tier M2: THE MATH, chains (msolve's A* over support states, solved legs as edges, the claim its certified
+		// plain bound; ordered by the goal field this call built anyway (its -1 a proof in physics mode): from the start the
+		// goal field puts nearest
+		const nearMin = Math.min(...startCost.map((c, i) => (c >= 0 && !starts[i].dead ? c : Infinity)));
+		if (mathOn && MATH_CHAIN_SHARE > 0 && nearMin <= MATH_CHAIN_TILES && Date.now() < wEnd - 50) {
+			const tC = Date.now(), cEnd = tC + Math.min(MATH_CHAIN_MS, mathShare(MATH_CHAIN_SHARE, mY.cTry, mY.cOk, 4) * (wEnd - tC));
+			let bi = -1;
+			starts.forEach((s, i) => {
+				if (s.dead) return;
+				const c = startCost[i];
+				if (bi < 0 || (c >= 0 && (startCost[bi] < 0 || c < startCost[bi] || (c === startCost[bi] && s.tick < starts[bi].tick)))) bi = i;
+			});
+			const cands = [];
+			let rc = null;
+			if (bi >= 0) {
+				const s = starts[bi];
+				const Tmax = Math.min(MATH_CHAIN_TMAX, beforeTick >= 0 ? beforeTick - s.tick : Infinity);
+				const f = !walled ? fields.get(s.disc) || null : null;
+				if (Tmax >= 2) {
+					try { rc = mathSolver().chain(s.snap, mTarget, { ms: Math.max(10, cEnd - Date.now()), Tmax, field: f || null, rootLeg: false }); }
+					catch (e) { rc = { ok: false, error: String(e && e.message || e) }; }
+					if (rc && rc.ok) mathCands(bi, rc.masks, { T: rc.T, proven: false, lb: 0 }, cands, 'math:chain');
+				}
+			}
+			if (rc) { mY.cTry++; if (cands.length) mY.cOk++; }
+			tiers.push({ tier: 'math-chain', ms: Date.now() - tC, ok: cands.length > 0, T: rc && rc.ok ? rc.T : null, closed: !!(rc && rc.closed), expanded: rc ? rc.expanded : 0, nodes: rc ? rc.nodes : 0, error: rc && rc.error ? rc.error : undefined });
+			if (cands.length) { const r = finishMath(cands); if (r) return out(r); }
+		}
 		// -------- tier 1: the primitives
 		if (co.prims && typeof co.prims.route === 'function' && Date.now() < wEnd) {
 			const t1 = Date.now();
@@ -507,7 +668,7 @@ function makeCore(L, co) {
 					}
 					const legsP = cands.length ? [{ start: cands[0].start, ticks: cands[0].tail.length, lb: nr.lb >= 0 ? nr.lb : 0, proven: !!nr.proven, tool: 'prims' }] : [];
 					const r = finishFound(cands, 'prims', legsP, nr.lb >= 0 ? nr.lb : 0);
-					if (r) return out(r);
+					if (r) return out(mathCert(r));
 				}
 				if (nr && nr.closest && nr.closest.masks) {
 					// (measured again in the finders' unit, field0's tiles: the primitives' own number is another field's (or
@@ -690,7 +851,7 @@ function makeCore(L, co) {
 					try { for (const a of r.arrivalsRaw) { const s = starts[a.start]; sim.restore(s.snap); const from = T.arrivalOf(L, sim, s.masks, null); co.prims.learn(from, a.tail, a.arrival); } } catch (e) { /* optional */ }
 				}
 				delete r.arrivalsRaw;
-				return out(r);
+				return out(mathCert(r));
 			}
 			void legs;
 		}
@@ -708,6 +869,78 @@ function makeCore(L, co) {
 		return out(fr);
 
 		// ---------------------------------------------------------------- the pieces
+		/** a math leg (masks from start si; the solver's goal, the centre in the waypoint's tiles, first holds at its last
+		 *  tick) as the executor's candidates: the engine's replay to the first tick the EXECUTOR's goal holds (a coin or
+		 *  the trophy is touched at the next tick's start: up to 2 ticks more, the last direction held, released, with the
+		 *  jump). The leg's proof carries over where that tick is the solver's T (+ the touch's lag of a coin / trophy) */
+		function mathCands(si, masks, res, cands, tool) {
+			const s = starts[si];
+			const last = masks.length ? masks[masks.length - 1] & 30 : 0;
+			const exts = [last, 0, last | 1].filter((e, i, a) => a.indexOf(e) === i);
+			for (const e of exts) {
+				sim.restore(s.snap);
+				const n = masks.length + 2;
+				const tail = new Uint8Array(n);
+				let hit = 0;
+				for (let t = 0; t < n; t++) {
+					const m = t < masks.length ? masks[t] & 31 : e;
+					tail[t] = m;
+					E.applyMask(inp, m);
+					sim.tick(inp);
+					if (sim.is_dead) break;
+					if (beforeTick >= 0 && s.tick + t + 1 > beforeTick) break;
+					if (goal.test(sim)) { hit = t + 1; break; }
+				}
+				sims += n;
+				if (!hit) continue;
+				const proven = !!res.proven && (hit === res.T || (lag === 1 && hit === res.T + 1));
+				const lbM = Number.isFinite(res.lbMath) ? res.lbMath : null;
+				const lbE = proven ? hit : Math.min(hit, Math.max(res.cert ? res.lb || 0 : 0, lbM > 0 ? lbM : 0) + (lag === 1 ? 1 : 0));
+				cands.push({ start: si, tail: tail.slice(0, hit), depth: s.tick + hit - t0,
+					leg: { ticks: hit, lb: lbE, proven, provenBy: proven ? res.provenBy || 'plain' : null, lbMath: lbM, tool, T: res.T } });
+				if (hit <= masks.length) break;   // (the goal within the solver's own leg: the extension did not matter)
+			}
+		}
+		/** the math tier's result: the candidates verified and picked as every tier's (finishFound), each arrival's leg its
+		 *  own (the proof per start) */
+		function finishMath(cands) {
+			let lbA = Infinity;
+			for (let i = 0; i < starts.length; i++) {
+				if (starts[i].dead) continue;
+				const b = cands.some((c) => c.start === i && c.leg.proven) ? Math.min(...cands.filter((c) => c.start === i).map((c) => c.leg.ticks)) : mathLbE.get(i);
+				lbA = Math.min(lbA, b === undefined ? 0 : starts[i].tick - t0 + b);
+			}
+			const r = finishFound(cands, 'math', (a) => Object.assign({ start: a._c.start }, a._c.leg), Number.isFinite(lbA) ? lbA : 0, false);
+			if (r) delete r.arrivalsRaw;
+			return r;
+		}
+		/** the math's bound on a search tier's legs (src/math/lb.js certify: admissible for the centre in the tiles; a leg
+		 *  whose ticks it reaches is PROVEN OPTIMAL from its start), in the window left */
+		function mathCert(r) {
+			if (!mathOn || !MATH_CERT() || !r || !Array.isArray(r.legs)) return r;
+			// (its own small clock: a search tier's leg mostly comes at its window's end, where wEnd leaves nothing (the
+			// first full compile: a bound on 19 of 1,793 trigger / trophy legs); at most 120 ms, never past the deadline + 80 ms: the
+			// call still answers within its budget + 200 ms)
+			const certEnd = Math.max(wEnd, Math.min(deadline + 80, Date.now() + 120));
+			for (const lg of r.legs) {
+				const left = certEnd - Date.now();
+				if (left < 10) break;
+				if (!lg || lg.proven || !(lg.ticks > 0) || !starts[lg.start]) continue;
+				const Tc = lg.ticks - (lag === 1 ? 1 : 0);
+				if (!(Tc > 0)) continue;
+				try {
+					sim.restore(starts[lg.start].snap);
+					const c = mathLB().certify(sim, { tiles: mTarget.tiles, mode: 'touch' }, Tc, { cap: 4000, ms: Math.min(30, left / 3) });
+					if (c && c.lb !== null && c.lb >= 0) {
+						lg.lbMath = c.lb;
+						const lbE = c.lb + (lag === 1 ? 1 : 0);
+						if (!(lg.lb >= lbE)) lg.lb = Math.min(lg.ticks, lbE);
+						if (c.lb === Tc && c.proven) { lg.proven = true; lg.provenBy = 'events'; }
+					}
+				} catch (e) { /* the bound is optional */ }
+			}
+			return r;
+		}
 		/** a result from goal candidates {start, tail, depth}: arrivals built, verified from the level start, picked */
 		function finishFound(cands, tool, legsIn, lbA, proven, minDepth) {
 			const arr = [];
@@ -742,7 +975,7 @@ function makeCore(L, co) {
 			}
 			if (!good.length) return null;
 			const md = minDepth !== undefined ? minDepth : Math.min(...cands.map((c) => c.depth));
-			const legs = legsIn || good.map((a) => {
+			const legs = typeof legsIn === 'function' ? good.map(legsIn) : legsIn || good.map((a) => {
 				const c = a._c, off = starts[c.start].tick - t0;
 				return { start: c.start, ticks: c.tail.length, lb: Math.max(0, lbA - off), proven: !!proven && c.depth === md, tool };
 			});
@@ -1001,7 +1234,12 @@ async function createExecutor(L, opts) {
 	const core = makeCore(L, { prims: opts.prims || null, bounds: opts.bounds || null, model: opts.model || null });
 	const vsim = new E.EESim(L), vinp = new E.EEInput();
 	const RM = opts.RM || null;
-	const S = { reach: 0, ok: 0, fail: 0, watchdog: 0, late: 0, hung: 0, verifyDrop: 0, polish: 0, byTool: {}, byWhy: {}, ms: 0, sims: 0, walls: 0, wallsReset: 0, wallsArmed: 0 };
+	const S = { reach: 0, ok: 0, fail: 0, watchdog: 0, late: 0, hung: 0, verifyDrop: 0, polish: 0, byTool: {}, byWhy: {}, ms: 0, sims: 0, walls: 0, wallsReset: 0, wallsArmed: 0,
+		// (the math tier: its calls and legs, and the PATTERNS: the legs the search tiers found, the mathematics' to-do list)
+		math: { on: MATH_ON(), direct: 0, directOk: 0, directMs: 0, chain: 0, chainOk: 0, chainMs: 0, legs: 0, byTool: {}, proven: 0, provenBy: {}, certified: 0, arrivals: 0 },
+		patternsN: 0, patterns: [] };
+	let MSC_ = null;
+	const mClsOf = (sim) => { try { MSC_ = MSC_ || require('./msolve.js'); return MSC_.clsOf(sim, L.flags); } catch (e) { return '?'; } };
 	// (EEAT_EXEC_PROF=1, a measurement: every worker answer's prof (execworker.js) as an exec.prof event, late ones too;
 	// this thread's RCH3 builds (the skeleton's fieldAt, the planner's) and its event-loop delay at close)
 	const PROF = process.env.EEAT_EXEC_PROF === '1';
@@ -1466,8 +1704,20 @@ async function createExecutor(L, opts) {
 		const goal = T.goalOf(L, wp);
 		const beforeTick = wp.beforeTick >= 0 ? wp.beforeTick : -1;
 		const out = { ok: false, arrivals: [], tool: res.tool || null, ms: 0, sims: res.sims || 0, legs: res.legs || [], lb: res.lb || 0, fail: res.fail || null, tiers: res.tiers };
+		// (the math tier's numbers from the core's tiers: the worker's own stats never cross threads)
+		if (Array.isArray(res.tiers)) {
+			for (const t of res.tiers) {
+				if (!t) continue;
+				if (t.tier === 'math') { S.math.direct++; S.math.directMs += t.ms || 0; if (t.ok) S.math.directOk++; }
+				else if (t.tier === 'math-chain') { S.math.chain++; S.math.chainMs += t.ms || 0; if (t.ok) S.math.chainOk++; }
+			}
+		}
+		const legsIn = Array.isArray(res.legs) ? res.legs : [];
+		const aligned = res.ok && legsIn.length === (res.arrivals || []).length;
+		const legsKept = [];
 		if (res.ok) {
-			for (const a of res.arrivals) {
+			for (let ai = 0; ai < res.arrivals.length; ai++) {
+				const a = res.arrivals[ai];
 				const masks = T.masksOf(a.masks);
 				const st = starts[a.start];
 				// (the start's state as this thread replayed it from the level start (core.startOf: cached, the longest
@@ -1476,9 +1726,32 @@ async function createExecutor(L, opts) {
 				const vs = e && masks.length >= e.tick && a.masks.startsWith(e.str) ? vsim : null;
 				if (!vs || !verifyTail(vs, vinp, e.snap, e.tick, masks.subarray(e.tick), goal, beforeTick, !!wp.allowDeath)) { S.verifyDrop++; continue; }
 				const arr = T.arrivalOf(L, vs, masks, RM);
-				arr.leg = { start: a.start, ticks: a.ticks, tool: res.tool };
+				const lg = aligned ? legsIn[ai] : null;
+				arr.leg = { start: a.start, ticks: a.ticks, tool: (lg && lg.tool) || res.tool };
 				out.arrivals.push(arr);
+				if (aligned) legsKept.push(lg);
+				// (the math's legs and proofs; every other tier's leg a PATTERN: its run-length inputs from its start's support
+				// class and speeds, what the mathematics must learn to evaluate)
+				const tool = String((lg && lg.tool) || res.tool || '');
+				if (tool.startsWith('math')) {
+					S.math.legs++; S.math.byTool[tool] = (S.math.byTool[tool] || 0) + 1;
+					if (lg && lg.proven) { S.math.proven++; const b = lg.provenBy || '?'; S.math.provenBy[b] = (S.math.provenBy[b] || 0) + 1; }
+				} else if (tool) {
+					if (lg && lg.proven && lg.provenBy === 'events') S.math.certified++;
+					S.patternsN++;
+					if (S.patterns.length < PATTERNS_MAX) {
+						vs.restore(e.snap);
+						const tail = masks.subarray(e.tick);
+						let ch = 0;
+						for (let t = 1; t < tail.length; t++) if ((tail[t] & 31) !== (tail[t - 1] & 31)) ch++;
+						S.patterns.push({ label: wp.label || wp.kind || '', kind: wp.kind || '', tool, ticks: tail.length, changes: ch, runs: runsOf(tail),
+							from: { cls: mClsOf(vs), tile: T.tileOf(vs, L.width, L.height), px: vs.px, py: vs.py, vx: vs.speed_x, vy: vs.speed_y, ground: !!vs.on_ground, jumps: vs.jump_count },
+							lb: lg && Number.isFinite(+lg.lb) ? +lg.lb : null, lbMath: lg && Number.isFinite(+lg.lbMath) ? +lg.lbMath : null, proven: !!(lg && lg.proven) });
+					}
+				}
 			}
+			S.math.arrivals += out.arrivals.length;
+			if (aligned) out.legs = legsKept;
 			if (out.arrivals.length) out.ok = true;
 			else { out.tool = null; out.fail = { why: 'budget', closest: null, touched: [], blockedBy: [], level: 0, note: 'no arrival survived the replay' }; }
 		}

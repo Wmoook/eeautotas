@@ -1481,3 +1481,102 @@ limit 6, maxMs 250, iterate true, rounds 2, family false: the exhaustive one-cha
 [--only=F1..F6] [--T=32] [--D=9] [--shard=i/n]` (box 3 at full size: **176,469,571 checks, 0 mismatches**); the tables:
 `node tools/math/fields_tables.js`; the routes: `EEAT_TRUTH_ROOT=<truth> node tools/math/fields_cover.js --shard=i/n
 --out=<dir> [--family=1]`, then `--agg=<dir>`.
+
+## 7 The wire: the mathematics as the compiler's primary move generator
+
+The compiler (n4-plan, `src/compile.js` -> `src/plan/strategy.js` -> `src/plan/executor.js`) reaches each waypoint of its
+plan (a trigger touched with its Expect, a region, the trophy) from real engine states. Its executor asks THE MATH first
+(`makeCore.reach`, tiers M and M2); the search tiers (the primitives, the exact search, the finders) run only where the
+mathematics found no leg. `EEAT_MATH=0` switches the tier off (the executor as before, byte for byte).
+
+### 7.1 Tier M: the direct legs
+
+- For each live start (at most 4): the endgame's sound bound (`endgame.lowerBound` on the goal's bound context) above
+  the solver's horizon (`MATH_TMAX` 120 ticks) skips the start (no direct leg exists there); else `msolve.leg(start,
+  {tiles: the waypoint's tiles, cls: 'any'}, {Tmax, chain: false, prove: true})` (section 4: the plain regime's closed
+  forms, the field tier of section 6, the coupled one-change piece only where the sound bound puts the goal within
+  `MATH_COUPLED_NEAR` 40 ticks, at most 150,000 simulated ticks).
+- THE TOUCH LAG. The solver's goal is the centre in the tiles after tick T; the executor's goal is the trigger's touch,
+  which the engine reads at the next tick's start (a coin, the trophy: T + 1; a region: T). Every answer is replayed by
+  the engine to the first tick the EXECUTOR's goal holds (the last input held, released, or with the jump for the extra
+  tick), so the arrival is the engine's own; then verified again from the level start in the main thread (finalize).
+- THE PROOF CARRIES OVER. The solver's proof (its certified plain bound = T, or src/math/lb.js's event-graph bound = T:
+  no input sequence puts the centre in the tiles sooner) proves the executor's leg when the hit tick is T, or T + 1 for a
+  coin or the trophy (their touch needs the centre in the tile one tick before: no sequence touches sooner). Other
+  triggers (an Expect that may hold before the touch) carry the proof only at T. The leg's `lb` is the certified bound
+  (+ the lag), `provenBy` 'plain' | 'events'.
+- A SHORT UNPROVEN LEG (at most `MATH_UB_MAX` 40 ticks from the first start) gets the exact search bounded by it
+  (`exact.exactLeg`, maxDepth T - 1, at most 500 ms and a fifth of the window): a shorter leg (proven the minimum:
+  test/planexec.js's key leg, 39 ticks by the solver, is now proven the minimum) or the proof that the solver's leg is
+  the minimum (`provenBy` 'exact').
+- Not for: the skeleton's sub-legs (a sub-level set of the waypoint's field: the solver's cheapest entry into a level
+  set was a poor foothold, Rosa dei Venti's skeleton made 35 math sub-legs and no trigger), death steps and allowDeath
+  legs (the solver's goal needs a live ball).
+
+### 7.2 Tier M2: chains
+
+After the proof pre-check's goal fields: `msolve.chain` (section 4.6: A* over support states, solved legs as edges, the
+claim its certified plain bound) from the start the goal field puts nearest, ordered by that field (`o.rf`: the
+executor's own goal field as the doors stand, no second field build), only when that start is within
+`MATH_CHAIN_TILES` 30 tiles, at most `MATH_CHAIN_MS` 800 ms.
+
+### 7.3 The cost rule
+
+The direct legs get `MATH_DIRECT` 0.15 of the window (at most 600 ms), the chains 0.2 (at most 800 ms); both shares
+follow the tier's yield on the level (`mathShare`: after 8 / 4 calls, x 4 x the success rate, between 0.15 and 1 of the
+base). The gate's first version (0.25 / 0.3, no caps, the coupled piece everywhere, the sub-legs included) took half of
+every window where it found nothing (First Person Maze: 58 calls, 0 legs, 59 worker-s; progress 33 -> 0) and failed the
+gate (3 worse); the second (the yield rule) failed it too (Rosa dei Venti and Desolate Caverns lost); the third (this)
+passes it.
+
+### 7.4 The search tiers' legs: the bound and the patterns
+
+- Every leg a search tier finds gets the math's bound (`lb.js certify` from its start, the touch lag): `lbMath`, and a
+  PROOF where the bound reaches its ticks (`provenBy` 'events').
+- Every such leg is a PATTERN (`report.patterns`, at most 400 a compile; `report.math.patternsN`): the leg's run-length
+  inputs (`mask x ticks ...`), its input changes, its start's support class (msolve.clsOf: G W C Z B A), position and
+  speeds, the waypoint's kind: the legs the mathematics does not evaluate yet, its to-do list.
+
+### 7.5 The report
+
+`report.math` = {on, legs (the route's math legs), provenBy (the route's proven legs by what proved them), exec (the
+executor's math numbers: direct calls / with a leg / ms, chains / with a leg / ms, legs by tool, proven by 'plain' /
+'events' / 'exact', search-tier legs certified), patternsN}; each route leg carries `provenBy` and `lbMath`; the result
+line says "proven legs N of M (plain a, events b, exact c, search d); math legs k". The prove stage takes a math leg's
+proof like the exact search's, and a single math leg from the static level start proven the fewest ticks proves the
+route (lbProof).
+
+### 7.6 Measured (box 3, 60 s, --workers=3, the math on vs `EEAT_MATH=0` side by side on one tree)
+
+- **The shared gate** (src/out/n4plan/gate20.txt vs b2_w3.json, par 6 each): the first version exit 1 (compiled 9 vs
+  the off arm's 10; First Person Maze 33 -> 0, Starlight 18 -> 13, IWBTG 11 -> 1), the second exit 1 (7 vs 11: Rosa dei
+  Venti and Desolate Caverns lost); the third **exit 0, compiled 11 = the off arm's 11**, better 11 / worse 1 (IWBTG,
+  worse in the off arm too: the base's own); the final code (the third + the certificate's clock) **exit 0, compiled 11
+  vs the baseline's 9, better 14, worse 0**, every .eetas replayed (11 / 11). Its math: 952 direct calls, 135 with a leg
+  (85 s of worker time), 426 chains, 43 with a leg (122 s); 323 math legs (plain 94, coupled 154, chain 67, field 8),
+  84 proven (event graph 37, exact 42, plain 5).
+- **The full compile of all 230 levels, twice** (par 13 each arm, 104 threads): compiled **13 / 230 with the math vs 15
+  / 230 without, in both pairs** (every .eetas replayed: 13 / 13, 15 / 15); only without: Bygone Tutorial (both pairs;
+  it compiles in about half the runs of the base), Accident Prone (pair A), The Blank Page (pair B); only with: none;
+  progress (triggers on the failing levels) 539 vs 565 (A), 535 vs 521 (B); wall per level median 60.5 s either way (the
+  whole budget); the routes vs the best known (95 levels): median 1.10 / 1.19 with vs 1.17 / 1.16 without. The math
+  per full compile: ~4,300 direct calls, 6.2% with a leg (~400 s of worker time), ~1,400 chains, 7.7% with a leg
+  (~570 s), 595 math legs of ~22,000 arrivals (2.7%), 152 proven (exact 93, event graph 44, plain 15); the route legs
+  proven 77 / 59 with vs 50 / 28 without.
+- **What the mathematics does not cover yet** (the patterns: the search tiers' legs, ~21,000 a full compile): 91% are
+  the skeleton's sub-legs (no math there by design); of the ~1,800 trigger / trophy legs 79% start in the AIR (the plain
+  regime's airborne start is ONE trajectory to its landing: a leg that lands and acts again needs a chain), median 176
+  ticks (p90 443: past the direct horizon of 120), median 47 input changes (the finders' noisy legs); the math's bound
+  on them (lb.js from their start): on 52% (the final code's clock), median 0.15 of their ticks (long legs: the bound's
+  weak fallback), none reaching their ticks.
+- **Lane 2's tier.** While this stage measured, COMPILER-ALL lane 2 pushed its own move-solver tier (d56f54e, OPT-IN
+  `EEAT_MSOLVE=1`: the direct legs before the primitives, the chains after them from rung 1; its measurement: the tier
+  finds legs but does not pay at 60 s). Both are on n4-plan now, ONE AT A TIME: `EEAT_MSOLVE=1` turns this tier off
+  (`MATH_ON`) and runs lane 2's; the math tier here is the default. msolve.js's chain takes the caller's ordering field
+  as lane 2's `o.field` (this tier passes its goal field there).
+- **The pushed tree** (this tier on n4-plan 923d840, lane 2's tier off): the shared gate **exit 0, compiled 11 with the
+  math vs 10 without** (the baseline 9), better 10, worse 2 (IWBTG 11 -> 1, in the off arm too: the base's own;
+  Starlight 18 -> 15, the off arm 17), every .eetas replayed (11 / 11, 10 / 10); its math: 933 direct calls, 139 with a
+  leg, 401 chains, 31 with a leg, 315 math legs, 79 proven (event graph 48, exact 24, plain 7). test/planexec.js 32/32,
+  test/planstrategy.js 24/0, test/msolve.js 50/0 (plancompile's hard-watchdog check fails under the box's load with and
+  without this change).

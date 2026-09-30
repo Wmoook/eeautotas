@@ -221,10 +221,12 @@ async function failCases() {
 		for (let y = 0; y < 6; y++) rows.push([...'#'.repeat(w)].map((c, x) => (y === 0 || y === 5 || x === 0 || x === w - 1 ? '#' : '.')));
 		rows[4][1] = 'S';
 		const dx = w - 5;
-		for (let y = 1; y <= 4; y++) rows[y][dx] = ['d', 'e', 'f', 'd'][k] ;
+		// (the key tile k is the GREEN key (7): a green door (e, 24) opens with it, and the math tier's engine-verified arrival
+		// showed the region beyond it reachable in 1.5 s; the doors here are red and blue, which it never opens)
+		for (let y = 1; y <= 4; y++) rows[y][dx] = ['d', 'f', 'd', 'f'][k];
 		rows[4][4] = 'k';
 		const beyond = [];
-		cases.push({ name: `door${k}`, rows: rows.map((r) => r.join('')), door: ['key0', 'key1', 'key2', 'key0'][k],
+		cases.push({ name: `door${k}`, rows: rows.map((r) => r.join('')), door: ['key0', 'key2', 'key0', 'key2'][k],
 			wp: (at) => { for (let y = 1; y <= 4; y++) for (let x = dx + 1; x < w - 1; x++) beyond.push(at(x, y)); return { kind: 'region', tiles: beyond, expect: null, label: 'beyond the door' }; } });
 	}
 	const budget = 1500;
