@@ -101,6 +101,12 @@ function units() {
 		const an = anchorAfter(L, m, masks.subarray(0, r.goalAt));
 		const p2 = P.createPlanner(m, F.createFacts(), { crumbs: true }).plan(an, { k: 1 })[0];
 		check('P-UNIT crumbs on: from the crumb (30,2) the next crumb is (70,2)', !!p2 && p2.steps[0].crumb && p2.steps[0].waypoint.tiles[0] === at(70, 2), p2 ? planStr(m, p2) : 'no plan');
+		// (the CEGAR's cuts of the est walk (a failed leg's) do not stop the crumbs: their geometry is the 'now' walk)
+		const w = new Uint8Array(W * L.height); w[at(50, 1)] = 1; w[at(50, 2)] = 1;
+		m.setEstWalls(w);
+		const p3 = P.createPlanner(m, F.createFacts(), { crumbs: true }).plan({}, { k: 1 })[0];
+		m.setEstWalls(null);
+		check('P-UNIT crumbs on: with the est walk cut across the corridor the crumb (30,2) still comes first', !!p3 && p3.steps[0].crumb && p3.steps[0].waypoint.tiles[0] === at(30, 2), p3 ? planStr(m, p3) : 'no plan');
 	}
 	// ---- the coin door: both coins, then the trophy
 	{
