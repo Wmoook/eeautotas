@@ -314,6 +314,12 @@ const NEXT_EVAL = 64, NEXT_TRY = +process.env.EEAT_NEXT_TRY > 0 ? +process.env.E
 const NEXT_ALTS = +process.env.EEAT_NEXT_ALTS >= 0 && process.env.EEAT_NEXT_ALTS !== undefined ? +process.env.EEAT_NEXT_ALTS : 6;
 const NEXT_SLACK = +process.env.EEAT_NEXT_SLACK >= 0 && process.env.EEAT_NEXT_SLACK !== undefined ? +process.env.EEAT_NEXT_SLACK : 3;
 const PATTERNS_MAX = 400;
+// THE SETTLE TEMPLATES (tier S, doctor 5; OPT-IN EEAT_SETTLE=1, off = the executor as before): d x k x rest x jump runs
+// (reach(): settleCands), at most SETTLE_MS and SETTLE_F of the window, from the first SETTLE_STARTS live starts
+const SETTLE_ON = () => process.env.EEAT_SETTLE === '1';
+const SETTLE_MS = +process.env.EEAT_SETTLE_MS > 0 ? +process.env.EEAT_SETTLE_MS : 600;
+const SETTLE_F = 0.35, SETTLE_STARTS = 2, SETTLE_K = 80, SETTLE_IDLE = 90, SETTLE_BRANCH = 30, SETTLE_TAIL = 60;
+const SETTLE_JUMPS = [1, 4, 8, 14, 22];
 /** a leg's inputs as runs: 'mask x count' joined by spaces (the pattern's code) */
 function runsOf(tail) {
 	const out = [];
@@ -644,6 +650,25 @@ function makeCore(L, co) {
 				}
 				const r = finishMath(cands);
 				if (r) return out(r);
+			}
+		}
+		// -------- tier S: THE SETTLE TEMPLATES (OPT-IN EEAT_SETTLE=1; doctor 5): run d for k ticks, rest (no input) i ticks,
+		// press jump j ticks, rest; the engine plays each and the goal test decides (settleCands). The x auto-align puts a
+		// ball at rest exactly on the pixel grid only after it has stood a while (eesim.js: px = px | 0 once the remainder is
+		// under 0.2), and that grid position is what a 1-tile-wide vertical gap takes; the finders' cells (2 px, 1/8 px/tick)
+		// hold the FIRST arrival, so the later, aligned state of a resting ball is dropped. Stupid Fox's first leg (a 1-wide
+		// shaft to the protection): no tier in 1.5 / 5 s from the spawn or from the run (closest 4 tiles at the shaft's
+		// portal tile); the template from the spawn reaches it at tick 177 (the known route 181, which rests 55 ticks there).
+		if (SETTLE_ON() && !allowDeath && !wp.dieField && goal.tiles.length > 0 && Date.now() < wEnd - 20) {
+			const tS = Date.now(), sEnd = tS + Math.min(SETTLE_MS, SETTLE_F * (wEnd - tS));
+			const cands = [];
+			let n = 0;
+			for (const s of live.slice(0, SETTLE_STARTS)) { n += settleCands(starts.indexOf(s), cands, sEnd); if (Date.now() >= sEnd) break; }
+			tiers.push({ tier: 'settle', ms: Date.now() - tS, runs: n, ok: cands.length > 0 });
+			if (cands.length) {
+				cands.sort((a, b) => a.depth - b.depth);
+				const r = finishFound(cands.slice(0, 64), 'settle', null, 0, false);
+				if (r) { delete r.arrivalsRaw; return out(r); }
 			}
 		}
 		// -------- tier 0: the proof pre-check (and the goal fields for the cuts and the distances)
@@ -1180,6 +1205,55 @@ function makeCore(L, co) {
 					leg: { ticks: hit, lb: lbE, proven, provenBy: proven ? res.provenBy || 'plain' : null, lbMath: lbM, tool, T: res.T } });
 				if (hit <= masks.length) break;   // (the goal within the solver's own leg: the extension did not matter)
 			}
+		}
+		/** THE SETTLE TEMPLATES from start si (tier S): for d in (none, left, right), k = 0..SETTLE_K ticks of d, then rest
+		 *  up to SETTLE_IDLE ticks, with a branch at every SETTLE_BRANCH-th rest tick (and the first tick at rest) pressing
+		 *  jump j (SETTLE_JUMPS) ticks and resting SETTLE_TAIL more; every tick the executor's goal test (and beforeTick, a
+		 *  death ends the run). The candidates (the goal's first tick of each run) go to cands; returns the runs played */
+		function settleCands(si, cands, endT) {
+			const s = starts[si];
+			if (!s || s.dead) return 0;
+			let runs = 0;
+			const play = (m, tail) => { E.applyMask(inp, m); sim.tick(inp); sims++; tail.push(m); };
+			const hitNow = (tail) => (!sim.is_dead && goal.test(sim) && !(beforeTick >= 0 && s.tick + tail.length > beforeTick));
+			const push = (tail) => { cands.push({ start: si, tail: Uint8Array.from(tail), depth: s.tick + tail.length - t0, leg: null }); };
+			// (k outer, the direction inner: the shortest runs of both directions first, so a clock cut keeps both)
+			const pres = { 2: [], 4: [] }, snaps = { 2: s.snap, 4: s.snap }, done = { 2: false, 4: false };
+			for (let k = 0; k <= SETTLE_K; k++) for (const d of k === 0 ? [0] : [2, 4]) {
+				if (d !== 0 && done[d]) continue;
+				if (Date.now() >= endT) return runs;
+				const pre = d === 0 ? [] : pres[d];
+				sim.restore(d === 0 ? s.snap : snaps[d]);
+				if (d !== 0) {
+					play(d, pre);
+					if (sim.is_dead) { done[d] = true; continue; }
+					if (hitNow(pre)) { push(pre); done[d] = true; continue; }
+					snaps[d] = sim.snapshot();
+				}
+				{
+					const snapK = sim.snapshot();
+					const idle = pre.slice();
+					let rested = false;
+					for (let i = 0; i <= SETTLE_IDLE; i++) {
+						if (i > 0) { play(0, idle); if (sim.is_dead) break; if (hitNow(idle)) { push(idle); break; } }
+						const atRest = Math.abs(sim.speed_x) < 1e-3 && Math.abs(sim.speed_y) < 1e-3;
+						if (!(i % SETTLE_BRANCH === 0 || (atRest && !rested))) continue;
+						if (atRest) rested = true;
+						const snapI = sim.snapshot();
+						for (const j of SETTLE_JUMPS) {
+							runs++;
+							sim.restore(snapI);
+							const tail = idle.slice();
+							let hit = false;
+							for (let q = 0; q < j + SETTLE_TAIL; q++) { play(q < j ? 1 : 0, tail); if (sim.is_dead) break; if (hitNow(tail)) { hit = true; break; } }
+							if (hit) push(tail);
+						}
+						sim.restore(snapI);
+					}
+					sim.restore(snapK);
+				}
+			}
+			return runs;
 		}
 		/** the math tier's result: the candidates verified and picked as every tier's (finishFound), each arrival's leg its
 		 *  own (the proof per start) */
