@@ -1026,7 +1026,7 @@ function createSolver(L, opts = {}) {
 				}
 			} else res = solvePlain(snap, sim, ctx, tg, goal, oo, stats);
 		}
-		// a plain answer through a landing (4.10) is the plain regime's cheapest, not the cheapest of every tier: a way
+		// a plain answer through a landing (4.11) is the plain regime's cheapest, not the cheapest of every tier: a way
 		// through a field or the coupled one-change family can be shorter (the single moves' hops: 30 of 11,747 legs
 		// longer than the field / coupled tiers' answers), so the other tiers are asked below its T too
 		const landAns = res.ok && res.tool === 'plain' && typeof res.member === 'string' && res.member.includes('>land');
