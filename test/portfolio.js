@@ -66,13 +66,14 @@ const runupLevel = () => {
 		const snap = s0.snapshot();
 		const target = { tiles: [15 * W + 48], cls: 'any' };
 		const P = PO.createPortfolio(L);
-		// (only the backward meet: its piece of a 10-s projection is 3 s, more than the first call's 400 ms)
+		// (call 1: the backward meet's first run takes its share of 400 ms and the clock ends it; call 2 holds its long piece:
+		// 0.3 of the 10-s projection, at least 4 x the first piece; a third run never comes)
 		const r1 = P.solve(snap, target, { ms: 400, total: 10000, plan: 'bw:0.3,corr:0.7' });
-		ok(!r1.arms.bw, `call 1: the backward meet did not run (${JSON.stringify(r1.arms)})`);
-		ok(r1.deferred.includes('bw') || r1.ok, `call 1: the backward meet deferred (${r1.deferred})`);
+		ok(r1.ok || (r1.arms.bw && r1.arms.bw.why === 'budget'), `call 1: the backward meet ran its short piece (${JSON.stringify(r1.arms)})`);
 		if (!r1.ok) {
 			const r2 = P.solve(snap, target, { ms: 6000, total: 10000, plan: 'bw:0.3,corr:0.7' });
 			ok(r2.resumed, 'call 2 continues the session');
+			ok(r2.arms.bw && r2.arms.bw.piece >= 2900, `call 2: the backward meet's long piece (${r2.arms.bw && r2.arms.bw.piece} ms)`);
 			ok(r2.ok, `call 2 finds the leg (${r2.why})`);
 			ok(r2.ok && replay(L, snap, r2.masks, target.tiles) === r2.T, 'call 2 replays onto the target');
 			const r3 = P.solve(snap, target, { ms: 200, total: 10000, plan: 'bw:0.3,corr:0.7' });

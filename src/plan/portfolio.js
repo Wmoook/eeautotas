@@ -37,6 +37,7 @@ const ARROWS = new Set([1, 2, 3, 1518, 411, 412, 413, 1519]);
 const CORR_OPTS = { M: 3, Mu: 1, legT: 90, RX: 18, RD: 30, subStop: 2, plainStops: [8, 20], dom: 'dir', landMax: 0, legMode: 'lazy', lazyWide: true, lazyLegs: false };
 const RESUMABLE = { chain: true, corr: true, prof: false, bw: false, leg: false };
 const SESS_KEEP = 8;
+const GROW = 4;                             // (a one-piece arm's second run: at least this many times its first piece)
 const ENV = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? process.env[k] : d);
 
 function createPortfolio(L, opts = {}) {
@@ -145,10 +146,10 @@ function createPortfolio(L, opts = {}) {
 				const goal = { tiles: Int32Array.from(target.tiles), cls: target.cls || 'any', fieldTiles: null, allowDeath: false, test: (s) => gtest(s, s.px, s.py) };
 				res = profile().profileLeg(L, [{ snap, tick: 0 }], goal, { ms, deadline, depth: Tmax });
 				if (res && res.ok) res.T = res.tick;
-				r.done = true;
+				r.done = !(res && /time|stopped/.test(res.why || ''));
 			} else if (arm === 'bw') {
 				res = backward().solve(snap, target, { ms });
-				r.done = true;
+				r.done = !(res && res.why === 'budget');
 			} else if (arm === 'leg') {
 				// (the executor's tier 3 finder on the stretch: the goal field of the level as it stands at the start, a region
 				// of LEG_M tiles around the start and the target on the field's walk; the goal = msolve's exact test)
@@ -162,7 +163,7 @@ function createPortfolio(L, opts = {}) {
 				const reg = regionOf(f, sim, target.tiles, o.legM || 24);
 				const rl = legs().legBest(L, [{ snap, tick: 0 }], goal, { deadline, field: f, region: reg, depthMax: Tmax });
 				res = { ok: rl.status === 'found' && !!rl.tail, masks: rl.tail, T: rl.depth, why: rl.status };
-				r.done = true;
+				r.done = !/time|stopped/.test(rl.status || '');
 			} else throw new Error('arm ' + arm);
 		} catch (e) { res = { ok: false, why: 'error: ' + (e && e.message || e) }; }
 		r.ms = Date.now() - t0;
@@ -195,7 +196,7 @@ function createPortfolio(L, opts = {}) {
 		let sess = o.resume === false ? null : sessions.get(key);
 		if (sess) { sessions.delete(key); sessions.set(key, sess); }
 		else {
-			sess = { key, spent: {}, done: {}, calls: 0 };
+			sess = { key, spent: {}, done: {}, pieces: {}, calls: 0 };
 			if (o.resume !== false) { sessions.set(key, sess); while (sessions.size > SESS_KEEP) sessions.delete(sessions.keys().next().value); }
 		}
 		sess.calls++;
@@ -228,13 +229,24 @@ function createPortfolio(L, opts = {}) {
 			let slice;
 			if (RESUMABLE[arm]) slice = i === plan.length - 1 ? left : fair;
 			else {
-				const piece = Math.max(f * proj, fair);
-				if (piece > left + 1 && later) { out.deferred.push(arm); continue; }
-				slice = i === plan.length - 1 ? left : Math.min(piece, left);
+				// a one-piece arm: its first run takes its share of this call (most stretches end there: the backward meet's
+				// median find is 0.4 s); a run the clock ended (not its search) is run ONCE more, as the long piece, in the first
+				// later call that holds GROW x its first piece and its share of the session's projected budget (never cut)
+				const prev = sess.pieces[arm] || [];
+				if (prev.length >= 2) continue;
+				let piece;
+				if (!prev.length) piece = later ? fair : Math.max(f * proj, fair);
+				else {
+					piece = Math.max(f * proj, GROW * prev[0]);
+					if (piece > left + 1) { out.deferred.push(arm); continue; }
+				}
+				slice = i === plan.length - 1 && !prev.length ? left : Math.min(piece, left);
+				(sess.pieces[arm] = prev).push(slice);
 			}
 			if (slice < 20) continue;
 			const r = runArm(arm, snap, target, Math.round(slice), Date.now() + slice, o, sess);
 			note(arm, r);
+			if (!RESUMABLE[arm]) out.arms[arm].piece = Math.round(slice);
 			if (r.ok) { Object.assign(out, { ok: true, masks: r.masks, T: r.T, arm }); break; }
 		}
 		// what is left: back to the resumable arms of the plan (their searches go on where they stopped)
