@@ -537,6 +537,7 @@ function createSolver(L, opts = {}) {
 		if (standing && y0 !== 16 * fr0 - 16) return { ok: false, why: 'standing off the grid (a half block / one-way)', tool: 'plain' };
 		// the gravity members: {kind, j, Y (per tick), V, g (ground ticks: floor needed at 1..g), off (a walk-off tick)}
 		const members = [];
+		const bonkMembers = [];                                // the post-landing bonk variants: the second pass (4.13)
 		const fall = gravTrace(y0, 0, Tmax, G), air = gravTrace(y0, vy0, Tmax, G), jmp = gravTrace(y0, G.J, Tmax, G);
 		if (standing) {
 			if (canJump) for (let j = 1; j < Tmax; j++) members.push({ kind: 'jump', j, g: j, off: 0, y: (t) => (t <= j ? y0 : jmp.Y[t - j]), r: (t) => (t <= j ? y0 : jmp.R[t - j]), v: (t) => (t <= j ? 0 : jmp.V[t - j]), air0: j });
@@ -646,7 +647,7 @@ function createSolver(L, opts = {}) {
 											mb.l.bonk = { b: b2, cr, line: yb };
 											mb.sk += 1e5;
 											mb.nodeCap = 4;
-											members.push(mb);
+											bonkMembers.push(mb);
 										}
 										prev = yt;
 									}
@@ -663,8 +664,7 @@ function createSolver(L, opts = {}) {
 			}
 		}
 		// the (T, member, windows) items
-		const items = [];
-		for (const m of members) {
+		const buildItems = (mlist, items) => { for (const m of mlist) {
 			if (m.kind === 'land' && m.act === 'walk') {
 				// on the landing row after the landing: the target's tiles in its centre row (class G while walking)
 				if (tg.cls === 'G' || tg.cls === 'any') {
@@ -725,6 +725,9 @@ function createSolver(L, opts = {}) {
 				}
 			}
 		}
+		};
+		const items = [];
+		buildItems(members, items);
 		const skOf = (m) => (m.sk !== undefined ? m.sk : m.kind === 'jump' ? m.j : 1e3 + m.off);
 		items.sort((a, b) => a.T - b.T || skOf(a.m) - skOf(b.m));
 		// the plain tier's clock (o.plainMs: a deadline for the whole tier, checked per item and every 2048 nodes)
@@ -744,11 +747,11 @@ function createSolver(L, opts = {}) {
 		// is still the answer)
 		const alts = !o.each && o.alts > 0 ? new Map() : null, altSlack = alts ? Math.max(0, o.altSlack || 0) : 0;
 		stats.setupMs = Number(process.hrtime.bigint() - (stats.t0 || process.hrtime.bigint())) / 1e6; stats.nItems = items.length;
-		for (const it of items) {
+		const runItems = (items, B) => { for (const it of items) {
 			if (!o.each && best && it.T > best.T + altSlack) break;
 			if (alts && best && it.T > best.T && alts.size >= o.alts) break;
-			if (budget.out) break;
-			if (tEnd && Date.now() > tEnd) { budget.out = true; break; }
+			if (B.out) break;
+			if (tEnd && Date.now() > tEnd) { B.out = true; budget.out = true; break; }
 			if (o.each && solved.has(it.tile)) continue;
 			if (o.each && o.perTile) { const n = (tries.get(it.tile) || 0) + 1; tries.set(it.tile, n); if (n > o.perTile) continue; }
 			// the root cut: THEOREM M from the start
@@ -852,8 +855,18 @@ function createSolver(L, opts = {}) {
 			const ib = { n: Math.min(bud.n, cap), out: false, tEnd };
 			if (ib.n > 0) solveX(x0, vx0, T, it.wins, tube, kMax, I, Hd, emit, ib, wall);
 			bud.n = before - (Math.min(before, cap) - Math.max(ib.n, 0));
-			if (budget.n <= 0) budget.out = true;
-			if (o.debug) o.debug({ T, kind: m.kind, j: m.j, off: m.off, bonk: m.bonk, land: it.land, wins: it.wins, cands: stats.cands - c0, best: best && best.T });
+			if (bud.n <= 0) bud.out = true;
+			if (o.debug) o.debug({ T, kind: m.kind, j: m.j, off: m.off, bonk: m.bonk || (m.l && m.l.bonk), land: it.land, wins: it.wins, cands: stats.cands - c0, best: best && best.T });
+		} };
+		runItems(items, budget);
+		// THE SECOND PASS (the post-landing bonk variants, 4.13): only for a leg the members left unsolved, on the variants' own
+		// node pool and the tier's clock: a leg the members solve costs exactly what it did without the variants
+		if (!best && bonkMembers.length && !o.each && !(tEnd && Date.now() > tEnd)) {
+			const items2 = [];
+			buildItems(bonkMembers, items2);
+			items2.sort((a, b) => a.T - b.T || skOf(a.m) - skOf(b.m));
+			stats.nItems2 = items2.length;
+			runItems(items2, budgetB);
 		}
 		if (o.each) return { ok: solved.size > 0, tool: 'plain', each: Array.from(solved.values()), budgetOut: budget.out };
 		if (!best) return { ok: false, why: budget.out ? 'budget' : 'no plain candidate', tool: 'plain' };
