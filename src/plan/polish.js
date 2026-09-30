@@ -220,6 +220,78 @@ function regionGoal(L, sim) {
 		test: (s) => !s.is_dead && T.tileOf(s, W, H) === tile && X.discKey(s) === dk };
 }
 
+// ---------------------------------------------------------------- THE IDLE SHIFT (a state trick, n5-tricks 3)
+// The clock (the time doors' 1000-tick phase, a key's 500 ticks) runs from the level's start, but the run's timer starts
+// at the first input: idle ticks before it are FREE. A route that RESTS (the ball's state the same tick after tick: waiting
+// for a time door's phase, a key to run out, a gate to shut) for w ticks from tick a can drop d of them and start d ticks
+// later instead: every tick after the rest keeps its absolute clock (the same phases, the same key timers), every tick
+// before it runs d ticks later on the clock; the replay decides (a time door met before the rest may now be shut), and
+// the run is d ticks faster. The cut alone (no shift) is tried too: a rest nothing needed. tools/cmp/tricks3.js: 300 rest
+// ticks next to a time door over the known routes (INFINITE 144, Good Egg 70-75). idleShift(L, masks, o) ->
+// {masks, saved, tries, rests, steps}; o: {deadline, accept(masks, how) (the caller's judge; default: faster and no more
+// deaths than the route), minRest (2), maxRests (48)}
+function idleShift(L, masks0, o = {}) {
+	const t0 = Date.now();
+	const deadline = o.deadline || (t0 + 2000);
+	let cur = masks0, tries = 0;
+	const steps = [];
+	let ev0 = null;
+	const accept = o.accept || ((cand, how) => {
+		const ev = C.evaluate(L, cand, true);
+		if (!ev) return false;
+		if (!ev0) ev0 = C.evaluate(L, cur, true);
+		if (!ev0 || ev.runTicks >= ev0.runTicks || ev.deaths > ev0.deaths || (ev.chance || 1) < (ev0.chance || 1)) return false;
+		steps.push({ how, from: ev0.runTicks, to: ev.runTicks });
+		ev0 = ev;
+		return true;
+	});
+	const minRest = o.minRest > 1 ? o.minRest : 2, maxRests = o.maxRests > 0 ? o.maxRests : 48;
+	// the rests of the route: maximal stretches of ticks whose state hash equals the tick before's
+	const restsOf = (ms) => {
+		const sim = new E.EESim(L), inp = new E.EEInput();
+		sim.reset();
+		let first = -1;
+		for (let t = 0; t < ms.length; t++) if ((ms[t] & 31) !== 0) { first = t; break; }
+		const out = [];
+		let h = sim.stateHashClockBlind(), runA = -1;
+		for (let t = 0; t < ms.length; t++) {
+			E.applyMask(inp, ms[t] & 31);
+			sim.tick(inp);
+			const h2 = sim.stateHashClockBlind();
+			// (tick t took the state at t to the same state at t + 1: a rest tick; only after the first input)
+			if (h2 === h && t > first && !sim.is_dead) { if (runA < 0) runA = t; }
+			else if (runA >= 0) { if (t - runA >= minRest) out.push({ a: runA, w: t - runA }); runA = -1; }
+			h = h2;
+			if (sim.has_silver_crown) break;
+		}
+		return { first, rests: out.sort((x, y) => y.w - x.w).slice(0, maxRests) };
+	};
+	let R = restsOf(cur);
+	const rests0 = R.rests.length;
+	for (let i = 0; i < R.rests.length && Date.now() < deadline; i++) {
+		const { a, w } = R.rests[i];
+		const f = Math.max(0, R.first);
+		// (d = the whole rest, then half of it: a door may need part of the wait)
+		for (const d of [w, Math.ceil(w / 2)]) {
+			if (d < 1 || Date.now() >= deadline) break;
+			const body = cur.subarray(f, a), tail = cur.subarray(a + d);
+			// the shift: d idle ticks more before the first input
+			const shifted = new Uint8Array(f + d + body.length + tail.length);
+			shifted.set(cur.subarray(0, f), 0); shifted.set(body, f + d); shifted.set(tail, f + d + body.length);
+			tries++;
+			if (accept(shifted, `idle shift ${d} (rest at ${a})`)) { cur = shifted; R = restsOf(cur); i = -1; break; }
+			// the cut alone
+			const cut = new Uint8Array(a + tail.length);
+			cut.set(cur.subarray(0, a), 0); cut.set(tail, a);
+			tries++;
+			if (accept(cut, `rest cut ${d} (at ${a})`)) { cur = cut; R = restsOf(cur); i = -1; break; }
+		}
+	}
+	const evA = C.evaluate(L, masks0, true), evB = C.evaluate(L, cur, true);
+	return { masks: cur, saved: evA && evB ? evA.runTicks - evB.runTicks : 0, tries, rests: rests0, steps, ms: Date.now() - t0 };
+}
+const TRICKS_IDLE = (() => { const s = new Set(String(process.env.EEAT_TRICKS || '').split(',').map((x) => x.trim())); return s.has('1') || s.has('all') || s.has('idle'); })();
+
 function polishRoute(L, masks0, o) {
 	o = o || {};
 	const t0 = Date.now();
@@ -242,6 +314,12 @@ function polishRoute(L, masks0, o) {
 		best = ev;
 		return true;
 	};
+	// (a0) THE IDLE SHIFT (EEAT_TRICKS idle; off = the polish before, byte for byte): the route's rests cut, the clock kept by
+	// idle ticks before the first input (free); at most 0.1 of the time
+	if (TRICKS_IDLE && !o.noIdle) {
+		const r = idleShift(L, best.ms, { deadline: Math.min(deadline, Date.now() + 0.1 * ms), accept: (cand, how) => accept(cand, how) });
+		void r;
+	}
 	// (a2) the mutation pass: the classic moves everywhere, exact rejoins combined by DP (a combination the judge refuses:
 	// its shortcuts one at a time, the largest first); passes while they find time and there is time (o.mutShare of it)
 	if (!o.noMutate) {
@@ -620,4 +698,4 @@ function polishLeg(L, start, tail0, goal, o) {
 	return { tail, saved: tail0.length - tail.length, mutated, windows, ms: Date.now() - t0 };
 }
 
-module.exports = { polishRoute, polishLeg, traceRoute, mutatePass, bestShortcutSet, spliceShortcuts, spansOf };
+module.exports = { polishRoute, polishLeg, traceRoute, mutatePass, bestShortcutSet, spliceShortcuts, spansOf, idleShift };
