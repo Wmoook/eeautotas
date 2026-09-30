@@ -94,6 +94,7 @@ const PROFILE_AT = process.env.EEAT_PROFILE_AT === 'early' ? 'early' : 'leg';
 // shorter one in EEAT_PROFILE_TIGHT (0.7) of what is left of the window (0: none, the tier's leg as it is). My level 730c:
 // the tier's 144-tick leg at rung 2 kept the finder from its 105-tick leg (141 vs 104 compiled, 3 of 3 A/Bs))
 const PROFILE_TIGHT = process.env.EEAT_PROFILE_TIGHT !== undefined ? +process.env.EEAT_PROFILE_TIGHT : 0.7;
+const PROFILE_YIELD = process.env.EEAT_PROFILE_YIELD !== undefined ? +process.env.EEAT_PROFILE_YIELD : 4;
 const MSOLVE_SHARE = process.env.EEAT_MSOLVE_SHARE !== undefined ? +process.env.EEAT_MSOLVE_SHARE : 0.2;        // the direct legs' cap
 const MSOLVE_CHAIN_SHARE = process.env.EEAT_MSOLVE_CHAIN !== undefined ? +process.env.EEAT_MSOLVE_CHAIN : 0.3;   // the chains' share, after the primitives
 const MSOLVE_LEGT = +process.env.EEAT_MSOLVE_LEGT || 150;       // the direct leg's horizon (ticks)
@@ -368,6 +369,7 @@ function makeCore(L, co) {
 	const mathSolver = () => MS_ || (MS_ = require('./msolve.js').createSolver(L, { prove: true }));
 	const mathLB = () => MLB_ || (MLB_ = require('../math/lb.js').createMathLB(L));
 	const mY = { dTry: 0, dOk: 0, cTry: 0, cOk: 0 };   // (the math's yield on this level: calls and calls with a leg)
+	const pY = { t: 0, ok: 0 };   // (the profile tier's yield on this level, EEAT_PROFILE=1: calls and calls with a leg)
 	const fieldMs = { n: 0, perTile: 0 };
 	let analysis = null;
 
@@ -635,13 +637,20 @@ function makeCore(L, co) {
 				if (r.ok) for (const a of r.arrivals || []) { const i = idx[a.start]; cands.push({ start: i, tail: Uint8Array.from(a.masks), depth: starts[i].tick - t0 + a.masks.length }); }
 				cands.sort((a, b) => a.depth - b.depth);
 				pst.ok = cands.length > 0;
+				pY.t++; if (pst.ok) pY.ok++;
 				tiers.push(pst);
 				return cands.length ? cands : null;
 			} catch (e) { pst.error = String(e && e.message || e); pst.ms = Date.now() - tP; tiers.push(pst); return null; }
 		};
 		const profileOn = PROFILE_ON() && rung >= PROFILE_RUNG && !allowDeath && !wp.dieField;
+		// (its share follows its yield on the level, as the math's (mathShare) with EEAT_PROFILE_YIELD (4: from its 4th call;
+		// 0: the fixed share): on the 20 failing levels its calls found nothing on most and the fixed 40% cost progress)
+		const profileShare = () => {
+			const b = rung <= 0 ? PROFILE_SHARE0 : PROFILE_SHARE;
+			return PROFILE_YIELD > 0 ? mathShare(b, pY.t, pY.ok, PROFILE_YIELD) : b;
+		};
 		if (profileOn && PROFILE_AT === 'early' && Date.now() < wEnd - 50) {
-			const cands = profileTier(Date.now() + (rung <= 0 ? PROFILE_SHARE0 : PROFILE_SHARE) * (wEnd - Date.now()));
+			const cands = profileTier(Date.now() + profileShare() * (wEnd - Date.now()));
 			if (cands) {
 				const c0 = cands[0];
 				const rP = finishFound(cands, 'profile', [{ start: c0.start, ticks: c0.tail.length, lb: 0, proven: false, tool: 'profile' }], 0);
@@ -905,7 +914,7 @@ function makeCore(L, co) {
 		}
 		// -------- tier P in the finders' place (EEAT_PROFILE_AT=leg, the default; see tier P above)
 		if (profileOn && PROFILE_AT === 'leg' && !found && !exactProof && Date.now() < wEnd - 50) {
-			const cands = profileTier(Date.now() + (rung <= 0 ? PROFILE_SHARE0 : PROFILE_SHARE) * (wEnd - Date.now()));
+			const cands = profileTier(Date.now() + profileShare() * (wEnd - Date.now()));
 			if (cands) {
 				found = { cands, tool: 'profile', proven: false, lbAbs };
 				// (the finders bounded by it: the best-first search for a leg shorter than the tier's, its own first leg)
