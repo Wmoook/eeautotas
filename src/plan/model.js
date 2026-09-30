@@ -325,6 +325,9 @@ function compileModel(L, o = {}) {
 		return [...set].sort((x, y) => x - y);
 	});
 	const deathIdx = process.env.EEAT_GAIN_DEATHS === '1' ? -1 : (fIdx.has('deaths') ? fIdx.get('deaths') : -1);
+	// (the crumbs' part of the gain, only with EEAT_CRUMB_RANK (strategy.js; unset: the states as before, byte for byte))
+	const crumbIdx = /^[12]$/.test(process.env.EEAT_CRUMB_RANK || '') ? feats.map((f, n) => (crumbFeats.has(f) ? n : -1)).filter((n) => n >= 0) : [];
+	const crumbCoins = crumbFeats.has('coins'), crumbBcoins = crumbFeats.has('bcoins');
 	function mkState(vals, taken, btaken, cp = -1) {
 		const dkey = vals.join(',');
 		let pkey = dkey;
@@ -337,7 +340,16 @@ function compileModel(L, o = {}) {
 		if (initV) for (let n = 0; n < vals.length; n++) if (n !== deathIdx && vals[n] !== initV[n]) gain++;
 		if (taken) for (let k = 0; k < taken.length; k++) gain += taken[k];
 		if (btaken) for (let k = 0; k < btaken.length; k++) gain += btaken[k];
-		return { key, dkey, pkey, feats: new FeatObj(vals), vals, taken, btaken, gain, cp };
+		const S = { key, dkey, pkey, feats: new FeatObj(vals), vals, taken, btaken, gain, cp };
+		// (the crumbs' part of the gain (EEAT_CRUMBS=1 levels only): the strategy's anchor order with EEAT_CRUMB_RANK)
+		if (crumbIdx.length) {
+			let cg = 0;
+			if (initV) for (const n of crumbIdx) if (vals[n] !== initV[n]) cg++;
+			if (crumbCoins && taken) for (let k = 0; k < taken.length; k++) cg += taken[k];
+			if (crumbBcoins && btaken) for (let k = 0; k < btaken.length; k++) cg += btaken[k];
+			S.cgain = cg;
+		}
+		return S;
 	}
 	// (the features' getters, each key parsed once: T.featValue parsed it on every read)
 	const getF = feats.map((f) => T.featGetter(f));

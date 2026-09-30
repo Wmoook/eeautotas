@@ -110,6 +110,14 @@ const STALL_S = 60, STALL_MIN_S = 5, STALL_F = 1 / 6;
 const FAIL_TICKS = 200, UCB_C = 100;
 // (THE TIMER's anchor pick: planner.js EEAT_PLAN_TIMER=1)
 const TIMER_PICK = process.env.EEAT_PLAN_TIMER === '1';
+// THE CRUMB RANK (C6 lane 5 block 2; EEAT_CRUMB_RANK, unset = the anchor pick as before, byte for byte): a crumb (a coin
+// no gate reads, model.js EEAT_CRUMBS) is a relay of a long leg, not progress, but its arrival counts as gain (model.js
+// mkState: the coins taken), so the anchors past a crumb outrank every crumb-free anchor of the same real progress and
+// the compile follows the crumb path to the end (Tutorial 2: a blue coin 101 walk steps off its way taken from the level
+// start, every later anchor past it; the first route 5,022-6,069 run ticks vs 2,901-3,266 with the crumbs off, the direct
+// checkpoint leg found at rung 2). EEAT_CRUMB_RANK=1: once a route is known, the pick's gain leaves the crumbs out (the
+// crumb plans already stop there, planner.js); =2: always (the crumbs' own anchors by the score alone).
+const CRUMB_RANK = process.env.EEAT_CRUMB_RANK === '1' ? 1 : process.env.EEAT_CRUMB_RANK === '2' ? 2 : 0;
 const ARRIVALS_K = 4, MAX_DEEPEN = 4, STEER_MISS = 6000;
 // the polish's share of the budget once a route is known: min(POLISH_MS, POLISH_F x the budget)
 const POLISH_MS = 15000, POLISH_F = 0.25;
@@ -579,6 +587,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 	let extBound = Number.isFinite(+opts.bound) && +opts.bound > 0 ? +opts.bound : Infinity;
 	let best = null;   // {masks, ticks, runTicks, deaths, chance, legs, how}
 	const runBound = () => Math.min(best ? best.runTicks : Infinity, extBound);
+	// (the anchor pick's gain: EEAT_CRUMB_RANK leaves the crumbs' part out (1: once a route is known, 2: always))
+	const pickGain = CRUMB_RANK ? (A) => (A.S && A.S.cgain > 0 && (CRUMB_RANK === 2 || best) ? A.gain - A.S.cgain : A.gain) : (A) => A.gain;
 	const gapOf = (rt) => (Number.isFinite(rt) ? Math.max(0, rt - LB) : null);
 	/** a route (masks that finish): C.evaluate'd; the best when faster (run ticks, then ticks) -> {ev, better} | null */
 	const routeOf = (masks, how, legId) => {
@@ -880,7 +890,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		// (the most progress first, then the lowest plan cost + the arrival tick; THE TIMER (planner.js, EEAT_PLAN_TIMER=1): an
 		// anchor with no plan in its timed killer's time and no remover in time (a LATE anchor) after the others, whatever its gain)
 		const lateOf = (A) => (TIMER_PICK && A.plans && A.plans.late ? 1 : 0);
-		const list = live.filter((A) => !A.exhausted).sort((a, b) => (lateOf(a) - lateOf(b)) || (b.gain - a.gain) || (scoreOf(a, N) - scoreOf(b, N)));
+		const list = live.filter((A) => !A.exhausted).sort((a, b) => (lateOf(a) - lateOf(b)) || (pickGain(b) - pickGain(a)) || (scoreOf(a, N) - scoreOf(b, N)));
 		for (const A of list) {
 			if (left() < 200 || stopped) return null;
 			const { plans, why } = planOfAnchor(A);
@@ -1203,7 +1213,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	const fallbackJob = () => {
 		if (anchors.size !== fallbackAnchors) { fallbackAnchors = anchors.size; fallbacks = 0; }
 		if (fallbacks >= FALLBACK_MAX || stopped || left() < 1000) return null;
-		const list = [...anchors.values()].filter((A) => A.arrivals.length && !uselessA(A)).sort((a, b) => b.gain - a.gain || a.firstTick - b.firstTick);
+		const list = [...anchors.values()].filter((A) => A.arrivals.length && !uselessA(A)).sort((a, b) => pickGain(b) - pickGain(a) || a.firstTick - b.firstTick);
 		for (const A of list) {
 			for (let r = 0; r < rungMs.length; r++) {
 				const step = { n: 0, edge: `fallback:trophy:${A.key}`, nodeClass: `f${A.key}`, rung: r, synthetic: true, fallback: true, estTicks: 0, waypoint: { kind: 'trophy', label: 'trophy (fallback: no plan left)' } };
