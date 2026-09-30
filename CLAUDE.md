@@ -508,7 +508,7 @@ ways in.
   the planner's plans' first step run by `exec.reach` (arrivals replayed from the level start), a finish sooner the new
   incumbent (C.evaluate + the acceptance rule); (2) the polish with the route's JOINS as its window marks (`joinTicks`;
   the compile passed its leg objects, which polish.js reads as tick marks: none). In the compile (strategy.js): once a route
-  is known min(20 s, 0.25 x the budget) is kept for it (half order, half polish), a route over `EEAT_PROVE_MAX` (300) run
+  is known min(20 s, 0.25 x the budget) is kept for it (a quarter order, three quarters polish: EEAT_PERFECT_POLISH), a route over `EEAT_PROVE_MAX` (300) run
   ticks skips the prove stage (its exact search from the start proved none of the 24 compiled routes and took 10-30 s of the
   polish's time) and the polish takes what is left. THE MEASURE (box 5, the pass offline on the final compile's 24 routes,
   45 s each, `--workers=2`, `tools/perf/perfect.js`; every result replayed): 17 of 24 faster, 64,381 -> 61,931 run ticks,

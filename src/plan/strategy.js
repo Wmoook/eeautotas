@@ -71,8 +71,9 @@ const PERFECT_MS = +process.env.EEAT_PERFECT_MS || 20000, PERFECT_F = 0.25;
 // Space (30 s)); a longer route's prove reserve goes to the polish, whose time is the route's best return once it exists
 // (the pass offline, 16 s of polish at the joins on the final compile's routes: The Blank Page 3,190 -> 2,466, Trick Or
 // Treat 5,035 -> 4,424, whose compiles had 0.2 / 5.7 s of polish); the perfect stage's own share of its reserve for the
-// polish: PERFECT_POLISH)
-const PROVE_MAX_TICKS = +process.env.EEAT_PROVE_MAX || 300, PERFECT_POLISH = 0.5;
+// polish: PERFECT_POLISH, 0.75: on the 24 routes the order pass's 29 s gave 195 ticks in all and the polish's 16 s 2,255
+// (0.28 vs 5.9 ticks a second); Tutorial 1 with the whole 45 s on the polish 2,441 -> 2,267, with 29 + 16 s 2,374)
+const PROVE_MAX_TICKS = +process.env.EEAT_PROVE_MAX || 300, PERFECT_POLISH = +process.env.EEAT_PERFECT_POLISH || 0.75;
 // the exact landing (precision.js): a trophy leg's nearest state within PREC_NEAR tiles (the goal field's), at most
 // PREC_RUNS runs a compile of at most PREC_S s (at least PREC_MIN_S left), its PREC_ATTEMPTS nearest attempts
 const PREC_NEAR = 8, PREC_RUNS = 3, PREC_S = 40, PREC_MIN_S = 6, PREC_ATTEMPTS = 8;
