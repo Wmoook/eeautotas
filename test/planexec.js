@@ -441,7 +441,7 @@ async function chainOfRoute(e, budget, polishMs) {
 			// (--chainRetry: the failed leg once more from the ROUTE's own state at the leg's start, the same budget: ok there
 			// = the chain's arrivals are the problem (which state the legs before kept), not the leg; the states side by side)
 			if (args.chainRetry) {
-				const stOf = (m) => { const q = T.playTo(L, m); const s = q.sim; return s ? { t: m.length, x: +s.x.toFixed(2), y: +s.y.toFixed(2), vx: +s.speed_x.toFixed(2), vy: +s.speed_y.toFixed(2) } : null; };
+				const stOf = (m) => { const q = T.playTo(L, m); const s = q.sim; return s ? { t: m.length, x: +s.px.toFixed(2), y: +s.py.toFixed(2), vx: +s.speed_x.toFixed(2), vy: +s.speed_y.toFixed(2) } : null; };
 				const rr = await ex.reach([{ masks: tr.masks.subarray(0, legStart) }], wp, { ms: b, level: 1 });
 				retry = { ok: rr.ok, tool: rr.tool, ticks: rr.ok ? Math.min(...rr.arrivals.map((a) => a.masks.length)) - legStart : -1, legTicks, route: stOf(tr.masks.subarray(0, legStart)),
 					starts: starts.slice(0, 6).map((a) => stOf(typeof a.masks === 'string' ? T.masksOf(a.masks) : a.masks)), nStarts: starts.length, feat: o.feat };
