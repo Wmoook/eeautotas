@@ -64,7 +64,7 @@ function checkRoute(entry) {
 	sim.reset();
 	const swSig = (m) => { let s = ''; for (const [k, v] of m) if (v === true) s += k + ','; return s; };
 	const sig = () => `${sim._keysMask}|${sim.coins}|${sim.blue_coins}|${sim.team}|${sim.is_invulnerable ? 1 : 0}|${sim._collide_crown ? 1 : 0}|${sim.deaths}|${sim.checkpoint.x},${sim.checkpoint.y}|${swSig(sim._switches)}|${swSig(sim._oswitches)}`;
-	let R = M.stateOf(sim), P = R, sg = sig();
+	let R = M.stateOf(sim), P = R, sg = sig(), pend = null;
 	let lastStart = -1;
 	let evTick = 0, evTile = T.tileOf(sim, W, H), evR = R;   // the last change of R (bound check)
 	const gateTiles = [];
@@ -128,8 +128,18 @@ function checkRoute(entry) {
 		for (let c = 0; c < 6; c++) if (sim._kt[c] !== kt[c]) { if (lastKeyOn[c] >= 0 && (sim._keysMask >> c) & 1) hit(`key ${c} timer refreshed by a re-touch (model: no timers)`, { tick, tile: [tile % W, (tile / W) | 0], sinceOn: tick - lastKeyOn[c] }); lastKeyOn[c] = tick; kt[c] = sim._kt[c]; }
 		// (1) state
 		const s2 = sig();
+		const Rbefore = R;
 		if (s2 !== sg) { R = M.stateOf(sim); sg = s2; }
 		else if (touched && (touched.kind === 'coin' || touched.kind === 'bcoin')) R = M.stateOf(sim);
+		// (1b) the model's pendingOf (newer model.js): the state a deferred change will make, checked when the retry lands
+		if (typeof M.pendingOf === 'function') {
+			if (pend && R !== Rbefore && R.dkey !== Rbefore.dkey) {
+				const lands = sim._tileQueue.length + sim._stateQueue.length + sim._keysQueue.length === 0;
+				if (lands) hit(R.dkey === pend.dkey ? 'pendingOf: predicted the deferred change exactly' : 'pendingOf: the deferred change landed differently', { tick, P: pend.dkey.slice(0, 80), R: R.dkey.slice(0, 80) });
+			}
+			pend = M.pendingOf(sim, R);
+			if (pend && pend.dkey === R.dkey) pend = null;
+		}
 		if (P.key !== R.key) {
 			const q1 = sim._tileQueue.length + sim._stateQueue.length + sim._keysQueue.length + (sim._team_tx !== -1 ? 1 : 0);
 			const why = [];
