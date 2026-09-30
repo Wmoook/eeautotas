@@ -59,6 +59,11 @@ const FXSTATE = () => process.env.EEAT_FXSTATE === '1';
 const FX_IDS = new Set([417, 418, 419, 453, 461, 1517]);
 const FX_DEF = { 417: 0, 418: 0, 419: 0, 453: 0, 461: 1, 1517: 0 };
 const fxValue = (id, v) => (id === 418 || id === 453 ? (v !== 0 ? 1 : 0) : v);
+// (a WEAKER effect: fewer jumps, a lower jump / speed boost, fly or low gravity off; a gravity direction is no order. A
+// touch that only weakens the ball (an effect of a weaker value, an effect reset without protection) is exact in the
+// state but no plan edge: the planner's near plans took 'effect 461=0' (no jump at all) on Tutorial 4 and planned from a
+// ball that cannot jump)
+const fxWeaker = (id, v, cur) => (id === 1517 || cur === undefined ? false : v < cur);
 const KEY_NAMES = ['red', 'green', 'blue', 'cyan', 'magenta', 'yellow'];
 
 /** admissible ticks for D walk steps (8-way, a portal hop's entry step free) */
@@ -362,8 +367,9 @@ function compileModel(L, o = {}) {
 		if (X.kind === 'cp') return cpTracked && S.cp !== X.id ? { S2: mkState(S.vals, S.taken, S.btaken, X.id), changed: true, expect: null } : { S2: S, changed: false, expect: null };
 		if (!X.relevant || X.kind === 'trophy' || (X.kind === 'fx' && typeof X.param !== 'string')) return { S2: S, changed: false, expect: null };
 		const vals = S.vals.slice();
-		let taken = S.taken, btaken = S.btaken, expect = null;
+		let taken = S.taken, btaken = S.btaken, expect = null, weak = false;
 		const setF = (f, v) => { const n = fIdx.get(f); if (n === undefined) return; vals[n] = v; };
+		const getF0 = (f) => { const n = fIdx.get(f); return n === undefined ? undefined : S.vals[n]; };
 		const getF = (f) => { const n = fIdx.get(f); return n === undefined ? undefined : vals[n]; };
 		switch (X.kind) {
 			case 'key': { const f = X.feat; if (getF(f) !== 1) { setF(f, 1); expect = { feat: f, value: 1 }; } break; }
@@ -377,12 +383,14 @@ function compileModel(L, o = {}) {
 			case 'prot': if (getF('prot') !== X.param) { setF('prot', X.param); expect = { feat: 'prot', value: X.param }; } break;
 			case 'reset': {
 				if (getF('prot') === 1) { setF('prot', 0); expect = { feat: 'prot', value: 0 }; }
+				// (the effects back at their defaults: a WEAK touch when nothing else changes (no plan edge: planner.js))
+				else weak = true;
 				for (const [id, f] of fxFeat) { const d = FX_DEF[id]; if (getF(f) !== d) { setF(f, d); if (!expect) expect = { feat: f, value: d }; } }
 				break;
 			}
 			case 'fx': {
 				const p = String(X.param).split(':'), id = +p[0], f = X.feat, v = fxValue(id, +p[1]);
-				if (getF(f) !== undefined && getF(f) !== v) { setF(f, v); expect = { feat: f, value: v }; }
+				if (getF(f) !== undefined && getF(f) !== v) { setF(f, v); expect = { feat: f, value: v }; weak = fxWeaker(id, v, getF0(f)); }
 				break;
 			}
 			case 'crown': if (getF('crown') !== 1) { setF('crown', 1); expect = { feat: 'crown', value: 1 }; } break;
@@ -403,7 +411,7 @@ function compileModel(L, o = {}) {
 			default: break;
 		}
 		if (!expect) return { S2: S, changed: false, expect: null };
-		return { S2: mkState(vals, taken, btaken, S.cp), changed: true, expect };
+		return weak ? { S2: mkState(vals, taken, btaken, S.cp), changed: true, expect, weak: true } : { S2: mkState(vals, taken, btaken, S.cp), changed: true, expect };
 	}
 	/** the untaken tiles of a coin trigger in S (all tiles for another kind) */
 	function liveTiles(S, X) {

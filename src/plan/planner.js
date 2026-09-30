@@ -514,7 +514,7 @@ function createPlanner(model, facts, o = {}) {
 			for (const t of live) if (dL[t] < sL) sL = dL[t];
 			if (sL >= INF && !dvL) continue;
 			const tr = model.touch(S, X);
-			if (!tr.changed) continue;
+			if (!tr.changed || tr.weak) continue;
 			finish(X, live, 'trig:' + X.id, tr);
 		}
 		finish(null, trophyTiles, 'trophy', null);
