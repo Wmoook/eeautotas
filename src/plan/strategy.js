@@ -56,6 +56,24 @@ const RUNG_MS = [1500, 5000, 15000, 45000];
 const OS_ON = process.env.EEAT_ONESHOT === '1';
 const OS_SHARE = process.env.EEAT_OS_SHARE !== undefined ? +process.env.EEAT_OS_SHARE : 0.3;
 const OS_SLICE = process.env.EEAT_OS_SLICE !== undefined ? +process.env.EEAT_OS_SLICE : 100;
+// (THE ONE SHOT IN ITS OWN THREAD, the default with EEAT_ONESHOT=1 and a level file: src/plan/oneshot/osworker.js builds
+// its own model / bounds / planner from the file and runs the A* from the compile's start to its end, in parallel with the
+// executor, which keeps its workers and the main thread all their time (the main-thread mode above ran the A* for OS_SHARE
+// of the moves' time before the executor's first step). Its routes and first nodes per abstract state arrive as mask
+// strings (routeOf / addArrival here, as the main-thread harvest); the executor's new anchors and every better route go to
+// it (inject: a route is its bound: its ladder then searches only for faster ones). EEAT_OS_THREAD=0: the main-thread mode.)
+const OS_THREAD = process.env.EEAT_OS_THREAD !== '0';
+const OS_DRAIN_MAX = 64;   // the thread's arrivals replayed here per loop turn at most (the rest wait for the next turn)
+// (THE GATE: the thread's arrivals are held until the executor needs them: its first stall (the watchdog's) or its end
+// ('exhausted' / nothing left: the loop's hold) with no route; from then on they go to it as they come. Given at once, the
+// one shot's first arrivals (the greedy phase's: not the fewest ticks) became the executor's anchors and its routes were
+// built on them: the 40-level A/B's first 15, routes slower on 8 of 12 both-compiled levels, 6 of them with the one shot's
+// arrival as the first leg. EEAT_OS_GATE=0: at once.)
+const OS_GATE = process.env.EEAT_OS_GATE !== '0';
+// (the gate also opens with no route when the executor has made no new anchor for OS_OPEN_F of the budget (at least
+// OS_OPEN_MIN_S), or past OS_OPEN_HALF of the budget: the CEGAR's facts keep changing on a level the executor cannot pass, so
+// its watchdog's stall never comes there)
+const OS_OPEN_F = 0.2, OS_OPEN_MIN_S = 10, OS_OPEN_HALF = 0.5;
 const REPLAN_FIRST = process.env.EEAT_REPLAN_FIRST === '1';
 const PROGRESS_MS = 2000, WATCH_MS = 2000, SAVE_MS = 60000;
 // the watchdog's window: STALL_F of the budget, at least STALL_MIN_S, at most STALL_S
@@ -302,6 +320,30 @@ async function compile(L, opts = {}, emit = () => {}) {
 
 	// ---- the parts
 	const parts = partsOf(opts, say);
+	// ---- THE ONE SHOT's thread (OS_ON + OS_THREAD, a level file, the real parts): started first, it builds its own parts
+	let osw = null, osStats = null, osReady = null, osErr = '', osThreadDone = false, osOpen = !OS_GATE, osReleased = 0, osWantOpen = '';
+	const osQ = [];
+	const osPending = new Map();   // (the gate) abstract state key -> the one shot's soonest arrival's masks, held
+	if (OS_ON && OS_THREAD && opts.file && !opts.parts) {
+		try {
+			const { Worker } = require('worker_threads');
+			osw = new Worker(path.join(__dirname, 'oneshot', 'osworker.js'), { workerData: { file: path.resolve(String(opts.file)), graph: process.env.EEAT_OS_GRAPH === '1', graphThreads: 1, cache: process.env.EEAT_OS_CACHE || null } });
+			osw.on('message', (m) => {
+				if (!m || typeof m !== 'object') return;
+				if (m.type === 'route' || m.type === 'arr') osQ.push(m);
+				else if (m.type === 'stats') { osStats = m.stats; osThreadDone = !!m.done; }
+				else if (m.type === 'ready') { osReady = m; say({ ev: 'oneshot', what: 'ready', ms: m.ms, setupMs: m.setupMs }); }
+				else if (m.type === 'error') { osErr = String(m.error || '').split('\n')[0]; say({ ev: 'warning', text: `the one shot's thread: ${osErr}` }); }
+			});
+			osw.on('error', (e) => { osErr = String(e && e.message || e); say({ ev: 'warning', text: `the one shot's thread: ${osErr}` }); });
+			osw.unref();   // (a compile that ends another way never waits for it)
+		} catch (e) { osw = null; say({ ev: 'warning', text: `the one shot's thread could not start (${e.message})` }); }
+	}
+	/** a real state (masks from the level start: an executor anchor, a route) into the one shot (its thread or its object) */
+	const osInject = (masks, why) => {
+		if (osw) { try { osw.postMessage({ type: 'inject', masks: typeof masks === 'string' ? masks : T.strOf(masks), why }); return true; } catch (e) { return false; } }
+		return false;
+	};
 	let tm = Date.now();
 	const model = await parts.compileModel(L, { file: opts.file, seed: opts.seed });
 	const nTrig = cnt(model.triggers), nFeat = cnt(model.feats), nGate = cnt(model.gates !== undefined ? model.gates : model.doors);
@@ -481,6 +523,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 		say({ ev: 'result', kind: 'finish', ticks: ev.complete, runTicks: ev.runTicks, deaths: ev.deaths, chance: ev.chance, how, lb: LB, gap: gapOf(ev.runTicks), inputs: T.strOf(ev.ms) });
 		if (out) { try { C.writeEetas(path.join(out, 'route.eetas'), ev.ms); } catch (e) { /* read-only */ } }
 		lastProgress = Date.now();
+		// (the one shot's thread: every better route of another tool is its bound)
+		if (osw && how !== 'the one shot') osInject(ev.ms, 'route');
 		return { ev, better: true };
 	};
 
@@ -880,6 +924,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 					news++;
 					// (the one shot: the exact fallback's leg into its graph)
 					if (os) { try { if (os.inject(a.masks, 'exec')) osInjected++; } catch (e) { /* the one shot's own */ } }
+					else if (osw && osInject(a.masks, 'exec')) osInjected++;
 					const d = distOf(sim);
 					say({ ev: 'source', kind: 'room', room: a.room, desc: a.desc, key: B.key, gain: 1, tick: a.tick, ...(d !== undefined ? { dist: Math.round(d * 10) / 10 } : {}), inputs: T.strOf(a.masks), anchor: B.id, label: labelOf(step) });
 					if (steer) say({ ev: 'closest', dist: Math.round(distOf(sim) * 10) / 10, tick: a.tick, inputs: T.strOf(a.masks), anchor: B.id });
@@ -1074,6 +1119,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 			if (stalls === 1) deepen('stall');
 			else { const j = exploreJob(); if (j) exploreQ.push(j); }
 			lastProgress = now;
+			if (osw && !best && !osWantOpen) osWantOpen = 'stall';   // (the one shot's gate: opened at the loop's next turn)
 		}
 	};
 	const timers = [setInterval(progress, progressMs), setInterval(watchdog, watchMs), setInterval(saveFiles, SAVE_MS)];
@@ -1094,28 +1140,73 @@ async function compile(L, opts = {}, emit = () => {}) {
 
 	// ---- the one shot's harvest (OS_ON): its route, and the first node of every abstract state it reached as an anchor
 	let os = null, osDone = false, osBestT = Infinity, osAnchors = 0, osInjected = 0;
-	const osSeen = new Set();
+	const osSeen = new Map();   // abstract state key -> the ticks of the one shot's arrival taken
+	/** a route of the one shot (masks from the level start): verified by routeOf, the best when faster */
+	const osRoute = (masks, ticks) => {
+		if (!(ticks < osBestT)) return;
+		osBestT = ticks;
+		const lid = addLeg({ label: 'the one shot', fromTick: 0, ticks: masks.length, lb: null, proven: false, tool: 'oneshot', prev: null });
+		routeOf(masks, 'the one shot', lid);
+	};
+	/** the first node of an abstract state the one shot reached: replayed, an anchor (addArrival) */
+	const osArrival = (key, masks) => {
+		// (a state seen before only again with a sooner arrival: the thread sends one when its A* finds it)
+		const had = osSeen.get(key);
+		if (had !== undefined && !(masks.length < had)) return;
+		osSeen.set(key, masks.length);
+		if (!masks.length) return;
+		const r = replay(masks, null, false);
+		if (r.dead >= 0 || r.finished >= 0) return;
+		const a = Object.assign(T.arrivalOf(L, r.sim, masks, RM), { run: r.run, leg: addLeg({ label: 'the one shot', fromTick: 0, ticks: masks.length, lb: null, proven: false, tool: 'oneshot', prev: null }) });
+		let S2;
+		try { S2 = model.stateOf(r.sim); } catch (e) { return; }
+		const res = addArrival(a, S2, anchors.get(String(S0.key)), 'the one shot');
+		if (res.isNew) { osAnchors++; say({ ev: 'source', kind: 'room', room: a.room, desc: a.desc, key: res.anchor.key, gain: 1, tick: a.tick, inputs: T.strOf(a.masks), anchor: res.anchor.id, label: 'the one shot' }); }
+	};
 	const osHarvest = () => {
+		if (osw) {
+			// (the gate: the watchdog saw a stall with no route)
+			if (osWantOpen && !osOpen && !best) osRelease(osWantOpen);
+			// (the thread's messages: its routes at once, its arrivals OS_DRAIN_MAX a turn)
+			let n = 0;
+			const q = osQ.splice(0, osQ.length), keep = [];
+			for (const m of q) {
+				if (m.type === 'route') osRoute(T.masksOf(m.masks), m.ticks);
+				else if (!osOpen) { const k = String(m.key), had = osPending.get(k); if (!had || m.masks.length < had.length) osPending.set(k, m.masks); }
+				else if (n < OS_DRAIN_MAX) { n++; osArrival(String(m.key), T.masksOf(m.masks)); }
+				else keep.push(m);
+			}
+			for (const m of keep) osQ.push(m);
+			return;
+		}
 		if (!os) return;
 		const b = os.best();
-		if (b && b.masks && b.ticks < osBestT) {
-			osBestT = b.ticks;
-			const lid = addLeg({ label: 'the one shot', fromTick: 0, ticks: b.masks.length, lb: null, proven: false, tool: 'oneshot', prev: null });
-			routeOf(b.masks, 'the one shot', lid);
-		}
-		const A0 = anchors.get(String(S0.key));
-		for (const x of os.arrivals()) {
-			if (osSeen.has(x.key)) continue;
-			osSeen.add(x.key);
-			if (!x.masks.length) continue;
-			const r = replay(x.masks, null, false);
-			if (r.dead >= 0 || r.finished >= 0) continue;
-			const a = Object.assign(T.arrivalOf(L, r.sim, x.masks, RM), { run: r.run, leg: addLeg({ label: 'the one shot', fromTick: 0, ticks: x.masks.length, lb: null, proven: false, tool: 'oneshot', prev: null }) });
-			let S2;
-			try { S2 = model.stateOf(r.sim); } catch (e) { continue; }
-			const res = addArrival(a, S2, A0, 'the one shot');
-			if (res.isNew) { osAnchors++; say({ ev: 'source', kind: 'room', room: a.room, desc: a.desc, key: res.anchor.key, gain: 1, tick: a.tick, inputs: T.strOf(a.masks), anchor: res.anchor.id, label: 'the one shot' }); }
-		}
+		if (b && b.masks && b.kind !== 'inj') osRoute(b.masks, b.ticks);
+		for (const x of os.arrivals()) osArrival(x.key, x.masks);
+	};
+	/** the gate opens (the executor stalled or has nothing left, no route): the held arrivals go to it (addArrival), and
+	 *  every later one as it comes */
+	const osRelease = (why) => {
+		if (!osw || osOpen) return;
+		osOpen = true;
+		const n0 = anchors.size;
+		for (const [k, s] of osPending) osArrival(k, T.masksOf(s));
+		osReleased = osPending.size;
+		osPending.clear();
+		say({ ev: 'oneshot', what: 'gate', why, arrivals: osReleased, anchors: anchors.size - n0 });
+	};
+	/** the executor has nothing left to run and would end: while the one shot's thread still searches (no route yet, time
+	 *  left) the loop waits a turn for its anchors / route instead (-> true: go on) */
+	const osHold = async () => {
+		if (!osw || best || stopped) return false;
+		const n0 = anchors.size;
+		osRelease('the executor has nothing left');
+		if (anchors.size !== n0) { nothingSince = -1; return true; }   // (the held arrivals: new anchors, the planner's jobs again)
+		if (osThreadDone || osErr || left() <= 1000) return false;
+		await new Promise((res) => { const tt = setTimeout(res, 250); if (tt.unref) tt.unref(); });
+		osHarvest();
+		if (anchors.size !== n0) nothingSince = -1;   // (new anchors: the planner's jobs again)
+		return true;
 	};
 
 	// ---- MOVES: the parts that move (the primitives, the executor), then the loop
@@ -1131,8 +1222,10 @@ async function compile(L, opts = {}, emit = () => {}) {
 		throw e;
 	}
 	say({ ev: 'start', triggers: nTrig, feats: nFeat, workers, inflight: P, prims: !!prims, bounds: !!bounds, lb: LB, seconds, partsMs: Date.now() - tMoves });
-	// ---- THE ONE SHOT (EEAT_ONESHOT=1): the moves' first tier (OS_ON above)
-	if (OS_ON) {
+	// ---- THE ONE SHOT (EEAT_ONESHOT=1): the moves' first tier (OS_ON above); in its thread (osw) it runs already: its
+	// messages so far harvested here and at every turn of the loop
+	if (osw) osHarvest();
+	else if (OS_ON) {
 		const tO = Date.now();
 		try {
 			const OSM = require('./oneshot/solve.js');
@@ -1164,6 +1257,12 @@ async function compile(L, opts = {}, emit = () => {}) {
 			if (best && left() <= endRes() && !inflight.size) { end = 'time'; break; }
 			if (anchors.size !== anchorsSeen || best !== bestSeen) { anchorsSeen = anchors.size; bestSeen = best; progressAt = Date.now(); }
 			if (stallEnd && Date.now() - progressAt > stallEnd) { end = 'stalled'; break; }
+			if (osw && !osOpen && !best && !osWantOpen) {
+				// (the gate with no route: no new anchor for a while, or half the budget gone)
+				if (Date.now() - progressAt > Math.max(OS_OPEN_MIN_S, OS_OPEN_F * seconds) * 1000) osWantOpen = 'no new anchor';
+				else if (secNow() > OS_OPEN_HALF * seconds) osWantOpen = 'half the budget';
+			}
+			if (osw) osHarvest();   // (the one shot's thread: its routes and new anchors before the next jobs are picked)
 			while (inflight.size < P && !(best && left() <= endRes())) {
 				const job = exploreQ.length ? exploreQ.shift() : nextJob();
 				if (!job) break;
@@ -1180,15 +1279,15 @@ async function compile(L, opts = {}, emit = () => {}) {
 				// fallbacks (a direct trophy step, then the frontier) while time is left; else the end)
 				if (exploreQ.length) continue;
 				if (left() < 250 || (best && left() <= endRes())) { end = 'time'; break; }
-				if (nothingSince >= 0 && nothingSince === steps) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } end = 'exhausted'; break; }
+				if (nothingSince >= 0 && nothingSince === steps) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } if (osw && await osHold()) continue; end = 'exhausted'; break; }
 				nothingSince = steps;
 				// (a deepening refused for the clock alone (its doubled first rung past the time left) is no exhaustion: the
 				// end is the time's, not a claim that no plan is left (The Flighty Slighty, The Tunnels, Fish Gods, OCTOS:
 				// "end exhausted" 1-5 s before the 60-s budget; every level is possible))
-				if (!deepen('exhausted')) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } end = deepenings < maxDeepen ? 'time' : 'exhausted'; break; }
+				if (!deepen('exhausted')) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } if (osw && await osHold()) continue; end = deepenings < maxDeepen ? 'time' : 'exhausted'; break; }
 				continue;
 			}
-			if (os && !osDone && !stopped && !(best && left() <= endReserve)) {
+			if (osw) { /* (the thread runs on its own) */ } else if (os && !osDone && !stopped && !(best && left() <= endReserve)) {
 				// (the one shot's slice while the workers run the steps in flight)
 				try { const r = os.run(Math.min(OS_SLICE, Math.max(0, left() - endReserve - 50)), { stop: () => stopped }); osDone = r.done; osHarvest(); } catch (e) { bug('oneshot', { error: e.message }); os = null; }
 			}
@@ -1204,6 +1303,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	} finally {
 		for (const tt of timers) clearInterval(tt);
 	}
+	if (osw) osHarvest();   // (the one shot's thread: what arrived during the last turn)
 	const legTools = (lg) => { const c = {}; for (const g of lg) c[g.tool || '?'] = (c[g.tool || '?'] || 0) + 1; return c; };
 	{
 		const lg = best ? best.legs : [];
@@ -1378,6 +1478,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	// compile ended there: the 300-s runs of THE REST ended at 284.5 s on Tutorial 1 (its repolish round had just saved 134
 	// ticks in 16 s, the proof took 0.5 s) and at 282-300 s elsewhere. Not after a proof (the route is optimal).
 	// EEAT_POLISH_LAST=0: off.
+	if (osw) osHarvest();   // (a faster route of the one shot's thread meanwhile: polished below like any)
 	if (best && polishOn && POLISH_REST && process.env.EEAT_POLISH_LAST !== '0' && !proveProof && !stopped && left() - 300 > REST_MIN_MS) {
 		tm = Date.now();
 		const notes = [];
@@ -1390,6 +1491,17 @@ async function compile(L, opts = {}, emit = () => {}) {
 		}
 		if (saved > 0) stage('lastpolish', Date.now() - tm, `-${num(saved)} ticks in ${notes.length} round${notes.length === 1 ? '' : 's'} (${notes.join('; ')})`);
 		else say({ ev: 'lastpolish', ms: Date.now() - tm, text: notes.join('; ') || 'no gain' });
+	}
+	// ---- the one shot's thread: told to stop, its last messages taken (a faster route verified by routeOf), ended
+	if (osw) {
+		tm = Date.now();
+		try { osw.postMessage({ type: 'stop' }); } catch (e) { /* gone */ }
+		await new Promise((res) => { const tt = setTimeout(res, 1500); osw.once('exit', () => { clearTimeout(tt); res(); }); });
+		const b0 = best;
+		osHarvest();
+		try { await osw.terminate(); } catch (e) { /* ended */ }
+		const s = osStats || {};
+		stage('oneshot', Date.now() - tm, `${Number.isFinite(osBestT) ? `its route ${num(osBestT)} ticks${best && best !== b0 ? ' (the best: taken at the end)' : ''}` : 'no route'}${s.closedLevel >= 0 ? `, closed at ladder step ${s.closedLevel}` : ''}, ${num(s.expanded || 0)} expanded, ${num(s.nodes || 0)} nodes, ${s.states || 0} states, ${osAnchors} anchors given, ${osInjected} injected${OS_GATE ? `, the gate ${osOpen ? `opened (${osReleased} held arrivals)` : `shut (${osPending.size} arrivals held)`}` : ''}${osErr ? `, error: ${osErr}` : ''}`);
 	}
 
 	// ---- the bound again (the planner's facts may have raised it), the report
@@ -1425,7 +1537,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	saveFiles();
 	return { ok: !!best, masks: best ? best.masks : null, route: best ? best.masks : null, runTicks: best ? best.runTicks : null, ticks: best ? best.ticks : null, deaths: best ? best.deaths : null, chance: best ? best.chance : null,
 		lb: LB, lbComplete, lbProof, gap: best ? gapOf(best.runTicks) : null, legs: best ? best.legs : [], stages, known, why, end, anchors: anchors.size, steps, okSteps, bugs, deepenings, stalls, bnbPlans, bnbArrivals, relayRuns, relaySet, relayDrop, exec: execStats,
-		...(OS_ON ? { oneshot: os ? Object.assign(os.stats(), { anchorsGiven: osAnchors, injected: osInjected, routeTicks: Number.isFinite(osBestT) ? osBestT : null, how: best ? best.how : null }) : null } : {}) };
+		...(OS_ON ? { oneshot: os || osw ? Object.assign(os ? os.stats() : Object.assign({}, osStats || {}), { thread: !!osw, readyMs: osReady ? osReady.ms : null, error: osErr || null, gate: osw && OS_GATE ? (osOpen ? 'open' : 'shut') : null, released: osReleased, held: osPending.size, anchorsGiven: osAnchors, injected: osInjected, routeTicks: Number.isFinite(osBestT) ? osBestT : null, how: best ? best.how : null }) : null } : {}) };
 }
 
 /** run(L, opts, emit): the compile loop as a Find a route strategy (src/plan.js): 300 s by default, the source events'
