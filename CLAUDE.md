@@ -556,7 +556,14 @@ ways in.
   6 s (the standalone corridor 21 -> 28 of the same 55 at 20 s). THE PORTFOLIO (n5-s99-portfolio's portfolio.js with this
   corridor: `EEAT_CORR_FIELDS=1` is the corridor's own default for every caller; tools/lab/portfolio_chain.js arm port, the
   1,123 chains, 5 s, box 5 loaded): 85.7% -> 87.2% (its plan gives the corridor 0.2-0.25 of the budget, the backward
-  solver's legs 908 of 962; the corridor with the pass alone at 5 s: 87.9% on box 6).
+  solver's legs 908 of 962; the corridor with the pass alone at 5 s: 87.9% on box 6). From the later starts (hit-300 /
+  hit-120, 74 legs) `EEAT_CORRIDOR=1` 62 vs the wide config 63, T / route median 1.017 -> 1.000 (hit-300 1.117 -> 1.003),
+  found in 2.7 s vs 7.1 s median. THE WIDE CONFIG IN THE COMPILE (`EEAT_CORRIDOR=1 EEAT_CORR_FIELDS=1 EEAT_CORR_MIN=0
+  EEAT_CORR_REPLACE=1 EEAT_CORR_SHARE=0.7 EEAT_CORR_MS=15000` vs `EEAT_CORRIDOR=1`, the same 25 levels, 120 s, W3, box 6,
+  one run an arm, side by side): compiled **13 vs 15** (+ Tutorial 3 2,327, + Christmas Town 4,185 (STUCK-FIELD); none
+  lost), the 13 both 53,787 vs 53,837 run ticks (faster 6: Tutorial 1 1,867 vs 2,254, INFINITE 2,842 vs 3,216, Frostbitten
+  7,973 vs 8,753, Fish Gods 3,660 vs 4,083; slower 5: Crypts of Anubis 4,091 vs 3,309, Trick Or Treat 5,229 vs 4,339, K
+  Underground 2,725 vs 2,343). Not yet: its replicate, a full compile, 300 s.
   Still failing (the chain set): long routes (480+ ticks 60.9%: the clock), precision staircases (celeste's half-block
   steps: 52-tick chains, every copy), boost / portal chains the held-mask fans do not make.
 - **The timer** (C6 push 3 lane 3, `src/plan/planner.js` `timerOf` / `timerPlan` / `removerInTime`, strategy.js
