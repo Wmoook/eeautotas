@@ -153,12 +153,14 @@ const RF = () => RF_ || (RF_ = require('../reach.js'));
 const DIR9 = [0, 2, 4, 8, 16, 10, 12, 18, 20];
 /** the land-and-act members' default (o.land overrides): EEAT_MSOLVE_LAND=0 off (the A/B knob through the compiler) */
 const LAND_DEF = process.env.EEAT_MSOLVE_LAND !== '0';
+// the land-and-act jump's bonk variants (coverage iteration 2; EEAT_MSOLVE_LANDBONK=0: off, o.landBonk)
+const LAND_BONK_DEF = process.env.EEAT_MSOLVE_LANDBONK !== '0';
 const MI_MASK = [0, 2, 4];               // kin1d input index -> mask bits (0 '-', 1 L, 2 R)
 
 /** a gravity member's name (the result's `member`): jump@j, off@o, walk, air; a land-and-act member base>land row@T1>act */
 function memberName(m) {
-	if (m.kind === 'land') return `${memberName(m.base)}>land${m.l.fr}@${m.l.T1}>${m.act === 'jump' ? (m.l.j2 === m.l.T1 ? 'hop' : `jump@${m.l.j2}`) : m.act === 'off' ? `off@${m.l.off2}` : 'walk'}`;
-	return m.kind === 'jump' ? `jump@${m.j}` : m.kind === 'off' ? `off@${m.off}` : m.kind;
+	if (m.kind === 'land') return `${memberName(m.base)}>land${m.l.fr}@${m.l.T1}>${m.act === 'jump' ? (m.l.j2 === m.l.T1 ? 'hop' : `jump@${m.l.j2}`) : m.act === 'off' ? `off@${m.l.off2}` : 'walk'}${m.l.bonk ? `>bonk${m.l.bonk.cr}@${m.l.bonk.b}` : ''}`;
+	return (m.kind === 'jump' ? `jump@${m.j}` : m.kind === 'off' ? `off@${m.off}` : m.kind) + (m.bonk ? `>bonk${m.bonk.cr}@${m.bonk.b}` : '');
 }
 
 // ------------------------------------------------------------------ the support class (the moves study's clsOf)
@@ -589,6 +591,19 @@ function createSolver(L, opts = {}) {
 				for (let c = c0; c <= c1; c++) if (sol[fr * W + c] !== 0) return true;
 				return false;
 			};
+			// a blocking tile (solid or half: a one-way lets a rise through) in row cr over the reachable columns (the world's top)
+			// ... with the row under it free there (a ceiling's lowest row: the box can stand in row cr + 1 under it; the inner
+			// rows of a thick ceiling are no bonk line)
+			const rowHasCeil = (cr, lo, hi) => {
+				if (cr >= Hh - 1) return false;
+				const c0 = Math.max(0, Math.floor(lo / 16) - 1), c1 = Math.min(W - 1, Math.floor((hi + 16) / 16) + 1);
+				for (let c = c0; c <= c1; c++) {
+					const q = cr < 0 ? 1 : sol[cr * W + c], u = sol[(cr + 1) * W + c];
+					if ((q === 1 || q === 4) && u !== 1 && u !== 4) return true;
+				}
+				return false;
+			};
+			const landBonk = o.landBonk !== undefined ? !!o.landBonk : LAND_BONK_DEF;
 			for (const b of bases) {
 				let nl = 0;
 				for (let t = Math.max(1, b.air0 + 1); t < Tmax - 1 && nl < landMax; t++) {
@@ -611,6 +626,31 @@ function createSolver(L, opts = {}) {
 							const jEnd = standing ? T1 : Tmax - 1;           // standing starts: the hop alone
 							for (let j2 = T1; j2 <= jEnd; j2++) {
 								members.push(mk('jump', j2, 0, j2, j2, (q) => (pre(q) ? by(q) : q <= j2 ? yl : jl.Y[q - j2]), (q) => (q < T1 ? br(q) : q === T1 ? rt : q <= j2 ? yl : jl.R[q - j2]), (q) => (pre(q) ? bv(q) : q <= j2 ? 0 : jl.V[q - j2])));
+								// THE BONK AFTER THE ACT (coverage 2): the jump from the landing line stopped by a ceiling row cr at tick
+								// b (y blocked at the line 16 cr + 16, or at a whole start y: one add, it stays; vy = 0), then the fall
+								// from there: the base member's bonk rule on the second jump, only where a ceiling can be over the
+								// box's reachable columns at that tick (the hold tables' range)
+								if (landBonk) {
+									let prev = yl;
+									for (let t = j2 + 1; t < Tmax; t++) {
+										if (!(jl.V[t - j2] < 0)) break;
+										const yt = jl.Y[t - j2];
+										for (let line = Math.floor(prev / 16) * 16; line > yt; line -= 16) {
+											const yb = Number.isInteger(prev) ? prev : line, b2 = t, cr = line / 16 - 1;
+											const hr2 = holdRange(Hd, x0, vx0, b2, K1.ALIGN_SLACK + 1e-6);
+											if (!rowHasCeil(cr, hr2[0], hr2[1])) continue;
+											const fb = fallL(yb), jj = j2;
+											const mb = mk('jump', jj, 0, jj, jj, (q) => (pre(q) ? by(q) : q <= jj ? yl : q < b2 ? jl.Y[q - jj] : q === b2 ? yb : fb.Y[q - b2]), (q) => (q < T1 ? br(q) : q === T1 ? rt : q <= jj ? yl : q < b2 ? jl.R[q - jj] : q === b2 ? yb : fb.R[q - b2]), (q) => (pre(q) ? bv(q) : q <= jj ? 0 : q < b2 ? jl.V[q - jj] : q === b2 ? 0 : fb.V[q - b2]));
+											// after every member without a bonk at the same T (sk), and a quarter of an item's node share: at
+											// equal T the old members first, so the variants spend no budget a leg the members solve needed
+											mb.l.bonk = { b: b2, cr, line: yb };
+											mb.sk += 1e5;
+											mb.nodeCap = 4;
+											members.push(mb);
+										}
+										prev = yt;
+									}
+								}
 							}
 						}
 						if (!standing) {
@@ -693,6 +733,9 @@ function createSolver(L, opts = {}) {
 		const tEnd0 = o.plainMs > 0 ? Date.now() + o.plainMs : 0;
 		const tEnd = o.deadline > 0 ? (tEnd0 ? Math.min(tEnd0, o.deadline) : o.deadline) : tEnd0;
 		const budget = { n: o.nodes || 400000, out: false };
+		// the post-landing bonk variants spend a node pool of their own (o.bonkNodes): the other members keep the whole
+		// budget they had without them, so a leg the members solved before is not lost to the variants' items
+		const budgetB = { n: o.bonkNodes || 100000, out: false };
 		let best = null;
 		const solved = o.each ? new Map() : null, goals = o.each ? new Map() : null, tries = new Map();
 		// (o.alts: up to that many verified legs with DISTINCT END STATES (the arrival's class: vx, vy rounded, grounded) within
@@ -747,8 +790,14 @@ function createSolver(L, opts = {}) {
 					if (j === lnd.T1) return boxFree(sol, x, lnd.line) && plainAt(tiles, x, lnd.line) && (floorAt(sol, raw, lnd.fr) || floorAt(sol, xs, lnd.fr) || floorAt(sol, x, lnd.fr));
 					if (j <= lnd.g2) return floorAt(sol, xs, lnd.fr) && boxFree(sol, x, lnd.line) && plainAt(tiles, x, lnd.line);
 					if (lnd.off2 && j === lnd.off2 && floorAt(sol, xs, lnd.fr)) return false;
+					if (lnd.bonk && j === lnd.bonk.b) {
+						// the second jump's bonk: the ceiling over the box (sub-step, raw or aligned x), the box free under it
+						if (!(ceilAt(sol, xs, lnd.bonk.cr) || ceilAt(sol, raw, lnd.bonk.cr) || ceilAt(sol, x, lnd.bonk.cr))) return false;
+						return boxFree(sol, x, lnd.bonk.line) && plainAt(tiles, x, lnd.bonk.line);
+					}
 					return boxFree(sol, x, Ys[j]) && plainAt(tiles, x, Ys[j]);
 				}
+				if (lnd && lnd.bonk && j === lnd.bonk.b && j === T && !(ceilAt(sol, xs, lnd.bonk.cr) || ceilAt(sol, raw, lnd.bonk.cr) || ceilAt(sol, x, lnd.bonk.cr))) return false;
 				if (j <= bm.g) return floorAt(sol, xs, fr0) && boxFree(sol, x, y0);
 				if (bm.off && j === bm.off) { if (floorAt(sol, xs, fr0)) return false; }
 				if (bm.bonk && j === bm.bonk.b) {
@@ -798,10 +847,11 @@ function createSolver(L, opts = {}) {
 			};
 			const c0 = stats.cands;
 			// a per-item share of the budget: no one (T, member) item eats the whole leg's budget
-			const cap = o.itemNodes || 40000, before = budget.n;
-			const ib = { n: Math.min(budget.n, cap), out: false, tEnd };
-			solveX(x0, vx0, T, it.wins, tube, kMax, I, Hd, emit, ib, wall);
-			budget.n = before - (Math.min(before, cap) - Math.max(ib.n, 0));
+			const bud = m.nodeCap ? budgetB : budget;
+			const cap = Math.floor((o.itemNodes || 40000) / (m.nodeCap || 1)), before = bud.n;
+			const ib = { n: Math.min(bud.n, cap), out: false, tEnd };
+			if (ib.n > 0) solveX(x0, vx0, T, it.wins, tube, kMax, I, Hd, emit, ib, wall);
+			bud.n = before - (Math.min(before, cap) - Math.max(ib.n, 0));
 			if (budget.n <= 0) budget.out = true;
 			if (o.debug) o.debug({ T, kind: m.kind, j: m.j, off: m.off, bonk: m.bonk, land: it.land, wins: it.wins, cands: stats.cands - c0, best: best && best.T });
 		}
