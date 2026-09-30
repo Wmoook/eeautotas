@@ -221,17 +221,18 @@ function profileLeg(L, starts, goal, o = {}) {
 		if (bestFin && d + 1 >= bestFin.arrive) return;
 		let r = null;
 		try {
-			r = msolver().leg(nd.sn, { tiles: Array.from(goal.tiles), cls: 'any' }, { Tmax: bestFin ? Math.min(Tmax, bestFin.arrive - d - 1) : Tmax, chain: false, coupledTicks: FIN_CT, fieldMs: FIN_FMS, deadline: Math.min(deadline, Date.now() + FIN_MS) });
+			r = msolver().leg(nd.sn, { tiles: Array.from(goal.tiles), cls: goal.cls || 'any' }, { Tmax: bestFin ? Math.min(Tmax, bestFin.arrive - d - 1) : Tmax, chain: false, coupledTicks: FIN_CT, fieldMs: FIN_FMS, deadline: Math.min(deadline, Date.now() + FIN_MS) });
 		} catch (e) { r = null; }
 		finCalls++;
 		if (!r || !r.ok) return;
 		// the goal's own test on the engine's replay (the touch lag: the last input held up to 2 ticks more)
 		sim.restore(nd.sn);
 		const ms = Array.from(r.masks);
+		const n0 = ms.length;
 		let hit = -1;
-		for (let t = 0; t < ms.length + 2; t++) {
-			const m = t < ms.length ? ms[t] : (ms[ms.length - 1] & 30);
-			if (t >= ms.length) ms.push(m);
+		for (let t = 0; t < n0 + 2; t++) {
+			const m = t < n0 ? ms[t] : (ms[n0 - 1] & 30);
+			if (t >= n0) ms.push(m);
 			E.applyMask(inp, m); sim.tick(inp);
 			if (sim.is_dead && !allowDeath) break;
 			if (goal.test(sim)) { hit = t + 1; break; }
