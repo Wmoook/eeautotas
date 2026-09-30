@@ -576,12 +576,13 @@ function makeCore(L, co) {
 		}
 		// -------- tier B: THE BACKWARD TIER (OPT-IN EEAT_BACKWARD=1; the header's BW_*)
 		if (BW_ON() && !allowDeath && !wp.dieField && !goal.fieldTiles && goal.tiles.length > 0 && Date.now() < wEnd - 50) {
-			// (BW_RUNGS: the tier by the rung: rung 0 the meet alone at 0.2 of the window, rung 1 the closure too at 0.3,
-			// from rung 2 at 0.6 (the other tiers keep most of a short window: with 0.5 at rung 1 Endless Pain's known-route
-			// leg, found by the leg tier alone in 1.8 s, failed its rung 1); EEAT_BW_RUNGS=0: every rung at BW_SHARE)
-			const bwR = BW_RUNGS ? Math.min(rung, 2) : 1;
-			const bwShare = BW_RUNGS ? [0.2, 0.3, 0.6][bwR] : BW_SHARE;
-			const bwO = BW_RUNGS ? [{ closeF: 0, quickF: 1, quick: 400000 }, {}, {}][bwR] : {};
+			// (BW_RUNGS: the tier by the rung: rung 0 the meet alone at 0.2 of the window, rungs 1-2 the closure too at 0.3,
+			// from rung 3 at 0.6: the other tiers keep most of a short window (with 0.5 at rung 1 Endless Pain's known-route
+			// leg, found by the leg tier alone in 1.8 s, failed its rung 1; with 0.6 at rung 2 Egg Quest II's and Frostbitten's,
+			// found by the skeleton in its whole 15 s, failed); EEAT_BW_RUNGS=0: every rung at BW_SHARE)
+			const bwR = BW_RUNGS ? Math.min(rung, 3) : 1;
+			const bwShare = BW_RUNGS ? [0.2, 0.3, 0.3, 0.6][bwR] : BW_SHARE;
+			const bwO = BW_RUNGS ? [{ closeF: 0, quickF: 1, quick: 400000 }, {}, {}, {}][bwR] : {};
 			const tB = Date.now(), bEnd = tB + Math.min(BW_MS, bwShare * (wEnd - tB));
 			const cands = [];
 			const bst = { tier: 'backward', tries: 0, ok: false, T: null, why: null, stats: null };
