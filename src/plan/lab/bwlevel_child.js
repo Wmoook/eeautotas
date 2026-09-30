@@ -137,7 +137,7 @@ try {
 			for (let d = Math.max(1, d0 - 8); d <= Math.min(D - 1, d0 + 8); d++) { const c = cut.get(d); if (c && (best < 0 || c.length < cut.get(best).length)) best = d; }
 			if (best > 0 && (!picks.length || best > picks[picks.length - 1])) picks.push(best);
 		}
-		out({ ev: 'cuts', D, cuts: picks.map((d) => [d, cut.get(d).length]), ms: Date.now() - tc });
+		out({ ev: 'cuts', D, start: [sT % W, (sT / W) | 0], cuts: picks.map((d) => [d, cut.get(d).length, ...cut.get(d).slice(0, 3).map((v) => [v % W, (v / W) | 0])]), ms: Date.now() - tc });
 		const legs = [...picks.map((d) => ({ label: 'cut ' + d + ' (' + cut.get(d).length + ' tiles)', tiles: cut.get(d), w: d })), { label: 'trophy', tiles: M.trophyTiles.slice(), w: D, trophy: true }];
 		let prefix = new Uint8Array(0), lsim = st, wAt = 0;
 		const tEnd = Date.now() + clockMs;
