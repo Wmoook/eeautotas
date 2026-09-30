@@ -60,7 +60,9 @@
 //     o: {Tmax, K (max x changes, default 2), plain, fields, coupled (each default true), nodes (the plain branch and
 //       bound's budget, 400 k), fieldMs (250), coupledTicks (2 M), chain / chainAny / chainMs (the chain tier),
 //       prove (the event-graph proof of src/math/lb.js for a leg the plain certificate did not prove; default
-//       createSolver's opts.prove, false), proveMs (50), debug(item)}
+//       createSolver's opts.prove, false), proveMs (50), land (the land-and-act members of the plain tier: an airborne
+//       member lands on a floor line and hops / jumps / walks off / walks on; default on, EEAT_MSOLVE_LAND=0 off),
+//       plainMs (the plain tier's clock, checked per item and every 2048 nodes; none by default), debug(item)}
 //   S.chain(start, target, o) -> {ok, masks, T, closed, expanded, legs, nodes, cut, reach, firstMs, ms}
 //                                o: {ms, legT, w, fanT, fanMax, fanNodes, events, reach (the reach field's order), kappa}
 //   S.landings(start, o) -> [{tile, T, masks, hop}]   the forward fan-out from a plain state
@@ -86,7 +88,15 @@ let RF_ = null;
 /** the reach field (src/reach.js), the chains' order, loaded on first use */
 const RF = () => RF_ || (RF_ = require('../reach.js'));
 const DIR9 = [0, 2, 4, 8, 16, 10, 12, 18, 20];
+/** the land-and-act members' default (o.land overrides): EEAT_MSOLVE_LAND=0 off (the A/B knob through the compiler) */
+const LAND_DEF = process.env.EEAT_MSOLVE_LAND !== '0';
 const MI_MASK = [0, 2, 4];               // kin1d input index -> mask bits (0 '-', 1 L, 2 R)
+
+/** a gravity member's name (the result's `member`): jump@j, off@o, walk, air; a land-and-act member base>land row@T1>act */
+function memberName(m) {
+	if (m.kind === 'land') return `${memberName(m.base)}>land${m.l.fr}@${m.l.T1}>${m.act === 'jump' ? (m.l.j2 === m.l.T1 ? 'hop' : `jump@${m.l.j2}`) : m.act === 'off' ? `off@${m.l.off2}` : 'walk'}`;
+	return m.kind === 'jump' ? `jump@${m.j}` : m.kind === 'off' ? `off@${m.off}` : m.kind;
+}
 
 // ------------------------------------------------------------------ the support class (the moves study's clsOf)
 function clsOf(sim, flags) {
@@ -355,7 +365,7 @@ function createSolver(L, opts = {}) {
 			const rec = (t, x, v, miPrev, k, code) => {
 				for (let mi = 0; mi < 3 && !stop; mi++) {
 					if (k > 0 && mi === miPrev) continue;
-					if (--budget.n < 0) { stop = true; budget.out = true; return; }
+					if (--budget.n < 0 || ((budget.n & 2047) === 0 && budget.tEnd && Date.now() > budget.tEnd)) { stop = true; budget.out = true; return; }
 					if (!feasible(x, v, T - t, kT - k, mi)) continue;
 					const code2 = (code | (mi << (2 * k)) | (k > 0 ? t << (8 + 7 * (k - 1)) : 0)) >>> 0;
 					if (k === kT) {
@@ -390,7 +400,7 @@ function createSolver(L, opts = {}) {
 							const mono = mi !== 0 && mf !== 0 && !(I.mods[mi] < 0.1 && I.mods[mi] > -0.1) && !(I.mods[mf] < 0.1 && I.mods[mf] > -0.1);
 							if (!mono) {
 								for (let i = 0; i < n && !stop; i++) {
-									if (--budget.n < 0) { stop = true; budget.out = true; return; }
+									if (--budget.n < 0 || ((budget.n & 2047) === 0 && budget.tEnd && Date.now() > budget.tEnd)) { stop = true; budget.out = true; return; }
 									if (!feasible(xs[i], vs[i], T - (t + 1 + i), 0, mf)) continue;
 									tryAt(i);
 								}
@@ -402,7 +412,7 @@ function createSolver(L, opts = {}) {
 							let a = 0, b = n;
 							while (a < b) { const m = (a + b) >> 1; budget.n--; const e = endX(m); if (up ? e >= wlo - 1e-9 : e < whi + 1e-9) b = m; else a = m + 1; }
 							for (let i = a; i < n && !stop; i++) {
-								if (--budget.n < 0) { stop = true; budget.out = true; return; }
+								if (--budget.n < 0 || ((budget.n & 2047) === 0 && budget.tEnd && Date.now() > budget.tEnd)) { stop = true; budget.out = true; return; }
 								const e = endX(i);
 								if (up ? e >= whi + 1e-9 : e < wlo - 1e-9) break;
 								tryAt(i);
@@ -491,9 +501,82 @@ function createSolver(L, opts = {}) {
 				prev = yt;
 			}
 		}
+		// THE LAND-AND-ACT MEMBERS (section 4.10, the coverage iteration): the gravity axis of a leg through ONE landing.
+		// An airborne member crosses the floor line of row fr descending at exactly one tick T1 (y = line after it, vy =
+		// 0: the landing is the collision's, the x map is the same plain recurrence on the ground and in the air); from
+		// there the ball is a STANDING ball on row fr: it jumps at a tick j2 >= T1 (j2 = T1: the landing hop), walks off
+		// at a tick o2 > T1 + 1, or walks on. The member = the base member to T1 + the standing family from (line, T1): a
+		// two-parameter gravity family, still a closed form of the tables (gravTrace from the line). The x axis is one
+		// pattern across the landing; the tube checks the floor under the box on the ground ticks (row fr). Airborne
+		// starts get every act (jump / off / walk); standing starts' members (a jump, a walk-off) the walk and the hop, with
+		// o.landStanding only.
+		if ((o.land !== undefined ? o.land : LAND_DEF) && !o.each && Tmax > 4) {
+			const landMax = o.landRows || 6;
+			const jmpFrom = new Map(), fallFromL = new Map();
+			const jmpL = (yl) => { if (!jmpFrom.has(yl)) jmpFrom.set(yl, gravTrace(yl, G.J, Tmax, G)); return jmpFrom.get(yl); };
+			const fallL = (yl) => { if (!fallFromL.has(yl)) fallFromL.set(yl, gravTrace(yl, 0, Tmax, G)); return fallFromL.get(yl); };
+			// (a standing start's jump / walk-off members as bases only with o.landStanding: on the single real moves they cost
+			// the jump legs' node budget, 39 lost of 11,747, and won 5 hops; its 2-move legs are the chains')
+			const bases = members.filter((m) => m.kind === 'air' || (o.landStanding && (m.kind === 'jump' || m.kind === 'off') && standing));
+			const canJ2 = s.max_jumps >= 1;
+			const rowHasFloor = (fr, lo, hi) => {
+				if (fr >= Hh) return true;
+				const c0 = Math.max(0, Math.floor(lo / 16) - 1), c1 = Math.min(W - 1, Math.floor((hi + 16) / 16) + 1);
+				for (let c = c0; c <= c1; c++) if (sol[fr * W + c] !== 0) return true;
+				return false;
+			};
+			for (const b of bases) {
+				let nl = 0;
+				for (let t = Math.max(1, b.air0 + 1); t < Tmax - 1 && nl < landMax; t++) {
+					if (!(b.v(t) > 0)) continue;
+					const yp = t === 1 ? y0 : b.y(t - 1), rt = b.r(t);
+					// every floor line crossed descending in this tick: yp <= line < raw
+					for (let line = Math.ceil(yp / 16) * 16; line < rt && nl < landMax; line += 16) {
+						const fr = line / 16 + 1;
+						if (fr > Hh) break;
+						const hr = holdRange(Hd, x0, vx0, t, K1.ALIGN_SLACK + 1e-6);
+						if (!rowHasFloor(fr, hr[0], hr[1])) continue;
+						nl++;
+						const T1 = t, yl = line, jl = jmpL(yl), fl = fallL(yl);
+						const pre = (q) => q < T1;
+						const mk = (kind, j2, off2, g2, air0, y, r, v) => ({ kind: 'land', act: kind, base: b, j: 0, g: 0, off: 0, air0, l: { T1, fr, line: yl, j2, off2, g2 }, jumps: (b.kind === 'jump' ? [b.j] : []).concat(j2 ? [j2] : []), sk: (b.kind === 'jump' ? b.j : b.kind === 'off' ? 1e3 + b.off : 0) + 5e3 + (j2 || off2 || 0), y, r, v });
+						const by = b.y, br = b.r, bv = b.v;
+						// the walk on (only on the landing row's target tiles: the items below)
+						members.push(mk('walk', 0, 0, Tmax, Tmax, (q) => (pre(q) ? by(q) : yl), (q) => (q < T1 ? br(q) : q === T1 ? rt : yl), (q) => (pre(q) ? bv(q) : 0)));
+						if (canJ2) {
+							const jEnd = standing ? T1 : Tmax - 1;           // standing starts: the hop alone
+							for (let j2 = T1; j2 <= jEnd; j2++) {
+								members.push(mk('jump', j2, 0, j2, j2, (q) => (pre(q) ? by(q) : q <= j2 ? yl : jl.Y[q - j2]), (q) => (q < T1 ? br(q) : q === T1 ? rt : q <= j2 ? yl : jl.R[q - j2]), (q) => (pre(q) ? bv(q) : q <= j2 ? 0 : jl.V[q - j2])));
+							}
+						}
+						if (!standing) {
+							for (let o2 = T1 + 1; o2 < Tmax; o2++) {
+								members.push(mk('off', 0, o2, o2 - 1, o2 - 1, (q) => (pre(q) ? by(q) : q < o2 ? yl : fl.Y[q - o2 + 1]), (q) => (q < T1 ? br(q) : q === T1 ? rt : q < o2 ? yl : fl.R[q - o2 + 1]), (q) => (pre(q) ? bv(q) : q < o2 ? 0 : fl.V[q - o2 + 1])));
+							}
+						}
+					}
+				}
+			}
+		}
 		// the (T, member, windows) items
 		const items = [];
 		for (const m of members) {
+			if (m.kind === 'land' && m.act === 'walk') {
+				// on the landing row after the landing: the target's tiles in its centre row (class G while walking)
+				if (tg.cls === 'G' || tg.cls === 'any') {
+					const fr = m.l.fr;
+					if (o.each) {
+						for (const c of tg.colsByRow.get(fr - 1) || []) {
+							const wins = landWins({ colsByRow: new Map([[fr - 1, [c]]]) }, sol, fr);
+							if (wins.length) for (let T = m.l.T1 + 1; T <= Tmax; T++) items.push({ T, m, wins, land: fr, tile: (fr - 1) * W + c });
+						}
+					} else {
+						const wins = landWins(tg, sol, fr);
+						if (wins.length) for (let T = m.l.T1 + 1; T <= Tmax; T++) items.push({ T, m, wins, land: fr });
+					}
+				}
+				continue;
+			}
 			if (m.kind === 'walk') {
 				// on the floor row: the target's tiles in the centre row fr0 - 1 (class G while walking)
 				if (tg.cls === 'G' || tg.cls === 'any') {
@@ -538,13 +621,17 @@ function createSolver(L, opts = {}) {
 				}
 			}
 		}
-		items.sort((a, b) => a.T - b.T || (a.m.kind === 'jump' ? a.m.j : 1e3 + a.m.off) - (b.m.kind === 'jump' ? b.m.j : 1e3 + b.m.off));
+		const skOf = (m) => (m.sk !== undefined ? m.sk : m.kind === 'jump' ? m.j : 1e3 + m.off);
+		items.sort((a, b) => a.T - b.T || skOf(a.m) - skOf(b.m));
+		// the plain tier's clock (o.plainMs: a deadline for the whole tier, checked per item and every 2048 nodes)
+		const tEnd = o.plainMs > 0 ? Date.now() + o.plainMs : 0;
 		const budget = { n: o.nodes || 400000, out: false };
 		let best = null;
 		const solved = o.each ? new Map() : null, goals = o.each ? new Map() : null, tries = new Map();
 		for (const it of items) {
 			if (!o.each && best && it.T > best.T) break;
 			if (budget.out) break;
+			if (tEnd && Date.now() > tEnd) { budget.out = true; break; }
 			if (o.each && solved.has(it.tile)) continue;
 			if (o.each && o.perTile) { const n = (tries.get(it.tile) || 0) + 1; tries.set(it.tile, n); if (n > o.perTile) continue; }
 			// the root cut: THEOREM M from the start
@@ -573,18 +660,27 @@ function createSolver(L, opts = {}) {
 				for (let q = Math.floor(x); q >= xn; q -= 1) { if (blk(q)) return p; p = q; }
 				return p;
 			};
+			const lnd = m.l, bm = lnd ? m.base : m;
 			const tube = (j, xp, x, raw) => {
 				// the first x sub-step's position (the y probe of the lockstep loop sees it); raw = x before the align
 				if (raw === undefined) raw = x;
 				let xs = raw;
 				const fx = Math.floor(xp);
 				if (raw > xp) { if (raw >= fx + 1) xs = fx + 1; } else if (raw < xp) { if (xp !== fx && raw < fx) xs = fx; }
-				if (j <= m.g) return floorAt(sol, xs, fr0) && boxFree(sol, x, y0);
-				if (m.off && j === m.off) { if (floorAt(sol, xs, fr0)) return false; }
-				if (m.bonk && j === m.bonk.b) {
+				if (lnd && j >= lnd.T1 && j < T) {
+					// the land-and-act member after its base: the landing tick (the box over a floor of row fr, free at the
+					// line), the ground ticks (the floor under the first sub-step), the walk-off tick, then its own flight
+					if (j === lnd.T1) return boxFree(sol, x, lnd.line) && plainAt(tiles, x, lnd.line) && (floorAt(sol, raw, lnd.fr) || floorAt(sol, xs, lnd.fr) || floorAt(sol, x, lnd.fr));
+					if (j <= lnd.g2) return floorAt(sol, xs, lnd.fr) && boxFree(sol, x, lnd.line) && plainAt(tiles, x, lnd.line);
+					if (lnd.off2 && j === lnd.off2 && floorAt(sol, xs, lnd.fr)) return false;
+					return boxFree(sol, x, Ys[j]) && plainAt(tiles, x, Ys[j]);
+				}
+				if (j <= bm.g) return floorAt(sol, xs, fr0) && boxFree(sol, x, y0);
+				if (bm.off && j === bm.off) { if (floorAt(sol, xs, fr0)) return false; }
+				if (bm.bonk && j === bm.bonk.b) {
 					// the ceiling over the box (at the sub-step, before or after the align) and the box free under it
-					if (!(ceilAt(sol, xs, m.bonk.cr) || ceilAt(sol, raw, m.bonk.cr) || ceilAt(sol, x, m.bonk.cr))) return false;
-					if (j < T) return boxFree(sol, x, m.bonk.line) && plainAt(tiles, x, m.bonk.line);
+					if (!(ceilAt(sol, xs, bm.bonk.cr) || ceilAt(sol, raw, bm.bonk.cr) || ceilAt(sol, x, bm.bonk.cr))) return false;
+					if (j < T) return boxFree(sol, x, bm.bonk.line) && plainAt(tiles, x, bm.bonk.line);
 				}
 				if (j === T) {
 					if (it.land >= 0) return boxFree(sol, x, 16 * it.land - 16) && (floorAt(sol, raw, it.land) || floorAt(sol, xs, it.land) || floorAt(sol, x, it.land));
@@ -600,7 +696,7 @@ function createSolver(L, opts = {}) {
 				const masks = new Uint8Array(T + extra);
 				for (let t = 1; t <= T + extra; t++) {
 					let mk = MI_MASK[K1.inputAt(code, Math.min(t, T))];
-					if (m.kind === 'jump' && t === m.j) mk |= 1;
+					if (m.jumps) { for (let q = 0; q < m.jumps.length; q++) if (t === m.jumps[q]) mk |= 1; } else if (m.kind === 'jump' && t === m.j) mk |= 1;
 					masks[t - 1] = mk;
 				}
 				stats.verifies++;
@@ -614,7 +710,7 @@ function createSolver(L, opts = {}) {
 				const hit = replay(snap, masks, goal, T + extra);
 				if (hit > 0) {
 					const ms = masks.subarray(0, hit);
-					if (!best || hit < best.T) best = { T: hit, masks: Uint8Array.from(ms), k, member: m.kind === 'jump' ? `jump@${m.j}` : m.kind === 'off' ? `off@${m.off}` : m.kind, code };
+					if (!best || hit < best.T) best = { T: hit, masks: Uint8Array.from(ms), k, member: memberName(m), code };
 					return true;
 				}
 				return false;
@@ -622,7 +718,7 @@ function createSolver(L, opts = {}) {
 			const c0 = stats.cands;
 			// a per-item share of the budget: no one (T, member) item eats the whole leg's budget
 			const cap = o.itemNodes || 40000, before = budget.n;
-			const ib = { n: Math.min(budget.n, cap), out: false };
+			const ib = { n: Math.min(budget.n, cap), out: false, tEnd };
 			solveX(x0, vx0, T, it.wins, tube, kMax, I, Hd, emit, ib, wall);
 			budget.n = before - (Math.min(before, cap) - Math.max(ib.n, 0));
 			if (budget.n <= 0) budget.out = true;
@@ -930,20 +1026,24 @@ function createSolver(L, opts = {}) {
 				}
 			} else res = solvePlain(snap, sim, ctx, tg, goal, oo, stats);
 		}
-		if (!res.ok && oo.fields !== false && !target.tele) {
+		// a plain answer through a landing (4.11) is the plain regime's cheapest, not the cheapest of every tier: a way
+		// through a field or the coupled one-change family can be shorter (the single moves' hops: 30 of 11,747 legs
+		// longer than the field / coupled tiers' answers), so the other tiers are asked below its T too
+		const landAns = res.ok && res.tool === 'plain' && typeof res.member === 'string' && res.member.includes('>land');
+		if ((!res.ok || landAns) && oo.fields !== false && !target.tele && (!landAns || res.T > 1)) {
 			// THE FIELD TIER (src/math/fieldsolve.js, the fields derivation): the start field's axis roles, the gravity
 			// axis' option trajectories, the input axes solved by fields.solveAxis in the goal's windows, the schedule
 			// iteration across field boundaries; its candidates replayed by the engine there
 			sim.restore(snap);
-			const r = FSOLVE().solveLeg(L, sim, { tiles: tg.tiles, cls: tg.cls === 'any' ? null : tg.cls, maxT: oo.Tmax }, { k: oo.fieldK || 2, maxMs: oo.fieldMs || 250 });
+			const r = FSOLVE().solveLeg(L, sim, { tiles: tg.tiles, cls: tg.cls === 'any' ? null : tg.cls, maxT: landAns ? res.T - 1 : oo.Tmax }, { k: oo.fieldK || 2, maxMs: oo.fieldMs || 250 });
 			stats.fields = (stats.fields || 0) + 1;
 			if (r.ok) {
 				// the goal replayed here by this solver's own test (the same letters; a teleport goal never reaches here)
 				const hit = replay(snap, r.masks, goal);
-				if (hit > 0) res = { ok: true, tool: 'field', T: hit, masks: Uint8Array.from(r.masks.subarray(0, hit)), member: r.tool };
+				if (hit > 0 && (!res.ok || hit < res.T)) res = { ok: true, tool: 'field', T: hit, masks: Uint8Array.from(r.masks.subarray(0, hit)), member: r.tool };
 			}
 		}
-		if (res.ok && res.tool === 'field' && oo.coupled !== false && res.T > 1) {
+		if (res.ok && (res.tool === 'field' || landAns) && oo.coupled !== false && res.T > 1) {
 			// cheapest T across the tiers: the coupled piece below the field answer's T
 			const r = solveCoupled(snap, sim, tg, goal, Object.assign({}, oo, { Tmax: res.T - 1 }), stats);
 			if (r.ok && r.T < res.T) res = r;
