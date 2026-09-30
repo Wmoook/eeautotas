@@ -706,7 +706,7 @@ function makeCore(L, co) {
 		let lbAbs = 0, exactProof = false, legTime = false;
 		let found = null;   // {cands, tool, proven, lbAbs}
 		// (the counterexample walls: the tiles the finders reached, their region, whether the last best-first run exhausted it)
-		let visW = null, regionW = null, bestExhausted = false;
+		let visW = null, regionW = null, bestExhausted = false, closedAll = false;
 		{
 			const t2 = Date.now();
 			// (its share: 35% where the goal can be near (the least start bound within X_NEAR ticks: the exact search's
@@ -766,6 +766,9 @@ function makeCore(L, co) {
 			}
 			const t3b = Date.now();
 			let r = rC !== null && rC.status === 'found' ? rC : mode === 'beam' ? runBeam(bEnd, depthMax) : runBest(mode === 'best' ? (port > 0 && port < 1 ? t3 + port * (wEnd - t3) : bEnd) : t3 + 0.7 * (wEnd - t3));
+			// (the default grain closed every way without a death (the ladder's finer grains may still run out of time): the
+			// death leg's trigger, reachWp; an order, no claim)
+			if (mode === 'best' && r.status === 'exhausted') closedAll = true;
 			if (r !== rC) {
 				sims += r.sims;
 				tiers.push({ tier: mode === 'beam' ? 'leg' : 'best', ms: Date.now() - t3b, status: r.status, passes: r.passes });
@@ -789,6 +792,7 @@ function makeCore(L, co) {
 				const cp = r.closest && r.closest.pop >= 0 ? r.closest.pop : -1;
 				const plateau = r.status === 'time' && cp >= 0 && pops >= WALL_POPS && cp < (1 - WALL_PLATEAU) * pops && r.closest.dist > WALL_NEAR;
 				bestExhausted = mode === 'best' && (r.status === 'exhausted' || plateau);
+				if (mode === 'best' && r.status === 'exhausted') closedAll = true;
 			}
 			if (mode === 'mix' && r.status !== 'stopped' && Date.now() < wEnd - 5) {
 				const ub = r.status === 'found' ? Math.min(...r.goals.map((c) => c.depth)) : depthMax + 1;
@@ -874,6 +878,8 @@ function makeCore(L, co) {
 		let why = exactProof ? 'exhausted' : (legTime || Date.now() >= wEnd - 5 ? 'budget' : 'exhausted');
 		if (walled && why === 'exhausted') why = 'budget';   // (a walled field's region is no claim)
 		const fr = failResult(why, closest, null, rung, starts, goal, { lbAbs, startCost, deadline });
+		// (every best-first pass ran out of open states: the finders closed every way without a death; reachWp's death leg)
+		if (closedAll && !allowDeath) fr.fail.closedAll = true;
 		// (an exhausted best-first search: its reached tiles against the field, the counterexample walls; the relaxation's
 		// way it could not take is no proof of anything: 'budget')
 		if (visW && bestExhausted && field0) {
@@ -1371,6 +1377,8 @@ async function createExecutor(L, opts) {
 	const SKEL_STEP = +process.env.EEAT_SKEL_STEP > 0 ? +process.env.EEAT_SKEL_STEP : 12;
 	const SKEL_MIN = +process.env.EEAT_SKEL_MIN > 0 ? +process.env.EEAT_SKEL_MIN : 30;
 	const SKEL_DIRECT = process.env.EEAT_SKEL_DIRECT !== undefined ? Math.max(0, Math.min(0.9, +process.env.EEAT_SKEL_DIRECT || 0)) : 0.35;
+	const DEATH_LEG = process.env.EEAT_DEATH_LEG !== '0';
+	const canDieL = !!(opts.model && opts.model.canDie);
 	const skelKey = (goal, wp, startStrs, wn) => `${goal.kind}|${Array.from(goal.tiles).slice(0, 64).join(',')}|${goal.tiles.length}|${wp.expect ? wp.expect.feat + '=' + wp.expect.value : ''}|${startStrs[0].length}:${startStrs[0].slice(-64)}|w${wn | 0}`;
 	const skelMemo = new Map();   // key (goal, first start, walls) -> [{c, cur: [mask strings]}] (the levels reached, deepest last)
 	// (the counterexample walls per field: the waypoint's field tiles, their touch rule and deaths -> a Set of tiles; a
@@ -1491,6 +1499,27 @@ async function createExecutor(L, opts) {
 	const DEAD_K = 16, DEAD_BACK = 6, DEAD_REST = 0.3;
 	const deadEnds = new Set();   // stateHash of skeleton arrivals the finders could not go on from
 	const hashOf = (str) => { try { return core.startOf(String(str)).hash; } catch (e) { return null; } };
+	// THE DEATH LEG (EEAT_DEATH_LEG=0: off): a waypoint whose finders closed every way from the starts without a death
+	// (every best-first pass out of open states: fail.closedAll) on a level where a death moves the ball (the model's
+	// canDie: a killer and a respawn) goes on with deaths as moves: the same waypoint with allowDeath (a death is a move:
+	// the ball respawns at its checkpoint / the next spawn and the leg goes on from there), in the time left. Buuwuu's
+	// Stronghold: its known route dies at (6,55) back to the checkpoint (42,11) and falls to the coin (44,81); from the
+	// route's own state there every pass closed without a death (the compile's closest 91.6 tiles, rung after rung).
+	// The arrivals carry deathLeg: the strategy's replay lets the leg die (every one the engine's replay)
+	async function deathLeg(starts, wp, budget, r, end) {
+		if (!DEATH_LEG || !canDieL || wp.allowDeath || wp.dieField || !r || r.ok || !r.fail || !r.fail.closedAll) return null;
+		if (wp.beforeTick >= 0 || wp.beforeRel !== undefined) return null;
+		const t0 = Date.now(), left = end - t0;
+		if (!(left >= 300)) return null;
+		S.deathLegs = (S.deathLegs || 0) + 1;
+		const wpD = Object.assign({}, wp, { allowDeath: true, label: `${wp.label || wp.kind} (through a death)` });
+		const rD = await reachLeg(starts, wpD, { ms: left, level: budget.level | 0, k: budget.k, deadline: end, stop: budget.stop });
+		if (emit) emit({ ev: 'exec.death', label: wp.label || '', ok: !!rD.ok, ms: Date.now() - t0, why: rD.ok ? '' : (rD.fail && rD.fail.why) || '' });
+		if (!rD.ok) return null;
+		S.deathLegsOk = (S.deathLegsOk || 0) + 1;
+		rD.deathLeg = true;
+		return rD;
+	}
 	async function reach(starts, wp, budget) {
 		const r = await reachWp(starts, wp, budget);
 		stuckNote(wp, r);
@@ -1520,7 +1549,10 @@ async function createExecutor(L, opts) {
 			if (wArr && !f0) { wallDropLast(wk, wp.label); wN = -1; wRefresh(); measure(); }
 		};
 		measure();
-		if (!f0 || !(c0 >= SKEL_MIN) || !Number.isFinite(c0)) return reachLeg(starts, wp, budget);
+		if (!f0 || !(c0 >= SKEL_MIN) || !Number.isFinite(c0)) {
+			const rS = await reachLeg(starts, wp, budget);
+			return (await deathLeg(starts, wp, budget, rS, deadline)) || rS;
+		}
 		// (the direct leg first with SKEL_DIRECT of the budget (a leg the finders reach whole keeps its way: the skeleton's
 		// split cost PARTIAL levels their progress, SMB3 3 -> 0, Booty Return 14 -> 6); its found leg, or its proof
 		// (the exact tier's exhaustion: no time in it), is the answer; else the skeleton with the rest)
@@ -1528,6 +1560,8 @@ async function createExecutor(L, opts) {
 			const dMs = SKEL_DIRECT * (deadline - Date.now());
 			const r0 = await reachLeg(starts, wp, { ms: dMs, level: budget.level | 0, k: budget.k, deadline: Math.min(deadline, Date.now() + dMs), stop: budget.stop });
 			if (r0.ok || (r0.fail && (r0.fail.why === 'proof' || r0.fail.why === 'stopped' || r0.fail.why === 'dies'))) return r0;
+			const rD = await deathLeg(starts, wp, budget, r0, Date.now() + 0.5 * (deadline - Date.now()));
+			if (rD) return rD;
 			if (wRefresh()) { measure(); if (!f0 || !Number.isFinite(c0)) return r0; }
 		}
 		// (resume from the deepest level an earlier call for this step reached)
