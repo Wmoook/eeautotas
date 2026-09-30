@@ -906,6 +906,13 @@ function createSolver(L, opts = {}) {
 const TWIN = process.env.EEAT_MATH_TWIN !== '0', TWIN_MASK = (+process.env.EEAT_MATH_TWIN_K || 4) - 1;   // K a power of 2
 // the coupled piece's two-change family F2 for a leg the one-change families left unsolved (EEAT_MATH_F2=0: none)
 const F2 = process.env.EEAT_MATH_F2 !== '0';
+// F2's run-up jump (n5 doctor 2; OPT-IN EEAT_MATH_F2J=1, not measured in the compiler): the middle hold m1 = m0 with the
+// jump press at c1, tried first at every c1 (run, jump at c1, steer from c2). Sandcastle Safari's checkpoint leg (the
+// route's own states, the coupled tier alone): from the ground at 7.15 px/tick 110 ticks out and from 120 out every tier
+// failed ("no candidate"; 10 ticks later, in the air, F1 finds 93 vs the route's 100); with this 103 / 113 ticks (the
+// route's 110 / 120) but only at 5-20 M coupled ticks: the executor's math tier gives the coupled piece 150 k and only
+// within 40 ticks by the endgame bound, so as the executor stands it does not reach these legs
+const F2J = process.env.EEAT_MATH_F2J === '1';
 	function solveCoupled(snap, s, tg, goal, o, stats) {
 		const Tmax = o.Tmax;
 		const ordered = CORDER && o.coupledOrder !== false;
@@ -1027,8 +1034,12 @@ const F2 = process.env.EEAT_MATH_F2 !== '0';
 					if (bx && cut(t + 1, best ? best.T : Tmax)) { alive = t; break; }
 				}
 				for (let c1 = 1; c1 <= alive && c1 <= snaps.length; c1++) {
-					for (const m1 of DIR9) {
-						if (m1 === m0) continue;
+					for (let i1 = F2J ? -1 : 0; i1 < DIR9.length; i1++) {
+						// (i1 = -1, first: THE RUN-UP JUMP: m1 = m0 with the jump press at c1, then the change m2: run, jump at
+						// c1, steer at c2; F1's hold-then-jump with one more change, EEAT_MATH_F2J=0: none)
+						const pj = i1 < 0;
+						const m1 = pj ? m0 : DIR9[i1];
+						if (!pj && m1 === m0) continue;
 						if (over()) break outer;
 						const L2 = best ? best.T - 1 : Tmax - 1;
 						if (c1 >= L2) continue;
@@ -1036,7 +1047,7 @@ const F2 = process.env.EEAT_MATH_F2 !== '0';
 						sim.restore(snaps[c1 - 1]);
 						for (let t = c1; t < L2; t++) {
 							const px = sim.px, py = sim.py;
-							E.applyMask(inp, m1);
+							E.applyMask(inp, pj && t === c1 ? (m1 | 1) : m1);
 							sim.tick(inp);
 							stats.ticks++;
 							if (sim.is_dead) break;
@@ -1046,6 +1057,7 @@ const F2 = process.env.EEAT_MATH_F2 !== '0';
 									const ms = new Uint8Array(h);
 									for (let u = 0; u < h; u++) ms[u] = u < c1 ? m0 : m1;
 									ms[0] |= p0;
+									if (pj) ms[c1] |= 1;
 									best = { T: h, masks: ms, k: 1 };
 								}
 								break;
@@ -1068,6 +1080,7 @@ const F2 = process.env.EEAT_MATH_F2 !== '0';
 									const ms = new Uint8Array(h);
 									for (let u = 0; u < h; u++) ms[u] = u < c1 ? m0 : u < c2 ? m1 : m2;
 									ms[0] |= p0;
+									if (pj) ms[c1] |= 1;
 									best = { T: h, masks: ms, k: 2 };
 								}
 							}
