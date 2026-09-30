@@ -16,12 +16,15 @@
 //      (fail 'proof', blockedBy = the shut gates the all-open field's way crosses);
 //   1. the primitives (opts.prims: prims.route) when given;
 //   2. EXACT (exact.js solveExact): the breadth-first branch and bound over absolute ticks from every start (exact dedup,
-//      the admissible bound, deaths dropped unless wp.allowDeath, the -1 cut): the first goal = the proven minimum;
-//   3. LEG (legs.js): the finders, not proofs: legBest (the default) a best-first search (f = tick + 2.5 x the time
-//      estimate: the admissible kinematic bound near the goal, else the goal field's distance at the running pace, or the
-//      primitives' tick field when opts.bounds is given) over fine cells (1 px, 2 px, 1/16, 1/8, the door-reading state:
-//      the first arrival closes a cell); legBFS (EEAT_EXEC_LEG=beam; 'mix': best-first then the beam bounded by it) a
-//      time-layered widening beam that keeps the fastest state per cell, ranked the same way, at most 8 states a tile;
+//      the admissible bound, deaths dropped unless wp.allowDeath, the -1 cut, the monotone counter cut, a jump that
+//      cannot jump not simulated): the first goal = the proven minimum; 35% of the window where the goal can be within
+//      40 ticks, else 12% (a lower bound);
+//   3. LEG (legs.js): the finders, not proofs: legBest (the default) a best-first search (f = tick + 5 x the goal field's
+//      distance at the running pace, or the primitives' tick field when opts.bounds is given) over cells (2 px, 4 px, 1/8,
+//      1/4 px/tick, the door-reading state: the first arrival closes a cell; a run out of open states again on finer
+//      cells); legBFS (EEAT_EXEC_LEG=beam; 'mix': best-first then the beam bounded by it) a time-layered widening beam;
+//   3b. the tightening: best-first again (w 3, the kinematic bound in its ranking) for legs shorter than the one found,
+//      half of what is left; then polish.js polishLeg (the mutation pass on the leg, exact windows from its end);
 //   2b. EXACT again with the leg's ticks as the budget (maxDepth = its absolute tick - 1): a shorter leg (proven the
 //      minimum) or a proof that the leg is optimal;
 //   the goal states of the successful tier (up to 4 k) -> T.pickDiverse (the earliest, the fastest, one per class).
