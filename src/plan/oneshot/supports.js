@@ -36,7 +36,11 @@
 //                the offsets of the same inputs differ in the low bits, ee_math.md 2.5 THEOREM 4), HALF (a half-tile rest
 //                line), ICE (ice under the box), KILL (the centre cell kills: a support only while protected), ONEWAY /
 //                OWSPEED (a one-way holds it; for some velocity signs only), DOOR (a door holds it or its box needs one
-//                open: the condition table), EXACT = EDGE | NEAR | BINADE (the sub-pixel classes are exact there)
+//                open: S.conds[surf.cond] = {open, shut}: model.js gate ids, a door tile of no gate as -1 - its cell),
+//                XPULL (the centre's pull is another: grounded only on the tick arriving from a cell of this pull),
+//                FXFLIP (a gravity effect of another flip at the centre: the flip turns at the tick's end),
+//                EXACT = EDGE | NEAR | BINADE (the sub-pixel classes are exact there)
+//   edgeSupports(S, o)                           the supports as part 2's records (src/plan/oneshot/edges.js o.supports)
 //   classify(S, sim, o) -> {kind, id, ...}      the support class of an ENGINE STATE at a move boundary (null: in the air)
 //   vclass(v) / VCLASS                           the speed classes: the run-up age (the least n ticks of a held key from
 //                                                rest whose speed reaches |v|), geometric buckets, and over-speed buckets
@@ -380,8 +384,10 @@ function buildSupports(L, o = {}) {
 			fl |= SF_XPULL;
 		}
 		// valid: the condition (doors the box needs open; doors the support needs shut when nothing else holds it)
-		const shut = (b === 1 || (fl & SF_ONEWAY)) ? [] : doorsOut.slice();
-		const open = doorsIn.slice();
+		// (by the model's gates: a gate's tiles share one state; a door tile of no gate by its own cell, as -1 - cell)
+		const toG = (t) => (model.gateOf[t] >= 0 ? model.gateOf[t] : -1 - t);
+		const shut = (b === 1 || (fl & SF_ONEWAY)) ? [] : [...new Set(doorsOut.map(toG))];
+		const open = [...new Set(doorsIn.map(toG))];
 		pc.cond = conds.id(open, shut);
 		if (pc.cond !== 0) fl |= SF_DOOR;
 		if ((L.gFlags[c.cur] & 4) !== 0) fl |= SF_KILL;
