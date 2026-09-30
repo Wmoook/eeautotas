@@ -258,6 +258,16 @@ function makeCore(L, co) {
 				}
 			}
 			if (r.status === 'found') found = { cands: r.goals, tool: 'leg', proven: false, lbAbs };
+			// (EEAT_TIGHTEN=1, a measurement knob: a leg found, the best-first search again with the kinematic bound in its
+			// order and only legs shorter than it, half of what is left)
+			if (found && process.env.EEAT_TIGHTEN === '1' && Date.now() < wEnd - 50) {
+				const t8 = Date.now();
+				const ub = Math.min(...found.cands.map((c) => c.depth));
+				const r3 = LG.legBest(L, snaps, goal, { sim, deadline: t8 + 0.5 * (wEnd - t8), stop: stopFn, allowDeath, beforeTick, field: field0, region, bounds: co.bounds || null, depthMax: ub - 1, w: +process.env.EEAT_BEST_W || 0, cell: cell0, kbOn: true });
+				sims += r3.sims;
+				tiers.push({ tier: 'best-tighten', ms: Date.now() - t8, status: r3.status, depth: r3.depth });
+				if (r3.status === 'found' && r3.depth < ub) found.cands = r3.goals.concat(found.cands);
+			}
 			else {
 				if (r.closest && r.closest.tail) noteClosest(r.closest.dist, r.closest.start, r.closest.tail);
 				if (r.status === 'time' || r.status === 'depth') legTime = true;
