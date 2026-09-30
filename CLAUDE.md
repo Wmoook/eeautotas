@@ -520,6 +520,32 @@ ways in.
   to the executor from the compile's start: its routes are routes (verified), the executor's anchors and routes go into it
   (a route = its bound: its refinement ladder then looks only for faster ones), its arrivals reach the executor only when the
   executor stalls or has nothing left (THE GATE). Measured (box 6): with the arrivals given at once it HURT (slower routes on 10 of 15 levels, 2 levels lost); with the gate (300 s, 40 levels) 25 = 25 compiled (lost INFINITE and TPs The Horror, late base routes; gained Endless Space and K Underground), the first route 18% sooner (geo-mean), run ticks 0.7% fewer, one thread and ~1.7 GB more a compile: OPT-IN (it does not yet lose nothing).
+- **The stretch solver in its own process** (n5-s99-budget, 2026-09-30; `EEAT_STRETCH=1`, OPT-IN, off = the compile byte for
+  byte; `src/plan/lab/stretch_child.js`, strategy.js `st*`; `test/s99stretch.js`): the executor's rung ladder (1.5 / 5 / 15 /
+  45 s windows) restarts every solver of a stretch at every rung, and the lab's backward solver (`src/plan/lab/backward.js`)
+  needs 30-40 s IN ONE PIECE on a long leg (inside the rung windows it never finished one). ONE child process a compile
+  (`EEAT_ST_N` children, default 1) keeps that solver (and its closed closures' memo) across requests and gets ONE stretch at a
+  time on ONE continuous clock, next to the executor, whose rungs go on: (1) at the moves' start a SHORT first plan (at most
+  `EEAT_ST_SHORT` 3 steps: the ONE-LEG levels' trophy) from the level start, its legs in order (shares by the plan's est
+  ticks), on `EEAT_ST_SHORT_F` 0.9 of the budget (at most 270 s; before a route the moves have the whole time, the polish /
+  proof reserves are a route's); (2) then, before the first route, the stretch (anchor, plan step) the executor failed at rung
+  >= 1 from the anchor of the most progress, from its earliest arrival, `EEAT_ST_MS` 40 s (80 s on a retry after 'budget'),
+  with THE REST OF A SHORT PLAN (its anchor's plan through it has at most 3 steps: its later legs too, 40 s a leg;
+  `EEAT_ST_CHAIN=0` off); (3) a leg the child did not finish hands back the backward solve's node of the least time to go
+  (backward.js `o.closest`, opt-in there), replayed here and made that stretch's RELAY start for the executor's next rung
+  when it has none (`EEAT_ST_RELAY=0` off: "keep partial progress as the next rung's start"); (4) a request made stale (its
+  stretch done by the executor before the child's first leg, or a route known and it is no whole-level request) is stopped
+  and the child started again. Every child answer is replayed there (the waypoint's goal test, `T.goalOf`) and again here
+  (`verified`: the engine from the level start) before it is an anchor (`addArrival`) or a route (`routeOf`); the loop that
+  would end 'exhausted' waits while a child works (`stHold`). `report.stretch` {requests, ok, anchors, routes, legs, ms,
+  relays, stale, children, short}. MEASURED (the lab's 48-level A/B set, W3, par 3 an arm side by side, one tree, joins and
+  loops off in both arms): 120 s, box 5, two A/Bs (6f04001 without the relay / chain; bdd076a with them): compiled 20 vs 22
+  and 23 vs 23, pooled 43 vs 45 of 96; The Blank Page (2,942 / 2,024) and INVASION (4,093; the child's whole-level route at
+  ~40 s) 2 of 2 vs 0 of 2; lost once each Tutorial 3, INFINITE, Crypts Of Anubis, Presto Penguins (the base 1 of 2 on each:
+  the moves' spread); the executor's own work the same with the child (the levels failing in both arms: 1,460 / 1,465 steps
+  vs 1,451 / 1,472, simulated ticks -3% / +4%). Per stretch (the lab's krt data, box 5): from the known route's previous
+  trigger the executor's rungs 1-2 (5 + 15-s windows) 30 / 49, one continuous 30-s backward clock 34 / 49, either 36 / 49;
+  every start kind 89 / 129 -> 105 / 129 (69% -> 81%).
 - **Checks**: unit tests `test/plantypes.js`, `planmodel.js`, `planplanner.js`, `planbounds.js`, `planprims.js`,
   `planexec.js --only=unit,fail`, `planstrategy.js`, `plancompile.js` (the CLI and the Compile API with the mock parts
   `test/planmock.js`), `plantruth.js`, `msolve.js --quick`, `kin.js --quick`, `mathsep.js`. The truth checkers on the known routes
