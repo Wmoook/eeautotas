@@ -365,7 +365,10 @@ async function compile(L, opts = {}, emit = () => {}) {
 	if (OS_ON && OS_THREAD && opts.file && !opts.parts) {
 		try {
 			const { Worker } = require('worker_threads');
-			osw = new Worker(path.join(__dirname, 'oneshot', 'osworker.js'), { workerData: { file: path.resolve(String(opts.file)), graph: process.env.EEAT_OS_GRAPH === '1', graphThreads: 1, cache: process.env.EEAT_OS_CACHE || null } });
+			// (its isolate's old space: osworker.js OS_HEAP_MB (the live heap where its A* stops growing) + 512 MB; 0: V8's own)
+			const osHeap = process.env.EEAT_OS_HEAP_MB !== undefined && process.env.EEAT_OS_HEAP_MB !== '' && Number.isFinite(+process.env.EEAT_OS_HEAP_MB) ? +process.env.EEAT_OS_HEAP_MB : 1024;
+			osw = new Worker(path.join(__dirname, 'oneshot', 'osworker.js'), { workerData: { file: path.resolve(String(opts.file)), graph: process.env.EEAT_OS_GRAPH === '1', graphThreads: 1, cache: process.env.EEAT_OS_CACHE || null },
+				...(osHeap > 0 ? { resourceLimits: { maxOldGenerationSizeMb: Math.round(osHeap + 512) } } : {}) });
 			osw.on('message', (m) => {
 				if (!m || typeof m !== 'object') return;
 				if (m.type === 'route' || m.type === 'arr') osQ.push(m);

@@ -22,6 +22,45 @@ const T = require('../types.js');
 const SLICE_MS = +process.env.EEAT_OS_TSLICE || 250;     // one run() of the A* between two looks at the port
 const STATS_MS = 2000;
 const ARR_GAIN = +process.env.EEAT_OS_ARR_GAIN || 5;     // a sooner arrival of a state already sent goes out again past this
+// THE ONE SHOT TAKES NOTHING AWAY (lane 6, push 3). The thread shares the machine with the executor's workers and the main
+// thread; its A* is busy all the time (295 of 300 s on the failing levels) and its store grows ~1 KB a node (1-2 M nodes:
+// +1.7 GB peak RSS a compile). Two limits keep the executor's clock and memory what they are without it:
+// - OS_NICE: on Linux this thread's own nice value (setpriority on its thread id, /proc/thread-self) is raised to OS_NICE:
+//   the scheduler gives it only the cycles the executor's threads leave (a compile that runs alone on free cores: the same
+//   speed; a loaded machine: the executor first). Elsewhere nothing. EEAT_OS_NICE=0: the thread's nice as the process's.
+// - OS_HEAP_MB: past this much live heap in this thread the A* stops growing (no more expansions; its route, its arrivals
+//   and its injected states stay; the stats say heapStop). The live heap is measured (a full collection of this thread's
+//   isolate, at most every 10 s) only when the used heap is past the limit. strategy.js also gives the thread's isolate an
+//   old-space limit of OS_HEAP_MB + 512 MB (V8 collects near it: the garbage between two collections stays bounded).
+//   EEAT_OS_HEAP_MB=0: no limit.
+const envNum = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' && Number.isFinite(+process.env[k]) ? +process.env[k] : d);
+const OS_NICE = envNum('EEAT_OS_NICE', 19);
+const OS_HEAP_MB = envNum('EEAT_OS_HEAP_MB', 1024);
+/** this thread's nice value raised to OS_NICE (Linux: its own thread id) -> {tid, nice} or null */
+function niceSelf() {
+	if (!(OS_NICE > 0) || process.platform !== 'linux') return null;
+	try {
+		const tid = +String(require('fs').readlinkSync('/proc/thread-self')).split('/').pop();
+		if (!(tid > 0)) return null;
+		const os = require('os');
+		const cur = os.getPriority(tid);
+		const want = Math.min(19, Math.max(cur, OS_NICE));
+		if (want !== cur) os.setPriority(tid, want);
+		return { tid, nice: os.getPriority(tid) };
+	} catch (e) { return null; }
+}
+const heapMB = () => { try { return require('v8').getHeapStatistics().used_heap_size / 1048576; } catch (e) { return 0; } };
+/** the live heap (MB): a full collection first (this thread's isolate only), then the used heap */
+let gcFn = null, liveAt = 0;
+const liveHeapMB = () => {
+	if (Date.now() - liveAt < 10000) return 0;
+	liveAt = Date.now();
+	try {
+		if (!gcFn) { require('v8').setFlagsFromString('--expose-gc'); gcFn = require('vm').runInNewContext('gc'); }
+		if (typeof gcFn === 'function') gcFn();
+	} catch (e) { /* the used heap as it is */ }
+	return heapMB();
+};
 
 let stopped = false;
 const inbox = [];
@@ -34,6 +73,7 @@ const post = (m) => { try { parentPort.postMessage(m); } catch (e) { /* the main
 
 (async () => {
 	const t0 = Date.now();
+	const niced = niceSelf();
 	const L = T.loadLevelFile(workerData.file);
 	const model = await require('../model.js').compileModel(L, { file: workerData.file });
 	let bounds = null;
@@ -50,14 +90,15 @@ const post = (m) => { try { parentPort.postMessage(m); } catch (e) { /* the main
 	}
 	const setupMs = Date.now() - t0;
 	const os = OSM.createOneShot(L, { model, planner, bounds, graph });
-	post({ type: 'ready', ms: Date.now() - t0, setupMs });
-	let bestT = Infinity, lastStats = 0, done = false;
+	post({ type: 'ready', ms: Date.now() - t0, setupMs, nice: niced ? niced.nice : null });
+	let bestT = Infinity, lastStats = 0, done = false, heapStop = false;
+	const statsOf = () => Object.assign(os.stats(), { nice: niced ? niced.nice : null, heapMB: Math.round(heapMB()), heapStop });
 	const sent = new Map();   // abstract state key -> the g of the arrival sent (sent again when the A* finds it sooner)
 	const drain = () => {
 		while (inbox.length) {
 			const m = inbox.shift();
-			if (m.type === 'inject' && m.masks) { try { if (os.inject(T.masksOf(m.masks), m.why || 'exec')) done = false; } catch (e) { /* not a state of this level */ } }
-			else if (m.type === 'stats') post({ type: 'stats', stats: os.stats(), done });
+			if (m.type === 'inject' && m.masks) { try { if (os.inject(T.masksOf(m.masks), m.why || 'exec') && !heapStop) done = false; } catch (e) { /* not a state of this level */ } }
+			else if (m.type === 'stats') post({ type: 'stats', stats: statsOf(), done });
 		}
 	};
 	const harvest = () => {
@@ -83,11 +124,16 @@ const post = (m) => { try { parentPort.postMessage(m); } catch (e) { /* the main
 			harvest();
 			if (r && r.done) { done = true; post({ type: 'stats', stats: r.stats, done: true }); }
 		}
-		if (Date.now() - lastStats > STATS_MS) { lastStats = Date.now(); post({ type: 'stats', stats: os.stats(), done }); }
+		if (Date.now() - lastStats > STATS_MS) {
+			lastStats = Date.now();
+			// (the heap limit: the used heap past OS_HEAP_MB is measured again after a full collection: the live heap decides)
+			if (OS_HEAP_MB > 0 && !heapStop && heapMB() > OS_HEAP_MB && liveHeapMB() > OS_HEAP_MB) { heapStop = true; done = true; }
+			post({ type: 'stats', stats: statsOf(), done });
+		}
 		// (the port's messages: an inject may open the A* again after its open list ran out)
 		await new Promise((res) => setTimeout(res, done ? 50 : 0));
 	}
 	harvest();
-	post({ type: 'stats', stats: os.stats(), done, end: true });
+	post({ type: 'stats', stats: statsOf(), done, end: true });
 	process.exit(0);
 })().catch((e) => { post({ type: 'error', error: String(e && e.stack || e) }); process.exit(1); });
