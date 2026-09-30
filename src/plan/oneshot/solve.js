@@ -63,6 +63,15 @@ const LEG_FAIL = env('EEAT_OS_LEG_FAIL', 8);       // a waypoint's failed legs b
 const LAND_AIR = process.env.EEAT_OS_LAND_AIR === '1';
 const LAND_PER = env('EEAT_OS_LAND_PER', 2);
 const LEG_TRY_MIN = env('EEAT_OS_LEG_TRYMIN', 48), LEG_RATE = env('EEAT_OS_LEG_RATE', 32), LEG_SPARSE = env('EEAT_OS_LEG_SPARSE', 16);
+// THE FAR LEGS (lane 6, push 3; OPT-IN EEAT_OS_BW=1, off = the A* as before): a waypoint the reach field puts past LEG_TILES
+// got no leg at all, so on a level whose steps are far (the RATE / ONE-LEG levels: Gravity's Rainbow's one step, the trophy
+// 127 tiles out; Tutorial 2 / 4's first) the A* was a blind flood of the held masks' segments (w0: 99.9% 'fan' nodes, 0 legs
+// in 300 s). A far waypoint gets the lab's backward solver (src/plan/lab/backward.js: one continuous leg, its answer
+// replayed) from the first node of its abstract state that asks, then only from a node the field puts BW_GAP tiles nearer
+// than the last try, its clock doubling from BW_MS0 to BW_MSMAX, the far legs at most BW_SHARE of the A*'s own time
+// (the one shot runs in a process of its own: its time is not the executor's).
+const OS_BW = process.env.EEAT_OS_BW === '1';
+const BW_MS0 = env('EEAT_OS_BW_MS', 1000), BW_MSMAX = env('EEAT_OS_BW_MSMAX', 16000), BW_GAP = env('EEAT_OS_BW_GAP', 4), BW_SHARE = env('EEAT_OS_BW_SHARE', 0.5);
 const LEG_NOGAIN = env('EEAT_OS_LEG_NOGAIN', 12);   // a step's legs that changed nothing before it gets no more legs        // landings fan-outs per (abstract state, support tile, speed class)   // the landings fan-out from airborne nodes too
 const CLASS_MODE = String(process.env.EEAT_OS_CLASS || 'fine');   // the support class: 'fine' | 'coarse'
 const FAR_TILES = env('EEAT_OS_FAR', 800);         // the order's tiles where the reach field says 'no way while S holds'
@@ -154,7 +163,10 @@ function createOneShot(L, o = {}) {
 		}
 	}
 	const ST = { expanded: 0, pushed: 0, nodes: 0, dupHash: 0, dupClass: 0, dead: 0, deathEdges: 0, legs: 0, legOk: 0, lands: 0, fans: 0, graphEdges: 0, injected: 0, plans: 0, planMs: 0, planFail: 0,
-		states: 0, routes: 0, pruned: 0, dropped: 0, expandMs: 0, hMs: 0, legMs: 0, landMs: 0, fanMs: 0, firstMs: 0, runs: 0, ms: 0, byKind: {} };
+		states: 0, routes: 0, pruned: 0, dropped: 0, expandMs: 0, hMs: 0, legMs: 0, landMs: 0, fanMs: 0, firstMs: 0, runs: 0, ms: 0, byKind: {},
+		bwLegs: 0, bwOk: 0, bwMs: 0 };
+	let BWS = null;
+	const bwSolver = () => BWS || (BWS = require('../lab/backward.js').createBackward(L));
 	const nodes = [];                 // id -> node
 	const heap = new Heap();
 	const seen = new Map();           // stateHash -> least g
@@ -437,6 +449,17 @@ function createOneShot(L, o = {}) {
 			const c = wf ? RF.costAt(wf, sim) : -1;
 			wp.tries = wp.tries || 0; wp.oks = wp.oks || 0;
 			const reachT = wp.oks > 0 ? LEG_TILES : LEG_TILES / (1 << Math.min(3, Math.floor(wp.tries / LEG_FAIL)));
+			if (OS_BW && c > reachT && !(wp.bwDone) && (wp.bwC === undefined || c < wp.bwC - BW_GAP) &&
+				ST.bwMs <= BW_SHARE * (runMs + Date.now() - tRun0)) {
+				wp.bwC = c; wp.bwN = (wp.bwN || 0) + 1;
+				const bms = Math.min(BW_MSMAX, BW_MS0 * (1 << Math.min(5, wp.bwN - 1)));
+				const tb = Date.now();
+				let r = null;
+				try { r = bwSolver().solve(n.snap, { tiles: Array.from(wp.tiles) }, { ms: bms }); } catch (e) { r = null; ST.bwErr = String(e && e.message || e).slice(0, 120); }
+				ST.bwLegs++; ST.bwMs += Date.now() - tb;
+				if (r && r.ok && r.masks && r.masks.length) { ST.bwOk++; wp.bwDone = true; cand.push([r.masks instanceof Uint8Array ? r.masks : Uint8Array.from(r.masks), 'bw', wp]); }
+				sim.restore(n.snap);
+			}
 			if (c < 0 || c > reachT) continue;
 			// (a step whose legs arrive and change nothing (the same abstract state, no new node) LEG_NOGAIN times: no more legs)
 			if ((wp.noGain || 0) >= LEG_NOGAIN) continue;
