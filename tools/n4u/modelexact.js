@@ -63,7 +63,7 @@ function checkRoute(entry) {
 	const sim = new E.EESim(L), inp = new E.EEInput();
 	sim.reset();
 	const swSig = (m) => { let s = ''; for (const [k, v] of m) if (v === true) s += k + ','; return s; };
-	const sig = () => `${sim._keysMask}|${sim.coins}|${sim.blue_coins}|${sim.team}|${sim.is_invulnerable ? 1 : 0}|${sim._collide_crown ? 1 : 0}|${sim.deaths}|${sim.checkpoint.x},${sim.checkpoint.y}|${swSig(sim._switches)}|${swSig(sim._oswitches)}`;
+	const sig = () => `${sim._keysMask}|${sim.coins}|${sim.blue_coins}|${sim.team}|${sim.is_invulnerable ? 1 : 0}|${sim._collide_crown ? 1 : 0}|${sim.deaths}|${sim.checkpoint.x},${sim.checkpoint.y}|${swSig(sim._switches)}|${swSig(sim._oswitches)}|${sim._show_coin_gate},${sim._show_blue_coin_gate},${sim._show_death_gate},${sim._timedoor_state ? 1 : 0},${sim.is_zombie ? 1 : 0}`;   // (+ the copies the gates read: stateOf keeps them)
 	let R = M.stateOf(sim), P = R, sg = sig(), pend = null;
 	let lastStart = -1;
 	let evTick = 0, evTile = T.tileOf(sim, W, H), evR = R;   // the last change of R (bound check)

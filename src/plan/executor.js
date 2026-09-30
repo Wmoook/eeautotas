@@ -177,7 +177,9 @@ function makeCore(L, co) {
 			try {
 				const pEnd = t1 + 0.5 * (wEnd - t1);
 				const arr = live.map((s) => { sim.restore(s.snap); return T.arrivalOf(L, sim, s.masks, null); });
-				const nr = await co.prims.route(arr, goal, { ms: pEnd - t1, deadline: pEnd, stop: stopFn, k }, { allowDeath, beforeTick });
+				// (beforeTick: this file's -1 is 'none'; the primitives' is undefined: -1 there pruned every child, so the
+				// primitives tier never found a leg in a compile)
+				const nr = await co.prims.route(arr, goal, { ms: pEnd - t1, deadline: pEnd, stop: stopFn, k }, { allowDeath, beforeTick: beforeTick >= 0 ? beforeTick : undefined });
 				sims += (nr && nr.sims) || 0;
 				tiers.push({ tier: 'prims', ms: Date.now() - t1, ok: !!(nr && nr.ok) });
 				if (nr && nr.ok && nr.arrivals && nr.arrivals.length) {

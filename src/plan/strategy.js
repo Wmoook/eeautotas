@@ -468,7 +468,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 		let r;
 		// (the plan's own budget: the planner's default (2 s first, 0.3 s after) within a quarter of the time left; a call that
 		// overran it by far is said once (a synchronous call cannot be cut here: the CLI's watchdog is the backstop))
-		const planMs = Math.max(100, Math.min(!A.plans && anchors.size <= 1 ? 2000 : 300, (left() - (best ? endReserve : 0)) / 4));
+		// (a plan cut by its budget ('budget': no proof of anything) doubles the anchor's next budget, up to 16x)
+		const planMs = Math.max(100, Math.min((!A.plans && anchors.size <= 1 ? 2000 : 300) * (1 << Math.min(4, A.budgetCuts || 0)), (left() - (best ? endReserve : 0)) / 4));
 		const tp = Date.now();
 		try { r = planner.plan(anchorArg(A), { k: 3, depth: depthOf(A), runBound: rb, tickBound, epoch, ms: planMs }); } catch (e) { bug('plan', { error: e.message, anchor: A.id }); r = { plans: [], why: `error: ${e.message}` }; }
 		const tpMs = Date.now() - tp;
@@ -494,13 +495,15 @@ async function compile(L, opts = {}, emit = () => {}) {
 		for (const A of open) if (uselessA(A)) { A.exhausted = true; A.why = 'bound'; }
 		const live = open.filter((A) => !A.exhausted);
 		// (an anchor never planned (the start, an import, a new state): planned once for its cost)
-		for (const A of live) if (A.costVer < 0 && !Number.isFinite(A.costEst)) { const p = planOfAnchor(A); if (!p.plans.length) { A.exhausted = true; A.why = p.why || 'exhausted'; } }
+		// (an empty plan list cut by the planner's budget is no proof: the anchor stays open and replans with twice the budget)
+		const budgetCut = (A, why) => { if (why !== 'budget' || (A.budgetCuts || 0) >= 4) return false; A.budgetCuts = (A.budgetCuts || 0) + 1; A.planVer = -1; return true; };
+		for (const A of live) if (A.costVer < 0 && !Number.isFinite(A.costEst)) { const p = planOfAnchor(A); if (!p.plans.length && !budgetCut(A, p.why)) { A.exhausted = true; A.why = p.why || 'exhausted'; } }
 		// (the most progress first, then the lowest plan cost + the arrival tick)
 		const list = live.filter((A) => !A.exhausted).sort((a, b) => (b.gain - a.gain) || (scoreOf(a, N) - scoreOf(b, N)));
 		for (const A of list) {
 			if (left() < 200 || stopped) return null;
 			const { plans, why } = planOfAnchor(A);
-			if (!plans.length) { A.exhausted = true; A.why = why || 'exhausted'; continue; }
+			if (!plans.length) { if (!budgetCut(A, why)) { A.exhausted = true; A.why = why || 'exhausted'; } continue; }
 			for (const plan of plans) {
 				const step = plan.steps[0];
 				const ek = edgeKey(step);
