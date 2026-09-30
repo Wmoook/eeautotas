@@ -2011,3 +2011,64 @@ variants only for a leg the members left unsolved) keeps a solved leg's cost exa
 - **So:** the variants raise the plain tier's share of the airborne route legs (4.13: 58.0% -> 66.6%, 0 lost) at no
   cost to a leg it solved before; the compiler's own direct legs do not show it yet (the same ~6% with a leg on the
   class). What the compiler's missed legs need is 7.8's: legs past the 120-tick horizon and across fields.
+
+## 8 Backward reachability and the meet: long legs as dynamic programming (the lab, n5-lab-backward)
+
+(CHAINS-LAB approach A, 2026-09-30.) Code: `src/plan/lab/backward.js` (the solver), `tools/cmp/bwkrt.js` (krt.js's
+known-route legs through it), `tools/cmp/bwsumm.js`, `tools/cmp/abcmp.js`, `test/labbackward.js`; the executor's tier
+`EEAT_BACKWARD=1` (OPT-IN; off = the executor byte for byte). The wall of section 7: the compiler's trigger legs are
+long (median 176 ticks, 47 input changes) and cross fields, and a chain of single moves (4.6) finds 52% of 4-move
+chains. Here a leg is solved as a Bellman problem on a finite MACRO MODEL of the leg's corridor, and the real start
+meets the values:
+
+### 8.1 The model
+- A CELL = the discrete state (coins, keys, switches, team, effects; the clock's phase in 50-tick buckets on a level
+  with time doors), grounded, the centre's half tile in x and y, vx in 1/2 and vy in 1 px/tick, the gravity queue's
+  physics classes (a field entered acts 2 ticks later: without them a ball that had just entered an arrow was its own
+  parent's cell and the dedup dropped it; every search in Gravity's Rainbow's 1-wide arrow shaft ended in 15 nodes).
+- A MACRO MOVE from an exact state = one mask (the directions that act: left / right under a vertical pull, up / down
+  under a horizontal one, all nine without a pull or in a liquid; with and without the jump press where a jump can
+  fire) held to its first EVENT: a half tile on the ground or in a field, a landing (with its HOP: the jump on the
+  landing tick) or a take-off, the physics class of the centre changed, a teleport, 6 ticks of plain air (the air
+  control), 48 ticks, the target's tiles touched. A dead state's move is its dead ticks to the respawn. Every move is
+  the engine's replay: every child is an exact state.
+
+### 8.2 Backward: the values
+The CORRIDOR: the gravity-blind walk from the target's tiles (portals both ways, time doors open), the tiles within the
+start's walk distance x 1.5 + 40, and within the reach field's band of the doors as they stand (the killers closed:
+Endless Space's spike maze 11,759 -> 2,156 tiles). SEEDS: the start's discrete state at rest on every standable half
+tile of the corridor, settled by the engine (independent of the start: the target's side is covered before the start
+arrives there). THE CLOSURE: every cell expanded once from its representative (the first exact state that made it),
+TARGET FIRST (a bucket queue by the walk distance: a closure its clock cuts holds the target's side). D = the Bellman
+time to go, D(c) = min over c's moves (ticks + D(child)), D(target) = 0, by Dijkstra on the reversed edges. D carries
+the SPEED: a run-up's arrival has a value where the same place at rest has a larger or none (test/labbackward.js: a
+13-tile spiked gap crossed from its edge only after running away from it).
+
+### 8.3 The meet, the exact basin, the ladder, the relay
+- THE MEET: A* over exact engine states from the real start with the same macro moves (a cell keeps 2 exact states, a
+  state twice is one node), h = D(the child's cell), else the nearest speed class of its place, else the reach field
+  (src/reach.js, deaths off, the doors as they stand) at the top running speed x 3 + 200. A QUICK MEET on that order
+  alone runs first (0.3 of the clock, 50 k nodes): most legs need no closure (r6: 81 of the 104 legs found).
+- THE EXACT BASIN: a node within 100 ticks of the target by its value asks msolve's direct leg (section 4: the plain
+  regime's per-axis closed forms and the field tier, i.e. the target's per-axis backward sets evaluated), once per 8
+  expansions within a quarter of the meet's time: a last move the macro cells are too coarse for (Presto Penguins'
+  trophy in an arrow maze with portals).
+- THE REFINEMENT LADDER: an exhausted meet again with the dedup cells halved and one state more a cell (3 steps).
+- THE RELAY: a meet its node caps stopped (not its clock) commits to its expanded node of the least time to go (its path
+  from the start kept) and meets again from it: a long leg as a chain of meets (greedy; up to 6 steps).
+Every leg returned is replayed from the start once more (a dead start through its dead ticks).
+
+### 8.4 The numbers (box 5; the 55 known-route legs of krt_b4 with a hit: from the route's own state at the previous
+trigger, 300 and 120 ticks before the route first enters the stuck waypoint; every leg replayed from the level start)
+| run | prev (55) | hit-300 (32) | hit-120 (42) | median s (prev / 300 / 120) | ticks / route median |
+|---|---:|---:|---:|---|---|
+| the executor, krt.js rungs 1-2 (5 + 15 s) | 31 | 23 | 38 | - | - |
+| r3: closure + meet, 30 s a start | 33 | 25 | 38 | 13.1 / 13.5 / 0.1 | 1.005 / 1.057 / 1.042 |
+| r6: + the exact basin, the ladder, the quick meet | **37** | **28** | **39** | 13.1 / 1.9 / 0.2 | 1.004 / 1.060 / 1.050 |
+| r6, the meet alone (no closure) | 34 | 28 | 39 | 4.7 / 1.8 / 0.2 | 1.009 / 1.103 / 1.042 |
+- From the previous trigger by krt's class: ARRIVAL 30 / 31, LONG (legs of 488-3,052 route ticks none of the
+  executor's rungs found from there) 6 / 20, FINDER (no executor start found them) 1 / 4 (Sandcastle Safari: the ball
+  must first run AWAY to take a right-arrow band's speed); found by this and not the executor: 7 (prev), 7 (hit-300), 2
+  (hit-120); only by the executor 1 / 2 / 1. At or under the route's own ticks: 18 / 12 / 13.
+- The Bellman value at the start cell where the closure reached it vs the leg found: 455 / 455, 269 / 279, 479 / 490,
+  344 / 346, 474 / 514 (the model's optimal chain from its representatives; the meet's exact leg).

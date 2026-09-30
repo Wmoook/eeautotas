@@ -62,7 +62,7 @@ const ENV = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? +
 const DEF = {
 	vxq: ENV('EEAT_BW_VXQ', 2), vyq: ENV('EEAT_BW_VYQ', 1), airStep: ENV('EEAT_BW_AIRSTEP', 6), maxT: ENV('EEAT_BW_MAXT', 48),
 	corrF: ENV('EEAT_BW_CORRF', 1.5), corrAdd: ENV('EEAT_BW_CORRADD', 40), maxCells: ENV('EEAT_BW_MAXCELLS', 400000),
-	w: ENV('EEAT_BW_W', 1.0), closeF: ENV('EEAT_BW_CLOSEF', 0.6), meetNodes: ENV('EEAT_BW_MEET', 400000), maxNodes: ENV('EEAT_BW_MAXNODES', 900000), keep: ENV('EEAT_BW_KEEP', 2), quick: ENV('EEAT_BW_QUICK', 50000), quickF: ENV('EEAT_BW_QUICKF', 0.3), reach: ENV('EEAT_BW_REACH', 1), perim: ENV('EEAT_BW_PERIM', 0), corrReach: ENV('EEAT_BW_CORRREACH', 1), relay: ENV('EEAT_BW_RELAY', 6), relayMin: ENV('EEAT_BW_RELAYMIN', 20), meetF: ENV('EEAT_BW_MEETF', 1), finish: ENV('EEAT_BW_FINISH', 1), ladder: ENV('EEAT_BW_LADDER', 3), finishShare: ENV('EEAT_BW_FINISHSHARE', 0.25), finishH: ENV('EEAT_BW_FINISHH', 100), finishEvery: ENV('EEAT_BW_FINISHEVERY', 8), finishMs: ENV('EEAT_BW_FINISHMS', 25), finishT: ENV('EEAT_BW_FINISHT', 120), fw: ENV('EEAT_BW_FW', 3), fadd: ENV('EEAT_BW_FADD', 200),
+	w: ENV('EEAT_BW_W', 1.0), closeF: ENV('EEAT_BW_CLOSEF', 0.6), meetNodes: ENV('EEAT_BW_MEET', 400000), maxNodes: ENV('EEAT_BW_MAXNODES', 900000), keep: ENV('EEAT_BW_KEEP', 2), quick: ENV('EEAT_BW_QUICK', 50000), quickF: ENV('EEAT_BW_QUICKF', 0.3), reach: ENV('EEAT_BW_REACH', 1), perim: ENV('EEAT_BW_PERIM', 0), corrReach: ENV('EEAT_BW_CORRREACH', 1), relay: ENV('EEAT_BW_RELAY', 6), memo: ENV('EEAT_BW_MEMO', 2), relayMin: ENV('EEAT_BW_RELAYMIN', 20), meetF: ENV('EEAT_BW_MEETF', 1), finish: ENV('EEAT_BW_FINISH', 1), ladder: ENV('EEAT_BW_LADDER', 3), finishShare: ENV('EEAT_BW_FINISHSHARE', 0.25), finishH: ENV('EEAT_BW_FINISHH', 100), finishEvery: ENV('EEAT_BW_FINISHEVERY', 8), finishMs: ENV('EEAT_BW_FINISHMS', 25), finishT: ENV('EEAT_BW_FINISHT', 120), fw: ENV('EEAT_BW_FW', 3), fadd: ENV('EEAT_BW_FADD', 200),
 };
 
 // ------------------------------------------------------------------ a small binary heap (key, value pairs)
@@ -155,6 +155,7 @@ function createBackward(L, opts = {}) {
 		return d;
 	}
 
+	const valMemo = new Map();             // the values of closed closures (P.memo newest), by target and discrete state
 	let MS_ = null;
 	const msol = () => MS_ || (MS_ = require('../msolve.js').createSolver(L, {}));
 	// the reach field to a target's tiles (deaths off: the meet never dies), the newest 6
@@ -290,11 +291,11 @@ function createBackward(L, opts = {}) {
 		};
 		// the place key (no speeds): the fallback's index
 		const placeOf = (key) => { const p = key.split('|'); return `${p[0]}|${p[1]}|${p[2]}|${p[3]}`; };
-		const cellId = new Map();                // key -> id
-		const cellKey = [], cellSnap = [], cellTile = [];
+		let cellId = new Map();                  // key -> id
+		let cellKey = [], cellSnap = [], cellTile = [];
 		const revFrom = [], revTicks = [];       // reversed edges per child id: parents and ticks (flat arrays per cell)
 		const toTarget = new Map();              // parent id -> least ticks to the target
-		const byPlace = new Map();               // place -> [ids]
+		let byPlace = new Map();                 // place -> [ids]
 		// THE CLOSURE'S ORDER: nearest the target first (the walk distance of the cell's tile: a bucket queue), so the values
 		// grow backward from the target and a closure cut by its clock has the target's side, not a start-side generation
 		const buckets = [];
@@ -600,9 +601,22 @@ function createBackward(L, opts = {}) {
 		stats.quick = !!found;
 		if (!found && P.closeF > 0) {
 			// 2. the closure, target first (the seeds made now); 3. the values; 4. the meet with them
-			seedAll();
-			closure(closeEnd);
-			dijkstra();
+			// (THE VALUES' MEMO: a later call to the same target from the same discrete state within the same corridor takes the
+			// values a closed closure left: the compiler asks a stuck waypoint again from its anchors at every rung)
+			const mKey = `${Array.from(target.tiles).sort((a, b) => a - b).join(',')}|${discOf(sim.restore(snap0) || sim)}`;
+			const mm = P.memo ? valMemo.get(mKey) : null;
+			if (mm && mm.lim >= lim && tileOfS(sim) >= 0 && mm.inCorr[tileOfS(sim)]) {
+				cellId = mm.cellId; cellKey = mm.cellKey; byPlace = mm.byPlace; D = mm.D;
+				stats.memo = true; stats.cells = cellKey.length; stats.finite = mm.finite;
+			} else {
+				seedAll();
+				closure(closeEnd);
+				dijkstra();
+				if (P.memo && stats.closed) {
+					valMemo.set(mKey, { lim, inCorr, cellId, cellKey, byPlace, D, finite: stats.finite });
+					while (valMemo.size > P.memo) valMemo.delete(valMemo.keys().next().value);
+				}
+			}
 			found = meet(P.meetNodes, t0 + clock * P.meetF);
 		}
 		// 5. THE REFINEMENT LADDER: an exhausted meet again with finer cells while the clock lasts
