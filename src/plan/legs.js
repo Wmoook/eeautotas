@@ -57,8 +57,11 @@ function legBFS(L, starts, goal, o) {
 	const extra = o.extra >= 0 ? o.extra : 3;
 	const stallMax = o.stall > 0 ? o.stall : 200;
 	const noSeen = !!o.noSeen;
-	// (the ranking's time bound: endgame.js's admissible kinematic envelope, capped; none with deaths allowed)
-	const B = allowDeath || o.noBound ? null : (o.B || X.boundFor(L, goal));
+	// (the ranking's time bound: endgame.js's admissible kinematic envelope, capped; none with deaths allowed;
+	// EEAT_BEAM_KB=0: none)
+	const B = allowDeath || o.noBound || process.env.EEAT_BEAM_KB === '0' ? null : (o.B || X.boundFor(L, goal));
+	const dkOf = discKeyCache();
+	const JSKIP_B = process.env.EEAT_JSKIP !== '0' && !o.noJskip;
 	const HLIM = o.hLim > 0 ? o.hLim : 64;
 	const BF = boundsFieldOf(o.bounds, goal);
 	const FT = o.fieldPace > 0 ? o.fieldPace : 16 / 6.78;   // (ticks a tile at the running speed)
@@ -140,9 +143,13 @@ function legBFS(L, starts, goal, o) {
 				if ((i & 63) === 0 && i > 0) { const tu2 = timeUp(); if (tu2) { passes.push({ width, layers: d, sims, why: tu2 }); return finish(tu2); } }
 				const masks = EG.probeMasks(sim, inp, cur[i].sn);
 				sims++;
+				// (a jump that cannot jump: the very state of the input without it (exact.js's rule), not simulated)
+				let noJump = 0;
 				for (let k = 0; k < masks.length; k++) {
 					const m = masks[k];
+					if ((m & 1) && JSKIP_B && (noJump & (1 << (m & 30))) !== 0) continue;
 					if (k > 0) { sim.restore(cur[i].sn); E.applyMask(inp, m); sim.tick(inp); sims++; }
+					if (!(m & 1) && sim.run_ticks !== 0 && !sim.has_levitation && sim.jump_count >= sim.max_jumps) noJump |= 1 << (m & 30);
 					if (sim.is_dead && !allowDeath) continue;
 					if (!sim.is_dead && X.goalAt(goal, sim, t0 + c, beforeTick)) {
 						if (found < 0) found = c;
@@ -153,7 +160,7 @@ function legBFS(L, starts, goal, o) {
 					if (cx < 0 || cy < 0 || cx >= W || cy >= H) continue;
 					const t = cy * W + cx;
 					if (region !== null && !region[t]) continue;
-					const disc = X.discKey(sim);
+					const disc = dkOf(sim);
 					const key = cellOf(sim, disc);
 					if (!noSeen && seen.has(key)) continue;
 					const v = Math.abs(sim.speed_x) + Math.abs(sim.speed_y);
