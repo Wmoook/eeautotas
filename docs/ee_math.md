@@ -261,7 +261,7 @@ deaths, grounded) with `Object.is` (bit for bit, `-0 ≠ +0`):
 |---|---|---|
 | A | constants (bits), the flag and gravity tables of ids 0..4095 | equal |
 | B | one tick from constructed states in an open field: every context (24 current-tile kinds x 5 delayed kinds x 17 effect sets: speed / jump effects, zombie, low gravity, flip 1-4, protection, ice timers, levitation, multijump, dead; world gravity 1 and float32 0.3) x all 32 masks x every reachable speed (the 1-D closures of kin's maps from rest: x in air to depth 14 = 4,600,117 speeds, y in air from rest and every jump, x / y in water, mud, lava, dots, climbables to depth 11 (~170-265 k each), x on ice to depth 12 (511,109); edge doubles: 0, -0, ±1e-4 and neighbours, ±16, subnormals, 22.72; 20,000 random doubles): **7,154,295 speeds** | box 3: **457,874,880 one-tick checks, 0 differ** (laptop, depth 8: 2,968,672) |
-| B2 | the same in contact: on a floor / at a left or right wall / under a ceiling / in a corner of every contact kind (brick, ice, a plain and rotated one-ways, half blocks of rotation 0-3, a present, time doors, the secret block 50), touching or a fraction away, in air / dots / water / arrows / climbables / boosts | laptop: 569,408 ticks (239,016 with a blocked step, 38,072 grounded, 6,576 jumps), 0 differ; box 3: 1.13 |
+| B2 | the same in contact: on a floor / at a left or right wall / under a ceiling / in a corner of every contact kind (brick, ice, a plain and rotated one-ways, half blocks of rotation 0-3, a present, time doors, the secret block 50), touching or a fraction away, in air / dots / water / arrows / climbables / boosts | box 3: **228,937,440 contact ticks** (75,997,676 with a blocked step, 12,969,456 grounded, 2,436,384 jumps), 0 differ |
 | C | free runs: random levels of every block kind kin models (solids, 19 half blocks x rot 0-4, presents, plain and rotated one-ways, 4 liquids, ice, climbables, dots, arrows, boosts, fire / spikes, 13 effects with their numbers, time doors, checkpoints, several spawns, single-exit portal pairs and self-targets, world gravity 1 / 0 / -1 / 2 / float32), random mid-run starts, sticky random inputs (keep 0.5 / 0.85 / 0.95), **kin on its own state** | box 3: **160,000 levels x 4 starts x 200 ticks = 128,000,000 ticks** (107,398 deaths, 88,144 teleports) and **12,000 levels x 4 x 2000 ticks = 96,000,000 ticks** (46,799 deaths, 37,777 teleports): 0 differ |
 | D | exhaustive input trees: every sequence of the 18 distinct inputs to depth 5 from random mid-run states of random levels | box 3: 24 starts x 2,000,718 = **48,017,232 nodes, 0 differ** |
 | E | the real routes (truthset.js: the user's jobs + the benchmark runs), the world answering with the engine's own doors (as they stand during the move), tiles (coin pickups undone), portal draws: one step every tick, and **kin running free on its own state from the level start to the trophy** | **218 routes, 2,013,028 ticks (1861 teleports), 0 differ, both ways** (laptop and box 3) |
@@ -277,7 +277,7 @@ level's static geometry (`makeWorld`) or the engine's live state (test/kin_route
 - `W.exit(P, st)`: a random portal's exit (EEO's Math.random; `makeWorld` picks `o.pick` or the first);
 - `W.spawn(st)`: the spawn rotation without a checkpoint.
 Not modelled (never met in the 2.01 M real ticks, and each outside a replay's movement): an out-of-range music block
-(the engine aborts the rest of the tick: eeo-tas throws), god mode (needs the G key: kin has the paths, untested),
+(the engine aborts the rest of the tick: eeo-tas throws),
 the one-way memory side effects of the world's own overlaps() calls (a team retry, a purple-switch retry, a key expiry,
 PlayState's per-frame queues) and PlayState's coin-gate display dance between its three tick-start calls (kin makes
 the three calls with one door answer).
@@ -286,8 +286,9 @@ the three calls with one door answer).
 
 `~/math_rec_res` (28 processes, 2026-09-30 01:00-01:15 EDT): B `--depth=14 --cap=5e6 --sdepth=11 --scap=2e6` x 8
 shards (8 x 57.2 M checks), C `--runs=20000 --ticks=200` x 8 and `--runs=3000 --ticks=2000` x 4, D `--tree=5
---starts=4` x 6, E + F x 2 (`EEAT_TRUTH_ROOT` = `~/n4plan_primitives/truth`), then B2 x 8. In all: **730 M engine ticks
-compared field by field with 0 differences**. Rerun: `src/out/math/run_box.sh` (the worktree's scratch).
+--starts=4` x 6, E + F x 2 (`EEAT_TRUTH_ROOT` = `~/n4plan_primitives/truth`), then B2 x 8 (`--depth=14 --sdepth=11`). In all: **960,842,580 engine ticks compared field by field
+(B 457,874,880 + B2 228,937,440 + C 224,000,000 + D 48,017,232 + E 2,013,028), 0 differences**. God mode (the G key, never in
+a replay; kin has its paths): `--god=1` on C, 1,200,000 ticks on the laptop, 0 differ. Rerun: `src/out/math/run_box.sh` (the worktree's scratch).
 
 ### 1.14 API (src/plan/kin.js)
 

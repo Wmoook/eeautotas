@@ -36,6 +36,7 @@ const TICKS = +arg('ticks', 200);
 const DEPTH = +arg('depth', QUICK ? 8 : 12);
 const TREE = +arg('tree', QUICK ? 4 : 5);
 const JSONOUT = arg('json', '');
+const GOD = arg('god', '0') === '1';
 
 let pass = 0, fail = 0;
 const report = {};
@@ -467,6 +468,7 @@ function testC() {
 			// a random prefix on the engine alone: kin starts from any mid-run state
 			const pre = stickyMasks(rng, Math.floor(rng() * 120), 0.85);
 			for (const m of pre) { E.applyMask(inp, m); sim.tick(inp); }
+			if (GOD) sim.in_god_mode = true;   // god mode (the G key; never in a replay): its paths in kin too
 			const st = K.fromSim(sim);
 			const masks = stickyMasks(rng, TICKS, [0.5, 0.85, 0.95][s % 3]);
 			const d = runPair(sim, st, W, masks, inp);
