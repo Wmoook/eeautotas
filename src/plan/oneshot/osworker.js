@@ -14,7 +14,6 @@
 //   {type: 'error', error}
 // messages in:
 //   {type: 'inject', masks}   a real state from the level start (an executor anchor, or a whole route: its bound)
-//   {type: 'bwans', id, ok, masks, ms, why}   (workerData.bwShare) the answer to a far leg's request
 //   {type: 'stop'}            end the loop (the worker then exits by itself)
 //   {type: 'stats'}           a 'stats' answer now
 // THE ONE SHOT'S OWN PROCESS (strategy.js OS_PROC, the default with EEAT_ONESHOT=1: EEAT_OS_PROC=0 the worker thread): the
@@ -102,11 +101,7 @@ const post = (m) => { try { parentPort.postMessage(m); } catch (e) { /* the main
 		} catch (e) { graph = null; }
 	}
 	const setupMs = Date.now() - t0;
-	// (THE SHARED SESSION, workerData.bwShare (strategy.js: EEAT_OS_BW_ST=1 with the compile's stretch solver on): the far
-	// legs go out as requests {type: 'bwreq', id, masks, wp, ms} to the compile's stretch child, whose backward solver serves
-	// the executor's stretches too: no second backward solver in this process)
-	const farLeg = workerData.bwShare ? (q) => post({ type: 'bwreq', id: q.id, masks: T.strOf(q.masks), wp: q.wp, ms: q.ms }) : null;
-	const os = OSM.createOneShot(L, Object.assign({ model, planner, bounds, graph }, farLeg ? { farLeg } : {}));
+	const os = OSM.createOneShot(L, { model, planner, bounds, graph });
 	post({ type: 'ready', ms: Date.now() - t0, setupMs, nice: niced ? niced.nice : null });
 	let bestT = Infinity, lastStats = 0, done = false, heapStop = false;
 	const statsOf = () => Object.assign(os.stats(), { nice: niced ? niced.nice : null, heapMB: Math.round(heapMB()), heapStop });
@@ -115,7 +110,6 @@ const post = (m) => { try { parentPort.postMessage(m); } catch (e) { /* the main
 		while (inbox.length) {
 			const m = inbox.shift();
 			if (m.type === 'inject' && m.masks) { try { if (os.inject(T.masksOf(m.masks), m.why || 'exec') && !heapStop) done = false; } catch (e) { /* not a state of this level */ } }
-			else if (m.type === 'bwans') { try { if (os.farDone(m) && !heapStop) done = false; } catch (e) { /* not a state of this level */ } }
 			else if (m.type === 'stats') post({ type: 'stats', stats: statsOf(), done });
 		}
 	};

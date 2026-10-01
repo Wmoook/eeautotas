@@ -602,8 +602,7 @@ function hashGet(keys, vals, log, u) {
  *  the ball comes nearer X than ever before (side 'right': moving left, a new least x; 'left' the mirror) no faster than
  *  VMAX: the exact start Q = X - (x - ref) as the hash key (grid units of g) -> the F entry {code, len (pattern ticks),
  *  at (ticks to the arrival), far (the excursion away from X, px from the start)} */
-function arrivalsOf(g, ref, X, side, n, H, limit, atMax, air) {
-	if (air) return airArrivalsOf(g, ref, X, n, H, limit, air);
+function arrivalsOf(g, ref, X, side, n, H, limit, atMax) {
 	const AM = atMax || Infinity;
 	clearHash(H);
 	const { code, len, at, far } = H;
@@ -646,70 +645,6 @@ function arrivalsOf(g, ref, X, side, n, H, limit, atMax, air) {
 	rec(ref, 0, 0, 0, ref, 0);
 	return { code, len, at, far, n: H.n, full, uMin, uMax };
 }
-// THE AIRBORNE ARRIVAL (C6 lane 5 block 3; OPT-IN EEAT_PREC_AIR=1, unset: the stage byte for byte as before): the ground
-// pieces above arrive at X on the floor, so the ball must creep onto the window's edge at the end of a coast (the
-// precision puzzle: 153 run ticks, a 34-tick piece from a rest 1.2 px away whose last 18 ticks crawl from 5720.52 to
-// 5720.0). The best known route (111) jumps from a rest 0.36 px from X instead, bonks the ceiling, steers in the air and
-// is at x == X exactly at the tick its fall passes the floor's level. Under vertical gravity on plain tiles the x motion
-// does not depend on y (the binade lemma holds from any speed and in the air), and the jump's y path does not depend on
-// x, so an airborne piece is: from rest, the jump on its first tick, every lateral pattern of 1..n ticks and its coast,
-// at the tick k the fall comes back to the floor's level (airTimeOf: the engine from a real rest of that floor) or one
-// tick before; any direction, no faster than VMAX (one press toward the window's wall stops it there). Its excursion is
-// in the air: far 0 (the engine's replay of every hit judges the way).
-function airArrivalsOf(g, ref, X, n, H, limit, k) {
-	clearHash(H);
-	const { code, len, at, far } = H;
-	limit = Math.min(limit || H.limit, H.limit);
-	const uX = (X - g.base) / g.ulp, uRef = (ref - g.base) / g.ulp;
-	let uMin = Infinity, uMax = -Infinity;
-	const st = { px: 0, sx: 0 };
-	let full = false;
-	// (from rest an idle tick moves nothing, so a pattern that arrives at its own tick t < k arrives at k when it starts
-	// k - t ticks after the jump: every tick of every pattern and coast is a candidate, the delay kept in at's high byte;
-	// at the arrival no faster leftward than one press (the next press toward the window's wall stops it), any rightward)
-	const cand = (px, sx, c, d, t) => {
-		if (full || !(sx >= -VMAX)) return;
-		const u = uX - ((px - g.base) / g.ulp - uRef);
-		if (u < 0 || u >= 2 ** 53) return;
-		const kk = H.n;
-		if (hashPut(H, u, kk)) { code[kk] = c; len[kk] = d; at[kk] = k | ((k - t) << 8); far[kk] = 0; if (u < uMin) uMin = u; if (u > uMax) uMax = u; }
-		if (H.n >= limit) full = true;
-	};
-	const rec = (px, sx, d, c) => {
-		for (let i = 0; i < 3 && !full; i++) {
-			if (i === 1 && d === 0) continue;   // (a pattern starts with a press: the delay is its idle start)
-			st.px = px; st.sx = sx;
-			latTick(st, i - 1, false);
-			const px2 = st.px, sx2 = st.sx, c2 = c * 3 + i, d2 = d + 1;
-			if (Math.abs(px2 - ref) > 200) continue;
-			cand(px2, sx2, c2, d2, d2);
-			if (d2 < n && d2 < k) rec(px2, sx2, d2, c2);
-			if (i === 1 || d2 >= k) continue;
-			// the coast (no input) after the pattern, every tick to the floor's level
-			st.px = px2; st.sx = sx2;
-			let t = d2;
-			while (t < k && st.sx !== 0) { latTick(st, 0, false); t++; cand(st.px, st.sx, c2, d2, t); }
-		}
-	};
-	if (k >= 2) rec(ref, 0, 0, 0);
-	return { code, len, at, far, n: H.n, full, uMin, uMax };
-}
-/** the ticks from a jump at rest on the floor fl (one press, no lateral input) to the tick the fall is back at the floor's
- *  level (the landing tick), by the engine from a real rest: 0 when it does not come back within 240 ticks */
-function airTimeOf(ctx, A, r, fl) {
-	const sim = ctx.sim, inp = ctx.inp;
-	sim.restore(A.snap);
-	ctx.fin = false;
-	if (!play(ctx, [...decode(r.code, r.len), ...new Array(r.coast).fill(0)]) || ctx.fin || sim.py !== fl.py) return 0;
-	for (let t = 1; t <= 240; t++) {
-		E.applyMask(inp, t === 1 ? 1 : 0);
-		sim.tick(inp);
-		if (sim.is_dead || ctx.fin) return 0;
-		if (t > 1 && sim.py === fl.py && sim.speed_y === 0) return t;
-	}
-	return 0;
-}
-const PREC_AIR = process.env.EEAT_PREC_AIR === '1';
 
 // ---------------------------------------------------------------- the meet in the middle
 /** the lookups of rests[i0..i1) x (the empty piece + the library's moves that land in the F table's key range [uMin,
@@ -780,48 +715,7 @@ async function realize(ctx, t, st, o) {
 // moves x arrivals) / (their spread in grid units): on the user's level (x ~ 5720, a grid of 2^-40 px) the first step
 // gives ~6 in ~2 s; at x ~ 104 (2^-46 px, 64x finer) the same tables give ~0.02, so later steps (up to ~27x) run there.
 const GROW = [{ n1: 6, lib: 10, f: 11 }, { n1: 7, lib: 11, f: 11 }, { n1: 7, lib: 11, f: 12 }, { n1: 8, lib: 12, f: 12 }, { n1: 8, lib: 13, f: 12 }];
-// (THE AIRBORNE ARRIVAL's pass, EEAT_PREC_AIR=1: first, with AIR_SHARE of the time left and its own result; the ground
-// passes below then run as before and the stage keeps the fastest route of both)
-const AIR_SHARE = 0.4, AIR_STEPS = 2;
 async function realizeOn(ctx, t, st, F0, side, o, res, emit) {
-	if (!PREC_AIR || o.air) return realizeOnGround(ctx, t, st, F0, side, o, res, emit);
-	const floor = F0.floor;
-	const g = gridOf(side === 'right' ? Math.max(t.x, 1) : Math.max(t.x - 1e-9, 1));
-	const fl = { py: floor.py, lo: Math.max(floor.lo, g.base), loOpen: floor.lo >= g.base ? floor.loOpen : false, hi: Math.min(floor.hi, g.top - 1), hiOpen: floor.hi <= g.top - 1 ? floor.hiOpen : false };
-	const ra = { routes: [], landed: 0, hits: 0, lookups: 0, end: '', closest: res.closest, firstAt: 0 };
-	const restsBy = new Map([[GROW[0].n1, restsOf(ctx, F0.anchors, fl, GROW[0].n1)]]);
-	let k = 0;
-	for (const r of restsBy.get(GROW[0].n1).slice(0, 8)) { k = airTimeOf(ctx, F0.anchors[r.anchor], r, fl); if (k) break; }
-	emit({ ev: 'progress', phase: 'air', target: t.x, side, airTicks: k, sec: o.sec() });
-	if (k) {
-		const oa = Object.assign({}, o, { air: k, fast: false, deadline: Math.min(o.deadline, Date.now() + Math.max(0, o.deadline - Date.now()) * AIR_SHARE) });
-		if (o.fast) {
-			// (the rests braked from the attempts' moving states first: the airborne piece pays where its rest comes early;
-			// the coasted rests' anchors are the attempts' late rests; the hits checked fewest ticks first)
-			const fa = movingAnchorsOf(ctx, st.states, F0.floor).filter((A) => (side === 'right' ? A.px > t.x : A.px < t.x));
-			const secsLeft = Math.max(0, (oa.deadline - Date.now()) / 1000);
-			const fr = fastRestsOf(fa, fl, { nodes: o.fastNodes || Math.max(FAST_NODES_MIN, Math.min(FAST_NODES, secsLeft * FAST_NS)) });
-			emit({ ev: 'progress', phase: 'airfast', anchors: fa.length, rests: fr.rests.length, sec: o.sec() });
-			const FA = { floor: F0.floor, anchors: fa, rests: fr.rests };
-			const oaf = Object.assign({}, oa, { fast: true, firstOnly: false });
-			for (const step of FAST_STEPS) {
-				const why = await realizeStep(ctx, t, st, FA, side, oaf, ra, emit, g, fl, FA.rests, GROW[step], step);
-				if (ra.routes.length || why !== 'exhausted' || Date.now() > oa.deadline || (o.stopped && o.stopped())) break;
-			}
-		}
-		for (let step = 0; step < AIR_STEPS && !ra.routes.length; step++) {
-			const sz = GROW[step];
-			if (!restsBy.has(sz.n1)) restsBy.set(sz.n1, restsOf(ctx, F0.anchors, fl, sz.n1));
-			const why = await realizeStep(ctx, t, st, F0, side, oa, ra, emit, g, fl, restsBy.get(sz.n1), sz, step);
-			if (ra.routes.length || why !== 'exhausted' || Date.now() > oa.deadline || (o.stopped && o.stopped())) break;
-		}
-	}
-	res.hits += ra.hits; res.landed += ra.landed; res.lookups += ra.lookups;
-	if (ra.closest && ra.closest !== res.closest) res.closest = ra.closest;
-	if (!(ra.routes.length && o.firstOnly)) await realizeOnGround(ctx, t, st, F0, side, o, res, emit);
-	if (ra.routes.length) { res.routes.push(...ra.routes); if (!res.firstAt) res.firstAt = ra.firstAt; if (!res.end || res.end === 'exhausted') res.end = 'finish'; }
-}
-async function realizeOnGround(ctx, t, st, F0, side, o, res, emit) {
 	const floor = F0.floor;
 	const g = gridOf(side === 'right' ? Math.max(t.x, 1) : Math.max(t.x - 1e-9, 1));
 	// (the pieces add up within one binade of doubles: the stretch cut to it)
@@ -834,7 +728,7 @@ async function realizeOnGround(ctx, t, st, F0, side, o, res, emit) {
 	let FF = null;
 	if (o.fast) {
 		const d0 = o.deadline, oOld = Object.assign({}, o, { fast: false, deadline: Math.min(d0, Date.now() + (d0 - Date.now()) * FAST_OLD) });
-		await realizeOnGround(ctx, t, st, F0, side, oOld, res, emit);
+		await realizeOn(ctx, t, st, F0, side, oOld, res, emit);
 		if (Date.now() > d0 || (o.stopped && o.stopped())) return;
 		o = Object.assign({}, o, { firstOnly: false });
 	}
@@ -869,7 +763,7 @@ async function realizeStep(ctx, t, st, F0, side, o, res, emit, g, fl, rests, sz,
 	const ref = Math.floor((fl.lo + fl.hi) / 2) + 0.3713;
 	const lib = libraryOf(g, ref, sz.lib, o.fast ? FAST_LIB_COAST : 0);
 	const H = o.hash;
-	const F = arrivalsOf(g, ref, t.x, side, sz.f, H, 0, o.fast ? FAST_AT : 0, o.air || 0);
+	const F = arrivalsOf(g, ref, t.x, side, sz.f, H, 0, o.fast ? FAST_AT : 0);
 	emit({ ev: 'progress', phase: 'tables', step, library: lib.n, arrivals: H.n, sec: o.sec() });
 	// (the rests nearest X first: the library's moves are short, so only rests near X can meet the F table; then in order
 	// of their ticks)
@@ -890,11 +784,7 @@ async function realizeStep(ctx, t, st, F0, side, o, res, emit, g, fl, rests, sz,
 		const tail = [...decode(r.code, r.len), ...new Array(r.coast).fill(0)];
 		if (j >= 0) tail.push(...decode(lib.code[j], lib.len[j]), ...new Array(lib.coast[j]).fill(0));
 		const fm = decode(F.code[f], F.len[f]);
-		if (o.air) {
-			// (the airborne piece: the jump on its first tick, the lateral pattern after its delay, then its coast)
-			const tot = F.at[f] & 255, dl = F.at[f] >> 8;
-			for (let k = 0; k < tot; k++) tail.push((k >= dl && k - dl < fm.length ? fm[k - dl] : 0) | (k === 0 ? 1 : 0));
-		} else for (let k = 0; k < F.at[f]; k++) tail.push(k < fm.length ? fm[k] : 0);
+		for (let k = 0; k < F.at[f]; k++) tail.push(k < fm.length ? fm[k] : 0);
 		sim.restore(A.snap);
 		ctx.fin = false;
 		if (!play(ctx, tail)) return null;
@@ -902,7 +792,6 @@ async function realizeStep(ctx, t, st, F0, side, o, res, emit, g, fl, rests, sz,
 		if (sim.px !== t.x) return null;
 		res.landed++;
 		const land = sim.snapshot();
-		if (o.air) emit({ ev: 'airland', at: F.at[f] & 255, delay: F.at[f] >> 8, vx: sim.speed_x, vy: sim.speed_y, py: sim.py, masks: prefixOf(A).concat(tail).map((m) => String.fromCharCode(48 + m)).join('') });
 		// the nudge test's own way on from X first (it may fit the landing as it is), then the exact local search
 		const tryMasks = (ms) => { sim.restore(land); ctx.fin = false; return play(ctx, ms) && ctx.fin; };
 		if (t.cont && t.cont.length && tryMasks(t.cont)) return { masks: tail.concat(t.cont), A };
@@ -943,7 +832,7 @@ async function realizeStep(ctx, t, st, F0, side, o, res, emit, g, fl, rests, sz,
 				res.lookups += m.n;
 				if (o.fast) {
 					// (every hit kept with its ticks from the level start; replayed in that order after the scan)
-					for (const [i, j, f] of m.hits) pending.push([rests[i].total + (j >= 0 ? lib.len[j] + lib.coast[j] : 0) + (o.air ? F.at[f] & 255 : F.at[f]), i, j, f]);
+					for (const [i, j, f] of m.hits) pending.push([rests[i].total + (j >= 0 ? lib.len[j] + lib.coast[j] : 0) + F.at[f], i, j, f]);
 					emit({ ev: 'progress', phase: 'search', target: t.x, side, step, hits: pending.length, lookups: res.lookups, done: next, rests: rests.length, sec: o.sec() });
 					give(wk);
 					return;
