@@ -937,7 +937,21 @@ ways in.
   succeeded at any rung (0 of ~470) and 1 of 230 penalty steps with a rest >= 10,000. The counterfactual (`cf.js`, lane 2
   block 3): capped at rung 0 past walk 5,000 the failed worker time falls 10.0% with 0 successes lost (pre-S99 data); on
   the S99 stack's own est events (EEAT_FAR_TROPHY=1e9 = the est logged, no cap) 13.4% with 1 lost (a Perilous Endeavor
-  coin the portfolio found at rung 3 in 8.2 s), past 10,000 3.7% with 0 lost. Not A/B'd in a compile yet.
+  coin the portfolio found at rung 3 in 8.2 s), past 10,000 3.7% with 0 lost (the whole 20-level S99 run: 7.9% / 1 lost,
+  3.6% / 0 lost). Not A/B'd in a compile yet. THE S99 STACK ON THE RATE CLASS (lane 2 block 3: n5-plan 8ade568's defaults
+  vs `EEAT_S99_DEFAULTS=0`, the 20 RATE test levels, 300 s, W3, 2 runs an arm, all 4 side by side on box 5): triggers 291 /
+  283 vs 304 / 235 (574 vs 539, +6.5%), compiled 1 / 1 vs 0 / 0 (Santa's Workshop 2,195 / 2,239, best known 2,104): NO
+  progress loss side by side (the chief's -12% / -7% were across runs and loads); per level better on EX Crew Ice 48 / 40
+  vs 38 / 27, EX Crew RR 11 / 13 vs 5 / 4, Egg Quest II hard 26 / 28 vs 21 / 13, Starlight 48 / 42 vs 44 / 24, the
+  consistent LOSS Terminal 6 / 6 vs 19 / 23 (its executor 70 steps vs 115). The stretch child's SHORT request (the
+  planner's 1-step trophy plan from the start, `EEAT_ST_SHORT_F` 0.9 of the budget) ran 262-270 s and solved 0 on every
+  RATE level where it ran (13 of 20; the child then got 1-2 stuck stretches); on S99's own full run (box 5's 122 levels)
+  72 short requests, 16 solved, the full-plan solves at 1-66 s but Just One More Time (244 s): `EEAT_ST_SHORT_F=0.3` is
+  the next A/B. THE SAME WAYPOINT FROM SEVERAL ANCHORS (item 3, counterfactual only): a cap of the 45-s rung once an edge
+  failed it from K other anchors frees 10.9% (K 1) / 3.1% (K 2) of the failed time on the chief's 122-level f300 but
+  loses 28 / 7 of its 147 rung-3 successes (here 11 of 71 and 8 of 85 rung-3 successes came after another anchor's
+  rung-3 failure): no cap is free; a shared session (the backward solver's target-side memo, `EEAT_BW_MEMO` 2, per
+  executor worker, no affinity of a waypoint to a worker) is the form left.
 - **THE WIDE LOOPS** (C6 lane 2 block 3; polish.js, the LOOPS stage after the budget; `EEAT_LOOP_WIDE=0`: off, the stage
   as before byte for byte): once the loop passes at the constants (a partner within 12 px at |dvx| + |dvy| <= 1.5, 3 a
   tick; `EEAT_LOOP_R` / `_V` / `_K` tune them) end with time left, the same passes again with wider partners (24 px / 4
