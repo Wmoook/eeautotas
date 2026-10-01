@@ -93,6 +93,10 @@ const CHAIN_CT = +process.env.EEAT_CHAIN_CT > 0 ? +process.env.EEAT_CHAIN_CT : 3
 const CHAIN_FMS = +process.env.EEAT_CHAIN_FMS > 0 ? +process.env.EEAT_CHAIN_FMS : 60;
 // the field legs from a plain node whose plain bound is not certified (c6 lane 2; EEAT_CHAIN_PFIELD=1, o.pfield; chain())
 const CHAIN_PFIELD = process.env.EEAT_CHAIN_PFIELD === '1';
+// THE WALK-OFF NODES (c6 push 3 block 2 lane 1; EEAT_CHAIN_LIFT=1, o.lift; chain()): the event fan-out's holds from a
+// standing node also stop at the tick they leave the ledge's edge without a press (and go on to their landing as before);
+// off = the chain before, byte for byte
+const CHAIN_LIFT = process.env.EEAT_CHAIN_LIFT === '1';
 // a field node's timed holds (eventFan's timed: the ticks a hold also stops at; EEAT_CHAIN_TIMED=0: none, as before)
 const CHAIN_TIMED = process.env.EEAT_CHAIN_TIMED === '0' ? [] : (process.env.EEAT_CHAIN_TIMED || '8,20,40').split(',').map(Number).filter((x) => x > 0);
 const DOTS = new Set([4, 414]);
@@ -2031,7 +2035,7 @@ const F2J = process.env.EEAT_MATH_F2J === '1';
 	 * chain node in a field had no child but its direct leg (Eurus' left-arrow staircase: from the known route's state 74
 	 * ticks before the blue coin, 1 node expanded and no chain; the route's own chain is holds inside the field)
 	 */
-	function eventFan(start, maxT, timed) {
+	function eventFan(start, maxT, timed, lift) {
 		const snap = snapOf(start);
 		const out = [];
 		for (const p0 of [0, 1]) for (const m0 of DIR9) {
@@ -2048,6 +2052,10 @@ const F2J = process.env.EEAT_MATH_F2J === '1';
 				const tele = Math.abs(sim.px - px) > TELEPORT_PX || Math.abs(sim.py - py) > TELEPORT_PX;
 				if (tele || (c !== c0 && c !== 'A') || (sim.on_ground && air && t > 0)) { out.push({ masks: Uint8Array.from(ms), hop: null }); break; }
 				if (timed && CHAIN_TIMED.includes(t + 1)) out.push({ masks: Uint8Array.from(ms), hop: null });
+				// (THE WALK-OFF, lift: a standing ball's hold leaves its ledge's edge without a press: that state a node too, the
+				// hold going on to its landing as before; the next hold from there steers the fall: a way back under the ledge,
+				// into a field below it)
+				if (lift && !air && !sim.on_ground && !(mk & 1) && t > 0) out.push({ masks: Uint8Array.from(ms), hop: null });
 				if (!sim.on_ground) air = true;
 			}
 		}
@@ -2136,6 +2144,7 @@ const F2J = process.env.EEAT_MATH_F2J === '1';
 		const domP = o.dom === undefined ? CHAIN_DOM : o.dom;
 		const dom = R0 ? R0.dom : new Map();
 		let domCut = R0 ? R0.domCut : 0, gatedN = 0, pfieldN = 0;
+		const liftOn = o.lift === undefined ? CHAIN_LIFT : !!o.lift;
 		const domKeep = (g) => {
 			if (!(domP > 0)) return true;
 			const cx = Math.trunc(sim.px + 8) >> 4, cy = Math.trunc(sim.py + 8) >> 4;
@@ -2196,7 +2205,7 @@ const F2J = process.env.EEAT_MATH_F2J === '1';
 			const lands = ctx ? landings(n.snap, { Tmax: Math.min(lim, o.fanT || 60), K: o.fanK, max: o.fanMax || 30, toward: tg, nodes: o.fanNodes || 20000, perTile: o.perTile || 0, deadline: t0 + budgetMs })
 				: chainTricks !== false && tricksOf(o).has('frame') ? frameLandings(n.snap, { Tmax: Math.min(lim, o.fanT || 60), K: o.fanK, max: o.fanMax || 30, toward: tg, nodes: o.fanNodes || 20000, perTile: o.perTile || 0, deadline: t0 + budgetMs, tricks: o.tricks }) : [];
 			const tE = prof ? Date.now() : 0;
-			if (o.events !== false) for (const e of eventFan(n.snap, Math.min(lim, o.fanT || 60), !ctx && CHAIN_TIMED.length > 0)) lands.push(e);
+			if (o.events !== false) for (const e of eventFan(n.snap, Math.min(lim, o.fanT || 60), !ctx && CHAIN_TIMED.length > 0, liftOn)) lands.push(e);
 			if (prof) { prof.land = (prof.land || 0) + tE - tF; prof.event = (prof.event || 0) + Date.now() - tE; }
 			const tP = prof ? Date.now() : 0;
 			legs += lands.length;
