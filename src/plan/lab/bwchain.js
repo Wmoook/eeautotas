@@ -127,7 +127,11 @@ function chainLevel(L, o = {}) {
 	const classOf = (n) => { if (n.cls === undefined) { try { const a = planner._anchorOf(anchorArg(n)); n.cls = a.S.key + '|' + a.cls; } catch (e) { n.cls = String(n.S.key) + '|*'; } } return n.cls; };
 	const addNode = (masks, sim, parent, label, relay) => {
 		const S = model.stateOf(sim);
-		const key = String(S.key);
+		// (RANK=est with GAIN FIRST: KEEP counts the nodes of a state over its checkpoints (the key without its '|c<cp>'
+		// part): the chain's legs never die, so a checkpoint touched on the way is no progress, and a 1-tick leg onto the
+		// checkpoint the node stands by made a new node of the same coins and features again and again (Summer Bee: 30 of
+		// 181 legs, depth 19 at gain 11))
+		const key = RANK_EST && GAIN_FIRST ? String(S.key).replace(/\|c-?\d+$/, '') : String(S.key);
 		const a = Object.assign(T.arrivalOf(L, sim, masks, null), { run: sim.run_ticks });
 		const same = byKey.get(key) || [];
 		if (same.some((x) => x.a.hash === a.hash)) { stats.dropped++; return null; }
