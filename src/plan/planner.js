@@ -63,6 +63,15 @@ const KEY_TICKS = 500;
 const TRK = require('./tricks.js');
 const TR_WARP = TRK.has('warp');
 const TR_EXH = TRK.has('exh');
+// (THE POCKET, OPT-IN EEAT_POCKET=1 (strategy.js: a pocket anchor picked after the others), its planner half: a failed step
+// at rung >= POCKET_RUNG whose closest approach stayed within POCKET_R tiles (Chebyshev) of the anchor's tiles while the
+// waypoint is farther than 2 x POCKET_R (the goal field at the closest) is EXHAUSTED IN EFFECT: no way out of the anchor's
+// pocket was found, so its edge from that node class is offered as its death variant (edge + '~w', as EEAT_TRICKS exh: a
+// death back at a respawn, then the trigger, its own rungs), where the level can kill and a respawn's death way reaches it.
+// EEAT_POCKET_DEATH=0: the pick's half alone)
+const POCKET_DEATH = process.env.EEAT_POCKET === '1' && process.env.EEAT_POCKET_DEATH !== '0';
+const POCKET_R = +process.env.EEAT_POCKET_R > 0 ? +process.env.EEAT_POCKET_R : 12;
+const POCKET_RUNG = process.env.EEAT_POCKET_RUNG !== undefined ? Math.max(0, +process.env.EEAT_POCKET_RUNG | 0) : 1;
 const TR_DBG = process.env.EEAT_TRICKS_DEBUG === '1';
 // (a forced chain's plan: its boost tile first as a region step, EEAT_CHAIN_HEAD=0: the chain's step alone)
 const CHAIN_HEAD = process.env.EEAT_CHAIN_HEAD !== '0';
@@ -798,7 +807,7 @@ function createPlanner(model, facts, o = {}) {
 			// (EXHAUSTED -> DEATH, EEAT_TRICKS exh: the leg exhausted from this class; its death variant only, where one
 			// exists: a level that can kill and a respawn the death way reaches the target from)
 			let g = null;
-			if (TR_EXH && wantEst && exhausted.has(edge + '\u0001' + cls)) {
+			if ((TR_EXH || POCKET_DEATH) && wantEst && exhausted.has(edge + '\u0001' + cls)) {
 				const gd = leg(tiles, true);
 				if (TR_DBG) { let rE = INF, sE = INF; const drE = dvE ? dvE.dr : null; for (const t of tiles) { if (drE && drE[t] < rE) rE = drE[t]; if (dE && dE[t] < sE) sE = dE[t]; } process.stderr.write(`[tricks exh] ${edge} viaDeath ${gd ? gd.viaDeath : null} relax ${gd ? gd.relaxOnly : null} dk ${dvE ? dvE.dk : null} sE ${sE} rE ${rE} cp ${S.cp} rsp ${model.respawnOf(S, 'est').id} cls ${String(cls).slice(-28)}\n`); }
 				if (gd && gd.viaDeath) { g = gd; edge += '~w'; }
@@ -1854,6 +1863,12 @@ function createPlanner(model, facts, o = {}) {
 		}
 		const fail = (result && result.fail) || { why: 'budget' };
 		if (TR_EXH && fail.why === 'exhausted' && model.canDie && !/~w$/.test(edge)) exhausted.add(edge + '\u0001' + cls);
+		if (POCKET_DEATH && model.canDie && a && fail.why !== 'stopped' && !/~w$/.test(edge) && (step.rung | 0) >= POCKET_RUNG && fail.closest && fail.closest.tile >= 0 && fail.closest.dist >= 2 * POCKET_R) {
+			const cx = fail.closest.tile % W, cy = (fail.closest.tile / W) | 0;
+			let near = Infinity;
+			for (const t of a.pos.tiles || []) near = Math.min(near, Math.max(Math.abs(t % W - cx), Math.abs(((t / W) | 0) - cy)));
+			if (near <= POCKET_R && !exhausted.has(edge + '\u0001' + cls)) { exhausted.add(edge + '\u0001' + cls); ST.pocketDeath = (ST.pocketDeath || 0) + 1; }
+		}
 		if (TR_DBG) process.stderr.write(`[tricks learn] ${edge} why ${fail.why} canDie ${model.canDie} cls ${String(cls).slice(-24)}\n`);
 		const sKey = a ? proofKey(a.S, a.pos) : (cls || '').split('|')[0];
 		if (fail.why === 'proof') out.push(facts.add({ kind: 'proof', edge, sKey }));

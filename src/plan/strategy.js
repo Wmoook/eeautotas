@@ -131,6 +131,20 @@ const TIMER_PICK = process.env.EEAT_PLAN_TIMER === '1';
 // ~1,600-tick estimate) counts nothing.
 const CRUMB_RANK = process.env.EEAT_CRUMB_RANK === '1' ? 1 : process.env.EEAT_CRUMB_RANK === '2' ? 2 : process.env.EEAT_CRUMB_RANK === '3' ? 3 : 0;
 const CR_F_SLACK = +process.env.EEAT_CR_F_SLACK || 0.1, CR_F_ABS = +process.env.EEAT_CR_F_ABS || 60;
+// THE POCKET (C6 push 3 lane 3 block 5; OPT-IN EEAT_POCKET=1, unset = the anchor pick as before, byte for byte): an anchor
+// whose steps toward FAR waypoints end with their closest approach still in the anchor's own neighbourhood has no way out of
+// where its arrival left the ball (a trigger at the bottom of a one-way pit, a ledge the ball cannot leave alive), whatever
+// its gain. Buuwuu's Stronghold (the chief's block-4 run, 300 s): anchor 6 (blue coin (65,30), gain 7, the most) took every
+// pick from 131 s to the end, 27 steps of 8 edges at rungs 0-3, every closest at (71,28) / (77,31) (6-12 tiles from its
+// arrival) with the targets 90-200 tiles away; the routes of the same code (6,434 / 6,485 run ticks) never take that coin.
+// With the knob a failed step at rung >= POCKET_RUNG whose closest tile is within POCKET_R tiles (Chebyshev) of the anchor's
+// arrival tiles while the waypoint is farther than 2 x POCKET_R (the goal field's distance at the closest) marks its edge
+// on the anchor; POCKET_K such edges make the anchor a POCKET, picked after the others whatever its gain (the planner's
+// half: planner.js, its pocketed edges offered as their death variants). Ordering only: no anchor dropped, no claim.
+const POCKET = process.env.EEAT_POCKET === '1';
+const POCKET_R = +process.env.EEAT_POCKET_R > 0 ? +process.env.EEAT_POCKET_R : 12;
+const POCKET_K = +process.env.EEAT_POCKET_K > 0 ? +process.env.EEAT_POCKET_K : 2;
+const POCKET_RUNG = process.env.EEAT_POCKET_RUNG !== undefined ? Math.max(0, +process.env.EEAT_POCKET_RUNG | 0) : 1;
 // THE FAR TROPHY (C6 push 3 lane 2 block 2, RATE; OPT-IN EEAT_FAR_TROPHY=<est ticks>, unset / 0: off, the compile byte for
 // byte as before): a plan whose first step is the trophy and whose est walk to it is longer than that runs at most at rung
 // EEAT_FAR_TROPHY_RUNG (1: a 5-s window) whatever rung its facts reached; its failures still climb the facts' ladder (the
@@ -1332,8 +1346,10 @@ async function compile(L, opts = {}, emit = () => {}) {
 		// (the most progress first, then the lowest plan cost + the arrival tick; THE TIMER (planner.js, EEAT_PLAN_TIMER=1): an
 		// anchor with no plan in its timed killer's time and no remover in time (a LATE anchor) after the others, whatever its gain)
 		const lateOf = (A) => (TIMER_PICK && A.plans && A.plans.late ? 1 : 0);
+		// (THE POCKET, EEAT_POCKET=1: a pocket anchor after the others, whatever its gain)
+		const pocketOf = (A) => (POCKET && A.pocket && A.pocket.size >= POCKET_K ? 1 : 0);
 		if (CRUMB_RANK === 3) crumbGate(live);
-		const list = live.filter((A) => !A.exhausted).sort((a, b) => (lateOf(a) - lateOf(b)) || (pickGain(b) - pickGain(a)) || (scoreOf(a, N) - scoreOf(b, N)));
+		const list = live.filter((A) => !A.exhausted).sort((a, b) => (lateOf(a) - lateOf(b)) || (pocketOf(a) - pocketOf(b)) || (pickGain(b) - pickGain(a)) || (scoreOf(a, N) - scoreOf(b, N)));
 		for (const A of list) {
 			if (left() < 200 || stopped) return null;
 			const { plans, why } = planOfAnchor(A);
@@ -1422,6 +1438,19 @@ async function compile(L, opts = {}, emit = () => {}) {
 		try { fs2 = planner.learn(step, res, anchorArg(A)) || []; } catch (e) { bug('learn', { error: e.message, label: labelOf(step) }); }
 		for (const f of fs2) say({ ev: 'fact', kind: f.kind || f.type || '?', edge: f.edge !== undefined ? f.edge : step.edge, rung: f.rung !== undefined ? f.rung : step.rung, why: f.why });
 		return fs2;
+	};
+	// (THE POCKET, EEAT_POCKET=1: a far step's failure whose closest stayed within POCKET_R tiles of the anchor's arrivals)
+	const pocketNote = (A, step, fail) => {
+		const c = fail && fail.closest;
+		if (!c || !(c.tile >= 0) || !(c.dist >= 2 * POCKET_R) || (step.rung | 0) < POCKET_RUNG || fail.why === 'stopped') return;
+		const Wd = L.width, cx = c.tile % Wd, cy = (c.tile / Wd) | 0;
+		let near = Infinity;
+		for (const s of A.arrivals) if (s && s.tile >= 0) near = Math.min(near, Math.max(Math.abs(s.tile % Wd - cx), Math.abs(((s.tile / Wd) | 0) - cy)));
+		if (!(near <= POCKET_R)) return;
+		const P = A.pocket || (A.pocket = new Set());
+		if (P.has(step.edge)) return;
+		P.add(step.edge);
+		if (P.size === POCKET_K) say({ ev: 'pocket', anchor: A.id, edges: [...P], closest: c.tile, dist: c.dist, near, label: labelOf(step) });
 	};
 	const failOf = (res, budget) => (res && res.fail) || { why: 'budget', closest: null, touched: [], blockedBy: [], level: budget.level };
 	// ---- THE LEG TRANSPLANT (n5 doctor b9; OPT-IN EEAT_PLAN_TRANSPLANT=1, else as before): the anchors of a level of
@@ -1548,6 +1577,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 			}
 		} else { A.fails++; failSteps++; }
 		learnFrom(step, res, A);
+		if (POCKET && !res.ok && !step.synthetic) pocketNote(A, step, res.fail);
 		if (ST_ON) stNote(A, step, wp, plan, !!res.ok);
 		const ms = Date.now() - t1;
 		const fail = res.ok ? null : res.fail || null;
