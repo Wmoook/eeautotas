@@ -371,6 +371,13 @@ const MATH_ALT_SLACK = process.env.EEAT_MATH_ALT_SLACK !== undefined ? +process.
 // 3,763), with the math tier's own 6 in 3 (the defaults here) a tie (1,162; kept among the picked, EEAT_NEXT_FIRST=0 the
 // default: EEAT_NEXT_FIRST=1 puts it first, 987 vs 986 on 37 routes).
 const NEXT_ON = () => process.env.EEAT_NEXT === '1';   // OPT-IN (7.9: a tie on the chain harness)
+// THE WORKERS' HEAP (P4, OPT-IN EEAT_EXEC_HEAP_MB=<MB>, unset = V8's own limit as before): each executor worker thread's
+// old generation capped (worker_threads resourceLimits.maxOldGenerationSizeMb), so V8 collects before the isolate's pages
+// grow to the default limit: with the stretch defaults a compile's own process peaked 4.7 GB on EX Crew Odyssey (the
+// portfolio's transient searches in 3 workers; its retained state after a GC is ~12 MB heap + ~150 MB buffers a worker,
+// src/out/p4 mem_pf.js) where the whole compile of block 1 peaked 3.5 GB. A worker past it ends with an error: its step
+// fails ('the worker exited') and the pool replaces it (the error / exit handlers below)
+const EXEC_HEAP_MB = +process.env.EEAT_EXEC_HEAP_MB > 0 ? Math.round(+process.env.EEAT_EXEC_HEAP_MB) : 0;
 const NEXT_FIRST = process.env.EEAT_NEXT_FIRST === '1';   // (1: the next-best arrival first; else among the picked)
 const NEXT_EVAL = 64, NEXT_TRY = +process.env.EEAT_NEXT_TRY > 0 ? +process.env.EEAT_NEXT_TRY : 6, NEXT_MS = +process.env.EEAT_NEXT_MS > 0 ? +process.env.EEAT_NEXT_MS : 25;
 const NEXT_ALTS = +process.env.EEAT_NEXT_ALTS >= 0 && process.env.EEAT_NEXT_ALTS !== undefined ? +process.env.EEAT_NEXT_ALTS : 6;
@@ -1899,7 +1906,7 @@ async function createExecutor(L, opts) {
 	const queue = [];
 	let jobId = 0;
 	const spawn = (i) => {
-		const w = new Worker(path.join(__dirname, 'execworker.js'), { workerData: { file: path.resolve(String(opts.file)), usePrims: !!opts.prims, useBounds: !!opts.bounds, seed: opts.seed | 0 } });
+		const w = new Worker(path.join(__dirname, 'execworker.js'), { workerData: { file: path.resolve(String(opts.file)), usePrims: !!opts.prims, useBounds: !!opts.bounds, seed: opts.seed | 0 }, ...(EXEC_HEAP_MB > 0 ? { resourceLimits: { maxOldGenerationSizeMb: EXEC_HEAP_MB } } : {}) });
 		const slot = { w, busy: null, i, dead: false };
 		w.on('message', (msg) => {
 			const job = slot.busy;

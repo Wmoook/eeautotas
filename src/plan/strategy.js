@@ -293,6 +293,10 @@ const ST_NICE = process.env.EEAT_ST_NICE !== undefined && process.env.EEAT_ST_NI
 // routes go through crumbs and detours where the direct stretch failed the executor's rungs (Tutorial 2: the start ->
 // checkpoint (245,28) stretch, the child's 64-s clock found it at tick 1,730; the route's own took a blue coin, 4,099))
 const ST_REFINE = process.env.EEAT_ST_REFINE === '1';
+// (THE CHILDREN'S HEAPS, P4: the stretch child's and the whole-level / chain child's V8 old space, --max-old-space-size;
+// EEAT_ST_HEAP_MB (default 3000) / EEAT_BWC_HEAP_MB (default 2000), the values before: the default = byte for byte)
+const ST_HEAP_MB = +process.env.EEAT_ST_HEAP_MB > 0 ? Math.round(+process.env.EEAT_ST_HEAP_MB) : 3000;
+const BWC_HEAP_MB = +process.env.EEAT_BWC_HEAP_MB > 0 ? Math.round(+process.env.EEAT_BWC_HEAP_MB) : 2000;
 /** a relative deadline (a step's or a waypoint's beforeTickFrom): a number, or 'prev+N' (N ticks after the previous
  *  step's arrival, i.e. this anchor's arrival: a key's KEY_TICKS) -> ticks | NaN */
 function relOf(x) {
@@ -834,7 +838,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 			let found = null, done = null, buf = '';
 			// (the chain with the stretch solver on: only a GATED level, --gatedOnly=1; the stretch child takes a one-leg level's
 			// whole-level solve)
-			const ch = cp.spawn(process.execPath, ['--max-old-space-size=2000', path.join(__dirname, 'lab', BW_CHAIN ? 'bwchain_child.js' : 'bwlevel_child.js'), String(opts.file), `--ms=${secs * 1000}`, ...(wpFile ? [`--wps=${wpFile}`] : []), ...(BW_CUTS && !BW_CHAIN ? ['--cuts=1'] : []), ...(BW_CHAIN && ST_ON ? ['--gatedOnly=1'] : [])], { stdio: ['ignore', 'pipe', 'ignore'] });
+			const ch = cp.spawn(process.execPath, [`--max-old-space-size=${BWC_HEAP_MB}`, path.join(__dirname, 'lab', BW_CHAIN ? 'bwchain_child.js' : 'bwlevel_child.js'), String(opts.file), `--ms=${secs * 1000}`, ...(wpFile ? [`--wps=${wpFile}`] : []), ...(BW_CUTS && !BW_CHAIN ? ['--cuts=1'] : []), ...(BW_CHAIN && ST_ON ? ['--gatedOnly=1'] : [])], { stdio: ['ignore', 'pipe', 'ignore'] });
 			bwlChild = ch;
 			const onExit = () => { try { ch.kill('SIGKILL'); } catch (e) { /* gone */ } };
 			process.once('exit', onExit);
@@ -921,7 +925,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		if (slot.ch) return;
 		const cp = require('child_process');
 		let ch;
-		try { ch = cp.spawn(process.execPath, ['--max-old-space-size=3000', path.join(__dirname, 'lab', 'stretch_child.js'), String(opts.file)], { stdio: ['pipe', 'pipe', 'ignore'] }); } catch (e) { say({ ev: 'warning', text: `the stretch solver: ${e.message}` }); return; }
+		try { ch = cp.spawn(process.execPath, [`--max-old-space-size=${ST_HEAP_MB}`, path.join(__dirname, 'lab', 'stretch_child.js'), String(opts.file)], { stdio: ['pipe', 'pipe', 'ignore'] }); } catch (e) { say({ ev: 'warning', text: `the stretch solver: ${e.message}` }); return; }
 		slot.ch = ch; stStats.children++;
 		// (below the compile's own priority: on a busy machine the executor's workers keep their CPU, the child takes what is
 		// idle; EEAT_ST_NICE=0: the same priority)
