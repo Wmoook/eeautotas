@@ -1203,7 +1203,17 @@ ways in.
   Labyrinth 27); routelb raises the compile's lb on 25 of 43; the gap median 88.5% of the route; the least celeste x2
   59.8% (lb 96 / 239), NC Naos d3c6 62.7% (57 / 153), the precision puzzle 63.4%, Bygone Tutorial 65.7% (633 / 1,847),
   Tutorial 1 66.1%, Ruins 70.5%, fef0 73.3% (16 / 60), Rosa dei Venti 74.1%, 730c 77.3% (22 / 97). fef0's C 17 resumed
-  on 8 threads: 813 of 1,875 tasks by 888 s (the rest are the pocket's big tasks), not closed.
+  on 8 threads: 873 of 1,875 tasks by 1,339 s (the rest are the pocket's big tasks), not closed. The reach tier (RCH3's
+  -1) cuts nothing more: the census of celeste 31c0 at C 97 and of NC Naos d3c6 at C 58 the same states and cuts at every
+  layer with and without it. **THE BREADTH-FIRST CENSUS IS A CHEAPER PROVER WHERE THE DFS THRASHES**: NC Naos d3c6 at C 58
+  (layercensus.js: every state once, full stateHash dedup across layers, the same cut; a front that empties with no crown
+  = C closed, the same claim as wholepar's): 7.0 M distinct states by layer 20, the layers 1.5 M and growing 1.34 / 1.28 /
+  1.23 / 1.20 / 1.17x (falling as the cut bites), 4 min on one thread, where wholepar's DFS spent 6.09 B nodes on 61 of
+  C 58's 171 tasks (its 2^24-slot shared table cleared every C, the tasks' prefixes searched again); Switch Labyrinth C 20
+  closed by the census in 30 s (420 K states). The census's seen set is now 64 V8 Sets by the hash's low bits (one Set
+  holds at most 2^24 entries). NEXT: THE BFS PROVER: the census's layers expanded by worker threads (chunks of the front,
+  one shared typed-array hash table, the next front merged), a task log per layer (resumable across cycles), first on NC
+  Naos d3c6 / the precision puzzle at C 58+ (where the DFS stalls) and fef0 C 17.
   THE STARTING BOUND OF EVERY COMPILED ROUTE (the default tiers at the route's first input, the 43 routes of b7 score
   cycle 4): h0 / route Switch Labyrinth 11 / 27, celeste x2 87 / 239, NC Naos d3c6 and the precision puzzle 49 / 153,
   Rosa dei Venti 924 / 3,557, Tutorial 1 488 / 2,090, Bygone Tutorial 420 / 1,847, My level 730c 19 / 97, fef0 4 / 60,

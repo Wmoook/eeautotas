@@ -30,7 +30,10 @@ const out = (o) => console.log(JSON.stringify(o));
 
 const { sources, rests } = LP.sourcesOf(L, 4000);
 const sim = new E.EESim(L), inp = new E.EEInput();
-const seen = new Set();
+// (a V8 Set holds at most 2^24 entries: NC Naos d3c6 at C 58 passes 7 M by layer 20, so the seen states are 64 Sets by the
+// hash's low bits; a state hash is a whole number below 2^53)
+const SH = Array.from({ length: 64 }, () => new Set());
+const seen = { has: (h) => SH[h & 63].has(h), add: (h) => SH[h & 63].add(h), get size() { let n = 0; for (const x of SH) n += x.size; return n; } };
 let front = [];
 for (const s of sources) { sim.restore(s); const hs = sim.stateHash(); if (!seen.has(hs)) { seen.add(hs); front.push(s); } }
 sim.restore(sources[0]);
