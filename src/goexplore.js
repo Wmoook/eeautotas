@@ -428,7 +428,7 @@ const SPD_PROGRESS = 1;
 // reads tool, cachedir and pausefile too
 const GPU_STRINGS = ['tool', 'bin', 'reach', 'stopfile', 'pausefile', 'cachedir', 'launch-ms', 'parent'];
 // the text options
-const TEXT_OPTS = new Set(['level', 'out', 'steer', 'work', 'burstSteer', 'prefix', 'pickBox', 'rollMix', 'prior', ...GPU_STRINGS]);
+const TEXT_OPTS = new Set(['level', 'out', 'steer', 'work', 'burstSteer', 'prefix', 'pickBox', 'rollMix', 'prior', 'goalTiles', ...GPU_STRINGS]);
 // --gpu=1, the roll mix (--rollMix=<roll>:<keep>[:<weight>],...; 0 = off: every batch --roll / --keep as before): the GPU
 // random runs' batches take their run length and keep probability from these classes in turn, each class the same share
 // of the GPU's TIME (its batches' kernel ms, times its weight; n3-regression-pins, 2026-09-29: before, the same share of
@@ -768,6 +768,20 @@ function prefixOf(a) {
 	const ms = /\.eetas$/i.test(a.prefix) ? C.readEetas(a.prefix) : Uint8Array.from(a.prefix, (ch) => (ch.charCodeAt(0) - 48) & 31);
 	return ms.length ? ms : null;
 }
+/** --goalTiles=<t,t,...> | <file.json> (THE HYBRID: src/plan/strategy.js EEAT_HYBRID=1 hands a compiler leg it failed to
+ *  this search, from the leg's start state (--prefix) to the leg's target): the tiles (y * W + x) the reach field is built to
+ *  instead of the trophy (head A's order and the bursts' arm by it; its -1 = a state that reaches none of them even with
+ *  every door open) and a 'goal' event (its inputs from the level start) when a run's ball is on one (its centre tile, or the
+ *  tile the last tick's touch read: GOAL_POSTS a worker, every sooner one after them); routes are found and printed as
+ *  always. Without the option: the search exactly as before (no field change, no test, no event) */
+function goalTilesOf(a, N) {
+	if (!a.goalTiles) return null;
+	const s = String(a.goalTiles);
+	const list = /\.json$/i.test(s) ? JSON.parse(fs.readFileSync(s, 'utf8')) : s.split(',').map(Number);
+	const out = [...new Set(list.map((t) => Math.trunc(+t)).filter((t) => t >= 0 && t < N))];
+	return out.length ? out : null;
+}
+const GOAL_POSTS = 12;
 /** the level file a verdict is about (end "unreachable": the reach field rules the start out, a proof about a FILE): its
  *  name and md5, so a wrong file shows (src/levelcheck.js; null when it cannot be read) */
 function levelFileOf(a) {
@@ -2536,6 +2550,12 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	const AV = coarse && a.avoidTiles ? a.avoidTiles : null;
 	let avoided = 0;
 	const centreTile = () => Math.min(N - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)));
+	// (--goalTiles, THE HYBRID: the leg's target tiles; a 'goal' message for each of the first GOAL_POSTS touches of this
+	// worker and every sooner one after them; null: no test)
+	const GOALM = (() => { const g = goalTilesOf(a, N); if (g === null) return null; const m = new Uint8Array(N); for (const t of g) m[t] = 1; return m; })();
+	let goalBest = Infinity, goalSent = 0;
+	const goalHit = () => { if (sim.is_dead) return false; if (GOALM[centreTile()] === 1) return true; const x = sim._pastx, y = sim._pasty; return x >= 0 && y >= 0 && x < W && y < H && GOALM[y * W + x] === 1; };
+	const goalPost = (t, inputs) => { if (!(t < goalBest) && goalSent >= GOAL_POSTS) return; if (t < goalBest) goalBest = t; goalSent++; post({ type: 'goal', seed, t, inputs: inputs() }); };
 	// deaths as moves (deathsOf; a.deathMoves): the respawn tiles, and per (room or discrete state, respawn tile) the
 	// earliest tick a cell of this archive was there (rspAt: deathPays' "reached otherwise"); the counts (dSeen: dying
 	// states, dCost / dNew: kept by the cost or as the earliest arrival, dDrop: ended as before, dCells: the respawns'
@@ -3571,6 +3591,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			// (a death: the end of the run, or with deaths as moves the dead ticks pass: the operator chose it)
 			if (sim.is_dead) { if (DI !== null) continue; break; }
 			if (t <= P) { if (t === P) room = room0; continue; }
+			if (GOALM !== null && goalHit()) goalPost(t, () => str.slice(0, t));
 			const rc = costOf();
 			if (rc < 0) break;
 			roomKey = RM.key(sim);
@@ -4146,6 +4167,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 					}
 					// (a death: the run ends here, unless deaths are moves and this one pays: its respawn then a cell, deathPays)
 					if (sim.is_dead) { if (DI !== null) dying(up, blk, o, s + 1, t, rcPrev, room, e); break; }
+					if (GOALM !== null && goalHit()) goalPost(t, () => C.eetasBytes(inputsOf({ up, blk, o, n: s + 1 })).toString('latin1'));
 					if (AV !== null && AV[centreTile()] === 1) { avoided++; break; }
 					const rc = costOf();
 					if (rc < 0) break;   // the reach field rules it out: no route from here
@@ -4994,9 +5016,20 @@ async function main() {
 	const sec = () => Math.round((Date.now() - t0) / 100) / 10;
 	// the field's tables in shared memory: the workers read them, and a copy per worker (the cost tables are about 120 MB
 	// on a 1000 x 1000 level) would cost memory and start-up time on every thread
-	const field = RF.shareField(RF.reachField(L, fieldOpts(a)));
+	// (--goalTiles, THE HYBRID: the field to those tiles; one that cuts the search's start off (a goal no model way reaches)
+	// is not used: the trophy's, as without the option, with a warning)
+	const GT = goalTilesOf(a, L.width * L.height);
+	let gOpts = GT !== null ? { goals: GT.map((tile) => ({ tile, cost: 0 })) } : {};
+	let field0 = RF.reachField(L, Object.assign({}, fieldOpts(a), gOpts));
+	if (GT !== null) {
+		const s1 = new E.EESim(L), i1 = new E.EEInput(), p1 = prefixOf(a);
+		s1.reset();
+		if (p1) for (let k = 0; k < p1.length; k++) { E.applyMask(i1, p1[k]); s1.tick(i1); }
+		if (!(RF.costAt(field0, s1) >= 0)) { say({ ev: 'warning', text: 'the goal tiles\' field cuts the start off: the trophy\'s field' }); gOpts = {}; field0 = RF.reachField(L, fieldOpts(a)); }
+	}
+	const field = RF.shareField(field0);
 	// (--dord: the death-free field for the workers' order, shared like the field; only with deaths as moves)
-	const ofield = a.deathMoves && a.dord !== 0 ? RF.shareField(RF.reachField(L, { deaths: false })) : null;
+	const ofield = a.deathMoves && a.dord !== 0 ? RF.shareField(RF.reachField(L, Object.assign({ deaths: false }, gOpts))) : null;
 	// (timed killers in the level: src/timed.js; the workers build their own bounds)
 	const TMD_L = TMD.timedOf(L) !== null;
 	const sim0 = new E.EESim(L);
@@ -5369,6 +5402,8 @@ async function main() {
 			if (bursts) bursts.edge(msg.from, msg.tile, msg.to, msg.trig);
 		} else if (msg.type === 'finish') {
 			routeFound(Uint8Array.from(msg.inputs, (ch) => (ch.charCodeAt(0) - 48) & 31), msg.seed, msg.simTicks, `worker ${msg.seed}`, !!msg.byL, !!msg.byW);
+		} else if (msg.type === 'goal') {
+			say({ ev: 'goal', t: msg.t, seed: msg.seed, sec: sec(), inputs: msg.inputs });
 		} else if (msg.type === 'picklog') {
 			plogs.set(msg.seed, msg.rows);
 			// (every worker's latest log summed: the 60 rows with the most picks)
