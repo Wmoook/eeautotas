@@ -1761,7 +1761,10 @@ function makeCore(L, co) {
 		const out = [], got = new Set();
 		const gateAt = (t) => {
 			if (A.cls[t] !== 3) return;
-			const feat = A.gateFeat[t];
+			// (THE DEATH DOOR'S NEED, OPT-IN EEAT_NEEDS_DEATHS=1: a death door (1011, open from its number of deaths on) is an
+			// 'open' gate to steer.js; shut on the way it is named as feature 'deaths', so the planner learns the step needs
+			// that many deaths first: planner.js openValue)
+			const feat = NEEDS_DEATHS() && A.gateFeat[t] === 'open' && L.fg[t] === 1011 ? 'deaths' : A.gateFeat[t];
 			if (!feat || feat === 'static' || feat === 'open') return;
 			const x = t % W, y = (t / W) | 0;
 			if (Math.max(Math.abs(x - x0), Math.abs(y - y0)) > near) return;
@@ -1863,10 +1866,19 @@ function fingerprint(L) {
 }
 
 // ================================================================ the main thread's executor
-/** the Waypoint as plain data (it crosses threads) */
-const wpData = (wp) => ({ kind: wp.kind, tiles: wp.tiles ? Array.from(wp.tiles) : [], trig: wp.trig, expect: wp.expect ? { feat: wp.expect.feat, value: wp.expect.value } : null,
+/** the Waypoint as plain data (it crosses threads)
+ *  THE DEATH STEP'S FLAG (B7 cold, OPT-IN EEAT_WP_DIEFIELD=1; off = the data before byte for byte): the planner's death step
+ *  (planner.js dieField: "die, back at a respawn") carries `dieField`, which the reach behind this copy reads (legBest's
+ *  `dieStep`: the dead ball and the ball at a kill cell's door first, legs.js diePri; the proof pre-check's "an ordering
+ *  field, no proof"; the math / settle / backward tiers' skip), but this copy dropped it: every death step ran its best-first
+ *  search without the death priority, and its dive stopped on the killer's doorstep (Cold World: from the 4 anchors at
+ *  chapter 1's end the step failed 30 rungs of 1.5-45 s, 9-14 M sims each; legBest alone with dieStep finds it in 0.1 s) */
+const WP_DIEFIELD = () => process.env.EEAT_WP_DIEFIELD === '1';
+const NEEDS_DEATHS = () => process.env.EEAT_NEEDS_DEATHS === '1';
+const wpData = (wp) => Object.assign({ kind: wp.kind, tiles: wp.tiles ? Array.from(wp.tiles) : [], trig: wp.trig, expect: wp.expect ? { feat: wp.expect.feat, value: wp.expect.value } : null,
 	label: wp.label || '', allowDeath: !!wp.allowDeath, beforeTick: wp.beforeTick >= 0 ? wp.beforeTick : -1,
-	fieldTiles: wp.fieldTiles ? Array.from(wp.fieldTiles) : null, fieldTouch: !!wp.fieldTouch, wallsOn: !!wp.wallsOn });
+	fieldTiles: wp.fieldTiles ? Array.from(wp.fieldTiles) : null, fieldTouch: !!wp.fieldTouch, wallsOn: !!wp.wallsOn },
+	WP_DIEFIELD() && wp.dieField ? { dieField: true } : null);
 
 async function createExecutor(L, opts) {
 	opts = opts || {};
@@ -2328,6 +2340,217 @@ async function createExecutor(L, opts) {
 		r2.ms = Date.now() - tIn;
 		return r2;
 	}
+	// ---- THE RUN-UP RELAY (C6 push 3 lane 4 block 3; OPT-IN EEAT_RUNUP=1, off = the executor byte for byte): the goal field
+	// has no speed, so a sub-level set the ball reaches only with a run-up is a wall to the finders it orders: Sentinel
+	// Ravines' skeleton stuck at (90,108), where the known route goes 29 tiles LEFT and up to the far end of a 45-tile dot
+	// row, accelerates right along it to 6.4 px/tick and only then climbs (the field +24 tiles above its running minimum on
+	// the way; the sub-leg failed at 45 s with every finder knob, from the route's state past the detour prims found it in
+	// 3.5 s). From the level's structure: the RUNS (a row's maximal stretch of tiles the ball can move along horizontally: a
+	// non-solid tile over a floor (solid, one-way, half block), or a dot tile) of RUNUP_MIN tiles or more within RUNUP_RY rows
+	// of the stuck arrival whose span covers its column, the run's end farther from the goal by the sub-leg's own field the
+	// run-up's start (at least RUNUP_DMIN tiles from the arrival, the field falling along the run by that much); the longest
+	// runs first, RUNUP_K of them: a relay leg to that end (a region waypoint, its own field), then the stuck sub-level set
+	// from the relay's arrivals. Waypoints only: every leg is the finders' from real arrivals, replayed as before; no claim.
+	const RUNUP_ON = process.env.EEAT_RUNUP === '1';
+	const RUNUP_MIN = +process.env.EEAT_RUNUP_MIN > 0 ? +process.env.EEAT_RUNUP_MIN : 16;
+	const RUNUP_RY = +process.env.EEAT_RUNUP_RY >= 0 ? +process.env.EEAT_RUNUP_RY : 8;
+	const RUNUP_DMIN = +process.env.EEAT_RUNUP_DMIN > 0 ? +process.env.EEAT_RUNUP_DMIN : 8;
+	const RUNUP_K = +process.env.EEAT_RUNUP_K > 0 ? +process.env.EEAT_RUNUP_K : 2;
+	const RUNUP_SHARE = +process.env.EEAT_RUNUP_SHARE > 0 ? Math.min(0.95, +process.env.EEAT_RUNUP_SHARE) : 0.6;
+	const RUNUP_GAP = +process.env.EEAT_RUNUP_GAP > 0 ? +process.env.EEAT_RUNUP_GAP | 0 : 0;
+	let runsMemo = null;
+	function runsOf() {
+		if (runsMemo) return runsMemo;
+		const Wl = L.width, Hl = L.height, fl = L.flags, fg = L.fg, runs = [];
+		// (eesim.js flags: 1 solid, 2 one-way, 4 rotated half, 8 half, 16 door; 4 / 414 the dots)
+		const ok = (x, y) => {
+			const t = y * Wl + x, id = fg[t], f = fl[id] | 0;
+			if (f & (1 | 16)) return false;
+			if (id === 4 || id === 414) return true;
+			const below = y + 1 < Hl ? (fl[fg[t + Wl]] | 0) : 1;
+			return (below & (1 | 2 | 4 | 8)) !== 0;
+		};
+		// (EEAT_RUNUP_GAP: a run goes on over gaps of at most that many open (not solid) tiles: a running ball hops them)
+		const open = (x, y) => ((fl[fg[y * Wl + x]] | 0) & (1 | 16)) === 0;
+		for (let y = 0; y < Hl; y++) {
+			let x = 0;
+			while (x < Wl) {
+				if (!ok(x, y)) { x++; continue; }
+				const x0 = x;
+				let xe = x;
+				while (x < Wl) {
+					if (ok(x, y)) { xe = x; x++; continue; }
+					let g = 0;
+					while (RUNUP_GAP > 0 && x + g < Wl && g <= RUNUP_GAP && !ok(x + g, y) && open(x + g, y)) g++;
+					if (g > 0 && g <= RUNUP_GAP && x + g < Wl && ok(x + g, y)) { x += g; continue; }
+					break;
+				}
+				if (xe - x0 + 1 >= RUNUP_MIN) runs.push({ y, x0, x1: xe });
+				x = Math.max(x, xe + 1);
+			}
+		}
+		runsMemo = runs;
+		return runs;
+	}
+	/** the stuck sub-level set `sub` again through a run-up relay: the arrivals' mask strings, or null */
+	async function runupRelay(cur, sub, fr, budget, deadline) {
+		let e;
+		try { e = core.startOf(String(cur[0])); } catch (x) { return null; }
+		if (!e || e.dead || !fr || !fr.f) return null;
+		vsim.restore(e.snap);
+		const Wl = L.width, Hl = L.height, at = T.tileOf(vsim, Wl, Hl), ax = at % Wl, ay = (at / Wl) | 0;
+		const m = tileMin(fr.f), CUT = RF.CUT, cands = [];
+		for (const R of runsOf()) {
+			if (Math.abs(R.y - ay) > RUNUP_RY || ax < R.x0 - RUNUP_RY || ax > R.x1 + RUNUP_RY) continue;
+			const mL = m[R.y * Wl + R.x0], mR = m[R.y * Wl + R.x1];
+			if (!(mL < CUT) || !(mR < CUT) || Math.abs(mL - mR) < 5 * RUNUP_DMIN) continue;
+			const fromL = mL > mR, xa = fromL ? R.x0 : R.x1;
+			if (Math.abs(xa - ax) < RUNUP_DMIN) continue;
+			const tiles = [];
+			for (let k = 0; k < 3 && k <= R.x1 - R.x0; k++) tiles.push(R.y * Wl + (fromL ? R.x0 + k : R.x1 - k));
+			cands.push({ tiles, x: xa, y: R.y, len: R.x1 - R.x0 + 1, dy: Math.abs(R.y - ay) });
+		}
+		if (!cands.length) { S.runupNone = (S.runupNone || 0) + 1; return null; }
+		cands.sort((a, b) => b.len - a.len || a.dy - b.dy);
+		const use = cands.slice(0, RUNUP_K), tIn = Date.now(), total = RUNUP_SHARE * (deadline - tIn);
+		for (let i = 0; i < use.length; i++) {
+			const cd = use[i], now = Date.now(), share = Math.min(deadline - now - 50, total / use.length);
+			if (!(share >= 400)) break;
+			S.runups = (S.runups || 0) + 1;
+			const wp1 = { kind: 'region', tiles: cd.tiles, expect: null, allowDeath: !!sub.allowDeath, label: `${sub.label || 'sub'} (run-up ${cd.x},${cd.y})` };
+			const s1 = 0.4 * share;
+			const r1 = await reachLeg(cur, wp1, { ms: s1, level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline: Math.min(deadline, Date.now() + s1), stop: budget.stop }, true);
+			let ok2 = false, r2 = null;
+			if (r1.ok) {
+				const c1 = r1.arrivals.map((a) => T.strOf(a.masks));
+				const s2 = Math.min(deadline - Date.now() - 50, share - (Date.now() - now));
+				if (s2 >= 200) {
+					r2 = await reachLeg(c1, sub, { ms: s2, level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline: Math.min(deadline, Date.now() + s2), stop: budget.stop }, true);
+					ok2 = !!r2.ok;
+				}
+			}
+			if (emit) emit({ ev: 'exec.runup', label: sub.label || '', from: [ax, ay], to: [cd.x, cd.y], len: cd.len, ok1: !!r1.ok, ok2, ms: Date.now() - now });
+			if (ok2) { S.runupOk = (S.runupOk || 0) + 1; return r2.arrivals.map((a) => T.strOf(a.masks)); }
+			if ((r1.fail && r1.fail.why === 'stopped') || (r2 && r2.fail && r2.fail.why === 'stopped')) break;
+		}
+		S.runupMs = (S.runupMs || 0) + (Date.now() - tIn);
+		return null;
+	}
+	// ---- THE STRUCTURE RELAYS (C6 push 3 lane 4 block 4; OPT-IN EEAT_STRUCT=1, off = the executor byte for byte): the
+	// ONE-LEG levels (one plan step spanning the level: Infinity Pain's 'team 1' from 417 tiles, Endless Pain's 'team 5' from
+	// 704) stall at the skeleton's FIRST sub-level sets (405 / 411, 692: 451 ms - 4.1 s each, both tries 'budget'): the
+	// field's descent from the arrival is a false near the physics cannot follow, and the run-up relay sees only horizontal
+	// runs. From the level's structure, the places a way bends at: a RUN's ends (8+ tiles of floor or dots), a LEDGE's edge
+	// (a floor tile beside an open tile with no floor: the drop), a SHAFT's bottom (a floor under 4 open tiles walled both
+	// sides), a FIELD's entry (an arrow / dot tile beside a plain open tile); those within STRUCT_RAD tiles of the stuck
+	// arrival, outside the stuck sub-level set and at most STRUCT_UP tiles above the arrival's level by the sub-leg's own
+	// field (an energy detour goes up the field), 3+ tiles from it; round-robin over the four classes, the farthest first,
+	// STRUCT_K of them 6+ tiles apart: a relay leg to the place (its tile and open neighbours), then the stuck sub-level set
+	// from the relay's arrivals. Waypoints only: every leg is the finders' from real arrivals, replayed as before; no claim.
+	const STRUCT_ON = process.env.EEAT_STRUCT === '1';
+	const STRUCT_RAD = +process.env.EEAT_STRUCT_RAD > 0 ? +process.env.EEAT_STRUCT_RAD : 24;
+	const STRUCT_UP = /^\d+(\.\d+)?$/.test(process.env.EEAT_STRUCT_UP || '') ? +process.env.EEAT_STRUCT_UP : 48;
+	const STRUCT_K = +process.env.EEAT_STRUCT_K > 0 ? +process.env.EEAT_STRUCT_K | 0 : 4;
+	const STRUCT_SHARE = +process.env.EEAT_STRUCT_SHARE > 0 ? Math.min(0.95, +process.env.EEAT_STRUCT_SHARE) : 0.6;
+	let featsMemo = null;
+	function featsOf() {
+		if (featsMemo) return featsMemo;
+		const Wl = L.width, Hl = L.height, fl = L.flags, fg = L.fg, out = [];
+		const GRV = new Set([1, 2, 3, 4, 411, 412, 413, 414, 1518, 1519]);
+		const fO = (x, y) => (x < 0 || y < 0 || x >= Wl || y >= Hl) ? 1 : (fl[fg[y * Wl + x]] | 0);
+		const open = (x, y) => x >= 0 && y >= 0 && x < Wl && y < Hl && (fO(x, y) & (1 | 16)) === 0;
+		const solid = (x, y) => (fO(x, y) & 1) !== 0;
+		const stand = (x, y) => {
+			if (!open(x, y)) return false;
+			const id = fg[y * Wl + x];
+			if (id === 4 || id === 414) return true;
+			return (fO(x, y + 1) & (1 | 2 | 4 | 8)) !== 0;
+		};
+		for (let y = 0; y < Hl; y++) {
+			let x0 = -1;
+			for (let x = 0; x <= Wl; x++) {
+				const s = x < Wl && stand(x, y);
+				if (s && x0 < 0) x0 = x;
+				if (!s && x0 >= 0) {
+					if (x - x0 >= 8) { out.push({ t: y * Wl + x0, x: x0, y, cl: 0 }); out.push({ t: y * Wl + x - 1, x: x - 1, y, cl: 0 }); }
+					x0 = -1;
+				}
+			}
+		}
+		for (let y = 0; y < Hl; y++) for (let x = 0; x < Wl; x++) {
+			const t = y * Wl + x, id = fg[t];
+			if (GRV.has(id)) {
+				if ([[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dy]) => open(x + dx, y + dy) && !GRV.has(fg[(y + dy) * Wl + x + dx]))) out.push({ t, x, y, cl: 3 });
+				continue;
+			}
+			if (!stand(x, y)) continue;
+			if ((open(x - 1, y) && !stand(x - 1, y)) || (open(x + 1, y) && !stand(x + 1, y))) out.push({ t, x, y, cl: 1 });
+			let walled = 0, up = true;
+			for (let k = 1; k <= 4; k++) { if (!open(x, y - k)) { up = false; break; } if (solid(x - 1, y - k) && solid(x + 1, y - k)) walled++; }
+			if (up && walled >= 3) out.push({ t, x, y, cl: 2 });
+		}
+		featsMemo = out;
+		return out;
+	}
+	/** the stuck sub-level set `sub` again through a structure relay: the arrivals' mask strings, or null */
+	async function structRelay(cur, sub, fr, cCur, lim, budget, deadline) {
+		let e;
+		try { e = core.startOf(String(cur[0])); } catch (x) { return null; }
+		if (!e || e.dead || !fr || !fr.f) return null;
+		vsim.restore(e.snap);
+		const Wl = L.width, Hl = L.height, at = T.tileOf(vsim, Wl, Hl), ax = at % Wl, ay = (at / Wl) | 0;
+		const m = tileMin(fr.f), CUT = RF.CUT, hi = Math.round((cCur + STRUCT_UP) * 5), byCl = [[], [], [], []];
+		for (const F of featsOf()) {
+			const dx = Math.abs(F.x - ax), dy = Math.abs(F.y - ay);
+			if (dx > STRUCT_RAD || dy > STRUCT_RAD || Math.max(dx, dy) < 3) continue;
+			const v = m[F.t];
+			if (!(v < CUT) || v <= lim || v > hi) continue;
+			byCl[F.cl].push({ t: F.t, x: F.x, y: F.y, cl: F.cl, d: dx * dx + dy * dy });
+		}
+		for (const a of byCl) a.sort((p, q) => q.d - p.d);
+		const use = [], idx = [0, 0, 0, 0];
+		for (let more = true; more && use.length < STRUCT_K;) {
+			more = false;
+			for (let c = 0; c < 4 && use.length < STRUCT_K; c++) {
+				const a = byCl[c];
+				while (idx[c] < a.length) {
+					const F = a[idx[c]++];
+					if (use.some((u) => Math.max(Math.abs(u.x - F.x), Math.abs(u.y - F.y)) < 6)) continue;
+					use.push(F); more = true; break;
+				}
+				if (idx[c] < a.length) more = true;
+			}
+		}
+		if (!use.length) { S.structNone = (S.structNone || 0) + 1; return null; }
+		const tIn = Date.now(), total = STRUCT_SHARE * (deadline - tIn), CLS = ['run', 'ledge', 'shaft', 'entry'];
+		for (let i = 0; i < use.length; i++) {
+			const cd = use[i], now = Date.now(), share = Math.min(deadline - now - 50, total / use.length);
+			if (!(share >= 400)) break;
+			S.structs = (S.structs || 0) + 1;
+			const tiles = [cd.t];
+			for (const [dx, dy] of [[1, 0], [-1, 0], [0, -1]]) {
+				const x = cd.x + dx, y = cd.y + dy;
+				if (x >= 0 && y >= 0 && x < Wl && y < Hl && ((L.flags[L.fg[y * Wl + x]] | 0) & (1 | 16)) === 0) tiles.push(y * Wl + x);
+			}
+			const wp1 = { kind: 'region', tiles, expect: null, allowDeath: !!sub.allowDeath, label: `${sub.label || 'sub'} (${CLS[cd.cl]} ${cd.x},${cd.y})` };
+			const s1 = 0.4 * share;
+			const r1 = await reachLeg(cur, wp1, { ms: s1, level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline: Math.min(deadline, Date.now() + s1), stop: budget.stop }, true);
+			let ok2 = false, r2 = null;
+			if (r1.ok) {
+				const c1 = r1.arrivals.map((a) => T.strOf(a.masks));
+				const s2 = Math.min(deadline - Date.now() - 50, share - (Date.now() - now));
+				if (s2 >= 200) {
+					r2 = await reachLeg(c1, sub, { ms: s2, level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline: Math.min(deadline, Date.now() + s2), stop: budget.stop }, true);
+					ok2 = !!r2.ok;
+				}
+			}
+			if (emit) emit({ ev: 'exec.struct', label: sub.label || '', from: [ax, ay], to: [cd.x, cd.y], cl: CLS[cd.cl], ok1: !!r1.ok, ok2, ms: Date.now() - now });
+			if (ok2) { S.structOk = (S.structOk || 0) + 1; S.structMs = (S.structMs || 0) + (Date.now() - tIn); return r2.arrivals.map((a) => T.strOf(a.masks)); }
+			if ((r1.fail && r1.fail.why === 'stopped') || (r2 && r2.fail && r2.fail.why === 'stopped')) break;
+		}
+		S.structMs = (S.structMs || 0) + (Date.now() - tIn);
+		return null;
+	}
 	async function reach(starts, wp, budget) {
 		const r = await reachWp(starts, wp, budget);
 		stuckNote(wp, r);
@@ -2445,6 +2668,7 @@ async function createExecutor(L, opts) {
 		// (the step adapts: a sub-leg found in under a third of its share doubles it (fast motion: fewer legs, fewer goal
 		// fields to build), a failed one halves it for its retry)
 		let lastFail = null, sims = 0, retried = false, stuck = false, step = SKEL_STEP, firstExh = false, backs = 0, okRun = 2;
+		const runupTried = new Set(), structTried = new Set();
 		while (Date.now() < deadline - 100) {
 			// (new counterexample walls from the last sub-leg: the level where the skeleton stands, on the new field)
 			if (wRefresh()) {
@@ -2506,6 +2730,34 @@ async function createExecutor(L, opts) {
 					retried = false; step = SKEL_STEP;
 					levels.push({ back: Math.round(cCur) });
 					continue;
+				}
+				// (THE RUN-UP RELAY, OPT-IN EEAT_RUNUP=1: the stuck sub-level set through a run's far end, once a level)
+				if (RUNUP_ON && !runupTried.has(Math.round(cCur)) && Date.now() < deadline - 600) {
+					runupTried.add(Math.round(cCur));
+					const ru = await runupRelay(cur, sub, fr, budget, deadline);
+					if (ru && ru.length) {
+						levels.push({ c: Math.round(c), ok: true, runup: true });
+						retried = false; okRun = 1; step = SKEL_STEP;
+						cur = ru; cCur = c;
+						if (!skelMemo.has(key)) skelMemo.set(key, []);
+						skelMemo.get(key).push({ c: cCur, cur: cur.slice() });
+						skelBasePush(key, cur);
+						continue;
+					}
+				}
+				// (THE STRUCTURE RELAYS, OPT-IN EEAT_STRUCT=1: the stuck sub-level set through a place the way bends at, once a level)
+				if (STRUCT_ON && !structTried.has(Math.round(cCur)) && Date.now() < deadline - 600) {
+					structTried.add(Math.round(cCur));
+					const sr = await structRelay(cur, sub, fr, cCur, lim, budget, deadline);
+					if (sr && sr.length) {
+						levels.push({ c: Math.round(c), ok: true, struct: true });
+						retried = false; okRun = 1; step = SKEL_STEP;
+						cur = sr; cCur = c;
+						if (!skelMemo.has(key)) skelMemo.set(key, []);
+						skelMemo.get(key).push({ c: cCur, cur: cur.slice() });
+						skelBasePush(key, cur);
+						continue;
+					}
 				}
 				// (a resumed level whose next sub-leg fails twice: a dead end, one level back next time)
 				if (top && levels.length === 2) {

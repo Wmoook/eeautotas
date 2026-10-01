@@ -63,6 +63,7 @@ const DEF = {
 	vxq: ENV('EEAT_BW_VXQ', 2), vyq: ENV('EEAT_BW_VYQ', 1), airStep: ENV('EEAT_BW_AIRSTEP', 6), maxT: ENV('EEAT_BW_MAXT', 48),
 	corrF: ENV('EEAT_BW_CORRF', 1.5), corrAdd: ENV('EEAT_BW_CORRADD', 40), maxCells: ENV('EEAT_BW_MAXCELLS', 400000),
 	w: ENV('EEAT_BW_W', 1.0), closeF: ENV('EEAT_BW_CLOSEF', 0.6), meetNodes: ENV('EEAT_BW_MEET', 400000), maxNodes: ENV('EEAT_BW_MAXNODES', 900000), keep: ENV('EEAT_BW_KEEP', 2), quick: ENV('EEAT_BW_QUICK', 50000), quickF: ENV('EEAT_BW_QUICKF', 0.3), reach: ENV('EEAT_BW_REACH', 1), perim: ENV('EEAT_BW_PERIM', 0), corrReach: ENV('EEAT_BW_CORRREACH', 1), relay: ENV('EEAT_BW_RELAY', 6), memo: ENV('EEAT_BW_MEMO', 2), variants: ENV('EEAT_BW_VARIANTS', 2), relayMin: ENV('EEAT_BW_RELAYMIN', 20), meetF: ENV('EEAT_BW_MEETF', 1), finish: ENV('EEAT_BW_FINISH', 1), ladder: ENV('EEAT_BW_LADDER', 3), finishShare: ENV('EEAT_BW_FINISHSHARE', 0.25), finishH: ENV('EEAT_BW_FINISHH', 100), finishEvery: ENV('EEAT_BW_FINISHEVERY', 8), finishMs: ENV('EEAT_BW_FINISHMS', 25), finishT: ENV('EEAT_BW_FINISHT', 120), fw: ENV('EEAT_BW_FW', 3), fadd: ENV('EEAT_BW_FADD', 200),
+	resume: ENV('EEAT_BW_RESUME', 0),
 };
 
 // ------------------------------------------------------------------ a small binary heap (key, value pairs)
@@ -128,6 +129,7 @@ function createBackward(L, opts = {}) {
 
 	// ---------------------------------------------------------------- the discrete state (what the cells keep apart)
 	const discIds = new Map();
+	const DISC_FIX = (opts.resume !== undefined ? +opts.resume : DEF.resume) > 0;
 	const swKeys = new WeakMap();                // a switch map (copy-on-write: its identity holds its content) -> its key
 	const swKey = (m, owned) => {
 		if (!m || m.size === 0) return '';
@@ -148,7 +150,10 @@ function createBackward(L, opts = {}) {
 		if (DM.ok && !s._swOwned && !s._oswOwned && DM.tb === tb && DM.c === s.coins && DM.b === s.blue_coins && DM.k === s._keysMask && DM.sw === s._switches && DM.osw === s._oswitches && DM.t === s.team && DM.j === j && DM.mj === s.max_jumps && DM.jb === s.jump_boost && DM.sb === s.speed_boost && DM.fl === fl && DM.fg === s.flip_gravity) return DM.d;
 		const sw = swKey(s._switches, s._swOwned), osw = swKey(s._oswitches, s._oswOwned);
 		// (a level with time doors: the clock's phase in TD_BUCKET-tick buckets, so a ball that waits for a door is not its own earlier cell)
-		const k = `${L.hasTimeDoors ? Math.floor((s._ticks % 1000) / TD_BUCKET) : ''},${s.coins},${s.blue_coins},${s._keysMask},${sw},${osw},${s.team},${s.max_jumps > 1 ? s.jump_count : 0},${s.max_jumps},${s.jump_boost},${s.speed_boost},${s.low_gravity ? 1 : 0},${s.is_invulnerable ? 1 : 0},${s.has_levitation ? 1 : 0},${s.flip_gravity},${s.is_cursed ? 1 : 0},${s.is_zombie ? 1 : 0},${s.is_poisoned ? 1 : 0},${s.is_on_fire ? 1 : 0},${s.has_crown ? 1 : 0}`;
+		// (DISC_FIX, with THE RESUMABLE CLOSURE: a noClock key without the clock's bucket, as its memo DM.tb says; before, a
+		// noClock call (the meet's variants) memoized a key WITH the bucket under tb 0, and the next clocked state of bucket 0
+		// took that id: on a time-door level the start's discrete id changed from call to call and no memo matched)
+		const k = `${DISC_FIX ? (L.hasTimeDoors && !noClock ? tb : '') : (L.hasTimeDoors ? Math.floor((s._ticks % 1000) / TD_BUCKET) : '')},${s.coins},${s.blue_coins},${s._keysMask},${sw},${osw},${s.team},${s.max_jumps > 1 ? s.jump_count : 0},${s.max_jumps},${s.jump_boost},${s.speed_boost},${s.low_gravity ? 1 : 0},${s.is_invulnerable ? 1 : 0},${s.has_levitation ? 1 : 0},${s.flip_gravity},${s.is_cursed ? 1 : 0},${s.is_zombie ? 1 : 0},${s.is_poisoned ? 1 : 0},${s.is_on_fire ? 1 : 0},${s.has_crown ? 1 : 0}`;
 		let d = discIds.get(k);
 		if (d === undefined) { d = discIds.size; discIds.set(k, d); }
 		if (!s._swOwned && !s._oswOwned) { DM.ok = true; DM.tb = tb; DM.c = s.coins; DM.b = s.blue_coins; DM.k = s._keysMask; DM.sw = s._switches; DM.osw = s._oswitches; DM.t = s.team; DM.j = j; DM.mj = s.max_jumps; DM.jb = s.jump_boost; DM.sb = s.speed_boost; DM.fl = fl; DM.fg = s.flip_gravity; DM.d = d; }
@@ -156,6 +161,7 @@ function createBackward(L, opts = {}) {
 	}
 
 	const valMemo = new Map();             // the values of closed closures (P.memo newest), by target and discrete state
+	const cutMemo = new Map();             // THE RESUMABLE CLOSURE (P.resume newest): closures a clock cut, to resume
 	let MS_ = null;
 	const msol = () => MS_ || (MS_ = opts.solver || require('../msolve.js').createSolver(L, {}));   // (opts.solver: a msolve solver of L to share)
 	// the reach field to a target's tiles (deaths off: the meet never dies), the newest 6
@@ -251,7 +257,7 @@ function createBackward(L, opts = {}) {
 		if (P.reach) { try { rfield = rfOf(target.tiles, sim); } catch (e) { rfield = null; } }
 		stats.reach = rfield ? rfield.mode : null;
 		const lim = Math.ceil(dS * P.corrF + P.corrAdd);
-		const inCorr = new Uint8Array(N);
+		let inCorr = new Uint8Array(N);
 		let corrTiles = 0;
 		// THE PERIMETER (P.perim > 0): the closure only within that walk distance of the target (a backward region the closure
 		// completes; the meet runs on the fallback order outside it and meets the values inside)
@@ -296,16 +302,16 @@ function createBackward(L, opts = {}) {
 		const placeOf = (key) => { const p = key.split('|'); return `${p[0]}|${p[1]}|${p[2]}|${p[3]}`; };
 		let cellId = new Map();                  // key -> id
 		let cellKey = [], cellSnap = [], cellTile = [];
-		const revFrom = [], revTicks = [];       // reversed edges per child id: parents and ticks (flat arrays per cell)
-		const toTarget = new Map();              // parent id -> least ticks to the target
+		let revFrom = [], revTicks = [];         // reversed edges per child id: parents and ticks (flat arrays per cell)
+		let toTarget = new Map();                // parent id -> least ticks to the target
 		let byPlace = new Map();                 // place -> [ids]
 		// THE CLOSURE'S ORDER: nearest the target first (the walk distance of the cell's tile: a bucket queue), so the values
 		// grow backward from the target and a closure cut by its clock has the target's side, not a start-side generation
-		const buckets = [];
+		let buckets = [];
 		let bCur = 0, bLeft = 0;
 		const qPush = (id, tile) => { const w = tile >= 0 && wd[tile] >= 0 ? wd[tile] : lim; let b = buckets[w]; if (!b) b = buckets[w] = []; b.push(id); bLeft++; if (w < bCur) bCur = w; };
-		const bHead = [];
-		const qPop = () => { while (bCur < buckets.length && (!buckets[bCur] || (bHead[bCur] | 0) >= buckets[bCur].length)) bCur++; if (bCur >= buckets.length) return -1; bLeft--; const h = bHead[bCur] | 0; bHead[bCur] = h + 1; return buckets[bCur][h]; };
+		let bHead = [];
+		const qPop =() => { while (bCur < buckets.length && (!buckets[bCur] || (bHead[bCur] | 0) >= buckets[bCur].length)) bCur++; if (bCur >= buckets.length) return -1; bLeft--; const h = bHead[bCur] | 0; bHead[bCur] = h + 1; return buckets[bCur][h]; };
 		const addCell = (key, s, tile) => {
 			let id = cellId.get(key);
 			if (id !== undefined) return id;
@@ -401,14 +407,15 @@ function createBackward(L, opts = {}) {
 		// ------------------------------------------------------------ THE CLOSURE (backward: seeded around the target)
 		const tC0 = Date.now();
 		const startKey = keyOf(sim);
-		const startCell = addCell(startKey, sim, tileOfS(sim));
+		let startCell = addCell(startKey, sim, tileOfS(sim));
 		// THE VARIANTS: the discrete states other than the start's that the quick meet reached (an effect, a key, a coin taken on
 		// the way: the target's side may be reachable only with one; seeding the start's alone left Planets' blue coin, a long
 		// rise with an effect, no value anywhere), the first state of each, the nearest P.variants seeded too
 		const variants = new Map();
 		sim.restore(snap0);
 		const disc0 = discOf(sim, true);
-		const seedAll = () => {
+		// (only: a tile mask, the seeds of those tiles alone (THE RESUMABLE CLOSURE's grown corridor); none: every corridor tile)
+		const seedAll = (only) => {
 			if (P.seeds === false) return;
 			// (the seeds' base: the start, or a dead start's respawn: its discrete state after the death)
 			let base = snap0;
@@ -419,7 +426,7 @@ function createBackward(L, opts = {}) {
 			for (const v of Array.from(variants.values()).sort((a, b) => a.h - b.h).slice(0, P.variants)) bases.push(v.snap);
 			stats.variants = bases.length - 1;
 			const order = [];
-			for (let t = 0; t < N; t++) if (inCorr[t]) order.push(t);
+			for (let t = 0; t < N; t++) if (only ? only[t] : inCorr[t]) order.push(t);
 			order.sort((a, b) => wd[a] - wd[b]);
 			for (const t of order) {
 				const cx = t % W, cy = (t / W) | 0;
@@ -449,11 +456,15 @@ function createBackward(L, opts = {}) {
 			}
 		};
 		// the closure: every cell once (BFS order: the start and the seeds first)
+		// (THE RESUMABLE CLOSURE, P.resume: border = the expanded cells with a child in the target's walk but outside the
+		// corridor, with their snapshots: a later call whose corridor is wider expands them again)
+		let border = new Map();
 		const expand = (id) => {
 			const snap = cellSnap[id];
 			cellSnap[id] = null;                   // (expanded once: its state is no longer needed)
 			sim.restore(snap);
 			const ms = macrosOf();
+			let out = false;
 			for (const [m, p] of ms) {
 				play(snap, m, p, (kind, ticks) => {
 					if (kind === 1) {
@@ -463,12 +474,13 @@ function createBackward(L, opts = {}) {
 						return;
 					}
 					const tl = tileOfS(sim);
-					if (tl < 0 || !inCorr[tl]) return;
+					if (tl < 0 || !inCorr[tl]) { if (P.resume && tl >= 0 && wd[tl] >= 0) out = true; return; }
 					const k = keyOf(sim);
 					const cid = addCell(k, sim, tl);
 					if (cid >= 0) addEdge(id, cid, ticks);
 				});
 			}
+			if (out) border.set(id, snap);
 		};
 		const closure = (until) => {
 			const tc = Date.now();
@@ -637,16 +649,44 @@ function createBackward(L, opts = {}) {
 			// values a closed closure left: the compiler asks a stuck waypoint again from its anchors at every rung)
 			const mKey = `${Array.from(target.tiles).sort((a, b) => a - b).join(',')}|${discOf(sim.restore(snap0) || sim)}`;
 			const mm = P.memo ? valMemo.get(mKey) : null;
+			// THE RESUMABLE CLOSURE (P.resume > 0, opt-in EEAT_BW_RESUME=<cut closures kept>; 0 = as before): a closure its clock
+			// cut is kept (by the target, the start's discrete state and the cell grain) and the next call to the same target
+			// resumes it where it stopped instead of building it again (the stretch child's 0.4 / 1.0 clocks, the one shot's far
+			// legs 1 -> 2 -> 4 ... s): the closure's work adds up across calls. The new call's corridor joins the kept one
+			// (union); where it grew, the kept cells with a child outside the old corridor are expanded again and the new tiles
+			// seeded. The values are the same Bellman values over a bigger cell graph: an order, as before
+			const rKey = P.resume > 0 ? `${mKey}|${target.cls || ''}|${target.tele ? 1 : 0}|${VXQ},${VYQ},${AIR},${MAXT},${P.corrF},${P.corrAdd},${P.perim},${P.corrReach},${P.maxCells},${P.variants},${P.seeds === false ? 0 : 1}` : null;
+			const cm = rKey && !(mm && mm.lim >= lim && tileOfS(sim) >= 0 && mm.inCorr[tileOfS(sim)]) ? cutMemo.get(rKey) : null;			let limR = lim;
 			if (mm && mm.lim >= lim && tileOfS(sim) >= 0 && mm.inCorr[tileOfS(sim)]) {
 				cellId = mm.cellId; cellKey = mm.cellKey; byPlace = mm.byPlace; D = mm.D;
 				stats.memo = true; stats.cells = cellKey.length; stats.finite = mm.finite;
 			} else {
-				seedAll();
+				if (cm) {
+					cutMemo.delete(rKey);
+					cellId = cm.cellId; cellKey = cm.cellKey; cellSnap = cm.cellSnap; cellTile = cm.cellTile; revFrom = cm.revFrom; revTicks = cm.revTicks;
+					toTarget = cm.toTarget; byPlace = cm.byPlace; buckets = cm.buckets; bHead = cm.bHead; bCur = cm.bCur; bLeft = cm.bLeft; border = cm.border;
+					const nIn = inCorr;
+					inCorr = cm.inCorr;
+					let grown = null, ng = 0;
+					for (let t = 0; t < N; t++) if (nIn[t] && !inCorr[t]) { inCorr[t] = 1; (grown || (grown = new Uint8Array(N)))[t] = 1; ng++; }
+					if (ng) {
+						for (const [id, s] of border) { cellSnap[id] = s; qPush(id, cellTile[id]); }
+						border = new Map();
+						seedAll(grown);
+					}
+					sim.restore(snap0);
+					startCell = addCell(startKey, sim, tileOfS(sim));
+					limR = Math.max(cm.lim, lim);
+					stats.resumed = cellKey.length; stats.grown = ng; stats.resumeN = cm.n + 1; stats.resumeLeft = bLeft;
+				} else seedAll();
 				closure(closeEnd);
 				dijkstra();
 				if (P.memo && stats.closed) {
-					valMemo.set(mKey, { lim, inCorr, cellId, cellKey, byPlace, D, finite: stats.finite });
+					valMemo.set(mKey, { lim: limR, inCorr, cellId, cellKey, byPlace, D, finite: stats.finite });
 					while (valMemo.size > P.memo) valMemo.delete(valMemo.keys().next().value);
+				} else if (rKey && !stats.closed) {
+					cutMemo.set(rKey, { lim: limR, inCorr, cellId, cellKey, cellSnap, cellTile, revFrom, revTicks, toTarget, byPlace, buckets, bHead, bCur, bLeft, border, n: cm ? cm.n + 1 : 1 });
+					while (cutMemo.size > P.resume) cutMemo.delete(cutMemo.keys().next().value);
 				}
 			}
 			found = meet(P.meetNodes, t0 + clock * P.meetF);
