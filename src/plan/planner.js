@@ -39,26 +39,6 @@ const PENALTY = 1e6;          // est of an edge only the relaxation reaches (no 
 const LM_W = 60;              // ticks of the plan search's f per landmark not yet achieved (src/landmarks.js, LAMA's count)
 const GAIN_BONUS = 3;         // walk steps of the plan search's f per unit of gain (the relevant triggers achieved)
 const KEY_TICKS = 500;
-// the diversification rule (nearPlans): one-step plans to the nearest untried triggers once every plan's first leg
-// failed its rung; DEFAULT 1 since COMPILE-ALL block 3 lane 4 (with the executor's true skeleton closest,
-// EEAT_SKEL_CLOSEST): EEAT_PLAN_NEAR=K (K near plans; 0: off, the planner as before)
-const NEAR_K = process.env.EEAT_PLAN_NEAR !== undefined ? Math.max(0, +process.env.EEAT_PLAN_NEAR | 0) : 1;
-// the floor probe's time (steer.js buildSteer on a level with count gates: the plan the steer's physics layers walk, run
-// again with the gates the model leaves open as floors; env EEAT_PLAN_FLOOR=0: off)
-const FLOOR_MS = +process.env.EEAT_PLAN_FLOOR_MS || 8000;
-// (and its layers: the steer build grows its layer product a feature at a time and checks its clock only between
-// features, so a switch maze (23_4 Switcher Puzzle: 14 switches, 224 layers) took 61.6 s against the 8 s asked, in the
-// bounds stage, 51 s of a 60-s compile; the floors found so far need 6-20 layers: Aedan Garden 11, MoonBase 7, Rotcil
-// Illusions 6, Springopolis 20; at 32 layers Switcher Puzzle stops at its cap)
-const FLOOR_LAYERS = +process.env.EEAT_PLAN_FLOOR_LAYERS || 32;
-// (off the critical path, o.floorAsync (the strategy's): the probe in a worker thread (src/plan/floorworker.js), the plans
-// made before its answer without floors, the floors added when it answers (floorVersion() bumps: the strategy's plan memo
-// re-plans); a probe still running at FLOOR_HARD_MS of wall time is terminated (no floors). The profile (lane 6, box 3):
-// the probe was 8-45 s of the bounds stage on 13 of the 14 STAGE-TIME levels (MKco Mushroom Cup 45 s: 5 purple switches'
-// 40 layers, 255 physics fields, no floor found; Dreamland 40 s, VVVVVV 37 s), where the floors it finds took 1.9-6.3 s
-// (Tropical Trials' coins >= 20: 25-30 s on the loaded box, so the cap is 30 s)
-const FLOOR_HARD_MS = +process.env.EEAT_PLAN_FLOOR_HARD_MS || 30000;
-const COUNT_GATES = new Set([165, 214]);
 const COLOURS = ['red', 'green', 'blue', 'cyan', 'magenta', 'yellow'];
 
 /** a heap on f (then g) */
@@ -80,60 +60,6 @@ function createPlanner(model, facts, o = {}) {
 	const relevant = model.triggers.filter((X) => X.relevant && X.kind !== 'trophy');
 	const trophyTiles = model.trophyTiles;
 	const openS = { key: '__open__', dkey: '__open__', vals: [], feats: {} };
-	// ---------------------------------------------------------------- floors (a count gate the way STANDS on)
-	// The est walk is 8-way and gravity-blind: a coin gate (165 / blue 214, solid from its count on) is a wall in it, never
-	// the floor a jump needs, and below its count it is air, so no plan collected the coins that make it solid first
-	// (Springopolis, Aedan Garden, MoonBase, Rotcil Illusions: the trophy only from a count gate; the plan went straight to
-	// the trophy, est 68 / 556 / 492 / 384 ticks, and every leg ran out of its budget). steer.js's floor probe (buildSteer:
-	// its layered physics plan replayed with those gates as floors, a jump whose only support is such a gate names it)
-	// gives the count; the trophy edge from a state below it gets the PENALTY (a price, never a drop: the probe is no proof)
-	const floorNeeds = [];
-	let floorVer = 0;
-	/** the probe's floors (steer.js info.floors) -> floorNeeds: the most each count feature needs */
-	const setFloors = (fl) => {
-		const most = new Map();
-		for (const x of fl || []) if ((x.feat === 'coins' || x.feat === 'bcoins') && x.param > 0 && model.feats.includes(x.feat)) most.set(x.feat, Math.max(most.get(x.feat) || 0, x.param));
-		floorNeeds.length = 0;
-		for (const [feat, min] of most) floorNeeds.push({ feat, min });
-		ST.floors = floorNeeds.map((n) => `${n.feat}>=${n.min}`).join(' ') || '';
-		if (floorNeeds.length) floorVer++;
-	};
-	if (process.env.EEAT_PLAN_FLOOR !== '0' && L && L.fg) {
-		let has = false;
-		for (let i = 0; i < L.fg.length && !has; i++) if (COUNT_GATES.has(L.fg[i])) has = true;
-		if (has && model.feats && (model.feats.includes('coins') || model.feats.includes('bcoins'))) {
-			const tf = Date.now();
-			let started = false;
-			if (o.floorAsync) {
-				try {
-					const { Worker } = require('worker_threads');
-					const wd = { maxMs: FLOOR_MS, maxLayers: FLOOR_LAYERS };
-					if (o.file) wd.file = require('path').resolve(String(o.file)); else wd.L = L;
-					const w = new Worker(require('path').join(__dirname, 'floorworker.js'), { workerData: wd });
-					ST.floorProbe = 'running';
-					const hard = setTimeout(() => { if (ST.floorProbe === 'running') { ST.floorProbe = 'cut'; ST.floorMs = Date.now() - tf; } w.terminate().catch(() => {}); }, FLOOR_HARD_MS);
-					if (hard.unref) hard.unref();
-					w.on('message', (m) => {
-						if (ST.floorProbe !== 'running') return;
-						ST.floorProbe = m && m.error ? 'error' : 'done'; ST.floorMs = Date.now() - tf;
-						if (m && !m.error) setFloors(m.floors);
-						clearTimeout(hard); w.terminate().catch(() => {});
-					});
-					w.on('error', () => { if (ST.floorProbe === 'running') { ST.floorProbe = 'error'; ST.floorMs = Date.now() - tf; } clearTimeout(hard); });
-					w.unref();
-					started = true;
-				} catch (e) { started = false; }
-			}
-			if (!started) {
-				try {
-					const st = require('../steer.js').buildSteer(L, { maxMs: FLOOR_MS, noDP: true, maxLayers: FLOOR_LAYERS });
-					setFloors((st && st.info && st.info.floors) || []);
-				} catch (e) { /* the probe is optional */ }
-				ST.floorMs = Date.now() - tf;
-			}
-		}
-	}
-	ST.floors = floorNeeds.map((n) => `${n.feat}>=${n.min}`).join(' ') || '';
 	// ---------------------------------------------------------------- positions
 	const posOfTrig = new Map();
 	/**
@@ -238,69 +164,28 @@ function createPlanner(model, facts, o = {}) {
 	// the fully open level (every tile but the static walls): the heuristics
 	let openMask = null;
 	const openDist = new Map();
-	const openOf = () => { if (!openMask) { openMask = new Uint8Array(model.N); for (let i = 0; i < model.N; i++) openMask[i] = model.A.cls[i] !== 0 ? 1 : 0; } return openMask; };
-	// (the open level's walks backwards from the trophy and from the killing tiles (model.revDist): the same numbers as one
-	// bfs per position (min over the goals), one search for every position; EEAT_PLAN_REVH=0: a bfs per position, as before:
-	// Moving Ice Puzzle's root has 3,346 trigger positions, 16.7 s of bfs in its first lowerBound expansion, Cold World's 568
-	// most of its first plan's 3.9 s)
-	const REVH = process.env.EEAT_PLAN_REVH !== '0' && typeof model.revDist === 'function';
-	let revTro = null, revDie = null;
-	const hsMemo = new Map();
-	const revMin = (R, tiles) => { let b = INF; for (const c of model.hopClosure(openOf(), tiles)) if (R[c] < b) b = R[c]; return b; };
 	function hSteps(pos) {
-		if (REVH) {
-			let h = hsMemo.get(pos.id);
-			if (h === undefined) { if (!revTro) revTro = model.revDist(openOf(), trophyTiles); h = revMin(revTro, pos.tiles); hsMemo.set(pos.id, h); }
-			return h;
-		}
 		let d = openDist.get(pos.id);
 		if (!d) {
-			d = model.bfs(openOf(), pos.tiles);
+			if (!openMask) { openMask = new Uint8Array(model.N); for (let i = 0; i < model.N; i++) openMask[i] = model.A.cls[i] !== 0 ? 1 : 0; }
+			d = model.bfs(openMask, pos.tiles);
 			openDist.set(pos.id, d);
 		}
 		let b = INF;
 		for (const t of trophyTiles) if (d[t] < b) b = d[t];
 		return b;
 	}
-	/** the open level's walk steps from pos to the nearest tile the ball can die in */
-	function dieSteps(pos) {
-		if (REVH) {
-			if (!revDie) { const g = []; for (let i = 0; i < model.N; i++) if (model.dieTile[i]) g.push(i); revDie = model.revDist(openOf(), g); }
-			return revMin(revDie, pos.tiles);
-		}
-		hSteps(pos);
-		const d = openDist.get(pos.id);
-		let dk = INF;
-		for (let i = 0; i < model.N; i++) if (model.dieTile[i] && d[i] < dk) dk = d[i];
-		return dk;
-	}
 	let openResp = null;
-	const hMemo = new Map(), hdMemo = new Map();
-	/** the est walk steps from pos to the trophy on the open level, the death shortcut included (a death and a respawn
-	 *  where no walk reaches the trophy: hSteps alone is INF there, and INF x pace became a partial plan's est of ~4.3e9:
-	 *  The Square). The partial plans' cost only: the plan search's f keeps hSteps (with this in f The Square's first plan
-	 *  reached the trophy, 9 steps, but Stupid Fox's first plan changed and lost its progress in the shared gate) */
-	function hStepsD(pos) {
-		const had = hdMemo.get(pos.id);
-		if (had !== undefined) return had;
-		let best = hSteps(pos);
-		if (model.canDie) {
-			const dk = dieSteps(pos);
-			if (dk < INF) {
-				if (openResp === null) openResp = hSteps(respawnPos);
-				if (openResp < INF) best = Math.min(best, dk + openResp + Math.ceil(DEAD_TICKS / PACE0));
-			}
-		}
-		hdMemo.set(pos.id, best);
-		return best;
-	}
+	const hMemo = new Map();
 	/** the admissible ticks from pos to the trophy on the open level (the death shortcut included) */
 	function hLb(pos) {
 		const had = hMemo.get(pos.id);
 		if (had !== undefined) return had;
 		let best = lbOfSteps(hSteps(pos));
 		if (model.canDie) {
-			const dk = dieSteps(pos);
+			const d = openDist.get(pos.id);
+			let dk = INF;
+			for (let i = 0; i < model.N; i++) if (model.dieTile[i] && d[i] < dk) dk = d[i];
 			if (dk < INF) {
 				if (openResp === null) openResp = hSteps(respawnPos);
 				if (openResp < INF) best = Math.min(best, lbOfSteps(dk) + DEAD_TICKS + lbOfSteps(openResp));
@@ -372,8 +257,7 @@ function createPlanner(model, facts, o = {}) {
 			pos = { id: pos.id + 'p' + Sp.dkey.length + ':' + (rec && rec.lbTiles ? rec.lbTiles.length : 0), tiles: pos.tiles, extra: 0, grace: rec ? rec.grace : null, lbTiles: rec ? rec.lbTiles : null };
 			S = Sp;
 		}
-		// (an anchor the strategy keeps apart by the trigger edge it was re-entered by (strategy addArrival): its facts too)
-		const cls = (arr ? `${Math.round(arr.vx || 0)},${arr.onGround ? 1 : 0}` : '0,1') + (anchor.qual ? `@${anchor.qual}` : '');
+		const cls = arr ? `${Math.round(arr.vx || 0)},${arr.onGround ? 1 : 0}` : '0,1';
 		// (the lb's base: the counts the coin / blue coin / death GATES read: the engine's _show_* copies, which lag the
 		// live counts by >= 1 tick and freeze while the ball overlaps a gate; the least of the copy and the count)
 		const live = (k) => (S.feats[k] !== undefined ? S.feats[k] : 0);
@@ -384,12 +268,6 @@ function createPlanner(model, facts, o = {}) {
 	// ---------------------------------------------------------------- edges
 	const hasCG = model.hasCoinGate.coins || model.hasCoinGate.bcoins;
 	const useBounds = !!bounds && !model.canDie && !hasCG;
-	// (the primitives' bound per edge is a Dijkstra field per (target, door state): ~0.35 s each on a 400 x 200 level, and
-	// a node's edges are every relevant trigger (26_2 Terror In The North: 172 coins, 60 s for the root's edges alone, past
-	// the compile's watchdog). A new field only while the calling search is inside its own budget (pairUntil), a memoized
-	// one always; else the tier-0 bound alone: both admissible, their max only tighter)
-	let pairUntil = Infinity;
-	const pairOK = (tiles, lvl) => Date.now() < pairUntil || (typeof bounds.hasField === 'function' && bounds.hasField(tiles, lvl));
 	/** the physics check's memo: (door key, position, edge) -> true when RCH3 is -1 from every tile of the position at
 	 *  rest and rising at the most (a heavy est penalty in the plan search, never a drop: an abstract position is no real
 	 *  state); 'proof' from the anchor's real state (then the edge is dropped at the root: an exact proof) */
@@ -421,17 +299,12 @@ function createPlanner(model, facts, o = {}) {
 			if (drL && rL < INF) lb = Math.min(lb, lbOfSteps(dvL.dk) + DEAD_TICKS + lbOfSteps(rL));
 			if (!Number.isFinite(lb)) return null;
 			lb += extra;
-			if (useBounds) { try { const lvl = model.levelOf(S); if (pairOK(tiles, lvl)) { const bb = bounds.pair(pos.tiles, tiles, lvl); if (Number.isFinite(bb)) lb = Math.max(lb, bb + extra); } } catch (e) { /* the tier-0 bound */ } }
+			if (useBounds) { try { const bb = bounds.pair(pos.tiles, tiles, model.levelOf(S)); if (Number.isFinite(bb)) lb = Math.max(lb, bb + extra); } catch (e) { /* the tier-0 bound */ } }
 			let est = lb, steps = sL, viaDeath = false, relaxOnly = false;
 			if (wantEst) {
 				if (sE < INF) { est = sE * P + extra; steps = sE; }
 				else if (drE && rE < INF) { est = (dvE.dk + rE) * P + DEAD_TICKS + extra; steps = dvE.dk + rE; viaDeath = true; }
-				else {
-					// (only the relaxation reaches it: its walk, else its death shortcut; sL is INF when only the lb's
-					// death way reaches it, and INF x pace overflowed the plan's est to ~4.3e9: The Square)
-					const sR = sL < INF ? sL : drL && rL < INF ? dvL.dk + rL : INF;
-					est = (sR < INF ? sR * P * 3 + (sL < INF ? 0 : DEAD_TICKS) : 0) + PENALTY + extra; relaxOnly = true;
-				}
+				else { est = sL * P * 3 + PENALTY + extra; relaxOnly = true; }
 				est = Math.max(lb, est);
 			}
 			return { lb, est, steps, viaDeath, relaxOnly };
@@ -446,7 +319,6 @@ function createPlanner(model, facts, o = {}) {
 					const ok = facts.okTicks(edge, cls);
 					if (ok !== undefined) g.est = Math.max(g.lb, ok);
 				}
-				if (X === null) for (const n of floorNeeds) if (!((S.feats[n.feat] || 0) >= n.min)) { g.est += PENALTY; break; }
 				const bad = rchBad.get(rchKey(S, pos, edge));
 				if (bad === 'proof' && root) return;
 				if (bad) g.est += PENALTY;
@@ -466,56 +338,8 @@ function createPlanner(model, facts, o = {}) {
 			finish(X, live, 'trig:' + X.id, tr);
 		}
 		finish(null, trophyTiles, 'trophy', null);
-		// DEATHS AS MOVES (lane 2's die edge, lane 5): where a death door (1011) or gate (1012) reads the death count, a death
-		// is an edge of its own (plan mode: the est walk to the nearest killer, the dead ticks, back at the respawn with one
-		// death more), so the door that needs N deaths opens in the plan: Tutorial 2's est walk passed its death door only in
-		// the relaxation, every plan carried the 1e6 penalty and no death step. The lb needs none (it keeps 1011 open).
-		// EEAT_PLAN_DIE=0: none
-		if (wantEst && DIE_EDGE && dieIdx !== undefined && dvE && S.vals[dieIdx] < model.deathT && dieNear(S.vals[dieIdx]) && (DIE_ALWAYS || out.some((e) => e.relaxOnly))) {
-			const vals = S.vals.slice();
-			vals[dieIdx] = S.vals[dieIdx] + 1;
-			const S2 = model.mkState(vals, S.taken, S.btaken, S.cp);
-			const rp = model.respawnOf(S2, 'est');
-			const edge = 'die:' + vals[dieIdx];
-			if (rp && !(facts && facts.blocked(edge, cls, S.key))) {
-				const ok = facts ? facts.okTicks(edge, cls) : undefined;
-				const lbD = (dvL ? lbOfSteps(dvL.dk) : 0) + DEAD_TICKS + extra;
-				const est = Math.max(lbD, ok !== undefined ? ok : dvE.dk * P + DEAD_TICKS + extra);
-				const X = { id: -1 - vals[dieIdx], kind: 'die', tiles: rp.tiles, label: `die, back at a respawn (deaths ${vals[dieIdx]})` };
-				out.push({ X, S2, pos2: diePos(rp), expect: { feat: 'deaths', value: vals[dieIdx] }, lb: lbD, est, steps: dvE.dk, viaDeath: false, relaxOnly: false, edge, live: rp.tiles });
-			}
-		}
 		return out;
 	}
-	const DIE_EDGE = process.env.EEAT_PLAN_DIE !== '0';
-	// (a death toward a door's count holds back at ANY respawn (a checkpoint touched on the way is where the engine puts
-	// the ball): the count opens the door wherever the ball comes back, and the strategy re-anchors on the real state.
-	// The Ten Commandments: its start room's only way out is a portal onto the checkpoint (2,21), so a death "back at the
-	// spawn" never held (every leg 'budget', closest 0 at a killer, rungs 2-3 spent). A viaDeath step (a death as a
-	// teleport to its respawn) keeps its respawn. EEAT_PLAN_DIE_ANY=0: the state's own respawn)
-	const DIE_ANY = process.env.EEAT_PLAN_DIE_ANY !== '0';
-	// (a death is offered only where an edge of the node is reachable in the relaxation alone (a shut death door is what
-	// the relaxation opens): The Ten Commandments' trophy is reachable without a death (666 run ticks), and offered at every
-	// node the death became its plan after one failed trophy rung (2,212 run ticks, 2 of 2; before the gain fix: its
-	// compile lost, 3 of 3); Tutorial 2's trophy is behind its death door (relaxation only): offered. EEAT_PLAN_DIE_WHEN=always)
-	const DIE_ALWAYS = process.env.EEAT_PLAN_DIE_WHEN === 'always';
-	// (a death is a move only toward a death door / gate threshold at most DIE_GAP deaths on: First Person Maze's 999-death
-	// door made "die" its first plan step (est 138), a way no route takes; each death costs 54 dead ticks at least)
-	const DIE_GAP = +process.env.EEAT_PLAN_DIE_GAP || 3;
-	const deathThs = (() => {
-		const set = new Set(), fg = model.L && model.L.fg, lk = model.L && model.L.lookup0;
-		// (the DOORS' thresholds (1011: open from N deaths on); a death gate (1012) SHUTS at its count, which the est walk
-		// (a shut gate a wall, never a floor) can only lose by: a die edge there is branching for nothing (Polar Eclipse's
-		// 16 gates at 1..16); EEAT_PLAN_DIE_GATES=1: gates too)
-		const gatesToo = process.env.EEAT_PLAN_DIE_GATES === '1';
-		if (fg && lk) for (let i = 0; i < fg.length; i++) if ((fg[i] === 1011 || (gatesToo && fg[i] === 1012)) && lk[i] > 0) set.add(lk[i]);
-		return [...set].sort((x, y) => x - y);
-	})();
-	const dieNear = (cur) => deathThs.some((t) => t > cur && t <= cur + DIE_GAP);
-	const dieIdx = model.featSet && model.featSet.has('deaths') && model.canDie && model.deathT > 0 ? model.fIdx.get('deaths') : undefined;
-	const diePosOf = new Map();
-	/** the position after a death: the respawn's tiles, no extra ticks (the die edge priced them) */
-	const diePos = (rp) => { let p = diePosOf.get(rp.id); if (!p) { p = { id: 'die@' + rp.id, tiles: rp.tiles, extra: 0 }; diePosOf.set(rp.id, p); } return p; };
 	/** the lb of a leg (costOf): the tier-0 bound under the lb relaxation, the primitives' where sound too, the larger */
 	function legLb(S, pos, tiles, base) {
 		let lb = model.pairLb(S, pos, tiles, 'lb', base);
@@ -531,7 +355,6 @@ function createPlanner(model, facts, o = {}) {
 		for (const n of path) {
 			if (Date.now() > deadline) break;
 			const from = n.parent, e = n.e;
-			if (e.X && e.X.kind === 'die') continue;   // (a death's goal is the respawn: no walk leg to check)
 			const k = rchKey(from.S, from.pos, e.edge);
 			if (rchBad.has(k)) continue;
 			ST.rchChecks++;
@@ -556,7 +379,6 @@ function createPlanner(model, facts, o = {}) {
 		ST.lbCalls++;
 		const a = anchorOf(anchor);
 		const ms = lo.ms !== undefined ? lo.ms : 1500, maxExpand = lo.maxExpand || 200000;
-		pairUntil = t0 + ms;
 		const open = new Heap(), best = new Map();
 		let seq = 0, expanded = 0, goal = Infinity, complete = false;
 		// (nodes merged over the coins' identities: one node per (feature values, checkpoint, position) with the least g
@@ -604,7 +426,6 @@ function createPlanner(model, facts, o = {}) {
 	function search(a, po, exclude) {
 		const t0 = Date.now();
 		const ms = po.ms, maxExpand = po.maxExpand;
-		pairUntil = t0 + ms;
 		const budget = po.depth > 0 ? po.depth - a.tick : Infinity;
 		const open = new Heap(), best = new Map();
 		let seq = 0, expanded = 0, found = null, pruned = 0;
@@ -665,16 +486,6 @@ function createPlanner(model, facts, o = {}) {
 		if (bestPartial === root && bestRootChild) bestPartial = bestRootChild;
 		return { found, bestPartial: bestPartial === root ? null : bestPartial, expanded, ms: Date.now() - t0, pruned, rootEdges, exhausted: !open.size && !found };
 	}
-	/** a death step's ORDERING field: the tiles a death starts from (model.dieSrc), not its goal tiles (the respawn, where
-	 *  the leg's start usually stands: every finder's field read 0 there and no search went to a killer; the executor's
-	 *  closest read 0, rung after rung). The goal test is the waypoint's own (alive back at the respawn, deaths + 1);
-	 *  EEAT_DIE_FIELD=0: the respawn's field as before */
-	const DIE_FIELD = process.env.EEAT_DIE_FIELD !== '0';
-	const dieSrcArr = model.dieSrc && model.dieSrc.length ? model.dieSrc : null;
-	function dieField(wp) {
-		if (DIE_FIELD && dieSrcArr) { wp.fieldTiles = dieSrcArr; wp.fieldTouch = false; wp.dieField = true; }
-		return wp;
-	}
 	/** the path of a search node -> the plan's steps (with the key-door passages and death steps inserted) */
 	function stepsOf(a, node) {
 		const path = [];
@@ -691,9 +502,8 @@ function createPlanner(model, facts, o = {}) {
 			if (e.viaDeath) {
 				if (deathsNow === null) deathsNow = a.sim ? a.sim.deaths : 0;
 				const edge = `death:${deathsNow}`;
-				const wpD = { kind: 'region', tiles: model.respawnOf(from.S).tiles.slice(), expect: { feat: 'deaths', value: deathsNow + 1 }, allowDeath: true, label: `die, back at a respawn (deaths ${deathsNow + 1})` };
-				dieField(wpD);
-				push({ edge, nodeClass: cls, rung: facts ? facts.rungOf(edge, cls) : 0, estTicks: DEAD_TICKS, lb: DEAD_TICKS, waypoint: wpD });
+				push({ edge, nodeClass: cls, rung: facts ? facts.rungOf(edge, cls) : 0, estTicks: DEAD_TICKS, lb: DEAD_TICKS,
+					waypoint: { kind: 'region', tiles: model.respawnOf(from.S).tiles.slice(), expect: { feat: 'deaths', value: deathsNow + 1 }, allowDeath: true, label: `die, back at a respawn (deaths ${deathsNow + 1})` } });
 				deathsNow++;
 			}
 			// the anchor's own active key: its door first, before the key runs out
@@ -708,13 +518,6 @@ function createPlanner(model, facts, o = {}) {
 				}
 			}
 			const X = e.X;
-			if (X && X.kind === 'die') {
-				// (a death as a move: the respawn with one death more; a death shortcut after it counts from there)
-				deathsNow = e.expect.value;
-				push({ edge: e.edge, nodeClass: cls, rung: facts ? facts.rungOf(e.edge, cls) : 0, estTicks: Math.round(e.est), lb: e.lb,
-					waypoint: dieField({ kind: 'region', tiles: DIE_ANY && model.respawn && model.respawn.length ? model.respawn.slice() : e.live.slice(), expect: e.expect, allowDeath: true, label: X.label }) });
-				continue;
-			}
 			const wp = X ? { kind: 'trigger', tiles: e.live.slice(), trig: X.id, expect: e.expect, label: X.label } : { kind: 'trophy', label: 'trophy' };
 			push({ edge: e.edge, nodeClass: cls, rung: facts ? facts.rungOf(e.edge, cls) : 0, waypoint: wp, estTicks: Math.round(e.est), lb: e.lb });
 			// a key followed by its door: the passage while the key is on
@@ -809,14 +612,11 @@ function createPlanner(model, facts, o = {}) {
 			const steps = stepsOf(a, node);
 			if (!steps.length) break;
 			const lbTail = res.found ? 0 : hLb(node.pos);
-			plans.push({ id: `p${ST.plans}.${r}`, steps, cost: Math.round(node.g + (res.found ? 0 : pace() * hStepsD(node.pos))), lb: node.gl + lbTail, partial: !res.found, why: res.found ? 'trophy' : 'budget: the most gain', expanded: res.expanded });
+			plans.push({ id: `p${ST.plans}.${r}`, steps, cost: Math.round(node.g + (res.found ? 0 : pace() * hSteps(node.pos))), lb: node.gl + lbTail, partial: !res.found, why: res.found ? 'trophy' : 'budget: the most gain', expanded: res.expanded });
 			exclude.add(steps[0].edge);
 			// (the first step's own edge: a death or passage step was inserted before the real first edge)
 			let n = node; while (n.parent && n.parent.parent) n = n.parent;
 			if (n.e) exclude.add(n.e.edge);
-		}
-		if (plans.length && NEAR_K > 0 && facts) {
-			try { const near = nearPlans(a, plans); if (near.length) plans.unshift(...near); } catch (e) { /* the rule is ordering only */ }
 		}
 		if (!plans.length) {
 			why = rootEdges < 0 ? 'budget' : rootEdges === 0 && !(facts && facts.list().length) ? 'proof' : 'exhausted';
@@ -831,56 +631,6 @@ function createPlanner(model, facts, o = {}) {
 		const out = plans;
 		out.why = why;
 		out.plans = plans;
-		return out;
-	}
-	/**
-	 * THE DIVERSIFICATION RULE (lane 3, COMPILE-ALL block 2; OPT-IN EEAT_PLAN_NEAR=1): the plan search keeps the cheapest whole plan, so a first leg
-	 * the executor cannot do in its rung comes back at the next rung, again and again, while nearer triggers that change
-	 * the state are never tried (the FIRST-LEG class of the full compile b1: 45 levels, a first target 100-600 tiles away;
-	 * the closest-0 false report had diversified by accident: its walls near the goal pushed the est walk to other
-	 * triggers). Here: when EVERY plan's first leg has FAILED from this node class (its rung >= 1: the plan search's own
-	 * diversity spent), the root's triggers that are nearer by the admissible bound (the edge's lb), not tried from this class yet (rung 0), not only a
-	 * relaxation's or a death's way, go first as one-step plans, the nearest first, at most NEAR_K (EEAT_PLAN_NEAR): a leg the executor does in its first rung is a new anchor with more gain (the strategy's most-progress order
-	 * goes on from it), one it fails moves to rung 1 and the next nearer trigger is offered at the next plan. Ordering
-	 * only: every plan the search found is still there (after them), no edge is dropped, the lb and the proofs untouched.
-	 * Measured (box 3, 60 s, --workers=3): a first version (fire when the BEST plan's first leg failed, 2 near plans
-	 * first) The Glitch 0 -> 8, MIHB's Dream 6 -> 10, but I Wanna be the Guy 15 -> 3 (its 2nd / 3rd plans, a checkpoint
-	 * and a switch, lead to its 15 triggers; the nearest-by-lb 40-coin group and checkpoints took their slots); this one
-	 * (all failed, 1 near plan) on lane 3's 45 FIRST-LEG levels 4 triggers vs 2 (noise level), gate20 7 compiled vs 9 of
-	 * the same code without it (Tutorial 1 / Bygone Tutorial: they compile in about half the runs), IWBTG 15 / 11 in two
-	 * runs: no gain shown, so OPT-IN; with EEAT_SKEL_CLOSEST=1 IWBTG 11 (15 -> 1 without the rule), MIHB 5, The Glitch 0.
-	 * DEFAULT ON (K 1) with the true skeleton closest since COMPILE-ALL block 3 lane 4: the pair measured together (box 3,
-	 * 60 s, --workers=3, n4-plan a137f8e, env EEAT_SKEL_CLOSEST=1 EEAT_PLAN_NEAR=1): the shared gate compiled 11 vs the
-	 * baseline's 9 (Tutorial 1 2,233 and Tree Decorating 1,320 run ticks, both compile in half the base runs), worse 0,
-	 * better 10 (Booty Return 25 vs 11, I Wanna be the Guy 16 vs 11, MIHB's Dream 22 vs 16, Starlight 22 vs 18, NC Naos
-	 * 319 vs 358 run ticks), The Glitch 8 vs the baseline's 4; the lane's 23 levels side by side with the base: progress
-	 * 78 vs 72 (Booty Return 16 vs 11, SPOT THE DIDFERNECE 4 vs 1, Beaches in Space 4 vs 2). EEAT_PLAN_NEAR=0: off.
-	 */
-	function nearPlans(a, plans) {
-		const p0 = plans[0];
-		if (!p0 || !p0.steps || !p0.steps.length) return [];
-		const cls = a.S.key + '|' + a.cls;
-		// (the first real edge of the best plan: a death or a key passage may be inserted before it)
-		const s0 = p0.steps.find((s) => !String(s.edge).startsWith('death:') && !String(s.edge).startsWith('region:key')) || p0.steps[0];
-		if (facts.rungOf(s0.edge, cls) < 1) return [];
-		// (only once the plan search's own diversity is spent: every plan's first leg has failed from this class; a plan
-		// whose first leg is untried still gets its rung-0 try (I Wanna be the Guy: its 2nd / 3rd plans' first legs, a
-		// checkpoint and a switch, lead to 15 triggers; the nearest-by-lb coins / checkpoints ahead of them took their slots:
-		// 15 -> 3)
-		for (const p of plans) { const f = p.steps.find((s) => !String(s.edge).startsWith('death:') && !String(s.edge).startsWith('region:key')) || p.steps[0]; if (facts.rungOf(f.edge, cls) < 1) return []; }
-		const lb0 = Number.isFinite(+s0.lb) ? +s0.lb : Infinity;
-		const es = edgesOf(a.S, a.pos, a.base, 'plan', true, cls);
-		const used = new Set(plans.map((p) => p.steps[0] && p.steps[0].edge));
-		const cands = es.filter((e) => e.X && !e.relaxOnly && !e.viaDeath && e.edge !== s0.edge && !used.has(e.edge) && e.lb < lb0 && facts.rungOf(e.edge, cls) === 0)
-			.sort((x, y) => x.lb - y.lb || x.est - y.est);
-		const out = [];
-		const root = { S: a.S, pos: a.pos, e: null, parent: null };
-		for (const e of cands.slice(0, NEAR_K)) {
-			const steps = stepsOf(a, { S: e.S2, pos: e.pos2, e, parent: root });
-			if (!steps.length) continue;
-			out.push({ id: `p${ST.plans}.n${out.length}`, steps, cost: p0.cost, lb: e.lb + hLb(e.pos2), partial: true, why: `near: '${s0.waypoint && s0.waypoint.label}' failed its rung ${facts.rungOf(s0.edge, cls) - 1}; the nearest untried trigger first`, near: true });
-		}
-		ST.nearPlans = (ST.nearPlans || 0) + out.length;
 		return out;
 	}
 	// ---------------------------------------------------------------- CEGAR
@@ -1009,9 +759,7 @@ function createPlanner(model, facts, o = {}) {
 		return `${p.partial ? 'PARTIAL ' : ''}plan ${p.id}: est ${p.cost} ticks, lb ${p.lb}: ` + p.steps.map((s) => s.waypoint.label + (s.rung ? `[r${s.rung}]` : '')).join(' -> ');
 	}
 	const stats = () => Object.assign({}, ST, { pace: pace(), model: model.stats() });
-	/** the floors' version: bumps when an async floor probe adds floors (plans made before it priced the trophy edge without) */
-	const floorVersion = () => floorVer;
-	return { plan, learn, lowerBound, costOf, explain, stats, floorVersion, _edgesOf: edgesOf, _hLb: hLb, _anchorOf: anchorOf };
+	return { plan, learn, lowerBound, costOf, explain, stats, _edgesOf: edgesOf, _hLb: hLb, _anchorOf: anchorOf };
 }
 
 module.exports = { createPlanner, PACE0 };

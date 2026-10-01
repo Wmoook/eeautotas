@@ -110,14 +110,6 @@ function tileOf(sim, W, H) {
 	return y * W + x;
 }
 /**
- * the tile the last tick's touch read (eesim.js _touchBlock: the centre cell at the tick's start, after the half-block
- * remap: _pastx / _pasty), -1 outside the level: every trigger (coin, switch, key, effect, checkpoint) fires there
- */
-function touchedTile(sim, W, H) {
-	const x = sim._pastx, y = sim._pasty;
-	return x >= 0 && y >= 0 && x < W && y < H ? y * W + x : -1;
-}
-/**
  * playTo(L, masks, o) -> {sim, tick, dead, finished, goalAt}: the masks from the level start in a fresh EESim.
  * dead: the first tick the ball was dead (-1 never; the replay stops there unless o.allowDeath); finished: the first
  * tick with the level complete (-1 never); goalAt: the first tick o.goal.test(sim) held (-1 never; o.goal from goalOf).
@@ -161,28 +153,6 @@ function featValue(sim, feat) {
 	}
 }
 /**
- * featGetter(feat) -> (sim) => featValue(sim, feat): the same value, the feature's key parsed ONCE (featValue parses
- * the string on every call: the primitives read every feature on every simulated tick, 12.5% of a leg's time in it)
- */
-function featGetter(feat) {
-	if (feat.startsWith('key')) { const b = +feat.slice(3); return (sim) => (sim._keysMask >> b) & 1; }
-	if (feat.startsWith('psw:')) { const id = +feat.slice(4); return (sim) => (sim._switches.get(id) === true ? 1 : 0); }
-	if (feat.startsWith('osw:')) { const id = +feat.slice(4); return (sim) => (sim._oswitches.get(id) === true ? 1 : 0); }
-	if (feat.startsWith('coin@')) { const t = +feat.slice(5); return (sim) => { const W = sim.width; return sim.is_coin_collected(t % W, (t / W) | 0) ? 1 : 0; }; }
-	switch (feat) {
-		case 'team': return (sim) => sim.team;
-		case 'prot': return (sim) => (sim.is_invulnerable ? 1 : 0);
-		case 'coins': return (sim) => sim.coins;
-		case 'bcoins': return (sim) => sim.blue_coins;
-		case 'crown': return (sim) => (sim._collide_crown ? 1 : 0);
-		case 'silver': return (sim) => (sim._collide_silver_crown ? 1 : 0);
-		case 'deaths': return (sim) => sim.deaths;
-		case 'cp': return (sim) => (sim.checkpoint.x < 0 ? -1 : sim.checkpoint.y * sim.width + sim.checkpoint.x);
-		case 'fx': return (sim) => (!sim.has_levitation && sim.flip_gravity === 0 && sim.max_jumps === 1 && sim.jump_boost === 0 && sim.speed_boost === 0 && !sim.low_gravity ? 0 : 1);
-		default: return () => NaN;
-	}
-}
-/**
  * goalOf(L, wp) -> {kind, tiles: Int32Array (the goal tiles for a goal field; for the trophy the level's trophies),
  * mask: Uint8Array(N) | null, test(sim) -> bool, allowDeath (the step may die on its way: playTo(..., {allowDeath}))}:
  * THE success rule of a waypoint, the same in every part (the primitives' A*, the leg search, the GPU finds' replay
@@ -198,26 +168,8 @@ function goalOf(L, wp) {
 	const mask = new Uint8Array(N);
 	for (const t of wp.tiles) if (t >= 0 && t < N) mask[t] = 1;
 	const ex = wp.expect ? wp.expect : null;
-	// a trigger's goal: the Expect holds and the ball's centre is on the trigger now OR the last tick's touch read it
-	// (touchedTile): the engine touches the centre cell at the tick's START and then moves, so a ball that crosses a coin /
-	// switch / checkpoint in one tick (a boost's 16 px/tick, any fast pass) has left the tile by the time the feature shows
-	// the touch, and "on the tile with the feature changed" never holds (the leg searches' "closest 0 tiles" failures)
-	// the COUNTS (coins, blue coins, deaths) only grow within a leg: the Expect is the count right after the touch
-	// (model.js touch: + 1), so a way that takes another coin first (a coin of another component on the way: the est walk
-	// is coin-blind) reaches the target at + 2 and "=== + 1" never held; at least the Expect is the touch's own semantics
-	// (a coin: the tile the ball is on or touched last is one of the target's AND its coin is taken: with ">=" the count
-	// alone could be another coin's while the ball stands on the target's untaken coin)
-	const ge = ex && (ex.feat === 'coins' || ex.feat === 'bcoins' || ex.feat === 'deaths');
-	const coin = ex && (ex.feat === 'coins' || ex.feat === 'bcoins');
-	const fv = ex ? featGetter(ex.feat) : null;
-	const okF = ex ? (ge ? (sim) => fv(sim) >= ex.value : (sim) => fv(sim) === ex.value) : null;
-	const onT = coin ? (sim, t) => t >= 0 && mask[t] === 1 && sim.is_coin_collected(t % W, (t / W) | 0) : (sim, t) => t >= 0 && mask[t] === 1;
-	const test = ex ? (sim) => !sim.is_dead && okF(sim) && (onT(sim, tileOf(sim, W, H)) || onT(sim, touchedTile(sim, W, H)))
-		: (sim) => !sim.is_dead && mask[tileOf(sim, W, H)] === 1;
-	// (fieldTiles: the tiles the ordering fields and bounds are built to, when not the goal's own (the executor's skeleton:
-	// a sub-level set of the waypoint's field, ordered by the waypoint's own fields, memoized across its sub-legs))
-	return { kind: wp.kind, tiles: Int32Array.from(wp.tiles), mask, test, allowDeath: !!wp.allowDeath,
-		fieldTiles: wp.fieldTiles && wp.fieldTiles.length ? Int32Array.from(wp.fieldTiles) : null, fieldTouch: !!wp.fieldTouch };
+	const test = ex ? (sim) => !sim.is_dead && mask[tileOf(sim, W, H)] === 1 && featValue(sim, ex.feat) === ex.value : (sim) => !sim.is_dead && mask[tileOf(sim, W, H)] === 1;
+	return { kind: wp.kind, tiles: Int32Array.from(wp.tiles), mask, test, allowDeath: !!wp.allowDeath };
 }
 
 // ---------------------------------------------------------------- arrivals
@@ -267,28 +219,8 @@ function levelNow(L, sim) {
 	return Object.assign({}, L, { fg });
 }
 /** a small hash of a level copy's foreground (the goal fields' memo key) */
-function fgHash0(fg) { let h = 0x811c9dc5; for (let i = 0; i < fg.length; i++) { h ^= fg[i]; h = Math.imul(h, 0x01000193); } return (h >>> 0).toString(36) + ':' + fg.length; }
-// (memoized per foreground ARRAY: a level copy's fg is never written after it is built (levelNow, model.levelOf, withWalls
-// write a fresh copy first), and the planner's edge pricing hashed the SAME copy on every trigger edge of every expansion
-// (bounds.hasField / bounds.field's memo key: O(N) each): Moving Ice Puzzle (400 x 200, 3,346 triggers) spent 34 s of its
-// 60-s compile's main thread there while the workers waited on it. The same string; EEAT_FGHASH_CHECK=1 recomputes every
-// memoized hash and throws on a difference; EEAT_FGHASH_MEMO=0: none)
-const FGH = new WeakMap();
-const FGH_ON = process.env.EEAT_FGHASH_MEMO !== '0', FGH_CHECK = process.env.EEAT_FGHASH_CHECK === '1';
-function fgHash(fg) {
-	if (!FGH_ON || !fg || typeof fg !== 'object') return fgHash0(fg);
-	let h = FGH.get(fg);
-	if (h === undefined) { h = fgHash0(fg); FGH.set(fg, h); }
-	else if (FGH_CHECK && h !== fgHash0(fg)) throw new Error('fgHash: a hashed foreground was written after its hash');
-	return h;
-}
-// (the goal fields' memo: by BYTES (an RCH3 field is ~250 bytes a tile: 10 MB on 200 x 200, 20 MB on 400 x 200), at least
-// FIELDS_MIN fields: the planner's path checks (model.reachable), the skeleton's measures and the workers' tiers share it,
-// and 8 fields thrashed between them (EEAT_FIELDS_MB, default 256; 0: the old 8)
-const FIELDS = new Map(), FIELDS_MIN = 8, FIELDS_CAP = 64;
-const FIELDS_MB = process.env.EEAT_FIELDS_MB !== undefined ? +process.env.EEAT_FIELDS_MB : 256;
-let FIELDS_MAX = FIELDS_MIN;
-const fieldBytes = (f) => { let b = 0; for (const k in f) { const a = f[k]; if (ArrayBuffer.isView(a)) b += a.byteLength; } return b; };
+function fgHash(fg) { let h = 0x811c9dc5; for (let i = 0; i < fg.length; i++) { h ^= fg[i]; h = Math.imul(h, 0x01000193); } return (h >>> 0).toString(36) + ':' + fg.length; }
+const FIELDS = new Map(), FIELDS_MAX = 8;
 /**
  * goalField(Lc, tiles, o) -> the RCH3 field (src/reach.js reachField) of level copy Lc (levelNow) seeded from the goal
  * tiles at cost 0 (the trophy is no goal), memoized (8 fields, LRU). RF.costAt(field, sim) -> tiles to the goal (-1 = a
@@ -301,9 +233,8 @@ function goalField(Lc, tiles, o = {}) {
 	const had = FIELDS.get(key);
 	if (had) { FIELDS.delete(key); FIELDS.set(key, had); return had; }
 	const f = RF.reachField(Lc, { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: o.deaths === true });
-	if (FIELDS.size === 0 && FIELDS_MB > 0) FIELDS_MAX = Math.max(FIELDS_MIN, Math.min(FIELDS_CAP, Math.floor(FIELDS_MB * 1048576 / Math.max(1, fieldBytes(f)))));
 	FIELDS.set(key, f);
-	while (FIELDS.size > FIELDS_MAX) FIELDS.delete(FIELDS.keys().next().value);
+	if (FIELDS.size > FIELDS_MAX) FIELDS.delete(FIELDS.keys().next().value);
 	return f;
 }
 
@@ -311,7 +242,4 @@ function goalField(Lc, tiles, o = {}) {
 /** emitter(stream) -> (ev) => void: one JSON object per line */
 const emitter = (stream = process.stdout) => (ev) => { try { stream.write(JSON.stringify(ev) + '\n'); } catch (e) { /* closed */ } };
 
-/** the tiles a goal's ordering fields are built to, and their touch rule (the trophy's) */
-const fieldTilesOf = (goal) => (goal.fieldTiles ? goal.fieldTiles : goal.tiles);
-const fieldTouchOf = (goal) => (goal.fieldTiles ? !!goal.fieldTouch : goal.kind === 'trophy');
-module.exports = { VERSION, fieldTilesOf, fieldTouchOf, strOf, masksOf, concat, loadLevelFile, tileOf, touchedTile, playTo, featValue, featGetter, goalOf, arrivalOf, classOf, pickDiverse, levelNow, goalField, fgHash, emitter, CLOCK_DOORS };
+module.exports = { VERSION, strOf, masksOf, concat, loadLevelFile, tileOf, playTo, featValue, goalOf, arrivalOf, classOf, pickDiverse, levelNow, goalField, fgHash, emitter, CLOCK_DOORS };
