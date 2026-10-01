@@ -122,6 +122,15 @@ console.log('splice: coin-blind past the last coin door (\'free\')');
 	const u = g.path({ lib });
 	check('\'free\' + a library edge: used, and its check (exact) fails', !!u && u.libUsed.length === 1 && S.firstBadCheck(level, u.ms, u.checks, 'free') === 0,
 		u ? `${u.libUsed.length} edge(s), run ${u.run}` : 'no path');
+	// the same edge ending at A's coin-blind twin there (the GPU searcher's every move past the coin-free tick,
+	// gpusearch.js runWindow): the union goes on along A's twins, the run replays as claimed and the check passes
+	const tA = S.trace(level, eA.ms, 'free', false);
+	const lib2 = new Map([[tr.H[40], new Map([[tA.HB[190], { seq: eB.ms.slice(40, 130), fam: 'every' }]])]]);
+	const u2 = S.unionGraph([tA]).path({ lib: lib2 });
+	const v2 = u2 && C.evaluate(level, u2.ms);
+	check('an edge to a coin-blind twin: used, the run replays exactly, its check passes (\'free\')', !!v2 && u2.libUsed.length === 1 && v2.runTicks === u2.run &&
+		u2.run < uX.run && S.firstBadCheck(level, u2.ms, u2.checks, 'free') === null && S.firstBadCheck(level, u2.ms, u2.checks, false) === 0,
+		v2 ? `${u2.run} (A alone ${uX.run})` : 'no path');
 }
 
 console.log('soundness: a coin door after the join');

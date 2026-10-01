@@ -305,8 +305,11 @@ async function refresh() {
 	const tr = TC.of('run:' + pick.key, pick.ms);
 	if (tr.n < 0) return !!ref;
 	const old = ref;
-	ref = { key: pick.key, masks: tr.masks, n: tr.n, H: tr.H, R: tr.R, ev: pick.ev, tickOf: new Map() };
+	// (HB, cf: the coin-blind twins from the coin-free tick on, trace 'free'; tickOf knows them too: the credit of an
+	// edge that ends at one)
+	ref = { key: pick.key, masks: tr.masks, n: tr.n, H: tr.H, R: tr.R, HB: tr.HB || null, cf: tr.cf, ev: pick.ev, tickOf: new Map() };
 	for (let t = 0; t <= ref.n; t++) ref.tickOf.set(ref.H[t], t);
+	if (ref.HB) for (let t = ref.cf; t <= ref.n; t++) ref.tickOf.set(ref.HB[t], t);
 	C.writeEetas(path.join(GDIR, 'ref.eetas'), ref.masks);
 	// a new reference: the systematic families need a full pass over it again (their cursors continue by state hash)
 	if (!state.left || state.left.key !== ref.key) {
@@ -414,7 +417,7 @@ function combineOn(g, base, what) {
 			cand = C.evaluate(level, u.ms);
 			if (cand && cand.complete <= u.ticks) break;
 			// a library edge that is not exact here (it cannot happen with a matching fingerprint): drop it, try again
-			const k = S.firstBadCheck(level, u.ms, u.checks, nc);
+			const k = S.firstBadCheck(level, u.ms, u.checks, traceMode());
 			const bad = k !== null ? u.libUsed.filter((e) => e.h1 !== 'F')[k] : u.libUsed.find((e) => e.h1 === 'F');
 			if (!bad) { note(`the combined run${g.runs.length > 1 ? ' of the known runs' : ''} does not replay as its parts (${u.ticks} ticks)`, what); return 'refused'; }
 			dropEdge(bad.h0, bad.h1);
@@ -641,7 +644,10 @@ function ensureReach() {
 function runWindow(T, o = {}) {
 	return new Promise((resolve) => {
 		const rf = ensureReach();
-		const a = ['explore', blobFile, path.join(GDIR, 'ref.eetas'), `--from=${T}`, '--rejoin=1', `--nocoins=${nc ? 1 : 0}`, `--depth=${EVERY_DEPTH}`, `--seconds=${o.seconds || EVERY_S}`,
+		// coins counted, but T past the reference's coin-free tick (its box touches no coin door or gate from there on):
+		// coin-blind rejoins are exact there; their edges end at the reference's coin-blind twins (splice.js 'free')
+		const twins = !nc && !o.prefix && ref.HB && T >= ref.cf;
+		const a = ['explore', blobFile, path.join(GDIR, 'ref.eetas'), `--from=${T}`, '--rejoin=1', `--nocoins=${nc || twins ? 1 : 0}`, `--depth=${EVERY_DEPTH}`, `--seconds=${o.seconds || EVERY_S}`,
 			'--coarse=0', '--cqx=0.5', '--cqv=4', '--qy=0.5', '--qvy=4', '--discrete=1', '--cap=1048576', `--cells=${everyCells()}`,
 			...(rf ? [`--reach=${rf}`, `--prune=${reachPrune ? 1 : 0}`] : []), ...(o.prefix ? [`--prefix=${o.prefix}`, `--gain=${o.gain}`] : []),
 			`--launch-ms=${launchMs}`, ...EEGPU_OPTS(), ...G.cacheArgs()];
@@ -665,7 +671,7 @@ function runWindow(T, o = {}) {
 					// (an idle-start window: its rejoins may cost ticks; the combine judges them by run ticks)
 					if (ev.from >= 0 && ev.from <= ref.n && ev.j > ev.from && ev.j <= ref.n && (ev.saving > 0 || o.prefix)) {
 						const seq = Uint8Array.from(String(ev.inputs), (c) => (c.charCodeAt(0) - 48) & 31);
-						if (addEdge(ref.H[ev.from], ref.H[ev.j], seq, fam)) { added++; best = Math.max(best, ev.saving); }
+						if (addEdge(ref.H[ev.from], twins ? ref.HB[ev.j] : ref.H[ev.j], seq, fam)) { added++; best = Math.max(best, ev.saving); }
 					}
 				} else if (ev.ev === 'layer') {
 					last = ev.ticks;

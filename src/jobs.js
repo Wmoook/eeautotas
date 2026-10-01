@@ -751,13 +751,16 @@ async function focus(id, fromSpec, toSpec, seconds, opts) {
 	const running = !!runningPid(id);
 	const Wk = Math.max(1, Math.min(os.cpus().length, +o.workers || (running ? Math.max(1, Math.floor(os.cpus().length / 2)) : os.cpus().length)));
 	const st = C.readJSON(path.join(dir, 'status.json'), {});
-	const NC = st.coinsOptional !== undefined ? (st.coinsOptional ? 1 : 0)
+	const NC0 = st.coinsOptional !== undefined ? (st.coinsOptional ? 1 : 0)
 		: (C.coinsIrrelevant(levelJsonOf(id), refMasks, { complete: tr.complete, runTicks: tr.runTicks }) ? 1 : 0);
+	// (coins counted, but the window past the best's last coin door: coin-blind there, as the grind's windows)
+	const FREE = !NC0 && C.coinFreeOk(level);
+	const NC = NC0 || (FREE && Math.max(0, from - 10) >= C.coinFreeTick(level, tr.X, tr.Y, tr.complete)) ? 1 : 0;
 	const fstate = { state: 'running', pid: process.pid, started: Date.now(), from, to, fromTime: fmt(tr.RUN[from]), toTime: fmt(tr.RUN[to]), seconds: S,
 		workers: Wk, bestBefore: tr.runTicks, dir: fd };
 	C.writeJSON(path.join(dir, 'focus.json'), fstate);
 	log(`[focus] ${id}: ticks ${from}-${to} (${fmt(tr.RUN[from])}-${fmt(tr.RUN[to])}) of best ${fmt(tr.runTicks)}, ${S} s per search, ${Wk} workers` +
-		`${running ? ' (the job is running: sharing the CPU)' : ''}, coins ${NC ? 'optional' : 'needed'}`);
+		`${running ? ' (the job is running: sharing the CPU)' : ''}, coins ${NC0 ? 'optional' : NC ? 'needed, but the window is past the last coin door (coin-blind here)' : 'needed'}`);
 	const outs = [];
 	const lvl = `--level=${lid}`;
 	const exp = path.join(fd, 'explore.eetas');
@@ -780,7 +783,7 @@ async function focus(id, fromSpec, toSpec, seconds, opts) {
 	if (outs.length) {
 		const sp = path.join(fd, 'splice.eetas');
 		fstate.stage = 'splice'; C.writeJSON(path.join(dir, 'focus.json'), fstate);
-		await runTool('splice.js', [sp, ref, ...outs, lvl, ...(NC ? ['--nocoins'] : [])], (s) => log('  ' + s));
+		await runTool('splice.js', [sp, ref, ...outs, lvl, ...(NC0 ? ['--nocoins'] : FREE ? ['--coinfree'] : [])], (s) => log('  ' + s));
 		const cands = (fs.existsSync(sp) ? [sp] : []).concat(outs);
 		const seen = new Set();
 		for (const f of cands) {
