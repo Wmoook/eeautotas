@@ -1511,6 +1511,38 @@ ways in.
   jump only where a floor is under every x the column allows the box: (14, 10)'s box cannot overlap (15, 11) because
   (15, 10) is a wall; x free within the column, one column a tick); checked like every tier on the 44 known routes.
   It must read >= ~49 at fef0's start (8x a layer: an exact search closes ~10 ticks of slack, not 55).
+- **THE BREADTH-FIRST PROVER ON WORKER THREADS** (box 7 lane 'proof' cycle 6, 2026-10-01; `tools/perfect/bfsprove.js`,
+  `test/bfsprove.js` 47/0; a tool, the compile unchanged): `node tools/perfect/bfsprove.js <level.eelvl> --C=<layer bound>
+  [--route=<a.eetas>,..] [--U=] [--threads=16] [--seconds=1800] [--ttBits=28] [--tiers=kin,rel,gate] [--maxGB=12]
+  [--heapMB=4096] [--initPer=64] [--rebalance=1.5] [--rebalanceMin=2000] [--out=<faster.eetas>]`: the layer census as a
+  PROVER (wholepar.js's convention: a finish at layer d is a route of d - 1 run ticks): breadth first over exact engine
+  states from every idle start (the first layers on the main thread until the front feeds every worker; the first inputs
+  non-zero), every input of every tick (endgame.probeMasks), wholepar.js's admissible cut at C (`makeCtx`, the default tiers
+  kin,rel,gate), FULL stateHash dedup ACROSS LAYERS in ONE shared insert-only table (a SharedArrayBuffer of 2 int32 a slot:
+  the low word, the high word + 1; Atomics compare-and-swap, a reader that meets a slot being written waits for its high
+  word; a probe run past 512 keeps the state: never unsound), the front split over N workers, a barrier a layer: the front
+  empties = C CLOSED (every route takes >= C run ticks), the first layer with a finish = THE OPTIMUM (every state of every
+  shorter route has d + h <= its ticks <= C: none cut; the dedup keeps the earliest copy of each), its route rebuilt from
+  the workers' parent links and REPLAYED (`FASTER` + `--out` below the routes given, else `PROVEN`); C = U closing =
+  PROVEN; every route given is checked against the tiers first. THE PACKED FRONT: a snapshot object is ~1.2 KB of V8 heap
+  (its 113 fields, doubles boxed); a layer keeps per state only the fields that differ from the worker's BASE snapshot
+  (Object.is: -0 and NaN exact) as (field, type, Float64) triples (~200-310 B a state), and every state read back is
+  RESTORED AND CHECKED against the stateHash stored at its insert (a mismatch throws: no claim). THE RE-ROOTING: a child
+  stays on its parent's worker, so the fronts drift apart (NC Naos d3c6 C 58: the largest 6.7x the least by layer 25, 13x
+  by 30: one subtree); past `--rebalance` x the mean every front comes back as packed paths from the sources (its root's +
+  the inputs since), is dealt out again round robin and rebuilt by replay, each state checked against its hash. `--maxGB`:
+  past that RSS the run stops ('memory'; the lb then = the last complete layer, weak). The toys: the optimum = exact.js's
+  from the same idle starts with the work on the main thread and on the workers, a slower U FASTER (written, replayed), the
+  optimum as a route PROVEN, C = the optimum CLOSED, all again re-rooted after every layer. MEASURED (box 7, load 150-170,
+  `~/b7_proof_out/c6/`): **NC Naos d3c6 C 58 CLOSED in 320.8 s (14 workers, 84,204,369 distinct states over 48 layers,
+  3 re-rootings in 12.4 s, RSS <= 7.9 GB): lb 57 -> 58** (cycle 4's DFS: C 58 6.09 B nodes on 61 of its 171 tasks in
+  1,648 s, not closed); its layers: 1.34 -> 1.07x to layer 26 (2,797,937 states, 20.8 M seen: the census's numbers
+  exactly; 131 s on 10 workers unbalanced, 78 s on 14 re-rooted, the census 604 s on one thread), a second rise to 7.3 M at
+  layer 33, down to 0.28 M at 39, a third wave of 1.25-1.3x a layer to 1.48 M at 47 (every state with one twin: a
+  sub-pixel family near the trophy), all cut at 48; with snapshot objects the run stopped on memory at layer 27 (14 GB).
+  Celeste 31c0 C 97 (4 workers, 6 GB): 1.3-1.8x a layer, 9.0 M states at layer 17, 30.7 M seen, stopped on memory at 18;
+  Switch Labyrinth C 27 (3 workers, 5 GB): 3x a layer, 9.2 M at layer 14, 17.3 M seen, stopped on memory (the DFS closed it
+  in cycle 3: 2.85 B nodes); My level fef0 C 18 (4 workers): 4.8x a layer (0.88 M at layer 8).
 - **THE ENDGAME and THE AIRBORNE ARRIVAL** (C6 push 3 lane 5 block 3; `src/out/n5/lanes/c6_lane5_b3.md`). THE ENDGAME
   (strategy.js after JOINS, its own clock; **DEFAULT ON since lane 5 block 4** (`src/out/n5/lanes/c6_lane5_b4.md`): compile.js
   gives it a fifth of the budget, at most 60 s (`ENDGAME_F`, `ENDGAME_MAX_S`); `--endgame=<s>` / `EEAT_ENDGAME_S=<s>` its
