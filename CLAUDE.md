@@ -1122,3 +1122,26 @@ ways in.
   search finds no crown within 60 ticks (4.4 M states): the bounds' walks go up through the down boost. NEXT: the boost's push
   in the bound (a tick that starts in a boost sets that speed to 16 along it, and the centre moves at most 16 px a tick, so it
   never crosses a boost tile against its push without a tick starting in it; teleports aside).
+- **THE PROOF OVER SEVERAL CYCLES** (box 7 lane 'proof' cycle 3, 2026-10-01; `tools/perfect/wholepar.js`, `test/wholepar.js`
+  54/0): THE TASK LOG (`--log=<tasks.jsonl>`: one line per task searched to the end; `--resume=<the same file>` with `--from=`
+  the proven lb below that C: the C's tasks (a pure function of the level, the tiers, the sources, C and `--split`) less the
+  logged ones, which count as done; a line cut by a kill is skipped): a C contour that runs out of time is no longer lost.
+  Sound with the shared table: a logged task pruned a state only where a task of ITS run entered it at a layer <=, and that
+  task is logged too or searched again from its root by the run that closes the C. The toys: the log holds every task of a
+  closed C, resumed from half / every task / a cut line the same PROVEN; Switch Labyrinth on one box-7 thread: C 21 closed
+  (173 tasks, 5.67 M nodes, 44 s), C 22 stopped at 60 s with 39 of its 174 tasks logged, the resumed run skipped them and closed C 22 (lb 22, as cycle 2) after 157 s more. THE ENDGAME DEDUP (default; `EEAT_WP_ATEG=1`
+  the old way): where the kin tier runs, the rel / gate tiers call bounds.at without its own endgame max (wholeproof.js
+  createH `o.noEndgame`: the same endgame.lowerBound was computed again per field, 16% of a node's time): Switch Labyrinth
+  C 20 the same search (1,814,646 nodes, 1,190,355 cut, 21,656 merged) in 15.3 / 16.5 s vs 20.4 / 28.1 s (one box-7 thread
+  a run); the engine is now 52% of a node (eesim.js `_ovSlow` 28%: the team doors' slow collision path), endgame.js 23%.
+  THE POCKET, measured (`src/out/b7proof/pocket3.js`, `starts.js`): the idle trajectory itself falls through the portal
+  (98, 2) -> (98, 23), rides the left boosts along row 25 with its box aligned (px 1536.0) and drops through the team door
+  (96, 26) into the pocket, where it rests: 7 of its 39 idle starts are in the corridor / pocket (h 9-15), and at C 20 99.3%
+  of the h calls are in those tiles; RCH3 (the `reach` tier) does not cut them (11.8 tiles). The boost's push AT THE TILE
+  LEVEL does not cut them either: in the tile graph the pocket leaves by (97, 26) -> the left boost (97, 25) -> the corridor
+  (9-10 ticks, the bound's own value); what the engine forbids is sub-pixel (the route's box is 0.93 px left of the column
+  so the down boosts are blocked by the wall (95, 26); an aligned box falls through the door): only a pixel-exact model of
+  the corridor cuts the pocket. THE TASK SIZES: `--split=3` (178 tasks at C 26) left 13 of 19 workers idle for most of
+  C 26 (6 tasks ran 22+ min, then 1); `--split=6` makes 2,700 tasks at C 27 (the pocket's idle starts 29-36: 2,600 of
+  them; the falling starts 0-28 one or two each: in the shaft every input gives the same state), 5-7 M nodes a task, all
+  13 workers busy, 1.8 M nodes/s on box 7 at load ~150. SWITCH LABYRINTH C 26 CLOSED (box 7, 19 threads at load 140-175, 1,476,991,460 nodes, 2,159 s): EVERY ROUTE TAKES >= 26 RUN TICKS: the gap to the best known 27 (= our compile's route) is 1 tick. C 27 (closing it = PROVEN) runs with the task log (`--split=6 --from=26`; box 7 `~/b7_proof_out/c3/switch_lab_c27.tasks.jsonl`), resumed by the next cycle with the same split and log; `--reverse=1`: a second run on the same log takes the tasks from the other end (the two meet in the middle).

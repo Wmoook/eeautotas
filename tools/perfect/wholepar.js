@@ -18,7 +18,7 @@
 // ours when below it (replayed, written to --out); C = U (our route's run ticks) closing = OUR ROUTE IS PROVEN OPTIMAL.
 //   node tools/perfect/wholepar.js <level.eelvl> [--route=<a.eetas>[,<b.eetas>]] [--U=<run ticks>] [--threads=8]
 //        [--seconds=1800] [--split=3] [--ttBits=23] [--tiers=kin,togo,rel,gate] [--from=<C>] [--out=<faster.eetas>]
-//        [--check=1] [--log=<tasks.jsonl>] [--resume=<tasks.jsonl>]
+//        [--check=1] [--log=<tasks.jsonl>] [--resume=<tasks.jsonl>] [--reverse=1]
 // Prints JSON lines ({ev 'check' | 'C' | 'found' | 'result'}).
 const path = require('path');
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
@@ -293,7 +293,9 @@ async function main() {
 		const all = tk.tasks;
 		// (a task searched to the end by an earlier run of this C: skipped, counted done)
 		const before = doneBefore.get(C);
-		const tasks = before ? all.filter((t) => !before.has(taskKey(t))) : all;
+		const tasks = before ? all.filter((t) => !before.has(taskKey(t))) : all.slice();
+		// (--reverse=1: the tasks from the other end: a second run on the same log meets the first in the middle)
+		if (args.reverse === '1') tasks.reverse();
 		const resumed = all.length - tasks.length;
 		let nodes = tk.nodes, done = resumed, stopped = 0, hit = null;
 		if (resumed) say({ ev: 'resume', C, tasks: all.length, skipped: resumed });
