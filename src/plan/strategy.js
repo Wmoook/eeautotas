@@ -133,6 +133,17 @@ const CR_F_SLACK = +process.env.EEAT_CR_F_SLACK || 0.1, CR_F_ABS = +process.env.
 // levels the trophy steps took 25% of the failed time with no success at any rung (the whole level left as one leg)
 const FAR_TROPHY = +process.env.EEAT_FAR_TROPHY > 0 ? +process.env.EEAT_FAR_TROPHY : 0;
 const FAR_TROPHY_RUNG = process.env.EEAT_FAR_TROPHY_RUNG !== undefined ? +process.env.EEAT_FAR_TROPHY_RUNG : 1;
+// THE SPARE WORKERS (B8 speed, 2026-09-30; OPT-IN EEAT_SPARE=1, unset / 0: off, the compile byte for byte as before): before
+// the first route, a worker the planner has no step for (every proposed edge already in flight: a one-leg level's single
+// trophy edge, a level whose frontier is one waypoint) runs an in-flight edge again at its NEXT rung, so the rung ladder
+// (1.5 / 5 / 15 / 45 s) runs side by side instead of one rung after another (the 45-s rung of a one-leg level's trophy
+// starts at ~1.5 s instead of ~21.5 s). Why: the S99 full compile's logs (the 50 compiled levels): the workers were idle
+// before the first route on the one-leg / one-frontier levels (Gravity's Rainbow 67% of 3 x 66 s, The Blank Page 88%,
+// Rosa dei Venti 86%, the precision puzzles 98%, Bygone Tutorial / INVASION 45%), 12% of all worker time. A spare's
+// failure is the same fact as its rung's (facts.js: the edge's rung = the highest failed + 1); a planner proposal of a
+// rung a spare runs waits for it (no repeat block); EEAT_SPARE_MAX: spares at once (default P - 1).
+const SPARE = process.env.EEAT_SPARE === '1';
+const SPARE_MAX = process.env.EEAT_SPARE_MAX !== undefined ? +process.env.EEAT_SPARE_MAX : -1;
 /** the rung a step's window is sized by: its own, or the far trophy's cap */
 const windowRung = (step) => (FAR_TROPHY > 0 && step && !step.synthetic && (!step.waypoint || step.waypoint.kind === 'trophy') && +step.estTicks > FAR_TROPHY ? Math.min(step.rung | 0, FAR_TROPHY_RUNG) : step.rung);
 const ARRIVALS_K = 4, MAX_DEEPEN = 4, STEER_MISS = 6000;
@@ -1223,6 +1234,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 				const ek = edgeKey(step);
 				if (inflight.has(ek) || localBlock.has(`${A.key}|${ek}`)) continue;
 				const tk = `${ek}|${step.rung}|${epoch}`;
+				// (THE SPARE WORKERS: this rung of the edge runs as a spare: wait for it, no repeat block)
+				if (SPARE && tried.has(tk) && tried.get(tk).spare && !tried.get(tk).done) continue;
 				if (tried.has(tk)) {
 					// (a triple already run in this epoch: the planner proposes it again; blocked here so it never runs twice: a
 					// failed one is the planner's bug (a failure must change its plan), a done one just done for this epoch)
@@ -1489,6 +1502,43 @@ async function compile(L, opts = {}, emit = () => {}) {
 		A.plans = null;   // (plan again from here: receding horizon)
 		cur = { plan, step, anchor: A.id, ok: rec.ok, depth: A.depth };
 		return { route };
+	};
+	// ---- THE SPARE WORKERS (EEAT_SPARE=1, above): the oldest in-flight planner edges again at their next rung not tried and
+	// not running, while workers are free and no route is known
+	let spareRuns = 0;
+	const spareFill = () => {
+		const cap = SPARE_MAX >= 0 ? SPARE_MAX : P - 1;
+		let running = 0;
+		// (the in-flight planner edges, oldest first, each once with its highest running rung: a spare's own edge too, so a
+		// free worker climbs the ladder of an edge whose main step already ended)
+		const base = new Map();
+		for (const g of [...inflight.values()].sort((x, y) => x.started - y.started)) {
+			if (g.spare) running++;
+			if (!g.job || !g.job.step || g.job.step.synthetic) continue;
+			const ek0 = edgeKey(g.job.step), r0 = g.job.step.rung | 0;
+			const b = base.get(ek0);
+			if (!b) base.set(ek0, { job: g.job, top: r0 }); else b.top = Math.max(b.top, r0);
+		}
+		for (const [ek, b] of base) {
+			if (inflight.size >= P || running >= cap) break;
+			const { anchor: A, step, plan } = b.job;
+			if (A.exhausted || !A.arrivals.length) continue;
+			const fr = facts && typeof facts.rungOf === 'function' ? facts.rungOf(step.edge, step.nodeClass) | 0 : 0;
+			const r = Math.max(b.top + 1, fr);
+			if (!(r < rungMs.length)) continue;
+			const tk = `${ek}|${r}|${epoch}`, key = `${ek}#spare${r}`;
+			if (tried.has(tk) || inflight.has(key)) continue;
+			const s2 = Object.assign({}, step, { rung: r });
+			const p2 = Object.assign({}, plan, { steps: [s2].concat(Array.isArray(plan.steps) ? plan.steps.slice(1) : []) });
+			const job = { anchor: A, plan: p2, step: s2 };
+			const g = { job, started: Date.now(), budgetMs: budgetOf(windowRung(s2)).ms, spare: true, ek };
+			spareRuns++; running++;
+			say({ ev: 'spare', anchor: A.id, label: labelOf(step), rung: r, top: b.top });
+			g.promise = runJob(job).catch((e) => { bug('job', { error: e.message }); return {}; }).then((x) => { inflight.delete(key); const tr = tried.get(tk); if (tr) tr.done = true; return x; });
+			// (runJob set tried[tk] synchronously: marked a spare, so the planner's own proposal of this rung waits for it)
+			if (tried.has(tk)) tried.get(tk).spare = true;
+			inflight.set(key, g);
+		}
 	};
 
 	// ---- the stall watchdog's exploration steps: region waypoints on an anchor's unvisited walk frontier
@@ -1783,6 +1833,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 				f.promise = runJob(job).catch((e) => { bug('job', { error: e.message }); return {}; }).then((r) => { inflight.delete(ek); return r; });
 				inflight.set(ek, f);
 			}
+			if (SPARE && !best && !stopped && inflight.size > 0 && inflight.size < P) spareFill();
 			if (!inflight.size) {
 				// (every anchor exhausted: a global deepening; nothing new since the last one, or no deepening left: the
 				// fallbacks (a direct trophy step, then the frontier) while time is left; else the end)
@@ -2142,7 +2193,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		bugs, deepenings, stalls, bnbPlans, bnbArrivals, layers: Math.max(0, ...[...anchors.values()].map((A) => A.firstTick)), ...(why ? { why } : {}) });
 	saveFiles();
 	return { ok: !!best, masks: best ? best.masks : null, route: best ? best.masks : null, runTicks: best ? best.runTicks : null, ticks: best ? best.ticks : null, deaths: best ? best.deaths : null, chance: best ? best.chance : null,
-		lb: LB, lbComplete, lbProof, gap: best ? gapOf(best.runTicks) : null, legs: best ? best.legs : [], stages, known, why, end, anchors: anchors.size, steps, okSteps, bugs, deepenings, stalls, bnbPlans, bnbArrivals, relayRuns, relaySet, relayDrop, ...(ST_ON ? { stretch: stStats } : {}), exec: execStats, perfect: perfectInfo, joins: joinsInfo,
+		lb: LB, lbComplete, lbProof, gap: best ? gapOf(best.runTicks) : null, legs: best ? best.legs : [], stages, known, why, end, anchors: anchors.size, steps, okSteps, bugs, deepenings, stalls, bnbPlans, bnbArrivals, relayRuns, relaySet, relayDrop, ...(ST_ON ? { stretch: stStats } : {}), ...(SPARE ? { spares: spareRuns } : {}), exec: execStats, perfect: perfectInfo, joins: joinsInfo,
 		...(OS_ON ? { oneshot: os || osw ? Object.assign(os ? os.stats() : Object.assign({}, osStats || {}), { thread: !!osw, readyMs: osReady ? osReady.ms : null, error: osErr || null, gate: osw && OS_GATE ? (osOpen ? 'open' : 'shut') : null, released: osReleased, held: osPending.size, anchorsGiven: osAnchors, injected: osInjected, routeTicks: Number.isFinite(osBestT) ? osBestT : null, how: best ? best.how : null }) : null } : {}) };
 }
 
