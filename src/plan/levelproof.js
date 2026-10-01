@@ -62,6 +62,13 @@ function contextOf(L, o = {}) {
 	// the field part: per abstract state key the order-aware cost-to-go field over the 8-px lattice (routelb.togo)
 	const RL = o.field ? require('../math/routelb.js').createRouteLB(L, {}) : null;
 	const togo = RL ? RL.togoFor : null;
+	// THE REACH FIELD'S PROOF (src/reach.js, RCH3, physics mode only): -1 = no input sequence takes the ball from that
+	// state to a trophy (the whole level, doors relaxed: passable and floors; deaths as its edges where the level has
+	// them): a state there is cut whatever its layer (the editor's and the searches' prune; o.reach === false: off)
+	let rf = null;
+	if (o.reach !== false) {
+		try { const RF = require('../reach.js'); const f = RF.reachField(L); if (f && f.mode !== 'walk') rf = { f, costAt: RF.costAt }; } catch (e) { rf = null; }
+	}
 	/** h(sim, lim): the admissible ticks until has_silver_crown (> lim: only that it is above lim) */
 	function h(sim, lim) {
 		if (sim.has_silver_crown) return 0;
@@ -69,6 +76,7 @@ function contextOf(L, o = {}) {
 			const left = Math.max(0, Math.floor((16.0 - sim._dead_offset) / 0.3 - 1e-9));
 			return left + hResp + 1;
 		}
+		if (rf !== null && rf.costAt(rf.f, sim) < 0) return Infinity;
 		let v = EG.lowerBound(egB, sim, lim) + 1;
 		if (canDie && v > DEATH_MIN + 1 + hResp) v = DEATH_MIN + 1 + hResp;
 		if (togo !== null && v <= lim) {
@@ -77,7 +85,7 @@ function contextOf(L, o = {}) {
 		}
 		return v;
 	}
-	return { egB, canDie, h, hResp };
+	return { egB, canDie, h, hResp, reach: !!rf };
 }
 
 /** the idle sources: [snapshot] until the ball rests (-1: it never does within maxIdle, or it dies idling) */
