@@ -212,7 +212,8 @@ const PREC_FAST = process.env.EEAT_PREC_FAST !== '0' && process.env.EEAT_PERFECT
 // (still at most PREC_RUNS runs); the moves' end with no route waits for a running child (precHold) as for the stretch
 // child; the child is killed when the moves end, and a route it prints after that is not taken.
 const PREC_ASYNC = process.env.EEAT_PREC_ASYNC === '1';
-// (B8 speed, cycle 2) THE EXACT LANDING'S ROUTES AS THEY COME (OPT-IN EEAT_PREC_STREAM=1; off = byte for byte): the child
+// (B8 speed, cycle 2) THE EXACT LANDING'S ROUTES AS THEY COME (EEAT_PREC_STREAM=1: a compiler default, src/plan/defaults.js;
+// unset here / =0: off, byte for byte): the child
 // prints every faster route it finds (precision.js with the fast rests: the coasted rests' route first, then the braked
 // rests' faster one), but the compile took its route only when the child ENDED; with the knob each better route is verified
 // (routeOf) the moment it is printed, so the first route comes at the coasted pass's find; the child, its later faster
