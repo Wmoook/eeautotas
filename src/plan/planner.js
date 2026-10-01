@@ -802,6 +802,9 @@ function createPlanner(model, facts, o = {}) {
 	// anchor's respawn -> the crumb toward c (the physics crumbs with c as the target, else c itself); c the anchor's
 	// respawn -> 'die, back at a respawn' first. Ordering only: waypoints, never a gate (each its own rungs, CRUMB_RUNGS).
 	const RESP_CRUMB = PHYS_RESPAWN && process.env.EEAT_RESP_CRUMB === '1';
+	// (EEAT_RESP_RUNGS: the respawn waypoint's steps leave the pick after that many failed rungs (default CRUMB_RUNGS); with
+	// EEAT_RUNG_DEEP 5 lets the 135-s rung run: the held death back at (58,235) was found only there (box 6: 30 s, prims))
+	const RESP_RUNGS = +process.env.EEAT_RESP_RUNGS > 0 ? +process.env.EEAT_RESP_RUNGS | 0 : CRUMB_RUNGS;
 	// THE STALL WALLS IN THE PHYSICS PASS (LH cold; OPT-IN EEAT_PHYS_CRUMBWALLS=1, inside PHYS_EST; off = byte for byte): the
 	// crumb field's stall walls of the anchor's class (EEAT_CRUMB_WALLS' crumbWallsOf: the closest approaches of the class's
 	// failed steps, rung >= 1) are solid in the pass's level copy too, so the pass's way (its prices, the crumbs' d1, the
@@ -1459,7 +1462,7 @@ function createPlanner(model, facts, o = {}) {
 		if (c === own) {
 			const deaths = s.deaths | 0, edge = `death:${deaths}`;
 			const rung = facts ? facts.rungOf(edge, cls) : 0;
-			if (rung >= CRUMB_RUNGS) return null;
+			if (rung >= RESP_RUNGS) return null;
 			ST.respDie = (ST.respDie || 0) + 1;
 			if (CRUMB_DBG) console.error('respCrumb die at', xy(c), 'for', e.X ? e.X.label : 'trophy', 'pass', best);
 			return { edge, nodeClass: cls, rung, estTicks: DEAD_TICKS, lb: DEAD_TICKS,
@@ -1481,7 +1484,7 @@ function createPlanner(model, facts, o = {}) {
 		if (r) { ST.respCrumb = (ST.respCrumb || 0) + 1; if (CRUMB_DBG) console.error('respCrumb toward', xy(c), 'by', r.waypoint.label); return r; }
 		const edge = 'trig:' + X.id;
 		const rung = facts ? facts.rungOf(edge, cls) : 0;
-		if (rung >= CRUMB_RUNGS) return null;
+		if (rung >= RESP_RUNGS) return null;
 		ST.respCrumb = (ST.respCrumb || 0) + 1;
 		if (CRUMB_DBG) console.error('respCrumb the checkpoint', xy(c), 'for', e.X ? e.X.label : 'trophy', 'pass', best);
 		let d1 = INF;
