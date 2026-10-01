@@ -36,8 +36,11 @@ const HY_MORE_F = num('EEAT_HY_MORE_F', 0.5), HY_MORE_MIN = num('EEAT_HY_MORE_MI
 // leg (the same anchor and step) once more, after HY_HOLD_S s, when the compiler has made no new anchor for HY_STALE_S s,
 // or when the executor has nothing left; dropped when the executor solves that leg itself. (The one shot's and the gated
 // chain's lesson: arrivals given at once take the executor's picks: a first route sooner, a slower final; v1 of this lane:
-// 1.08x the run ticks where both arms compiled, EZ Spooky Shack 1.98x.) The rooms: on the stale clock or the end alone.
+// 1.08x the run ticks where both arms compiled, EZ Spooky Shack 1.98x.) The rooms (soft guidance, the search's first arrivals): only
+// when no new anchor came for HY_ROOM_STALE_S s (120), at most HY_ROOM_N (8) a time, the earliest first, or when the executor
+// has nothing left (v4 gave them on the 45-s clock, all at once: Ice Cream Expedition 96 at once, 1.53x A's run ticks).
 const HY_GATE = process.env.EEAT_HY_GATE !== '0', HY_HOLD_S = num('EEAT_HY_HOLD_S', 30), HY_STALE_S = num('EEAT_HY_STALE_S', 45);
+const HY_ROOM_STALE_S = num('EEAT_HY_ROOM_STALE_S', 120), HY_ROOM_N = num('EEAT_HY_ROOM_N', 8);
 const HY_GPU = process.env.EEAT_HY_GPU !== '0', HY_NICE = num('EEAT_HY_NICE', 0), HY_TROPHY_ON = process.env.EEAT_HY_TROPHY_ON !== '0';
 // (Find a route's goexplore.js defaults: editor.js GX_DEFAULTS, kept in step by hand: this file must not load the editor)
 const GX_DEFAULTS = ['--opts=1', '--frontier=1', '--fBrake=1', '--fPhys=1'];
@@ -89,12 +92,19 @@ function createHybrid(ctx) {
 		if (n) ctx.say({ ev: 'hybrid', what: drop ? 'drop' : 'release', why, n, held: held.length });
 		return n;
 	};
-	/** the gate's clocks, every loop turn: a leg held past HY_HOLD_S, everything when no new anchor came for HY_STALE_S */
+	/** the gate's clocks, every loop turn: a leg held past HY_HOLD_S, the legs when no new anchor came for HY_STALE_S, the
+	 *  HY_ROOM_N earliest rooms when none came for HY_ROOM_STALE_S */
+	let roomAt = Date.now();
 	const gateTurn = () => {
 		if (!held.length) return;
 		const n = ctx.anchorsN ? ctx.anchorsN() : 0, now = Date.now();
-		if (n !== anchorsN) { anchorsN = n; anchorAt = now; }
-		if (now - anchorAt > HY_STALE_S * 1000) { release(() => true, 'no new anchor'); anchorAt = now; return; }
+		if (n !== anchorsN) { anchorsN = n; anchorAt = roomAt = now; }
+		if (now - anchorAt > HY_STALE_S * 1000) { release((e) => e.kind === 'leg', 'no new anchor'); anchorAt = now; }
+		if (now - roomAt > HY_ROOM_STALE_S * 1000) {
+			const pick = new Set(held.filter((e) => e.kind === 'room').sort((x, y) => x.masks.length - y.masks.length).slice(0, Math.max(1, HY_ROOM_N)));
+			release((e) => pick.has(e), 'no new anchor (rooms)');
+			roomAt = now;
+		}
 		release((e) => e.kind === 'leg' && now - e.t > HY_HOLD_S * 1000, 'held long enough');
 	};
 	const tool = (() => {
