@@ -114,6 +114,20 @@ const FLOOR_LAYERS = +process.env.EEAT_PLAN_FLOOR_LAYERS || 32;
 // 40 layers, 255 physics fields, no floor found; Dreamland 40 s, VVVVVV 37 s), where the floors it finds took 1.9-6.3 s
 // (Tropical Trials' coins >= 20: 25-30 s on the loaded box, so the cap is 30 s)
 const FLOOR_HARD_MS = +process.env.EEAT_PLAN_FLOOR_HARD_MS || 30000;
+// THE LONG PLAN CALL (C6 push 3 block 4 lane 1; OPT-IN EEAT_PLAN_LONG=<ms>, 0 / unset = off: the planner as before, byte for
+// byte): a plan call is 0.3 s (2 s the first), so on a switch level the plan search's budget ends before any trophy plan is
+// generated and the strategy gets only PARTIAL "most gain" plans: First Person Maze (best known 832 run ticks) after its
+// 31-switch column (gain 33-34) planned only switches 36 / 37, deaths and team 1, rung after rung, while a 30-s plan call from
+// the known route's own state there finds a whole trophy plan (est 808), one that toggles the column's switches back OFF
+// (src/out/n5/lanes/c6_lane1_b3.md (4)). The rule: when every plan of a plan call is partial (or priced by the PENALTY) and
+// the first plan's first step has failed LONG_R rungs from the anchor's class (EEAT_PLAN_LONG_R, default 1: stuck, not just
+// new), one LONG search from that anchor's abstract state (once a state, at most LONG_MAX a compile, at most a quarter of
+// the compile's time left); a trophy plan found along est walks (its g below the PENALTY) goes first, and its path is kept:
+// an anchor later in a state on that path gets the path's REST (a search guided along its edges, cheap) when its own plans
+// are all partial again. Ordering only: no edge dropped, the lb and the proofs untouched. (The gain bonus is KEPT in the long
+// search: from the route's tick-545 state (gain 33) 20 s with it found the 808 plan (1,237 nodes: the plan search expands
+// ~60 nodes a second there), 20 s without it none (1,017 nodes); EEAT_PLAN_LONG_GAIN=0: without.)
+// (its knobs are read per planner: createPlanner)
 const COUNT_GATES = new Set([165, 214]);
 const COLOURS = ['red', 'green', 'blue', 'cyan', 'magenta', 'yellow'];
 
@@ -135,6 +149,21 @@ const TIMER_START = TIMER && process.env.EEAT_PLAN_TIMER_START !== '0';
 // (the late rule alone: EEAT_PLAN_TIMER_LATE=0 = no anchor marked late, the deadline plans kept; the 36 timed levels' A/B, block 2:
 // the knob on lost progress on 12 of 21 unrouted levels, gained on 2, and every one of 3 both-routed routes was slower)
 const TIMER_LATE = TIMER && process.env.EEAT_PLAN_TIMER_LATE !== '0';
+// THE TROPHY AS RANKED COMPONENTS (C6 lane 3 block 4; OPT-IN EEAT_TROPHY_COMP=1, off = the planner byte for byte): the
+// trophy edge's target was the UNION of every trophy tile, so its est and the executor's goal field went to the NEAREST
+// trophy, and a decorative one decoys the whole compile: Ice Cream Expedition has 6 trophy tiles, (5,177) sealed (solids
+// on three sides, a one-way above that passes only a ball moving left), the routes end at (95,339); the chief's run ended
+// 'trophy rung 3, closest 2 tiles at (5,175)'; DEEPER's (25,91) stands on live portals, the real one (42,91). With the
+// knob a trophy step that fails at rung >= TCOMP_RUNG with its closest tile within TCOMP_NEAR tiles (Chebyshev) of a
+// trophy component, while another component is still a target, adds a 'tdrop' fact (facts.js) for the anchor's abstract
+// state (its doors / counts): the trophy edge from that state then goes to the other components only (edge
+// 'trophy~t<ids>', its own rungs from 0; the waypoint carries their tiles, types.js goalOf: the field to them, the test
+// still the crown). Ordering only: the lb / proofs read every trophy tile as before, the crown on any tile finishes.
+const NEEDS_DEATHS = process.env.EEAT_NEEDS_DEATHS === '1';   // (THE DEATH DOOR'S NEED: openValue, executor.js blockedOnWay)
+const TCOMP = process.env.EEAT_TROPHY_COMP === '1';
+const TCOMP_RUNG = Math.max(0, +(process.env.EEAT_TROPHY_COMP_RUNG || 2) | 0);
+const TCOMP_NEAR = Math.max(0, +(process.env.EEAT_TROPHY_COMP_NEAR || 2));
+const TCOMP_GLOBAL = process.env.EEAT_TROPHY_COMP_GLOBAL !== undefined ? Math.max(0, +process.env.EEAT_TROPHY_COMP_GLOBAL | 0) : 2;
 /** {left, id}: the ticks a ball has before its soonest running timed killer kills it (Infinity: none running; eesim.js's
  *  rule, Player.as:399-404: it dies on the first tick t with t - start > duration) and that killer's effect block (421
  *  curse, 422 zombie, 1584 poison, 0 fire: no remover block) */
@@ -161,6 +190,19 @@ class Heap {
 }
 
 function createPlanner(model, facts, o = {}) {
+	// (THE LONG PLAN CALL's knobs: the comment at the top)
+	const LONG_MS = process.env.EEAT_PLAN_LONG !== undefined ? Math.max(0, +process.env.EEAT_PLAN_LONG || 0) : 0;
+	const LONG_MAX = +process.env.EEAT_PLAN_LONG_MAX > 0 ? +process.env.EEAT_PLAN_LONG_MAX | 0 : 4;
+	const LONG_GAIN = process.env.EEAT_PLAN_LONG_GAIN !== '0';
+	const LONG_R = process.env.EEAT_PLAN_LONG_R !== undefined ? Math.max(0, +process.env.EEAT_PLAN_LONG_R | 0) : 1;
+	const LONG_EXPAND = +process.env.EEAT_PLAN_LONG_EXPAND > 0 ? +process.env.EEAT_PLAN_LONG_EXPAND : 3000000;
+	// (THE WALLS LIFTED, EEAT_PLAN_LONG_NOWALL=1, inside the long call only: the est walls (syncWalls: every failed step's
+	// closest approach walls its 3 x 3, for EVERY state and position) accumulate, and in a compile the long search found only
+	// plans through a relaxation-only edge (The Memory Game 1,008,291 / Fall of Zeal 1,003,176 from the start class, where
+	// the same search with fresh facts finds 4,260 / 1,344: a 6-coin plan, the trophy): with the knob a long search that finds
+	// nothing below the PENALTY runs once more with the walls lifted (the rungs, blocks and proofs as they are), its plan's
+	// first step at its next rung (not one at its last rung from the class); its rest the same way)
+	const LONG_NOWALL = process.env.EEAT_PLAN_LONG_NOWALL === '1';
 	const L = model.L, W = model.W, H = model.H;
 	const bounds = o.bounds && typeof o.bounds.pair === 'function' ? o.bounds : null;
 	const ST = { rchChecks: 0, plans: 0, planMs: 0, expands: 0, lbCalls: 0, lbMs: 0, lbExpands: 0, learned: 0, costOf: 0 };
@@ -829,7 +871,14 @@ function createPlanner(model, facts, o = {}) {
 			}
 		}
 		if (only) return out;
-		finish(null, trophyTiles, 'trophy', null);
+		// (THE TROPHY'S COMPONENTS, TCOMP: the components a near miss ruled out from this abstract state are not targets)
+		const tdrop = TCOMP && facts && model.trophies.length > 1 && typeof facts.tdropOf === 'function' ? facts.tdropOf(S.key) : null;
+		if (tdrop && tdrop.length) {
+			const keep = [];
+			model.trophies.forEach((X, i) => { if (!tdrop.includes(i)) for (const t of X.tiles) keep.push(t); });
+			if (keep.length) finish(null, keep, 'trophy~t' + tdrop.slice().sort((x, y) => x - y).join('.'), null);
+			else finish(null, trophyTiles, 'trophy', null);
+		} else finish(null, trophyTiles, 'trophy', null);
 		// (the stepping stones: an irrelevant coin / blue coin as a step of its own, the state unchanged; plan mode only)
 		if (wantEst && STONES && stones.length) {
 			// (STONE_WAY: the node's walk to the trophy on the open level, the stones' detour against it)
@@ -1031,7 +1080,9 @@ function createPlanner(model, facts, o = {}) {
 		// (the timer's deadline search: the fewest landmarks left first (LAMA's greedy order: the open level's walk is blind to
 		// the doors a landmark opens), then A* on the est; no gain bonus: the trophy in time, not the most gain)
 		const gw = tLeft < Infinity ? 1 : hLM(a.S) >= 3 ? 0.1 : 1;
-		const gainB = tLeft < Infinity ? 0 : GAIN_BONUS, lmW = tLeft < Infinity ? 1e7 : LM_W;
+		const gainB = tLeft < Infinity || po.noGain ? 0 : GAIN_BONUS, lmW = tLeft < Infinity ? 1e7 : LM_W;
+		// (THE LONG PLAN CALL's rest: only the guide's edge at each depth)
+		const guide = Array.isArray(po.guide) ? po.guide : null;
 		const fOf = (g, S, pos) => gw * g + EST_W * hSteps(pos) * P + lmW * hLM(S) - gainB * P * S.gain;
 		root.f = fOf(0, a.S, a.pos);
 		open.push(root);
@@ -1072,6 +1123,7 @@ function createPlanner(model, facts, o = {}) {
 			for (const e of es) {
 				if (isRoot && exclude.has(e.edge)) continue;
 				if (ban && ban.has(e.edge)) continue;
+				if (guide && guide[n.depth] !== e.edge) continue;
 				if (UNTOGGLE && untoggles(e, n.S, n.e && n.e.X ? n.e.X : isRoot ? a.viaX : null)) { ST.untoggled = (ST.untoggled || 0) + 1; continue; }
 				const g2 = n.g + e.est, gl2 = n.gl + e.lb;
 				if (!e.X) {
@@ -1203,7 +1255,8 @@ function createPlanner(model, facts, o = {}) {
 				push({ edge: eh, nodeClass: cls, rung: 0, estTicks: Math.max(0, Math.round(e.est) - 8), lb: 0,
 					waypoint: { kind: 'region', tiles: [X.boost], expect: null, label: `${X.label}: its boost` } });
 			}
-			const wp = X ? { kind: 'trigger', tiles: e.live.slice(), trig: X.id, expect: e.expect, label: e.anyOf > 1 ? `${X.label} (any of ${e.anyOf})` : X.label } : { kind: 'trophy', label: 'trophy' };
+			const wp = X ? { kind: 'trigger', tiles: e.live.slice(), trig: X.id, expect: e.expect, label: e.anyOf > 1 ? `${X.label} (any of ${e.anyOf})` : X.label }
+				: /^trophy~t/.test(e.edge) ? { kind: 'trophy', tiles: e.live.slice(), label: `trophy (${e.live.length} of ${trophyTiles.length} tiles)` } : { kind: 'trophy', label: 'trophy' };
 			push({ edge: e.edge, nodeClass: cls, rung: facts ? facts.rungOf(e.edge, cls) : 0, waypoint: wp, estTicks: Math.round(e.est), lb: e.lb, pen: e.pen || '' });
 			// a key followed by its door: the passage while the key is on
 			if (X && X.kind === 'key' && i + 1 < path.length) {
@@ -1400,6 +1453,13 @@ function createPlanner(model, facts, o = {}) {
 			let n = node; while (n.parent && n.parent.parent) n = n.parent;
 			if (n.e) exclude.add(n.e.edge);
 		}
+		// (THE LONG PLAN CALL, EEAT_PLAN_LONG=<ms>: every plan partial: one long search from this abstract state; its plan
+		// goes FIRST, in front of the near / crumb plans too (made below as without it: they read the search's own plans))
+		let longP = null;
+		if (LONG_MS > 0 && plans.length && plans.every((p) => p.partial || !(p.cost < PENALTY))) {
+			const stuck = !LONG_R || !!(facts && plans[0].steps[0] && facts.rungOf(plans[0].steps[0].edge, plans[0].steps[0].nodeClass) >= LONG_R);
+			try { const lp = longPlan(a, so, po, stuck); if (lp) longP = lp; } catch (e) { if (process.env.EEAT_LONG_DBG === '1') console.error('longPlan', e.stack); }
+		}
 		// (THE BYPASS, EEAT_PLAN_BYPASS=R: the trophy without the triggers whose legs failed R rungs from this class, first)
 		if (BYPASS > 0 && facts && plans.length) {
 			try { const bp = bypassPlan(a, plans, so, deadline); if (bp) plans.unshift(bp); } catch (e) { if (process.env.EEAT_BYPASS_DBG === '1') console.error('bypassPlan', e.stack); }
@@ -1466,6 +1526,7 @@ function createPlanner(model, facts, o = {}) {
 				} else if (cp.length) plans.unshift(...cp);
 			} catch (e) { if (process.env.EEAT_CRUMB_DBG === '1') console.error('crumbPlan', e.stack); }
 		}
+		if (longP) plans.unshift(longP);
 		if (!plans.length) {
 			why = rootEdges < 0 ? 'budget' : rootEdges === 0 && !(facts && facts.list().length) ? 'proof' : 'exhausted';
 			// (no edge at the root because the facts took them all: exhausted; none at all without facts: a walk proof)
@@ -1593,6 +1654,73 @@ function createPlanner(model, facts, o = {}) {
 	// (327,39), The 7 Depths of Hell's coins (76,279) / (78,228) / (64,176) and switch 3, Ice Slide Ride's coins and
 	// checkpoint, Octorage's switch 69 and coins, Fall of Zeal's key groups, UT Eternal Galaxy's checkpoint (166,107), The
 	// Memory Game's coin (179,188)), climbing rung after rung (45-s windows) in every plan call.
+	const longTried = new Set(), longPaths = [];
+	/** fn() with the est walls lifted (model.setEstWalls(null)), the walls rebuilt from the facts after */
+	const noWalls = (fn) => { model.setEstWalls(null); try { return fn(); } finally { wallsVer = -1; syncWalls(); } };
+	let longCalls = 0;
+	/** THE LONG PLAN CALL (EEAT_PLAN_LONG): a kept path's rest from this state, else one long search (once a state) */
+	function longPlan(a, so, po, stuck) {
+		const sk = a.S.key;
+		const mk = (node, why) => {
+			const steps = stepsOf(a, node);
+			if (!steps.length) return null;
+			return { id: `p${ST.plans}.L`, steps, cost: Math.round(node.g), lb: node.gl, partial: false, why, long: true };
+		};
+		// (a path kept from an earlier long call through this abstract state: its rest, along its own edges)
+		for (const lp of longPaths) {
+			const i = lp.keys.indexOf(sk);
+			if (i < 0 || i >= lp.edges.length) continue;
+			const rest = () => {
+				const res = search(a, Object.assign({}, so, { ms: 300, maxExpand: 20000, guide: lp.edges.slice(i) }), new Set(), null);
+				return res.found && res.found.g < PENALTY ? mk(res.found, `long: the rest of a long plan (step ${i + 1} of ${lp.edges.length}${lp.nowall ? ', the walls lifted' : ''})`) : null;
+			};
+			const r = lp.nowall ? noWalls(rest) : rest();
+			if (r) { ST.longRest = (ST.longRest || 0) + 1; return r; }
+		}
+		// (a new long search only where the first plan's first step is stuck (LONG_R rungs failed); a kept path's rest any time)
+		if (!stuck || longTried.has(sk) || longCalls >= LONG_MAX) return null;
+		// (a quarter of the compile's time left at most: po.left, the strategy's)
+		const room = Number.isFinite(+po.left) ? +po.left / 4 : LONG_MS;
+		const ms = Math.min(LONG_MS, room);
+		if (!(ms >= 1000)) return null;
+		longTried.add(sk); longCalls++;
+		ST.longCalls = longCalls;
+		const t0 = Date.now();
+		const res = search(a, Object.assign({}, so, { ms, maxExpand: LONG_EXPAND, noGain: !LONG_GAIN }), new Set(), null);
+		ST.longMs = (ST.longMs || 0) + (Date.now() - t0);
+		// (a search that ran out of nodes in under a second is no long call: it does not count to LONG_MAX (The Memory Game:
+		// 4 such searches, 3-7 ms each, every trophy plan through a relaxation-only edge, used the compile's 4 calls))
+		if (Date.now() - t0 < 1000) { longCalls--; ST.longShort = (ST.longShort || 0) + 1; }
+		const node = res.found;
+		if (process.env.EEAT_LONG_DBG === '1') console.error(`[long] ${sk.slice(0, 40)} ms ${Date.now() - t0} expanded ${res.expanded} found ${node ? Math.round(node.g) : '-'}`);
+		if (!node || !(node.g < PENALTY)) {
+			if (LONG_NOWALL && ST.estWalls > 0) {
+				const cls = a.S.key + '|' + a.cls;
+				const r = noWalls(() => {
+					const t1 = Date.now();
+					const res2 = search(a, Object.assign({}, so, { ms: Math.max(1000, ms - (t1 - t0)), maxExpand: LONG_EXPAND, noGain: !LONG_GAIN }), new Set(), null);
+					const n2 = res2.found;
+					if (process.env.EEAT_LONG_DBG === '1') console.error(`[long nowall] ${sk.slice(0, 40)} ms ${Date.now() - t1} expanded ${res2.expanded} found ${n2 ? Math.round(n2.g) : '-'}`);
+					if (!n2 || !(n2.g < PENALTY)) return null;
+					const p = mk(n2, `long: a trophy plan with the est walls lifted (${res2.expanded} nodes)`);
+					if (!p || (facts && facts.rungOf(p.steps[0].edge, cls) >= 3)) return null;   // (its step at its next rung: the ladder; not at the last one)
+					const path2 = [];
+					for (let n = n2; n && n.e; n = n.parent) path2.push(n);
+					path2.reverse();
+					longPaths.push({ keys: [a.S.key].concat(path2.map((n) => n.S.key)), edges: path2.map((n) => n.e.edge), nowall: true });
+					return p;
+				});
+				if (r) { ST.longFound = (ST.longFound || 0) + 1; ST.longNoWall = (ST.longNoWall || 0) + 1; return r; }
+			}
+			ST.longNone = (ST.longNone || 0) + 1; return null;
+		}
+		const path = [];
+		for (let n = node; n && n.e; n = n.parent) path.push(n);
+		path.reverse();
+		longPaths.push({ keys: [a.S.key].concat(path.map((n) => n.S.key)), edges: path.map((n) => n.e.edge) });
+		ST.longFound = (ST.longFound || 0) + 1;
+		return mk(node, `long: a trophy plan from a ${(ms / 1000).toFixed(0)}-s search (${res.expanded} nodes${LONG_GAIN ? '' : ', no gain bonus'})`);
+	}
 	const BYPASS = process.env.EEAT_PLAN_BYPASS !== undefined ? Math.max(0, +process.env.EEAT_PLAN_BYPASS | 0) : 0;
 	const BYPASS_MAX = +process.env.EEAT_BYPASS_MAX || 4;
 	function bypassPlan(a, plans, so, deadline) {
@@ -1678,6 +1806,11 @@ function createPlanner(model, facts, o = {}) {
 	/** the value of the feature gate tile i reads that opens it */
 	function openValue(i, S) {
 		const A = model.A, k = A.gateFeat[i], pol = A.gatePol[i], p = A.gateParam[i];
+		// (THE DEATH DOOR'S NEED, OPT-IN EEAT_NEEDS_DEATHS=1: a death door (1011) opens at its number of deaths (the model's
+		// S.feats.deaths, capped at the level's highest death door / gate number): that number is the value the step needs.
+		// Tutorial 2's switch 0 behind the door (264,28): every deaths-0 anchor class tried it at rungs 0-3 (closest 61.2 tiles
+		// at the door, ~66 worker-s a class) and the CEGAR learned nothing, the door being an 'open' gate to steer.js)
+		if (k === 'open' && NEEDS_DEATHS && model.L.fg[i] === 1011) return model.L.lookup0[i];
 		if (!k || k === 'open' || k === 'time' || k === 'static') return null;
 		if (k.startsWith('key') || k.startsWith('psw') || k.startsWith('osw') || k === 'crown') return pol === 1 ? 1 : 0;
 		if (k === 'team') return pol === 1 ? p : null;
@@ -1758,6 +1891,20 @@ function createPlanner(model, facts, o = {}) {
 			if (!f || v === null || v === undefined || a.S.feats[f] === v) continue;
 			out.push(facts.add({ kind: 'needs', edge, nodeClass: cls, feat: f, value: v }));
 		}
+		// (THE DEATH DOOR'S NEED, EEAT_NEEDS_DEATHS=1, planner side: a shut death door within 2 tiles of the closest tile
+		// in the anchor's state; the executor's blockedBy needs the all-open field, which a step whose window is used up
+		// does not build (blockedBy [] in the compiles: Tutorial 2's switch 0 from deaths-0 anchors, closest 61.2 at the door))
+		if (NEEDS_DEATHS && a && a.S.feats && a.S.feats.deaths !== undefined && fail.closest && fail.closest.tile !== undefined && fail.closest.tile !== null && fail.closest.tile >= 0) {
+			const cx = fail.closest.tile % W, cy = (fail.closest.tile / W) | 0, d0 = a.S.feats.deaths | 0, had = facts.needsOf(edge, cls);
+			let need = 0;
+			for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+				const x = cx + dx, y = cy + dy;
+				if (x < 0 || y < 0 || x >= W || y >= H) continue;
+				const t = y * W + x;
+				if (model.L.fg[t] === 1011 && model.L.lookup0[t] > d0 && (need === 0 || model.L.lookup0[t] < need)) need = model.L.lookup0[t];
+			}
+			if (need > 0 && !had.some((n) => n.feat === 'deaths' && n.value === need)) out.push(facts.add({ kind: 'needs', edge, nodeClass: cls, feat: 'deaths', value: need }));
+		}
 		const rung = facts.rungOf(edge, cls);
 		// (the est walk's path to the waypoint, cut just past the point nearest the closest approach: the next plans'
 		// est walk goes another way there, CEGAR's generalization over every edge through that corridor)
@@ -1770,15 +1917,36 @@ function createPlanner(model, facts, o = {}) {
 		if (CUT_PROG && a && fail.why !== 'exhausted' && fail.closest && fail.closest.tile !== undefined && fail.closest.tile !== null) {
 			// (THE PROGRESS RULE: a budget failure whose closest approach is less than CUT_PROG_F of the est walk's way from
 			// the anchor to the waypoint is no counterexample: see CUT_PROG)
-			const tiles = step.waypoint && step.waypoint.kind !== 'trophy' && step.waypoint.tiles ? step.waypoint.tiles : trophyTiles;
+			const tiles = step.waypoint && (step.waypoint.kind !== 'trophy' || TCOMP) && step.waypoint.tiles && step.waypoint.tiles.length ? step.waypoint.tiles : trophyTiles;
 			const dC = model.pairSteps(a.S, a.pos, [fail.closest.tile], 'est', a.base), dT = model.pairSteps(a.S, a.pos, tiles, 'est', a.base);
 			if (dT > 0 && dT < INF && !(dC >= CUT_PROG_F * dT)) { noWall = true; ST.cutSkipped = (ST.cutSkipped || 0) + 1; }
 		}
 		if (!isStone && !noWall && a && fail.closest && fail.closest.tile !== undefined && fail.closest.tile !== null && !(process.env.EEAT_FIELD_MEMO === '1' && !(fail.closest.dist >= 0)) && (rung + 1 >= 2 || fail.why === 'exhausted')) {
-			const tiles = step.waypoint && step.waypoint.kind !== 'trophy' && step.waypoint.tiles ? step.waypoint.tiles : trophyTiles;
+			const tiles = step.waypoint && (step.waypoint.kind !== 'trophy' || TCOMP) && step.waypoint.tiles && step.waypoint.tiles.length ? step.waypoint.tiles : trophyTiles;
 			cut = cutPast(a.S, a.pos, tiles, a.base, fail.closest.tile);
 		}
 		out.push(facts.add(Object.assign({ kind: 'fail', edge, nodeClass: cls, rung, why: fail.why || 'budget', closest: fail.closest ? { tile: fail.closest.tile, dist: fail.closest.dist } : null, blockedBy: fail.blockedBy || [], cut }, noWall ? { noWall: true } : {})));
+		// (THE TROPHY'S COMPONENTS, TCOMP: a near miss beside one trophy component at rung >= TCOMP_RUNG rules it out from
+		// this abstract state while another component is still a target)
+		if (TCOMP && a && model.trophies.length > 1 && step.waypoint && step.waypoint.kind === 'trophy' && rung >= TCOMP_RUNG && fail.why !== 'stopped'
+			&& fail.closest && fail.closest.tile !== undefined && fail.closest.tile !== null && fail.closest.tile >= 0) {
+			const cur = step.waypoint.tiles && step.waypoint.tiles.length ? new Set(Array.from(step.waypoint.tiles)) : null;
+			const dropped = facts.tdropOf(a.S.key);
+			const live = [];
+			model.trophies.forEach((X, i) => { if (!dropped.includes(i) && (!cur || X.tiles.some((t) => cur.has(t)))) live.push(i); });
+			if (live.length >= 2) {
+				const cx = fail.closest.tile % W, cy = (fail.closest.tile / W) | 0;
+				let bi = -1, bd = Infinity;
+				for (const i of live) for (const t of model.trophies[i].tiles) { const d = Math.max(Math.abs(t % W - cx), Math.abs(((t / W) | 0) - cy)); if (d < bd) { bd = d; bi = i; } }
+				if (bi >= 0 && bd <= TCOMP_NEAR) {
+					out.push(facts.add({ kind: 'tdrop', sKey: a.S.key, comp: bi })); ST.tdrops = (ST.tdrops || 0) + 1;
+					// (a component dropped from TCOMP_GLOBAL abstract states is dropped from every state: a decoy's seal does not
+					// depend on the coins held; Ice Cream Expedition's (5,177) near-missed again at rungs 1-2 from every new coin
+					// state, 5 drops in 300 s, each state's own; 0 = per state only)
+					if (TCOMP_GLOBAL > 0 && facts.tdropKeys(bi) >= TCOMP_GLOBAL && !facts.tdropOf('*').includes(bi)) out.push(facts.add({ kind: 'tdrop', sKey: '*', comp: bi }));
+				}
+			}
+		}
 		if (rung + 1 >= facts.RUNG_MAX || (isStone && rung + 1 >= STONE_RUNGS)) out.push(facts.add({ kind: 'block', edge, nodeClass: cls }));
 		return out;
 	}
