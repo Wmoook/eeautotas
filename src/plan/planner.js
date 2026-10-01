@@ -778,11 +778,40 @@ function createPlanner(model, facts, o = {}) {
 	const CUT_PROG = process.env.EEAT_CUT_PROG === '1';
 	const CUT_PROG_F = +process.env.EEAT_CUT_PROG_F > 0 ? +process.env.EEAT_CUT_PROG_F : 0.5;
 	const PHYS_CUT_TILES = 2000, PHYS_MAX_STATES = 4e6, PHYS_MEMO = 16;
+	// THE CHECKPOINT RESPAWNS IN THE PHYSICS PASS (B7 cold, cycle 6; OPT-IN EEAT_PHYS_RESPAWN=1, inside PHYS_EST; off = the
+	// pass before, byte for byte): the forward pass runs with deaths off, so a way that needs a death back at a checkpoint
+	// the ball touched on the way (the respawn places it AT the checkpoint, at rest: a stand no jump reaches) is no way,
+	// and its targets are priced PHYS_CUT_TILES: Cold World from the chapter-2 blue coin: the way out is down the one-ways
+	// to the left room, where the column's crates (57-58, 240) stand 1.6 px above a floor jump's apex and only the
+	// checkpoint (59,239)'s respawn (py 3824 = the crates' top) reaches them, then purple switch 2 (73,220) opens the doors
+	// (76, 221-223) to the up boost and the portal to the hub: the root edge to purple switch 2 was est 8,000 (the cut)
+	// while the coin (132,251) up the chamber climb the executor never makes read 492. With the knob a checkpoint the pass
+	// reaches (a move or more from the anchor: the anchor's own stale respawn is not one) seeds the respawn states there
+	// (F 0, R 0) EEAT_PHYS_RESP_D (10) moves later, on a level that can kill. Ordering only (a price, never a drop): a
+	// relaxation (the death itself is not modelled: any killer, any time after the touch)
+	const PHYS_RESPAWN = process.env.EEAT_PHYS_RESPAWN === '1';
+	const PHYS_RESP_D = +process.env.EEAT_PHYS_RESP_D > 0 ? +process.env.EEAT_PHYS_RESP_D | 0 : 10;
+	// THE CEGAR WALLS IN THE PHYSICS PASS (B7 cold, cycle 6; OPT-IN EEAT_PHYS_WALLS=1, inside PHYS_EST; off = the pass before,
+	// byte for byte): syncWalls walls the est walk where failed steps stalled (their closest approach's 3 x 3, the cuts),
+	// but the root edges' price is max(est walk, the physics pass's moves x pace), and the pass (RCH3's relaxed forward
+	// model) still takes the climb the executor never makes: Cold World from the chapter-2 blue coin, the coin (132,251)
+	// read 492 up the chamber (102-108, 206-215) after 3 walls there, its plan unchanged. With the knob the est walls
+	// outside the anchor's 5 x 5 are solid in the pass's level copy too (memo keyed by them). Ordering only.
+	const PHYS_WALLS = process.env.EEAT_PHYS_WALLS === '1';
+	let estWallMask = null, estWallN = 0;
 	const physMemo = new Map();
 	let RFm = null;
 	function physFwdOf(a) {
 		if (!a || !a.sim) return null;
-		const key = a.S.pkey + '|' + a.sim.stateHash();
+		// (PHYS_WALLS: the est walls outside the anchor's 5 x 5, solid in the pass's level copy)
+		let pw = null;
+		if (PHYS_WALLS && estWallMask && estWallN > 0) {
+			const ax = Math.floor((a.sim.px + 8) / 16), ay = Math.floor((a.sim.py + 8) / 16);
+			pw = [];
+			for (let j = 0; j < estWallMask.length; j++) if (estWallMask[j] && !(Math.abs((j % W) - ax) <= 2 && Math.abs(((j / W) | 0) - ay) <= 2)) pw.push(j);
+			if (!pw.length) pw = null;
+		}
+		const key = a.S.pkey + '|' + a.sim.stateHash() + (pw ? '|w' + pw.length + ':' + pw[0] + ':' + pw[pw.length - 1] : '');
 		let d = physMemo.get(key);
 		if (d !== undefined) return d;
 		d = null;
@@ -790,7 +819,9 @@ function createPlanner(model, facts, o = {}) {
 		try {
 			if (!RFm) RFm = require('../reach.js');
 			const goal = trophyTiles.length ? trophyTiles : [model.startTile];
-			const f = RFm.reachField(model.levelOf(a.S), { goals: Array.from(goal, (t) => ({ tile: t, cost: 0 })), deaths: false, debug: true, iceLocal: true, exitApex: true });
+			let Lp = model.levelOf(a.S);
+			if (pw) { const fg = Lp.fg.slice(); for (const j of pw) fg[j] = 9; Lp = Object.assign({}, Lp, { fg }); ST.physWalled = (ST.physWalled || 0) + 1; }
+			const f = RFm.reachField(Lp, { goals: Array.from(goal, (t) => ({ tile: t, cost: 0 })), deaths: false, debug: true, iceLocal: true, exitApex: true });
 			if (f && f.mode === 'physics' && f._m && typeof f._m.edgesOf === 'function') {
 				const s = a.sim, st = RFm.stateOf(f, s.px, s.py, s.speed_y, s._q0, s._q1, s._slippery);
 				const starts = st ? [...(st.base ? [st.base] : []), ...(st.rise || [])] : [];
@@ -800,11 +831,17 @@ function createPlanner(model, facts, o = {}) {
 				let cur = [], nxt = [], depth = 0, n = 0;
 				const add = (t, ty, l, list) => { const k = t * NT + ty; if (seen[k] >= l) return false; seen[k] = l; list.push(t, ty, l); return true; };
 				for (const [ty, l] of starts) add(st.t, ty, l, cur);
-				while (cur.length && n < PHYS_MAX_STATES) {
+				// (PHYS_RESPAWN: a checkpoint the pass reaches seeds the ball's respawn there, at rest (F 0, and R 0 on a
+				// normal tile), PHYS_RESP_D moves later; pend: depth -> the seeds)
+				const resp = PHYS_RESPAWN && model.canDie ? new Uint8Array(N) : null;
+				const pend = resp ? new Map() : null;
+				while ((cur.length || (pend && pend.size)) && n < PHYS_MAX_STATES) {
+					if (pend && pend.has(depth)) { for (const t of pend.get(depth)) { add(t, 1, 0, cur); add(t, 0, 0, cur); } pend.delete(depth); }
 					for (let i = 0; i < cur.length && n < PHYS_MAX_STATES; i += 3) {
 						const t = cur[i], ty = cur[i + 1], l = cur[i + 2];
 						n++;
 						if (d[t] > depth) d[t] = depth;
+						if (resp && !resp[t] && depth > 0 && L.fg[t] === 360) { resp[t] = 1; const k = depth + PHYS_RESP_D; if (!pend.has(k)) pend.set(k, []); pend.get(k).push(t); ST.physResp = (ST.physResp || 0) + 1; }
 						f._m.edgesOf(t, ty, l, (t2, ty2, l2) => { add(t2, ty2, l2, t2 === t ? cur : nxt); });
 					}
 					cur = nxt; nxt = []; depth++;
@@ -1500,6 +1537,7 @@ function createPlanner(model, facts, o = {}) {
 		}
 		model.setEstWalls(mask);
 		ST.estWalls = n;
+		if (PHYS_WALLS) { estWallMask = mask; estWallN = n; }
 	}
 	/** THE TIMER: a remover of the anchor's running killer (its block with the number 0) within the ticks left by the est
 	 *  walk in the anchor's state */
