@@ -353,16 +353,24 @@ function createBounds(L, o = {}) {
 		const Lx = Lc || L;
 		const gl = Array.from(goalTiles).filter((t) => t >= 0 && t < N).sort((a, b) => a - b);
 		const touch = fo.touch !== undefined ? !!fo.touch : gl.length > 0 && gl.every((t) => L.fg[t] === TROPHY);
-		const key = `${Lc ? T.fgHash(Lc.fg) : '-'}|${touch ? 1 : 0}|${gl.join(',')}`;
+		// (fo.init: Map goal tile -> its start value in ticks (absent: 0): a goal that is a way on, not an end, e.g. a trigger
+		// whose touch is followed by at least that many ticks (tools/perfect/wholeproof.js's order tier); none = as before)
+		const init = fo.init instanceof Map && fo.init.size ? fo.init : null;
+		const key = `${Lc ? T.fgHash(Lc.fg) : '-'}|${touch ? 1 : 0}|${gl.join(',')}` + (init ? '|i' + gl.map((t) => init.get(t) || 0).join(',') : '');
 		const had = memo.get(key);
 		if (had) { st.hits++; memo.delete(key); memo.set(key, had); return had; }
 		const t0 = Date.now();
 		const wall = wallOf(Lx);
 		const goals = new Set();
-		for (const t of gl) for (const c of (touch ? S.touchers(t) : [t])) goals.add(c);
+		const gInit = init ? new Map() : null;
+		for (const t of gl) for (const c of (touch ? S.touchers(t) : [t])) {
+			goals.add(c);
+			if (gInit) { const v = Math.max(0, +init.get(t) || 0), w = gInit.get(c); if (w === undefined || v < w) gInit.set(c, v); }
+		}
 		const goalArr = Int32Array.from(goals);
 		const isGoal = new Uint8Array(N);
 		for (const t of goalArr) isGoal[t] = 1;
+		const g0 = (t) => (gInit ? gInit.get(t) || 0 : 0);
 		// sources: the goals (0), the portal triggers (Q), the death sources (DEATH_MIN + the best respawn), from below
 		const Q = new Float64Array(S.portals.length).fill(1);
 		let R = 0;
@@ -372,14 +380,14 @@ function createBounds(L, o = {}) {
 		for (;;) {
 			rounds++;
 			const srcT = [], srcI = [];
-			for (const t of goalArr) { srcT.push(t); srcI.push(0); }
+			for (const t of goalArr) { srcT.push(t); srcI.push(g0(t)); }
 			S.portals.forEach((p, k) => { for (const c of p.trig) { srcT.push(c); srcI.push(Q[k]); } });
 			if (S.deaths) for (const d of S.dsrc) { srcT.push(d); srcI.push(DEATH_MIN + R); }
 			// iso: in steps (a source's ticks / (16 / 16.25) steps)
 			if (iso) dijkstra(S, wall, srcT, srcI.map((v) => v * D_TICK / 16), stepIso, iso);
 			if (ax) { dijkstra(S, wall, srcT, srcI, (dx) => costX(dx), ax); dijkstra(S, wall, srcT, srcI, (dx, dy) => costY(dy), ay); }
 			for (let i = 0; i < N; i++) {
-				if (isGoal[i]) { bound[i] = 0; continue; }
+				if (isGoal[i] && gInit === null) { bound[i] = 0; continue; }
 				let b = 1;
 				if (iso) { const v = iso[i]; if (v === Infinity) { bound[i] = Infinity; continue; } b = Math.max(b, Math.ceil((16 * v - 16 - SLACK) / D_TICK - EPS)); }
 				if (ax) {
@@ -387,7 +395,8 @@ function createBounds(L, o = {}) {
 					if (vx === Infinity || vy === Infinity) { bound[i] = Infinity; continue; }
 					b = Math.max(b, Math.ceil(vx - offX - EPS), Math.ceil(vy - offY - EPS));
 				}
-				bound[i] = b;
+				// (with fo.init a goal tile holds the least of its start value and the way on through the other goals)
+				bound[i] = isGoal[i] ? Math.min(g0(i), b) : b;
 			}
 			// the teleports' values from this bound (monotone: every round a lower bound)
 			let changed = false;
@@ -417,7 +426,7 @@ function createBounds(L, o = {}) {
 			for (let r = 0; r < MAX_ROUNDS; r++) {
 				rounds++;
 				const sT = [], sX = [], sY = [];
-				for (const t of goalArr) { sT.push(t); sX.push(0); sY.push(0); }
+				for (const t of goalArr) { sT.push(t); sX.push(g0(t)); sY.push(g0(t)); }
 				S.portals.forEach((p, k) => { if (!p.rotated) for (const c of p.trig) { sT.push(c); sX.push(Qp[k]); sY.push(Qp[k]); } });
 				if (S.deaths) for (const d of S.dsrc) { sT.push(d); sX.push(DEATH_MIN + R); sY.push(DEATH_MIN + R); }
 				for (const m of S.mechTiles) if (!isGoal[m]) { sT.push(m); sX.push(Math.max(0, cx[m] - mOffX)); sY.push(Math.max(0, cy[m] - mOffY)); }

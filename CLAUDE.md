@@ -1371,6 +1371,178 @@ ways in.
   gate with the default (60 s): exit 0, compiled 15 vs the baseline's 11, worse 1 (First Person Maze, the base's own).
   Tests that require src/plan/strategy.js directly read the environment (test/planstrategy.js's mock T-STALL fails with
   `EEAT_BW_LEVEL=1`: the child solves the real toy file).
+- **THE WHOLE-LEVEL PROOF** (box 7 lane 'proof', 2026-09-30; `tools/perfect/wholeproof.js`, `test/wholeproof.js` 37/0; a tool,
+  the compile unchanged): is a route TICK-PERFECT? `node tools/perfect/wholeproof.js <level> [--route=<a.eetas>,..] [--U=<run
+  ticks>] [--seconds=600] [--cap=4000000] [--out=<faster.eetas>] [--gate=0] [--deaths=0]`: an exact search over ENGINE states
+  (every input of every tick, stateHash merge: the trigger order is in the state; deaths as moves) from EVERY idle start at
+  run tick 0 (the timer starts at the first input: the idle trajectory until it rests or repeats), in IDA* contours over the
+  run ticks with an admissible h = bounds.js `at` on the rel trophy field (+ the crown's tick) and THE ORDER TIER (the doors
+  as the state holds them (types.js levelNow) until the ball reaches a door-changing trigger or a killer tile t, then t's rel
+  value: one multi-source field per door state, bounds.js `field(..., {init})`, fo.init OPT-IN: absent = the field byte for
+  byte); every closed pass PROVES lb = the next contour; a crown = the optimum (replayed: `FASTER` when below the routes
+  given, else `PROVEN`), a closed pass at U - 1 = `PROVEN`; `--check` (default): h never above the ticks left along every
+  route given, else no claim. The toys: the optimum = exact.js's from the same starts, PROVEN with the optimum as U, FASTER
+  with U + 1. THE WALL (box 7, 1,500 s a level, one thread): the bounds are far below the routes at the start (h / U:
+  Switch Labyrinth 9 / 27 (the portal keeps the speed, the fields do not), celeste 87 / 235, NC Naos 49 / 111, My level
+  fef0 4 / 59) and each tick of slack multiplies the states 3-5x: no whole level proven; the proven lbs it reached are the
+  B7 proof ORCHESTRATOR lines. The order tier: Ruins lb 64 vs 52 at the same time.
+- **THE WHOLE-LEVEL PROOF IN PARALLEL** (box 7 lane 'proof' cycle 2, 2026-09-30; `tools/perfect/wholepar.js`,
+  `test/wholepar.js` 30/0; a tool): `node tools/perfect/wholepar.js <level> [--route=<a.eetas>,..] [--U=] [--threads=8]
+  [--seconds=1800] [--from=<a proven lb>] [--tiers=kin,rel,gate] [--shared=1] [--ttBits=23] [--split=3] [--out=<faster.eetas>]
+  [--probe=1]`: levelproof.js's depth-first search (n5-p4-perfect, merged into n5-b7-proof) by C contours from the start's
+  bound (each C one complete search; a closed C PROVES every route takes >= C run ticks; the first finish = THE OPTIMUM,
+  replayed, `FASTER` and written to `--out` when below the routes given, `PROVEN` when C reaches their ticks) under the max of
+  the admissible tiers: `kin` (endgame.lowerBound), `rel` / `gate` (wholeproof.js's bounds.js fields), `reach` (opt-in:
+  RCH3's -1), `togo` (opt-in: routelb.js togoFor, NOT admissible: 2 ticks before the crown it reads 2.137 on NC Naos d3c6 and
+  the precision puzzle, 2.098 on celeste: the route check refuses it there); every route given is checked first (`--check=0`
+  off). THE SHARED TABLE (`--shared=1`): one transposition table for every worker (Int32 slots by Atomics, 16 bytes a slot,
+  2^ttBits slots, cleared before each C; a state is pruned only when some worker entered it at a layer <= this one under the
+  same C: sound under any interleaving) where levelproof.js's per-worker tables searched 2.6x the nodes (Switch Labyrinth C 21:
+  16.1 M nodes on 16 workers vs 6.2 M on one, 5.6 M shared on 4). Switch Labyrinth (box 7, 19 threads, load ~180, U 27 = the
+  best known): C 24 closed in 239 s (164 M nodes), C 25 in 848 s (491 M nodes): EVERY ROUTE TAKES >= 25 RUN TICKS (the gap
+  2); each C ~3x the nodes of the last (C 26 ~45 min, C 27 ~2-3 h on 19 threads at that load). WHERE THE NODES GO (`src/out/b7proof/nodemap.js`, C 21): 99.99% with the centre in the pocket under the down boost
+  (96, 25), a team-1 ball through the team door (96, 26), where the bounds read ~10 ticks to the trophy and an exhaustive
+  search finds no crown within 60 ticks (4.4 M states): the bounds' walks go up through the down boost. NEXT: the boost's push
+  in the bound (a tick that starts in a boost sets that speed to 16 along it, and the centre moves at most 16 px a tick, so it
+  never crosses a boost tile against its push without a tick starting in it; teleports aside).
+- **THE PROOF OVER SEVERAL CYCLES** (box 7 lane 'proof' cycle 3, 2026-10-01; `tools/perfect/wholepar.js`, `test/wholepar.js`
+  54/0): THE TASK LOG (`--log=<tasks.jsonl>`: one line per task searched to the end; `--resume=<the same file>` with `--from=`
+  the proven lb below that C: the C's tasks (a pure function of the level, the tiers, the sources, C and `--split`) less the
+  logged ones, which count as done; a line cut by a kill is skipped): a C contour that runs out of time is no longer lost.
+  Sound with the shared table: a logged task pruned a state only where a task of ITS run entered it at a layer <=, and that
+  task is logged too or searched again from its root by the run that closes the C. The toys: the log holds every task of a
+  closed C, resumed from half / every task / a cut line the same PROVEN; Switch Labyrinth on one box-7 thread: C 21 closed
+  (173 tasks, 5.67 M nodes, 44 s), C 22 stopped at 60 s with 39 of its 174 tasks logged, the resumed run skipped them and closed C 22 (lb 22, as cycle 2) after 157 s more. THE ENDGAME DEDUP (default; `EEAT_WP_ATEG=1`
+  the old way): where the kin tier runs, the rel / gate tiers call bounds.at without its own endgame max (wholeproof.js
+  createH `o.noEndgame`: the same endgame.lowerBound was computed again per field, 16% of a node's time): Switch Labyrinth
+  C 20 the same search (1,814,646 nodes, 1,190,355 cut, 21,656 merged) in 15.3 / 16.5 s vs 20.4 / 28.1 s (one box-7 thread
+  a run); the engine is now 52% of a node (eesim.js `_ovSlow` 28%: the team doors' slow collision path), endgame.js 23%.
+  THE POCKET, measured (`src/out/b7proof/pocket3.js`, `starts.js`): the idle trajectory itself falls through the portal
+  (98, 2) -> (98, 23), rides the left boosts along row 25 with its box aligned (px 1536.0) and drops through the team door
+  (96, 26) into the pocket, where it rests: 7 of its 39 idle starts are in the corridor / pocket (h 9-15), and at C 20 99.3%
+  of the h calls are in those tiles; RCH3 (the `reach` tier) does not cut them (11.8 tiles). The boost's push AT THE TILE
+  LEVEL does not cut them either: in the tile graph the pocket leaves by (97, 26) -> the left boost (97, 25) -> the corridor
+  (9-10 ticks, the bound's own value); what the engine forbids is sub-pixel (the route's box is 0.93 px left of the column
+  so the down boosts are blocked by the wall (95, 26); an aligned box falls through the door): only a pixel-exact model of
+  the corridor cuts the pocket. THE TASK SIZES: `--split=3` (178 tasks at C 26) left 13 of 19 workers idle for most of
+  C 26 (6 tasks ran 22+ min, then 1); `--split=6` makes 2,700 tasks at C 27 (the pocket's idle starts 29-36: 2,600 of
+  them; the falling starts 0-28 one or two each: in the shaft every input gives the same state), 5-7 M nodes a task, all
+  13 workers busy, 1.8 M nodes/s on box 7 at load ~150. **SWITCH LABYRINTH IS PROVEN: THE FIRST WHOLE ROUTE PROVEN OPTIMAL** (box 7, 2026-10-01 01:11 EDT): C 26 closed (19 threads at load 140-175, 1,476,991,460 nodes, 2,159 s: every route >= 26 run ticks), then C 27 (`--split=6 --from=26`, 2,700 tasks) closed by two SEQUENTIAL runs on the task log: a 13-thread run (its 2,189 tasks logged before a helper was started on the same log) and the closing run (19 threads, the other 511 tasks, 434 s; 2,849,047,846 nodes in the C's report): NO ROUTE FINISHES IN FEWER THAN 27 RUN TICKS, so the 27-tick route (the best known = the compiler's route, 1.0 of the best known on the scoreboard) is TICK-PERFECT (verdict PROVEN, gap 0; the tiers checked on both known routes first, 0 violations). The proof rests on: the engine (exact), the tiers kin / rel / gate being admissible, the stateHash merge (53 bits), the shared table's and the task log's rules above. Box 7 `~/b7_proof_out/c3/` (switch_lab_c26.out, switch_lab_c27s.out, c27_seq.tasks.jsonl). ONE RUN AT A TIME on a log: two runs writing one log at once are NOT a proof by the union of their lines (each can prune on a task only the other finished: a subtree searched by neither); a closing run trusts only the lines of runs that ended before it started (cycle 3: a 5-thread helper on the same log, from the other end, was dropped: the C 27 close resumes from the first run's 2,189 lines written before the helper started).
+- **WHICH LEVELS A PROOF CAN CLOSE: the layer census, the gap report** (box 7 lane 'proof' cycle 4, 2026-10-01;
+  `tools/perfect/layercensus.js`, a tool): `node tools/perfect/layercensus.js <level.eelvl> [--C=<run ticks>] [--tiers=kin,rel,gate]
+  [--maxLayer=2000000] [--seconds=600]`: breadth first over exact engine states from every idle start with FULL stateHash dedup
+  across layers and wholepar.js's cut at C: the distinct states an exact proof must visit at each depth and their growth a
+  layer. Box 7 (one thread a level): Switch Labyrinth (C 27) 3.2x a layer (1.85 M states at run tick 12; it closed at 27);
+  NC Naos d3c6 (C 111) 2.9x (3.7 M at 14); **My level fef0 (C 59) and 730c (C 93): 8x a layer** (22 / 93 / 361 / 1,470 /
+  9,013 / 66 K / 522 K / 4.29 M at run ticks 1-8, the two levels' first layers the same chamber) with no cut at all: the
+  trophy is one tile above the spawn, so every tier reads ~4 ticks while the route needs 59 (fef0's route: a 12-tick fall into
+  the dots, a drift to the left arrow, 15 ticks in the up-arrow column to build -2 px/tick, a sideways jump off the left wall,
+  the rise into the trophy): with these bounds no exact search closes 40+ ticks of slack at 8x a layer. THE TOGO TIER after
+  n5-p4-perfect's two fixes (5dcea4c, 2265e58; merged here): ADMISSIBLE on all 44 known routes of the 8 small levels (Switch
+  Labyrinth, My level fef0 / 730c / de42, NC Naos d3c6, the precision puzzle, celeste x2: every tick checked, 0 violations;
+  cycle 2: 2.137 two ticks before the crown) but it CUTS NOTHING the other tiers do not: the same h at the start and the same
+  nodes in every closed C with and without it (Switch Labyrinth C 9-16, fef0 C 4-13, 730c C 19-20, celeste C 74-80; one box-7
+  thread each), at ~1.5x the context build. THE GAP REPORT of the scoreboard's 45 compiled routes (b7 score cycle 3, n5-plan
+  e08ad21, 300 s; `tools/perfect/gaprep.js`, routelb.js with both fixes, 20 s a level; the lb = the max of the compile's,
+  routelb's and the proven exhaustive lbs): PROVEN 1 (Switch Labyrinth 27); routelb raises the lb on 24 of 45 (Tutorial 1
+  372 -> 708, Bygone Tutorial 334 -> 633, Tutorial 2 367 -> 786, MIHB's Dream 1,138 -> 1,299); the exhaustive lbs on the
+  small levels: fef0 16 / 60, 730c 22 / 97, NC Naos d3c6 **57** (C 57 closed this cycle: 114.8 M nodes, 188 s, 3 threads) /
+  153, the precision puzzle 56 / 153, celeste x2 94 / 239-240; the gap median 89% of the route (the smallest after Switch
+  Labyrinth: NC Naos 62.7%, celeste 60.7%, Bygone Tutorial 68.1%, Tutorial 1 67.7%, Ruins 70.7%); at or under the best known
+  10 of the 40 with one. The ladders this cycle (box 7 `~/b7_proof_out/c4/`, task logs for the next run's `--resume`): fef0 C 17
+  805 of 1,875 tasks in 1,800 s (1.6 B nodes, 4 threads), 730c C 23 33 of 1,938 (1.27 B nodes, 4 threads), NC Naos C 58 61
+  of 171 (6.09 B nodes in 1,648 s on 12 threads, where C 57 took 115 M: the next pocket). `wholepar.js --progress=<s>` (default 60): a `progress` line {C, tasks, done, nodes, s} during a long C
+  (output only; test/wholepar.js 54/0). NEXT: a bound that knows the time to BUILD speed (reach.js's R / F / C states with tick
+  costs from the exact per-axis recurrences of src/math/fields.js, x relaxed to the row's field classes; the jump only where
+  a real floor is under the box), the only way to close the chambers (fef0 / 730c) and the false-near pockets.
+- **THE BOUND ALONG THE ROUTES, the death way's respawn bound** (box 7 lane 'proof' cycle 5, 2026-10-01;
+  `tools/perfect/hcurve.js`, `tools/perfect/leveltext.js`, `tools/perfect/wholepar.js`, `src/plan/levelproof.js`):
+  `node tools/perfect/hcurve.js <level.eelvl> <route.eetas> [--every=1] [--tiers=kin;rel;gate;togo;kin,rel,gate]`: at every
+  run tick of a known route the ticks it has left and what each tier set reads there (`lim` = the ticks left, as the search
+  at C = the route passes it: endgame.lowerBound takes its one-jump-a-landing rise table only for lim < 256, so a caller
+  passing lim = Infinity reads less: 2 vs 3 at fef0's run tick 54); a summary line {at0, meanRatio (h / left), minSlack,
+  viol}. `node tools/perfect/leveltext.js <level.eelvl> [<route.eetas>] [x0 x1 y0 y1]` (ROWS=1: the route's state per run
+  tick): the level one char a tile, the route's centre cells '*'. THE CURVES (box 7, the default tiers kin,rel,gate, every
+  tick, every known route of the 8 small levels: 0 violations on 44 routes): Switch Labyrinth h0 11 / 27 (mean h / left
+  0.85: closed at 27), celeste x2 87 / 235 (0.47), NC Naos d3c6 and the precision puzzle 49 / 111 (0.24 along their 299-315
+  routes), My level 730c 19 / 93 (0.32), de42 19 / 140 (0.26), fef0 4 / 59 (0.34: 4-13 along the whole route; the
+  three My levels are one chamber: the spawn (14,10) under the trophy, spikes (12-13, 9), dots (13-14, 11), a left arrow
+  (12, 11) and an up-arrow column (12, 12-15): the route falls in, drifts to the left arrow, sinks into the up-arrow
+  column and rises out of it with -2.3 px/tick, jumps sideways off the left wall's one-way and rises through the dots
+  and (14, 10) into the trophy with -2.75: no tier knows the up-speed must be BUILT, so every state of the chamber reads
+  4-13). THE DEATH WAY'S RESPAWN BOUND (wholepar.js makeCtx, default on; `EEAT_WP_RESPFIELD=0`: off): the endgame dedup
+  (cycle 3: the rel / gate tiers without bounds.at's endgame max where the kin tier runs) also dropped bounds.at's death way
+  (DEATH_MIN + the rel field at the respawns), and the kin tier caps a way through a death by DEATH_MIN + 1 + the
+  respawns' SPEED-LIMIT bound alone: on celeste x2 the default tiers read **74** at the start where rel alone read 87 (13
+  ticks of bound lost on every state of a level with a checkpoint); now levelproof.js `contextOf(L, {hResp})` takes the
+  larger of its speed-limit bound and the rel field's least value over the respawn tiles (admissible for any state there:
+  bounds.at starts from it): celeste x2 h0 **87** again, the other 6 small levels unchanged (their deaths respawn at the
+  spawn), 0 violations on the 44 known routes, test/wholepar.js 54/0. A task log written under other tiers is not resumed
+  (its tasks are those tiers' function). **celeste 31c0 and cd73: C 95 CLOSED in 56.5 / 62.0 s (36.3 / 36.4 M nodes, 4
+  threads each, box 7 at load ~150): lb 95 on both** (cycle 4's C 95 with h0 74: not one task in 1,800 s on 3 threads);
+  **C 96 CLOSED on both (330 M nodes, 562 / 568 s): celeste x2 lb 96** (9x a contour: C 97 ~3 B nodes, its task logs
+  `~/b7_proof_out/c5/cel31.tasks.jsonl` / `celcd.tasks.jsonl` written by code7 = these tiers, for the next resume). THE GAP
+  REPORT of b7 score cycle 4's 43 routes (n5-plan 04ecf95, 300 s; gaprep.js + the exhaustive lbs): PROVEN 1 (Switch
+  Labyrinth 27); routelb raises the compile's lb on 25 of 43; the gap median 88.5% of the route; the least celeste x2
+  59.8% (lb 96 / 239), NC Naos d3c6 62.7% (57 / 153), the precision puzzle 63.4%, Bygone Tutorial 65.7% (633 / 1,847),
+  Tutorial 1 66.1%, Ruins 70.5%, fef0 71.7% (17 / 60), Rosa dei Venti 74.1%, 730c 77.3% (22 / 97). fef0's C 17 resumed
+  on 8 threads (cycle 4's log, 797 tasks skipped): **fef0 C 17 CLOSED (4.38 B nodes in all, 2,020 s): fef0 lb 17**; C 18
+  798 of 1,938 tasks logged in `~/b7_proof_out/c4/fef0.tasks.jsonl` (code6 = the tiers before the respawn bound, the same
+  values on fef0: its deaths respawn at the spawn); celeste x2 C 97 97 / 79 of 1,053 tasks logged (code7). The reach tier (RCH3's
+  -1) cuts nothing more: the census of celeste 31c0 at C 97 and of NC Naos d3c6 at C 58 the same states and cuts at every
+  layer with and without it. **THE BREADTH-FIRST CENSUS IS A CHEAPER PROVER WHERE THE DFS THRASHES**: NC Naos d3c6 at C 58
+  (layercensus.js: every state once, full stateHash dedup across layers, the same cut; a front that empties with no crown
+  = C closed, the same claim as wholepar's): 7.0 M distinct states by layer 20, the layers 1.5 M and growing 1.34 / 1.28 /
+  1.23 / 1.20 / 1.17x (falling as the cut bites), 4 min on one thread (a longer run: layer 26 2.80 M states at 1.07x, 20.8
+  M seen, 9.1 GB, 604 s, stopped at the cycle's end), where wholepar's DFS spent 6.09 B nodes on 61 of
+  C 58's 171 tasks (its 2^24-slot shared table cleared every C, the tasks' prefixes searched again); Switch Labyrinth C 20
+  closed by the census in 30 s (420 K states). The census's seen set is now 64 V8 Sets by the hash's low bits (one Set
+  holds at most 2^24 entries). NEXT: THE BFS PROVER: the census's layers expanded by worker threads (chunks of the front,
+  one shared typed-array hash table, the next front merged), a task log per layer (resumable across cycles), first on NC
+  Naos d3c6 / the precision puzzle at C 58+ (where the DFS stalls) and fef0 C 17.
+  THE STARTING BOUND OF EVERY COMPILED ROUTE (the default tiers at the route's first input, the 43 routes of b7 score
+  cycle 4): h0 / route Switch Labyrinth 11 / 27, celeste x2 87 / 239, NC Naos d3c6 and the precision puzzle 49 / 153,
+  Rosa dei Venti 924 / 3,557, Tutorial 1 488 / 2,090, Bygone Tutorial 420 / 1,847, My level 730c 19 / 97, fef0 4 / 60,
+  the rest 15-314 over 800-9,800-tick routes: no compiled route but Switch Labyrinth within an exact search's reach. NEXT
+  (the chambers): a tier whose state carries the vertical speed: per
+  (column, y to 1 px, vy to 1/64 px/tick) the least ticks to a trophy, a backward Dijkstra over a SOUND one-tick
+  transition (vy by fields.js's exact per-field recurrence with the delayed tile's field: the union over the cells the
+  centre was in 1-2 ticks before, the input's best; y = y + vy, blocked by the walls of the rows the box overlaps; the
+  jump only where a floor is under every x the column allows the box: (14, 10)'s box cannot overlap (15, 11) because
+  (15, 10) is a wall; x free within the column, one column a tick); checked like every tier on the 44 known routes.
+  It must read >= ~49 at fef0's start (8x a layer: an exact search closes ~10 ticks of slack, not 55).
+- **THE BREADTH-FIRST PROVER ON WORKER THREADS** (box 7 lane 'proof' cycle 6, 2026-10-01; `tools/perfect/bfsprove.js`,
+  `test/bfsprove.js` 47/0; a tool, the compile unchanged): `node tools/perfect/bfsprove.js <level.eelvl> --C=<layer bound>
+  [--route=<a.eetas>,..] [--U=] [--threads=16] [--seconds=1800] [--ttBits=28] [--tiers=kin,rel,gate] [--maxGB=12]
+  [--heapMB=4096] [--initPer=64] [--rebalance=1.5] [--rebalanceMin=2000] [--out=<faster.eetas>]`: the layer census as a
+  PROVER (wholepar.js's convention: a finish at layer d is a route of d - 1 run ticks): breadth first over exact engine
+  states from every idle start (the first layers on the main thread until the front feeds every worker; the first inputs
+  non-zero), every input of every tick (endgame.probeMasks), wholepar.js's admissible cut at C (`makeCtx`, the default tiers
+  kin,rel,gate), FULL stateHash dedup ACROSS LAYERS in ONE shared insert-only table (a SharedArrayBuffer of 2 int32 a slot:
+  the low word, the high word + 1; Atomics compare-and-swap, a reader that meets a slot being written waits for its high
+  word; a probe run past 512 keeps the state: never unsound), the front split over N workers, a barrier a layer: the front
+  empties = C CLOSED (every route takes >= C run ticks), the first layer with a finish = THE OPTIMUM (every state of every
+  shorter route has d + h <= its ticks <= C: none cut; the dedup keeps the earliest copy of each), its route rebuilt from
+  the workers' parent links and REPLAYED (`FASTER` + `--out` below the routes given, else `PROVEN`); C = U closing =
+  PROVEN; every route given is checked against the tiers first. THE PACKED FRONT: a snapshot object is ~1.2 KB of V8 heap
+  (its 113 fields, doubles boxed); a layer keeps per state only the fields that differ from the worker's BASE snapshot
+  (Object.is: -0 and NaN exact) as (field, type, Float64) triples (~200-310 B a state), and every state read back is
+  RESTORED AND CHECKED against the stateHash stored at its insert (a mismatch throws: no claim). THE RE-ROOTING: a child
+  stays on its parent's worker, so the fronts drift apart (NC Naos d3c6 C 58: the largest 6.7x the least by layer 25, 13x
+  by 30: one subtree); past `--rebalance` x the mean every front comes back as packed paths from the sources (its root's +
+  the inputs since), is dealt out again round robin and rebuilt by replay, each state checked against its hash. `--maxGB`:
+  past that RSS the run stops ('memory'; the lb then = the last complete layer, weak). The toys: the optimum = exact.js's
+  from the same idle starts with the work on the main thread and on the workers, a slower U FASTER (written, replayed), the
+  optimum as a route PROVEN, C = the optimum CLOSED, all again re-rooted after every layer. MEASURED (box 7, load 150-170,
+  `~/b7_proof_out/c6/`): **NC Naos d3c6 C 58 CLOSED in 320.8 s (14 workers, 84,204,369 distinct states over 48 layers,
+  3 re-rootings in 12.4 s, RSS <= 7.9 GB): lb 57 -> 58** (cycle 4's DFS: C 58 6.09 B nodes on 61 of its 171 tasks in
+  1,648 s, not closed); its layers: 1.34 -> 1.07x to layer 26 (2,797,937 states, 20.8 M seen: the census's numbers
+  exactly; 131 s on 10 workers unbalanced, 78 s on 14 re-rooted, the census 604 s on one thread), a second rise to 7.3 M at
+  layer 33, down to 0.28 M at 39, a third wave of 1.25-1.3x a layer to 1.48 M at 47 (every state with one twin: a
+  sub-pixel family near the trophy), all cut at 48; with snapshot objects the run stopped on memory at layer 27 (14 GB).
+  Celeste 31c0 C 97 (4 workers, 6 GB): 1.3-1.8x a layer, 9.0 M states at layer 17, 30.7 M seen, stopped on memory at 18;
+  Switch Labyrinth C 27 (3 workers, 5 GB): 3x a layer, 9.2 M at layer 14, 17.3 M seen, stopped on memory (the DFS closed it
+  in cycle 3: 2.85 B nodes); My level fef0 C 18 (4 workers): 4.8x a layer (0.88 M at layer 8).
 - **THE ENDGAME and THE AIRBORNE ARRIVAL** (C6 push 3 lane 5 block 3; `src/out/n5/lanes/c6_lane5_b3.md`). THE ENDGAME
   (strategy.js after JOINS, its own clock; **DEFAULT ON since lane 5 block 4** (`src/out/n5/lanes/c6_lane5_b4.md`): compile.js
   gives it a fifth of the budget, at most 60 s (`ENDGAME_F`, `ENDGAME_MAX_S`); `--endgame=<s>` / `EEAT_ENDGAME_S=<s>` its
