@@ -212,6 +212,10 @@ const BW_CUTS = process.env.EEAT_BW_CUTS === '1';
 // routes are taken at once. Given at once, the imported anchors outranked the executor's own (Ruins, local 100 s: 1,510 vs
 // 1,302 run ticks). EEAT_BW_GATE=0: at once, as before)
 const BW_GATE = process.env.EEAT_BW_GATE !== '0';
+// (EEAT_BW_OPEN=1, OPT-IN: the gate also opens, with no route, once BW_OPEN_F of the budget is gone while it holds an
+// arrival: a leg's arrival is a trigger's new model state, and the watchdog's stall may never come (the CEGAR's facts keep
+// changing: Happy Spookaween's held checkpoint stayed held to the end))
+const BW_OPEN = process.env.EEAT_BW_OPEN === '1', BW_OPEN_F = +process.env.EEAT_BW_OPEN_F > 0 ? +process.env.EEAT_BW_OPEN_F : 0.5;
 /** a relative deadline (a step's or a waypoint's beforeTickFrom): a number, or 'prev+N' (N ticks after the previous
  *  step's arrival, i.e. this anchor's arrival: a key's KEY_TICKS) -> ticks | NaN */
 function relOf(x) {
@@ -1462,6 +1466,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 				else if (secNow() > OS_OPEN_HALF * seconds) osWantOpen = 'half the budget';
 			}
 			if (osw) osHarvest();   // (the one shot's thread: its routes and new anchors before the next jobs are picked)
+			if (BW_OPEN && bwlDone && !bwlOpen && !best && !bwlWant && bwlHeld.length && secNow() > BW_OPEN_F * seconds) bwlWant = 'the budget share';
 			if (bwlWant && !bwlOpen && !best) bwlRelease(bwlWant);   // (the child's gate: the watchdog saw a stall with no route)
 			while (inflight.size < P && !(best && left() <= endRes())) {
 				const job = exploreQ.length ? exploreQ.shift() : nextJob();
