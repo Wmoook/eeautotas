@@ -72,5 +72,23 @@ for (const [name, rows] of Object.entries(ROOMS)) {
 	check('seen table: the same low word, another high word: new', ins(k2) === true && ins(k2) === false);
 	check('seen table: a low word 0 is stored', ins(k3) === true && ins(k3) === false);
 }
+// the packed front: every field read back exactly (-0, NaN, booleans, null, undefined, references), whatever the base
+{
+	const base = new E.EESnapshot(), a = new E.EESnapshot(), b = new E.EESnapshot(), out = new E.EESnapshot();
+	const F = BP.FIELDS;
+	F.forEach((k, i) => { base[k] = i; a[k] = i; b[k] = i; });
+	const map = new Map([[3, true]]);
+	a[F[0]] = -0; a[F[1]] = NaN; a[F[2]] = true; a[F[3]] = false; a[F[4]] = null; a[F[5]] = undefined; a[F[6]] = map; a[F[7]] = 1.5e-300;
+	b[F[0]] = 0.1 + 0.2;
+	const st = BP.makeStore();
+	for (let r = 0; r < 3000; r++) { st.push(a, base, 11); st.push(b, base, 22); }
+	let ok = true;
+	for (const i of [0, 1, 4000, 5999]) {
+		const src = i % 2 ? b : a, h = st.get(i, base, out);
+		if (h !== (i % 2 ? 22 : 11)) ok = false;
+		for (const k of F) if (!Object.is(out[k], src[k])) ok = false;
+	}
+	check('packed front: 6,000 states read back field for field (Object.is)', ok && st.n === 6000, `n ${st.n}`);
+}
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
