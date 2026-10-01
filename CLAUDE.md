@@ -594,6 +594,39 @@ ways in.
   (the P4 bullet below). Checks on the merged tree (laptop): labbackward 28/0, planstrategy 27/0, plancompile 31/0, msolve
   --quick 50/0, portfolio 20/20, s99stretch 7/0, bwchain 9/0, joins 22/0, planexec --only=unit,fail 15/15, T-MODEL-EXACT
   219 routes 0 unsound, T-PLAN-ORACLE 2/0, editor --only=app 97/0, regress --quick 60/0.
+- **THE HYBRID LEG** (n5-hy-leg, 2026-10-01; `src/plan/hybrid.js`, OPT-IN `EEAT_HYBRID=1`, off = the compile byte for byte:
+  the file not even loaded; records `src/out/n5/hybrid/leg/leg.md`, gitignored): a leg the executor fails (rung >= `EEAT_HY_RUNG`
+  2 on 'budget', or the same leg (edge + anchor class) failed `EEAT_HY_REPEAT` 2 times: the stall) is handed to the search
+  product's machinery as a SOLVER in a child process: `src/goexplore.js --prefix=<the anchor's earliest arrival's inputs>`
+  (the exact state, replayed there) with Find a route's defaults (`--opts=1 --frontier=1 --fBrake=1 --fPhys=1`), `EEAT_HY_W` 2
+  workers and its GPU bursts when a GPU tool is there (`EEAT_HY_GPU=0`: none), one child at a time, a 60-s slice
+  (`EEAT_HY_S`) doubled a retry, 3 tries a leg; the goal: a trigger / region leg `--goalTiles=<file>` (NEW, goexplore.js:
+  the reach field built to those tiles instead of the trophy, a `{"ev":"goal","t","inputs"}` event at a touch; without it
+  the search byte for byte, checked: the same done event as main on 3 levels, 1 worker, 3 M ticks), a trophy leg the
+  search's own target, the search's new rooms (`--rooms=1`) back as soft guidance (the plan's later gates). EVERY answer is
+  verified by the compiler (a touch cut at the waypoint's own goal test from the anchor's snapshot, then strategy.js
+  `verified` from the level start; routes `C.evaluate`): its inputs become the leg (tool `search`), the compiler goes on
+  with its own math. After a leg's first arrival the search goes on 0.5 of the time it took (2-15 s: `EEAT_HY_MORE_*`), every
+  sooner arrival added. The search's own ROUTE is PROVISIONAL (strategy.js `hyBest`: a `result` event with `provisional:
+  true` at once, the moves end at the end reserve, but best stays the compiler's, so the stretch / chain children and the
+  relays go on; at the moves' end the faster raw route is polished); a trophy search keeps improving its route until the
+  moves end or a failed leg needs the slot. THE GATE (`EEAT_HY_GATE`, on; the one shot's lesson): leg arrivals are HELD
+  until the executor fails that leg again, 30 s (`EEAT_HY_HOLD_S`), 45 s with no new anchor (`EEAT_HY_STALE_S`) or the
+  executor's end; dropped when the executor solves the leg itself; rooms only after 120 s with no new anchor
+  (`EEAT_HY_ROOM_STALE_S`), 8 at a time (`EEAT_HY_ROOM_N`). `report.hybrid` {requests, ok, legs, routes, rooms, goals,
+  rejected, held, released, dropped, gpu, ms}; events `{"ev":"hybrid","what":...}`; `test/hybrid.js` 16/0. MEASURED (box 9
+  GPUs 4-5, 45 pinned CPUs, 600 s, W3, A unset / B `EEAT_HYBRID=1` started together, one run an arm, every .eetas replayed;
+  levels the 300-s paired compile failed with 'legs fail after progress' and v1.7.1's search routes): v4 (the gate, 15
+  levels) compiled **A 9 / B 13** (+ Machu Picchu 6,431, Vargon Tragedy 7,401, First Person Maze 1,285, Delusion Valley
+  7,415 (best known 7,068); none lost), the first route's median **266 -> 69 s** (B's first route the search's trophy route
+  on 12 of 13: Aperture Science Lab 26 vs 220 s, Ice Slide Ride 25 vs 126 s), both compiled B / A geo-mean 1.083 (Aperture
+  0.915; Are You A God 1.228, Ice Cream Expedition 1.530: the rooms released all at once); v5 (rooms on the 120-s clock, the
+  branch's default) on the 6 room-heavy levels: compiled A 4 / B 5, both compiled **0.883** (Are You A God 7,696 vs 8,138, The
+  way of the north 5,091 vs 7,210, Ice Cream 11,568 vs 11,775, Delusion Valley 7,566 vs 8,158), first route median 456 ->
+  128 s; First Person Maze none either way in v5 (its v1 / v4 route was the search's own find of a switch leg's search, not
+  in every run). A's spread run to run on these levels ~10-30%: one run an arm. Cost: peak RSS median +0.6 GB a compile (the
+  child), one child's CPU (~3 cores while it runs). NEXT: more runs an arm, a leg tightener (the executor's own reach on the
+  leg, bounded by the search leg's ticks), the full 230.
 - **Where it stands** (2026-10-01 ~06:30, the C6 chief's block 4, **300 s**, `--workers=3`, one full compile on boxes 5 + 6,
   every .eetas read back to its finish; `src/out/n5/full_c6_b4.md` / `.jsonl`, gitignored): **47 / 230** with n5-plan 5214e62
   = main since the block-4 merge (campaign 40 / 203, hard 7 / 25, Bad EE Level 9 and Cold World 0 / 2; 47 / 47 replayed; a
