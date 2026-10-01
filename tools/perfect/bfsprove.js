@@ -147,6 +147,36 @@ function makeTripleStore() {
 	};
 }
 
+// a layer's parent links / inputs as they are made: typed and doubling (a JS array of numbers is 8 B an element)
+function growTyped(Ctor) {
+	let a = new Ctor(1024);
+	const g = { n: 0, push(v) { if (g.n === a.length) { const b = new Ctor(a.length * 2); b.set(a); a = b; } a[g.n++] = v; }, done() { return a.slice(0, g.n); } };
+	return g;
+}
+const growI32 = () => growTyped(Int32Array), growU8 = () => growTyped(Uint8Array);
+
+// a packed root set {src, off, masks, hs} sorted by (source, path), the bytes compared in order (the lazy roots' order)
+function sortRoots(rs) {
+	const n = rs.src.length, S = rs.src, O = rs.off, M = rs.masks, idx = new Int32Array(n);
+	for (let i = 0; i < n; i++) idx[i] = i;
+	idx.sort((a, b) => {
+		if (S[a] !== S[b]) return S[a] - S[b];
+		const la = O[a + 1] - O[a], lb = O[b + 1] - O[b], l = Math.min(la, lb), oa = O[a], ob = O[b];
+		for (let t = 0; t < l; t++) { const d = M[oa + t] - M[ob + t]; if (d !== 0) return d; }
+		return la - lb;
+	});
+	const src = new Int32Array(n), off = new Int32Array(n + 1), masks = new Uint8Array(M.length), hs = rs.hs ? new Float64Array(n) : null;
+	let at = 0;
+	for (let q = 0; q < n; q++) {
+		const i = idx[q];
+		src[q] = S[i]; off[q] = at;
+		masks.set(M.subarray(O[i], O[i + 1]), at); at += O[i + 1] - O[i];
+		if (hs) hs[q] = rs.hs[i];
+	}
+	off[n] = at;
+	return { src, off, masks, hs };
+}
+
 // ---------------------------------------------------------------- a worker: its own front, every layer on the barrier
 function workerMain() {
 	const { file, tiers, C, sab, deadline, maxBytes, replay } = workerData;
@@ -166,6 +196,29 @@ function workerMain() {
 	// (~105-300 B a state packed) goes; the seen table (8 B a slot) stays. Exact: the same states, the same inputs, the
 	// same cut / dedup / finish as the stored front (the engine's tick from a restored snapshot is deterministic).
 	const cache = [], cacheIdx = [], anc = [];
+	// THE LAZY ROOTS (replay mode): the roots are kept as their paths from the sources only (a re-rooting stores no layer
+	// of states: the stored roots were ~105-300 B a state, a whole layer at once), sorted by (source, path) so that
+	// consecutive roots share their prefixes, and a root's state is the engine's replay of its path from the nearest
+	// state of the last replayed root's path (rc[p] = the state after p inputs of it), checked against the hash it came with
+	const rc = [];
+	let rcPrev = -1, rcLen = 0;
+	const rootState = (j, out) => {
+		const s = roots.src[j], o0 = roots.off[j], len = roots.off[j + 1] - o0, M = roots.masks;
+		let p = 0;
+		if (rcPrev >= 0 && roots.src[rcPrev] === s) {
+			const q0 = roots.off[rcPrev], lim = Math.min(len, roots.off[rcPrev + 1] - q0, rcLen);
+			while (p < lim && M[o0 + p] === M[q0 + p]) p++;
+		}
+		sim.restore(p === 0 ? sources[s] : rc[p]);
+		for (let t = p; t < len; t++) {
+			E.applyMask(inp, M[o0 + t]); sim.tick(inp);
+			if (rc[t + 1] === undefined) rc[t + 1] = new E.EESnapshot();
+			sim.snapshot(rc[t + 1]);
+		}
+		rcPrev = j; rcLen = len;
+		if (roots.hs && roots.hs[j] !== sim.stateHash()) throw new Error(`bfsprove: a re-rooted state rebuilt wrong (root ${j})`);
+		return sim.snapshot(out);
+	};
 	const derive = (i, k) => {   // the state at index i of layer k (k = par.length: the front) into cache[k]; returns it
 		anc[k] = i;
 		for (let q = k - 1; q >= 0; q--) anc[q] = par[q][anc[q + 1]];
@@ -173,9 +226,7 @@ function workerMain() {
 		while (q >= 0 && cacheIdx[q] !== anc[q]) q--;
 		if (q < 0) {
 			if (cache[0] === undefined) cache[0] = new E.EESnapshot();
-			const hs = front.get(anc[0], base, cache[0]);
-			sim.restore(cache[0]);
-			if (sim.stateHash() !== hs) throw new Error(`bfsprove: a packed root read back wrong (root ${anc[0]})`);
+			rootState(anc[0], cache[0]);
 			cacheIdx[0] = anc[0]; q = 0;
 		}
 		if (q === k) return cache[k];
@@ -187,9 +238,12 @@ function workerMain() {
 		}
 		return cache[k];
 	};
-	const frontN = () => (par.length === 0 ? front.n : par[par.length - 1].length);
+	const frontN = () => (par.length === 0 ? roots.src.length : par[par.length - 1].length);
 	parentPort.on('message', (m) => {
-		if (m.type === 'roots') {
+		if (m.type === 'roots' && replay) {
+			roots = sortRoots(m.rs); front = null; par = []; mk = []; cacheIdx.length = 0; rcPrev = -1; rcLen = 0;
+			parentPort.postMessage({ type: 'ready', n: roots.src.length });
+		} else if (m.type === 'roots') {
 			// a root set (packed paths from the sources: the first layers, or a re-rooting's share of every worker's front),
 			// each state rebuilt by its own path and, where the hash came with it, checked against it
 			roots = m.rs; front = makeStore(); par = []; mk = []; cacheIdx.length = 0;
@@ -229,7 +283,7 @@ function workerMain() {
 			parentPort.postMessage({ type: 'dumped', rs: { src, off, masks, hs } }, [src.buffer, off.buffer, masks.buffer, hs.buffer]);
 		} else if (m.type === 'layer') {
 			const d = m.d;
-			const next = replay ? null : makeStore(), np = [], nm = [];
+			const next = replay ? null : makeStore(), np = growI32(), nm = growU8();   // (typed, doubling: 5 B a child, not 16)
 			let cut = 0, merged = 0, full = 0, crown = null, stopped = false;
 			const lim = C - (d + 1);
 			const n = replay ? frontN() : front.n, k = par.length;
@@ -264,10 +318,10 @@ function workerMain() {
 				for (let k = par.length - 1; k >= 0; k--) { back.push(mk[k][j]); j = par[k][j]; }
 				route = { src: roots.src[j], path: Array.from(roots.masks.subarray(roots.off[j], roots.off[j + 1])).concat(back.reverse()) };
 			}
-			const states = stopped ? 0 : np.length, bytes = replay ? 5 * np.length : next.bytes(), used = replay ? 5 * np.length : next.used();
+			const states = stopped ? 0 : np.n, bytes = replay ? 5 * np.n : next.bytes(), used = replay ? 5 * np.n : next.used();
 			if (stopped || crown !== null) front = makeStore();
 			else if (!replay) front = next;
-			if (!stopped && crown === null) { par.push(Int32Array.from(np)); mk.push(Uint8Array.from(nm)); }
+			if (!stopped && crown === null) { par.push(np.done()); mk.push(nm.done()); }
 			parentPort.postMessage({ type: 'done', d, states, cut, merged, full, stopped, route, bytes, used });
 		} else if (m.type === 'quit') process.exit(0);
 	});
