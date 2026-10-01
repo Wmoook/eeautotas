@@ -5,6 +5,7 @@
 // and the relay is stuck at wall 2) from "one wall" (the relay stuck where the first call was), and checks that the
 // closest state's masks really end at the reported closest tile (closestReplay.passesTile / end).
 //   node tools/cmp/relaykrt.js <level.eelvl> <start.eetas> "<label>" [--ms=45000] [--level=3] [--defaults=1]
+//     [--save=<closest.eetas>] (the first call's closest state as a whole run: a start for legab.js / nearkrt.js)
 // <start.eetas>: a whole run from the level start (e.g. a known route cut at a tick); <label>: the model's trigger label as
 // the compile prints it ("coin (207,189)"; a trailing " xN" dropped). Env as the compiler's (EEAT_*): e.g. EEAT_SKEL=0 runs
 // the executor's direct leg alone. Prints one JSON line.
@@ -61,6 +62,7 @@ const pos = argv.filter((s) => !s.startsWith('--'));
 			const m = typeof c.masks === 'string' ? T.masksOf(c.masks) : Uint8Array.from(c.masks);
 			const rp = replay(m);
 			out.closestReplay = { ticks: m.length, end: xy(rp.end), px: rp.px, py: rp.py, vx: rp.vx, vy: rp.vy, passesTile: rp.tiles.has(c.tile) };
+			if (opt('save', '')) { C.writeEetas(opt('save', ''), m); out.saved = opt('save', ''); }
 			const ex2 = await mk();
 			const t1 = Date.now();
 			const r2 = await ex2.reach([T.strOf(m)], wp, { ms, level: lv, k: 4 });

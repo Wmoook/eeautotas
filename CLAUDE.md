@@ -1330,7 +1330,10 @@ ways in.
   = d vs + `EEAT_DEEP_GATE=160` = g): ARE YOU A GOD compiled in both arms over the cycle: g 8,572 run ticks (first route
   9,559 at 536 s, round 1), d 7,713 (first route 13,239 at 727 s, round 2; d's round-1 run none, 13 triggers) (best known
   5,375; every .eetas replayed from the level file, 0 deaths); NC Naos de5f 12 (g) vs 9 (d) triggers; the deep rung's steps
-  g 2 finds / 7 fails (838 worker-s) vs d 3 / 15 (1,790 s) on the same two levels, 3 deep steps gated; ROUND3. THE
+  g 2 finds / 7 fails (838 worker-s) vs d 3 / 15 (1,790 s) on the same two levels, 3 deep steps gated; round 3 (the same
+  pair again): d COMPILED AYAG 7,556 (first route at 511 s; 1.41 of the best known, this cycle's best) where g did not (20
+  triggers, 5 deep steps gated), NC Naos de5f 14 = 14; over the cycle AYAG d 2 of 3, g 1 of 2, de5f 9 / 14 vs 12 / 14:
+  NO GAIN SHOWN for the gate (it frees deep-rung time: g 4 finds / 3 fails vs d 6 / 8 in round 3), stays OPT-IN. THE
   SKELETON'S DIRECT SHARE (`EEAT_SKEL_DIRECT=0.7`, an existing executor knob, vs the deep rung alone, round 2): AYAG none vs
   7,713, Stupid Fox 4 vs 7 triggers: NEGATIVE. NC NAOS'S STOP (both versions stop at coins (207,189) / (208,186) /
   (220,122)), from the known route's own states (`tools/cmp/legab.js` / `relaykrt.js`, `--defaults=1`; the 8,267-tick
@@ -1342,8 +1345,13 @@ ways in.
   (12.2 s); from the coin's own state (4125) the 45-s direct leg (`EEAT_SKEL=0`; the deep rung's direct share is 47 s)
   carries the glide to (230,189) at tick 4391, the route's own place and time ((227.5,190.6) at 4390). (2) From that arrival
   (vx -1.1, vy -0.6) the last 20 tiles (the route stops, drops to row 191 and takes three jumps left into the coin row) are
-  not found in 45 s (the relay: closest 23 at (228,188)), where the route's state 2-3 tiles away finds them in 0.9 s
-  (cycle 1's krt): the deep rung's 20.6-tile closest on de5f (cycle 2) is this second wall. Opt-in tried and dropped: a
+  not found in 45 s (the relay: closest 23 at (228,188)), nor in the 135-s window from that state (`--save` + legab, with
+  the skeleton and with `EEAT_SKEL=0` alike: closest 21.6 at (226,188)), where the route's state 2-3 tiles away finds them
+  in 0.9 s (cycle 1's krt): the deep rung's 20.6-tile closest on de5f (cycle 2) is this second wall. Its mechanism (the
+  route's trace): the route enters (226,188) at tick 4368 still FALLING (vy +1.7 px/tick, the glide's own descent),
+  drops through the row of up arrows (226-229, 189) at px 3616-3632 (it stops dead at px 3632.00, vx 0, at 4380) into the
+  air pocket of row 190-191 and leaves it left with up+left and jumps; the finder's arrivals there are later and RISING
+  (vy -0.6): the up arrows hold them in row 188-189. Both walls are one thing: the speed the glide carries. Opt-in tried and dropped: a
   GROWN RETRY (a sub-leg that failed by its budget retried with a doubled step): 41.6 / 42.6 tiles from 4210 / 4125, no
   gain (the 12-tile sub-leg SUCCEEDS with a slow arrival; the next set fails from it). The skeleton on 6 more stuck legs
   (krt, rung 2, base / `EEAT_SKEL=0` / `EEAT_SKEL_STEP=24`): Stupid Fox's checkpoint (55,46) from its previous trigger -- /
