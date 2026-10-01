@@ -1576,6 +1576,30 @@ ways in.
   dump's blue-coin state as the compile's start), the climb out of chapter 2 at (104-110, 206-211) as crumbs (the true
   exit's checkpoints (109,206) -> (118,197) -> (91,196) -> the portal by (82,194)), then the hub's blue door #1; the field's
   XR / C chain (269-294, 155-220) to test with the engine. NOT MERGED (opt-in, no shared gate).
+- **THE RESPAWN WAYPOINT: Cold World's way out of chapter 2 is a ladder of respawns** (LH cold, 2026-10-01 09:08-10:35,
+  branch n5-lh-cold = n5-b7-cold-c6 b9d95ef + main ccaef49; report `src/out/n5/lasthour/cold/cold.md` in the user's
+  checkout, gitignored). The night's EEAT_PHYS_RESPAWN run (1,800 s, box 6): the chapter-2 blue coin at 105-138 s, then
+  stuck in the coin pocket; the one right plan ('coin (73,222) -> purple switch 2' from the coin's respawn) read
+  closest -1 at every rung. WHY: the switch room (60-77, 216-233) is reached only through checkpoint RESPAWNS: the
+  physics pass's seed chain coin (73,222) <- (66,230) <- (58,235) <- (59,239), and the recorded search route takes it
+  (deaths at (67,242) / (65,230), the hub at 18,333). **`EEAT_RESP_CRUMB=1`** (planner.js, with EEAT_PHYS_RESPAWN and the
+  physics crumbs; OPT-IN, off = byte for byte, planplanner 60/60): the pass keeps per tile the seed that reached it first
+  (`fwd.via`); a root step whose target the crumbs' goal field reads no way to but the pass reaches only through a seed
+  goes by the seed chain (4 deep): the seed the anchor HOLDS (the engine's taken checkpoint) -> 'die, back at a respawn
+  (x,y)' holding it (types.js goalOf `wp.cpHold`: the engine's checkpoint must be that tile: a death that touched
+  another checkpoint respawned there); else the crumb toward the chain's first seed, the seed expected taken
+  (`{feat: 'cp'}`; an arrival rising through a checkpoint's tile need not take it); `EEAT_RESP_RUNGS` (default
+  CRUMB_RUNGS; 5 with EEAT_RUNG_DEEP: the held death at (58,235) was found only at the 135-s rung); `EEAT_RESP_EXEC=1`
+  (the trigger also by the executor's protection-layer field); `EEAT_PHYS_CRUMBWALLS=1` (the crumb field's stall walls
+  in the pass's level copy). THE EXECUTOR ALONG IT (offline, `chain.js`, from the night's arrival on (59,239)): every leg
+  found (rungs 1-2, the held death at rung 4), purple switch 2 + the coin (73,222), (77,218), **the hub checkpoint
+  (279,5) at tick 5,246** and **chapter 3's checkpoint (283,221) at tick 5,522** (the first time the compiler's own
+  executor leaves chapter 2). In the 14 compile arms the waypoint never fired: from the blue-coin anchors the roots are
+  trophy-room targets whose crumb fields read a way up the chamber climb. THE NEXT WALL: chapter 1's pool room: from
+  the hub every plan is 'X -> trophy' priced through the trophy-room portal (224,138) (est walk 22 steps; the pass 170
+  moves via a chapter-3 climb and the up arrows (243,133-139)), and the executor's field to chapter 3's purple switch 5
+  (250,225), from the hub and from (283,221), leads back to the pool ((217,144) / (217,151)) where the plain RCH3
+  field's way is 86 tiles down chapter 3. NOT MERGED (opt-in, offline evidence).
 - **Bad EE Level 9's mini walls: the deep rung and the warm rung** (B7 lane b9, cycle 2, 2026-09-30, branch n5-b7-b9;
   strategy.js, both OPT-IN, off = the compile byte for byte): `EEAT_RUNG_DEEP=<ms>` = one more rung of that many ms after
   the 45-s one (the facts block an (edge, node class) after 5 failures instead of 4; the executor runs it at its top tier,
