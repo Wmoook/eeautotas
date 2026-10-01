@@ -179,6 +179,13 @@ function createPlanner(model, facts, o = {}) {
 	const LONG_GAIN = process.env.EEAT_PLAN_LONG_GAIN !== '0';
 	const LONG_R = process.env.EEAT_PLAN_LONG_R !== undefined ? Math.max(0, +process.env.EEAT_PLAN_LONG_R | 0) : 1;
 	const LONG_EXPAND = +process.env.EEAT_PLAN_LONG_EXPAND > 0 ? +process.env.EEAT_PLAN_LONG_EXPAND : 3000000;
+	// (THE WALLS LIFTED, EEAT_PLAN_LONG_NOWALL=1, inside the long call only: the est walls (syncWalls: every failed step's
+	// closest approach walls its 3 x 3, for EVERY state and position) accumulate, and in a compile the long search found only
+	// plans through a relaxation-only edge (The Memory Game 1,008,291 / Fall of Zeal 1,003,176 from the start class, where
+	// the same search with fresh facts finds 4,260 / 1,344: a 6-coin plan, the trophy): with the knob a long search that finds
+	// nothing below the PENALTY runs once more with the walls lifted (the rungs, blocks and proofs as they are), its plan's
+	// first step not one that failed LONG_R rungs from the class; its rest the same way)
+	const LONG_NOWALL = process.env.EEAT_PLAN_LONG_NOWALL === '1';
 	const L = model.L, W = model.W, H = model.H;
 	const bounds = o.bounds && typeof o.bounds.pair === 'function' ? o.bounds : null;
 	const ST = { rchChecks: 0, plans: 0, planMs: 0, expands: 0, lbCalls: 0, lbMs: 0, lbExpands: 0, learned: 0, costOf: 0 };
@@ -1598,6 +1605,8 @@ function createPlanner(model, facts, o = {}) {
 	// checkpoint, Octorage's switch 69 and coins, Fall of Zeal's key groups, UT Eternal Galaxy's checkpoint (166,107), The
 	// Memory Game's coin (179,188)), climbing rung after rung (45-s windows) in every plan call.
 	const longTried = new Set(), longPaths = [];
+	/** fn() with the est walls lifted (model.setEstWalls(null)), the walls rebuilt from the facts after */
+	const noWalls = (fn) => { model.setEstWalls(null); try { return fn(); } finally { wallsVer = -1; syncWalls(); } };
 	let longCalls = 0;
 	/** THE LONG PLAN CALL (EEAT_PLAN_LONG): a kept path's rest from this state, else one long search (once a state) */
 	function longPlan(a, so, po, stuck) {
@@ -1611,8 +1620,12 @@ function createPlanner(model, facts, o = {}) {
 		for (const lp of longPaths) {
 			const i = lp.keys.indexOf(sk);
 			if (i < 0 || i >= lp.edges.length) continue;
-			const res = search(a, Object.assign({}, so, { ms: 300, maxExpand: 20000, guide: lp.edges.slice(i) }), new Set(), null);
-			if (res.found && res.found.g < PENALTY) { ST.longRest = (ST.longRest || 0) + 1; return mk(res.found, `long: the rest of a long plan (step ${i + 1} of ${lp.edges.length})`); }
+			const rest = () => {
+				const res = search(a, Object.assign({}, so, { ms: 300, maxExpand: 20000, guide: lp.edges.slice(i) }), new Set(), null);
+				return res.found && res.found.g < PENALTY ? mk(res.found, `long: the rest of a long plan (step ${i + 1} of ${lp.edges.length}${lp.nowall ? ', the walls lifted' : ''})`) : null;
+			};
+			const r = lp.nowall ? noWalls(rest) : rest();
+			if (r) { ST.longRest = (ST.longRest || 0) + 1; return r; }
 		}
 		// (a new long search only where the first plan's first step is stuck (LONG_R rungs failed); a kept path's rest any time)
 		if (!stuck || longTried.has(sk) || longCalls >= LONG_MAX) return null;
@@ -1630,7 +1643,27 @@ function createPlanner(model, facts, o = {}) {
 		if (Date.now() - t0 < 1000) { longCalls--; ST.longShort = (ST.longShort || 0) + 1; }
 		const node = res.found;
 		if (process.env.EEAT_LONG_DBG === '1') console.error(`[long] ${sk.slice(0, 40)} ms ${Date.now() - t0} expanded ${res.expanded} found ${node ? Math.round(node.g) : '-'}`);
-		if (!node || !(node.g < PENALTY)) { ST.longNone = (ST.longNone || 0) + 1; return null; }
+		if (!node || !(node.g < PENALTY)) {
+			if (LONG_NOWALL && ST.estWalls > 0) {
+				const cls = a.S.key + '|' + a.cls;
+				const r = noWalls(() => {
+					const t1 = Date.now();
+					const res2 = search(a, Object.assign({}, so, { ms: Math.max(1000, ms - (t1 - t0)), maxExpand: LONG_EXPAND, noGain: !LONG_GAIN }), new Set(), null);
+					const n2 = res2.found;
+					if (process.env.EEAT_LONG_DBG === '1') console.error(`[long nowall] ${sk.slice(0, 40)} ms ${Date.now() - t1} expanded ${res2.expanded} found ${n2 ? Math.round(n2.g) : '-'}`);
+					if (!n2 || !(n2.g < PENALTY)) return null;
+					const p = mk(n2, `long: a trophy plan with the est walls lifted (${res2.expanded} nodes)`);
+					if (!p || (facts && facts.rungOf(p.steps[0].edge, cls) >= Math.max(1, LONG_R))) return null;
+					const path2 = [];
+					for (let n = n2; n && n.e; n = n.parent) path2.push(n);
+					path2.reverse();
+					longPaths.push({ keys: [a.S.key].concat(path2.map((n) => n.S.key)), edges: path2.map((n) => n.e.edge), nowall: true });
+					return p;
+				});
+				if (r) { ST.longFound = (ST.longFound || 0) + 1; ST.longNoWall = (ST.longNoWall || 0) + 1; return r; }
+			}
+			ST.longNone = (ST.longNone || 0) + 1; return null;
+		}
 		const path = [];
 		for (let n = node; n && n.e; n = n.parent) path.push(n);
 		path.reverse();
