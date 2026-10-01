@@ -11,6 +11,10 @@
 //                                                            src/goexplore.js --gpu=1, jobs on stdin (rollhost.h)
 //   eegpu prove <level.bin> [--reach=<file>] [--seconds=30] [--maxCells=N]   a sound "no route" proof (prove.h; CPU only:
 //                                                            it never loads the NVIDIA driver)
+//   eegpu exact <level.bin> --h=<h.bin> --C=<run ticks> [--ladder=1] ...   THE EXACT LAYERED SEARCH (exact.h, exacthost.h):
+//                                                            the minimum run ticks when <= C, else a proof that none is;
+//                                                            its kernels: eegpu_exact_<tw>.ptx (eegpu ptx --src=exactkernels.cu)
+//   eegpu exacth <level.bin> <run.eetas> --h=<h.bin> [--cpu=1]   that search's bound h after every tick of a run
 // Level files come from src/gpu.js levelBlob(); .eetas are raw bytes (mask = (byte - 48) & 31).
 // Every GPU command takes --launch-ms=N (default 50): the target time of one kernel launch (launch.h: the work is
 // split into launches sized from the measured speed, so none nears the driver's 2 s watchdog even on a throttled
@@ -251,11 +255,16 @@ static int cmdPtx(int argc, char** argv) {
 	if (argc < 4) { fprintf(stderr, "usage: eegpu ptx <native dir> <out.ptx> --nvrtc=<dir with nvrtc64_120_0.dll> [--arch=compute_60] [--def=NAME,...]\n"); return 2; }
 	std::string dir = argv[2];
 	if (!cu::loadNvrtc(opt(argc, argv, "nvrtc", "."))) { fprintf(stderr, "%s\n", cu::lastError.c_str()); return 3; }
-	std::string src = readText(dir + "/kernels.cu"), h1 = readText(dir + "/eecore.h"), h2 = readText(dir + "/search.h"), h3 = readText(dir + "/beam.h"), h4 = readText(dir + "/explore.h");
-	const char* hdrs[] = { h1.c_str(), h2.c_str(), h3.c_str(), h4.c_str() };
-	const char* names[] = { "eecore.h", "search.h", "beam.h", "explore.h" };
+	// --src=exactkernels.cu: the exact search's own module (native/exact.h, eegpu exact); the default, kernels.cu, is
+	// compiled exactly as before (its 4 headers)
+	const std::string srcName = opt(argc, argv, "src", "kernels.cu");
+	const bool other = srcName != "kernels.cu";
+	std::string src = readText(dir + "/" + srcName), h1 = readText(dir + "/eecore.h"), h2 = readText(dir + "/search.h"), h3 = readText(dir + "/beam.h"), h4 = readText(dir + "/explore.h");
+	const std::string h5 = other ? readText(dir + "/exact.h") : std::string();
+	const char* hdrs[] = { h1.c_str(), h2.c_str(), h3.c_str(), h4.c_str(), h5.c_str() };
+	const char* names[] = { "eecore.h", "search.h", "beam.h", "explore.h", "exact.h" };
 	cu::nvrtcProgram prog;
-	cu::nvrtcCreateProgram(&prog, src.c_str(), "kernels.cu", 4, hdrs, names);
+	cu::nvrtcCreateProgram(&prog, src.c_str(), srcName.c_str(), other ? 5 : 4, hdrs, names);
 	std::string arch = "--gpu-architecture=" + opt(argc, argv, "arch", "compute_60");
 	std::string tw = "-DEE_ONLY_TW=" + opt(argc, argv, "tw", "8");
 	std::vector<std::string> defs;   // --def=A,B: extra -D options (build experiments, e.g. EE_TICK_NOINLINE)
@@ -955,6 +964,7 @@ static int cmdBench(int argc, char** argv) {
 #include "explorehost.h"
 #include "rollhost.h"
 #include "prove.h"
+#include "exacthost.h"
 
 // ------------------------------------------------------------------ twins: the exactness check of the twin rule (CPU)
 /** equal states: every byte, except the fields the next tick overwrites before it reads them (Sim::inUsed) */
@@ -1311,7 +1321,7 @@ static int cmdStackScan(int argc, char** argv) {
 }
 
 int main(int argc, char** argv) {
-	if (argc < 2) { fprintf(stderr, "eegpu trace|state|info|ptx|search|bench|beam|explore|roll|twins|reachtest|steertest|prove|stackscan ...\n"); return 2; }
+	if (argc < 2) { fprintf(stderr, "eegpu trace|state|info|ptx|search|bench|beam|explore|roll|twins|reachtest|steertest|prove|stackscan|exact|exacth ...\n"); return 2; }
 	std::string cmd = argv[1];
 	if (cmd == "prove") return cmdProve(argc, argv);   // (CPU only: before anything that may touch the driver)
 	if (cmd == "stackscan") return cmdStackScan(argc, argv);   // (CPU only)
@@ -1354,6 +1364,8 @@ int main(int argc, char** argv) {
 	if (cmd == "explore") return cmdExplore(argc, argv);
 	if (cmd == "roll") return cmdRoll(argc, argv);
 	if (cmd == "twins") return cmdTwins(argc, argv);
+	if (cmd == "exact") return cmdExact(argc, argv);
+	if (cmd == "exacth") return cmdExactH(argc, argv);
 	fprintf(stderr, "unknown command %s\n", argv[1]);
 	return 2;
 }
