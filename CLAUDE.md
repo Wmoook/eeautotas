@@ -1324,6 +1324,37 @@ ways in.
   what it should there (12 deep steps not run; the deep rung 7 finds / 7 fails vs 3 / 8). Both stay OPT-IN, not merged.
   NEXT: the floor's statistics from steps at their own rung only (a lifted step no evidence), at most rung 1; the gate
   alone at 160 tiles vs the deep rung on the hard set, more runs a level.
+- **The hard set at 900 s, cycle 4: the deep gate alone, and NC Naos's stop is two walls** (B8 hard, 2026-10-01, branch
+  n5-b8-hard-c4 = n5-b8-hard-c3 + this note + `tools/cmp/relaykrt.js`; box 8 `~/b8_hard_c4`, code = 5f7d66d, 900 s, W3,
+  arms side by side, one run a level a round, load 135-220; `src/out/n5/b8/hard_c4.txt`). THE GATE ALONE (`EEAT_RUNG_DEEP=135000`
+  = d vs + `EEAT_DEEP_GATE=160` = g): ARE YOU A GOD compiled in both arms over the cycle: g 8,572 run ticks (first route
+  9,559 at 536 s, round 1), d 7,713 (first route 13,239 at 727 s, round 2; d's round-1 run none, 13 triggers) (best known
+  5,375; every .eetas replayed from the level file, 0 deaths); NC Naos de5f 12 (g) vs 9 (d) triggers; the deep rung's steps
+  g 2 finds / 7 fails (838 worker-s) vs d 3 / 15 (1,790 s) on the same two levels, 3 deep steps gated; ROUND3. THE
+  SKELETON'S DIRECT SHARE (`EEAT_SKEL_DIRECT=0.7`, an existing executor knob, vs the deep rung alone, round 2): AYAG none vs
+  7,713, Stupid Fox 4 vs 7 triggers: NEGATIVE. NC NAOS'S STOP (both versions stop at coins (207,189) / (208,186) /
+  (220,122)), from the known route's own states (`tools/cmp/legab.js` / `relaykrt.js`, `--defaults=1`; the 8,267-tick
+  route cut at a tick; the leg coin (254,174) -> coin (207,189), 385 route ticks): TWO WALLS. (1) The route's 120-tick
+  left+jump GLIDE (mask 18 held, to -6.5 px/tick) down-left through a dot / up-arrow lattice: with the 12-tile skeleton the
+  135-s window fails 4 / 4 from ticks 4125 / 4210 (closest 40.6 tiles at (246,189), every rep the same), rung 2 from 4250
+  (already gliding at -4.7) too; the executor's direct leg alone (`EEAT_SKEL=0`) finds it from 4250 / 4290 at rung 2 (8.2 /
+  8.8 s), `EEAT_SKEL_STEP=24` from 4250 (11.9 s); at rung 3 the default's own 15.75-s direct leg finds it from 4250 / 4290
+  (12.2 s); from the coin's own state (4125) the 45-s direct leg (`EEAT_SKEL=0`; the deep rung's direct share is 47 s)
+  carries the glide to (230,189) at tick 4391, the route's own place and time ((227.5,190.6) at 4390). (2) From that arrival
+  (vx -1.1, vy -0.6) the last 20 tiles (the route stops, drops to row 191 and takes three jumps left into the coin row) are
+  not found in 45 s (the relay: closest 23 at (228,188)), where the route's state 2-3 tiles away finds them in 0.9 s
+  (cycle 1's krt): the deep rung's 20.6-tile closest on de5f (cycle 2) is this second wall. Opt-in tried and dropped: a
+  GROWN RETRY (a sub-leg that failed by its budget retried with a doubled step): 41.6 / 42.6 tiles from 4210 / 4125, no
+  gain (the 12-tile sub-leg SUCCEEDS with a slow arrival; the next set fails from it). The skeleton on 6 more stuck legs
+  (krt, rung 2, base / `EEAT_SKEL=0` / `EEAT_SKEL_STEP=24`): Stupid Fox's checkpoint (55,46) from its previous trigger -- /
+  15.2 s / --, from 300 before -- / 8.4 s / 13.4 s; Are You A God's coin (93,114) from 300 before -- / 8.6 s / --; Egg
+  Quest II's green key prev closest 13.8 / 5 / 7; Forgotten Veil b7be's coin (315,175) prev 35.8 / 60.4 / 67.4 (worse);
+  FV 731, NC Naos de5f the same; at rung 3 the base finds the Stupid Fox legs (11.6 / 9.8 s): the 12-tile skeleton costs
+  rungs on momentum legs, it is not those compiles' wall. `tools/cmp/relaykrt.js <level> <start.eetas> "<label>" [--ms]
+  [--level] [--defaults=1]`: a reach from a state, then the same leg from its own closest state (the relay start; its
+  masks end at the reported closest tile: checked). NEXT: the second wall (the lattice row's last 20 tiles from the
+  glide's own arrival: the finder's state vs the route's, an exact search from it), the gate with more runs a level before
+  any shared gate (with B7's merge of the deep rung).
 - **THE ENDGAME and THE AIRBORNE ARRIVAL** (C6 push 3 lane 5 block 3; `src/out/n5/lanes/c6_lane5_b3.md`). THE ENDGAME
   (strategy.js after JOINS, its own clock; OPT-IN `--endgame=<s>` / `EEAT_ENDGAME_S`, unset / 0 = the compile byte for byte;
   `EEAT_ENDGAME_K` the ladder's largest K, 64; `report.endgame`): the optimizer's exact endgame ladder (`src/endgame.js`
