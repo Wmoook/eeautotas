@@ -63,6 +63,12 @@ const W_EST0 = ENVN('EEAT_BWC_WEST0', 0.25), PLAN_AT = ENVN('EEAT_BWC_PLANAT', 1
 // (planner o.failEst), so its next plans go another way
 const LEARN = process.env.EEAT_BWC_LEARN === '1';
 const FAIL_K = ENVN('EEAT_BWC_FAILK', 1), FAIL_EST_C = ENVN('EEAT_BWC_FAILEST', 400);
+// THE ORDER BOUND (P4 gated, OPT-IN EEAT_BWC_MORE=1; off = the first route ends the search, byte for byte): a chain route is
+// one order; the search goes on to the clock's end for FASTER orders, a branch and bound with the first route the incumbent:
+// a node at tick t is out once t + the planner's admissible bound to the trophy (planner.lowerBound) reaches the
+// incumbent's finish tick, a candidate once t + its edge's lb does; every faster finish (C.evaluate'd) is the new incumbent
+// and reported through o.onRoute (the child prints it: the compile's routeOf takes it when faster)
+const MORE = process.env.EEAT_BWC_MORE === '1';
 
 /** the masks' replay from a snapshot: the first tick the goal holds (the tail candidates tried) -> {masks, sim} | null */
 function hitOf(L, snap, legMasks, goal) {
@@ -234,6 +240,15 @@ function chainLevel(L, o = {}) {
 		for (const m of o.starts || []) { try { const r = T.playTo(L, m, { allowDeath: true }); if (!r.sim.is_dead) addNode(m, r.sim, null, 'import'); } catch (e) { /* skip */ } }
 	}
 	let best = null, why = 'budget';
+	// (THE ORDER BOUND, MORE: the incumbent's finish tick; a node whose tick + the planner's admissible lower bound to the
+	// trophy (planner.lowerBound: A* on the lb walk relaxation) reaches it, and a candidate whose tick + its edge's lb does,
+	// is no try any more)
+	let bestC = Infinity;
+	const lbOf = (n) => {
+		if (n.lbT === undefined) { let t = 0; try { const r = planner.lowerBound(anchorArg(n), { ms: 300 }); t = r && Number.isFinite(r.ticks) ? r.ticks : (r && r.complete ? Infinity : 0); } catch (e) { t = 0; } n.lbT = t; stats.lbCalls = (stats.lbCalls || 0) + 1; }
+		return n.lbT;
+	};
+	const boundOut = (n) => bestC < Infinity && n.a.tick + lbOf(n) >= bestC;
 	outer:
 	while (left() > 300 && !stop()) {
 		// the next try: the least COST over (node, candidate, its next clock level) = the clock x (1 + RANK_W x the candidate's
@@ -261,11 +276,13 @@ function chainLevel(L, o = {}) {
 				for (const a of byGain.values()) { a.sort(better); a.forEach((n, i) => sib.set(n, i)); }
 				let bk = Infinity, bn = null, bc = null, bl = -1;
 				for (const n of nodes) {
+					if (bestC < Infinity && boundOut(n)) { if (!n.cut) { n.cut = true; stats.boundCut = (stats.boundCut || 0) + 1; } continue; }
 					const gf = (1 + GAIN_W * Math.max(0, gMax - n.gain)) * (1 + SIB_W * sib.get(n));
 					if (!n.cands) { const k = CL[0] * gf; if (k < bk || (k === bk && bn && better(n, bn) < 0)) { bk = k; bn = n; bc = null; bl = 0; } continue; }
 					for (let i = 0; i < n.cands.length; i++) {
 						const c = n.cands[i], l = c.tried + 1;
 						if (l >= CL.length) continue;
+						if (bestC < Infinity && c.step && Number.isFinite(+c.step.lb) && n.a.tick + (+c.step.lb) >= bestC) continue;
 						const k = CL[l] * c.w * gf * failF(c.edge);
 						if (k < bk || (k === bk && bn && better(n, bn) < 0)) { bk = k; bn = n; bc = c; bl = l; }
 					}
@@ -282,7 +299,7 @@ function chainLevel(L, o = {}) {
 				pick = bn; pc = bc; lvl = bl;
 			}
 		}
-		if (!pick) { why = 'exhausted'; break; }
+		if (!pick) { if (!best) why = 'exhausted'; else stats.closed = true; break; }
 		stats.level = Math.max(stats.level, lvl);
 		pc.tried = lvl;
 		const wp = pc.wp;
@@ -319,7 +336,17 @@ function chainLevel(L, o = {}) {
 		log(`L${lvl} ${leg.label} from tick ${pick.a.tick} (depth ${pick.depth}): ${leg.T} t, ${(leg.ms / 1000).toFixed(1)} s`);
 		if (hit.sim.has_silver_crown || wp.kind === 'trophy') {
 			const ev = C.evaluate(L, masks, false);
-			if (ev) { best = { masks: ev.ms || masks, runTicks: ev.runTicks, deaths: ev.deaths }; why = 'finish'; break; }
+			if (ev) {
+				// (MORE: the first route is the incumbent and the search goes on for faster orders under its bound; each faster
+				// one is reported (o.onRoute) and becomes the bound)
+				if (!best || ev.runTicks < best.runTicks) {
+					best = { masks: ev.ms || masks, runTicks: ev.runTicks, deaths: ev.deaths, ms: Date.now() - t0 };
+					why = 'finish'; bestC = ev.complete; stats.routes = (stats.routes || 0) + 1;
+					if (o.onRoute) { try { o.onRoute(best); } catch (e) { /* the caller's */ } }
+				}
+				if (!MORE) break;
+				continue;
+			}
 			leg.why = 'no finish'; leg.ok = false;
 			continue;
 		}

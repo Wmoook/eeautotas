@@ -19,7 +19,9 @@ for (const file of files) {
 	const row = { level: path.basename(file) };
 	try {
 		const L = T.loadLevelFile(file);
-		const r = BC.chainLevel(L, { ms, clocks: sched, file, log: verbose ? (s) => process.stderr.write(`[${((Date.now() - t0) / 1000).toFixed(1)}] ${s}\n`) : null });
+		const routes = [];
+		const r = BC.chainLevel(L, { ms, clocks: sched, file, log: verbose ? (s) => process.stderr.write(`[${((Date.now() - t0) / 1000).toFixed(1)}] ${s}\n`) : null, onRoute: (b) => routes.push([b.runTicks, Math.round((Date.now() - t0) / 100) / 10]) });
+		row.routes = routes;
 		row.ok = r.ok; row.why = r.why; row.runTicks = r.runTicks; row.deaths = r.deaths; row.depth = r.depth; row.gain = r.gain; row.deepestTick = r.deepestTick;
 		row.legs = r.legs.length; row.legsOk = r.legs.filter((x) => x.ok).length; row.stats = r.stats;
 		row.legList = r.legs.map((x) => [x.label, x.depth, x.from, x.ok ? x.T : null, Math.round(x.ms / 100) / 10, x.ok ? '' : x.why]);

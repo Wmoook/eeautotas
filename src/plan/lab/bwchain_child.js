@@ -68,8 +68,11 @@ try {
 	}
 	if (end !== 'finish' && left() > 5000) {
 		mode = mode ? 'one+chain' : 'chain';
+		// (EEAT_BWC_MORE: every faster chain route as it comes; the compile's routeOf keeps the fastest)
+		let printed = null;
 		const c = BC.chainLevel(L, {
 			ms: left() - 500, model: M, backward: B, file,
+			onRoute: process.env.EEAT_BWC_MORE === '1' ? (b) => { printed = b.runTicks; out({ ev: 'result', kind: 'finish', inputs: T.strOf(b.masks), runTicks: b.runTicks, deaths: b.deaths, ms: Date.now() - t0 }); } : null,
 			// (EEAT_BWC_IMPORT: 1 (the default) only the chain's FRONTIER (a node of more gain than every one printed before: the
 			// executor goes on from the chain's progress, not from every order it tried), 2 every node, 0 none)
 			onAnchor: (masks, info) => {
@@ -79,7 +82,7 @@ try {
 			},
 		});
 		out({ ev: 'chain', ok: c.ok, why: c.why, legs: c.stats.legs, legsOk: c.stats.legsOk, nodes: c.stats.nodes, gain: c.gain, ms: Date.now() - t0 });
-		if (c.ok) { out({ ev: 'result', kind: 'finish', inputs: T.strOf(c.masks), runTicks: c.runTicks, deaths: c.deaths }); end = 'finish'; }
+		if (c.ok) { if (printed !== c.runTicks) out({ ev: 'result', kind: 'finish', inputs: T.strOf(c.masks), runTicks: c.runTicks, deaths: c.deaths }); end = 'finish'; }
 		else end = c.why || 'none';
 	} else if (end !== 'finish') end = r.why || 'none';
 } catch (e) { end = 'error: ' + String(e && e.message || e).slice(0, 200); }
