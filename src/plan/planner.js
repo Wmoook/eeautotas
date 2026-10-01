@@ -157,6 +157,7 @@ const TIMER_LATE = TIMER && process.env.EEAT_PLAN_TIMER_LATE !== '0';
 // state (its doors / counts): the trophy edge from that state then goes to the other components only (edge
 // 'trophy~t<ids>', its own rungs from 0; the waypoint carries their tiles, types.js goalOf: the field to them, the test
 // still the crown). Ordering only: the lb / proofs read every trophy tile as before, the crown on any tile finishes.
+const NEEDS_DEATHS = process.env.EEAT_NEEDS_DEATHS === '1';   // (THE DEATH DOOR'S NEED: openValue, executor.js blockedOnWay)
 const TCOMP = process.env.EEAT_TROPHY_COMP === '1';
 const TCOMP_RUNG = Math.max(0, +(process.env.EEAT_TROPHY_COMP_RUNG || 2) | 0);
 const TCOMP_NEAR = Math.max(0, +(process.env.EEAT_TROPHY_COMP_NEAR || 2));
@@ -1777,6 +1778,11 @@ function createPlanner(model, facts, o = {}) {
 	/** the value of the feature gate tile i reads that opens it */
 	function openValue(i, S) {
 		const A = model.A, k = A.gateFeat[i], pol = A.gatePol[i], p = A.gateParam[i];
+		// (THE DEATH DOOR'S NEED, OPT-IN EEAT_NEEDS_DEATHS=1: a death door (1011) opens at its number of deaths (the model's
+		// S.feats.deaths, capped at the level's highest death door / gate number): that number is the value the step needs.
+		// Tutorial 2's switch 0 behind the door (264,28): every deaths-0 anchor class tried it at rungs 0-3 (closest 61.2 tiles
+		// at the door, ~66 worker-s a class) and the CEGAR learned nothing, the door being an 'open' gate to steer.js)
+		if (k === 'open' && NEEDS_DEATHS && model.L.fg[i] === 1011) return model.L.lookup0[i];
 		if (!k || k === 'open' || k === 'time' || k === 'static') return null;
 		if (k.startsWith('key') || k.startsWith('psw') || k.startsWith('osw') || k === 'crown') return pol === 1 ? 1 : 0;
 		if (k === 'team') return pol === 1 ? p : null;

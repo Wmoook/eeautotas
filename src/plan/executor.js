@@ -1761,7 +1761,10 @@ function makeCore(L, co) {
 		const out = [], got = new Set();
 		const gateAt = (t) => {
 			if (A.cls[t] !== 3) return;
-			const feat = A.gateFeat[t];
+			// (THE DEATH DOOR'S NEED, OPT-IN EEAT_NEEDS_DEATHS=1: a death door (1011, open from its number of deaths on) is an
+			// 'open' gate to steer.js; shut on the way it is named as feature 'deaths', so the planner learns the step needs
+			// that many deaths first: planner.js openValue)
+			const feat = NEEDS_DEATHS() && A.gateFeat[t] === 'open' && L.fg[t] === 1011 ? 'deaths' : A.gateFeat[t];
 			if (!feat || feat === 'static' || feat === 'open') return;
 			const x = t % W, y = (t / W) | 0;
 			if (Math.max(Math.abs(x - x0), Math.abs(y - y0)) > near) return;
@@ -1871,6 +1874,7 @@ function fingerprint(L) {
  *  search without the death priority, and its dive stopped on the killer's doorstep (Cold World: from the 4 anchors at
  *  chapter 1's end the step failed 30 rungs of 1.5-45 s, 9-14 M sims each; legBest alone with dieStep finds it in 0.1 s) */
 const WP_DIEFIELD = () => process.env.EEAT_WP_DIEFIELD === '1';
+const NEEDS_DEATHS = () => process.env.EEAT_NEEDS_DEATHS === '1';
 const wpData = (wp) => Object.assign({ kind: wp.kind, tiles: wp.tiles ? Array.from(wp.tiles) : [], trig: wp.trig, expect: wp.expect ? { feat: wp.expect.feat, value: wp.expect.value } : null,
 	label: wp.label || '', allowDeath: !!wp.allowDeath, beforeTick: wp.beforeTick >= 0 ? wp.beforeTick : -1,
 	fieldTiles: wp.fieldTiles ? Array.from(wp.fieldTiles) : null, fieldTouch: !!wp.fieldTouch, wallsOn: !!wp.wallsOn },
