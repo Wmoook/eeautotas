@@ -2031,6 +2031,16 @@ async function createExecutor(L, opts) {
 	const SKEL_REDIRECT = process.env.EEAT_SKEL_REDIRECT !== '0';   // (DEFAULT ON since n5 lane 6 block 1; =0: off)
 	const REDIRECT_F = +process.env.EEAT_SKEL_REDIRECT_F > 1 ? +process.env.EEAT_SKEL_REDIRECT_F : 2;
 	const skelDirectMs = new Map();   // skelKey -> the largest direct-leg share tried (EEAT_SKEL_REDIRECT)
+	// ---- THE DIRECT RUNG (B8 hard cycle 5, OPT-IN EEAT_DIRECT_RUNG=<rung>, unset = the portfolio byte for byte): on that
+	// rung a far leg (the skeleton's) is the direct leg ALONE with the whole window, and on a later rung the direct leg runs
+	// again only when its share is REDIRECT_F times the largest one tried for the key (else the skeleton has the whole
+	// window). WHY: the skeleton's 12-tile sub-level sets cut legs that live on momentum (a glide, a run-up, a fall through
+	// an arrow row) and the direct leg's 35% share at rung 2 (5.25 s) is short of them: from the known routes' own states
+	// (krt, rung 2) the direct leg alone found Stupid Fox's checkpoint (55,46) (15.2 / 8.4 s), Are You A God's coin (93,114)
+	// (8.6 s) and NC Naos's coin (207,189) (8.2 / 8.8 s) that the portfolio's rung 2 never did; rung 3's 15.75-s direct
+	// share found them again at 45 s a step. The ladder with the knob at 2: direct 15 s (rung 2), skeleton 45 s (rung 3),
+	// direct 47 s + skeleton 88 s (the deep rung).
+	const DIRECT_RUNG = process.env.EEAT_DIRECT_RUNG !== undefined && process.env.EEAT_DIRECT_RUNG !== '' && Number.isFinite(+process.env.EEAT_DIRECT_RUNG) ? +process.env.EEAT_DIRECT_RUNG : -1;
 	// ---- THE SKELETON ACROSS WALLS (n5 lane 4, RATE): the memo's key holds the waypoint field's wall count, and every
 	// failed direct leg / sub-leg learns counterexample walls, so the next call for the same step (the next rung, the next
 	// deepening) found no memo and started over at the step's starts: Sentinel Ravines' one trophy leg restarted 7 of its 8
@@ -2619,15 +2629,19 @@ async function createExecutor(L, opts) {
 			if (rv.ok || (rv.fail && (rv.fail.why === 'proof' || rv.fail.why === 'stopped' || rv.fail.why === 'dies'))) return rv;
 		}
 		const sk0 = skelKey(goal, wp, startStrs, wN);
-		const dMs0 = SKEL_DIRECT * (deadline - Date.now());
+		const dRung = DIRECT_RUNG >= 0 && (budget.level | 0) === DIRECT_RUNG;
+		const dMs0 = (dRung ? 1 : SKEL_DIRECT) * (deadline - Date.now());
 		const redirect = SKEL_REDIRECT && skelMemo.has(sk0) && dMs0 >= REDIRECT_F * (skelDirectMs.get(sk0) || Infinity);
-		if (SKEL_DIRECT > 0 && (!skelMemo.has(sk0) || redirect)) {
+		const dSkip = DIRECT_RUNG >= 0 && !dRung && skelDirectMs.has(sk0) && !(dMs0 >= REDIRECT_F * skelDirectMs.get(sk0));
+		if (SKEL_DIRECT > 0 && !dSkip && (dRung || !skelMemo.has(sk0) || redirect)) {
 			const dMs = dMs0;
-			if (SKEL_REDIRECT) { skelDirectMs.set(sk0, Math.max(skelDirectMs.get(sk0) || 0, dMs)); if (redirect) S.redirects = (S.redirects || 0) + 1; }
+			if (SKEL_REDIRECT || DIRECT_RUNG >= 0) { skelDirectMs.set(sk0, Math.max(skelDirectMs.get(sk0) || 0, dMs)); if (redirect) S.redirects = (S.redirects || 0) + 1; }
+			if (dRung) S.directRung = (S.directRung || 0) + 1;
 			const r0 = await reachLeg(starts, wp, { ms: dMs, level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline: Math.min(deadline, Date.now() + dMs), stop: budget.stop, next: budget.next || null, cover: coverSlot || slotV2 ? 2 : 0 });
 			if (r0.ok || (r0.fail && (r0.fail.why === 'proof' || r0.fail.why === 'stopped' || r0.fail.why === 'dies'))) return r0;
 			const rD = await deathLeg(starts, wp, budget, r0, Date.now() + 0.5 * (deadline - Date.now()));
 			if (rD) return rD;
+			if (dRung) return r0;
 			if (wRefresh()) { measure(); if (!f0 || !Number.isFinite(c0)) return r0; }
 		}
 		// (COVER V2: the cover slot after the direct leg found nothing, before the skeleton)
