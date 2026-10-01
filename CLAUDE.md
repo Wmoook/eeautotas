@@ -549,6 +549,33 @@ ways in.
   failures of that child were the load). The load's share: at load 230 the first routes took 1.7-5x their calm box-8
   times (load 25-60, the base: the pair 17-19 s vs 91-96, Animaly 56 vs 104, Gingerbread House 38 vs 64): a loaded
   box's median is not the compiler's.
+- **THE FIRST ROUTE'S LINEAGE** (B8 speed, cycle 3, 2026-10-01, branch n5-b8-speed-c3; box 8 `~/b8_speed_c3`):
+  `tools/cmp/lineage.js <log dir>` traces each first route back anchor by anchor (an anchor's parent: the anchor of the
+  longest inputs that are a prefix of its own, else the anchor of the ok step that made it) and splits each link's time
+  from its parent's birth into **esc** (the same edge's failed lower rungs from the parent), **win** (the successful
+  step's window) and **wait** (the parent born, that edge not yet running). Cycle 1's 43 routed levels (load 230):
+  4,341 s = executor links 2,928 s (esc 796 / win 1,091 / wait 1,038) + the children's route links 1,396 s (the stretch
+  child's one-leg levels 570, the chain child 255, precision 194); n5-plan 04ecf95 (b0, the 12 levels routed before the
+  box filled, load 200-228): executor links 912 s = esc 25% / win 42% / wait 33%. The successful windows: math / portfolio
+  0.4-0.8 s, the leg tier 1.2 s of 1.5 at rung 0, 3.4 of 5 at rung 1, 9-11 of 15 at rung 2 (after a find: the tightening,
+  the leg polish and the exact-ub to the window's end; EEAT_RATE caps it, opt-in). THE WORKERS' TIME before the first route
+  (b0, 12 levels, 4,772 worker-s): ok steps 24%; failed 76%, of it (anchor, edge) pairs NEVER solved before the route
+  2,964 s = 62% of all (rung 0 724, rung 1 924, rung 2 918, rung 3 399): the first route waits on edges that do not go.
+  THE WAIT, e.g. Tutorial 2 (176 s): every lineage link waited 11-15 s while the cost order ran the failed edges' 15-s
+  rung-2 windows before the next edge's rung 1 (`EEAT_RUNG_BREADTH=1`, doctor 5: iterative deepening over an anchor's
+  first legs). THE MAIN THREAD's re-plans (`EEAT_PLAN_PROF=1`: a 'planprof' event, this thread's `planner.plan` time):
+  Level 1 Overworld 227 plans 70.5 s of its 136-s first route (310 ms each: every plan cut by its 300-ms budget, a new
+  anchor every 0.3-0.4 s, each next step dispatched 0.3 s after its anchor's birth), MIHB's Dream 186 / 24.7 s of 155,
+  the others 2-4 s (2-3%). `EEAT_PLAN_PRE_MS=<ms>` (OPT-IN, off = byte for byte; planstrategy 27 / 0 both ways): the
+  re-plans before the first route on <ms>: Overworld 248 plans 39.3 s (158 ms each). THE A/B (box 8 `~/b8_speed_c3/abY`,
+  `firstab.js`, the 22 executor-routed levels of the 50, 300 s, W3, par 2 an arm side by side, one run an arm, load
+  185-225; unrouted at 300): base 21 / 22 routed, first-route median 121.8 s, p90 247.6, 5 by 60 s; `EEAT_PLAN_PRE_MS=100`
+  19 / 22, median 135, p90 300, 5 (both routed 18: faster 5 / slower 13, geo 1.117); `EEAT_RUNG_BREADTH=1` 17 / 22, median
+  140.6, p90 300, 5 (both 17: faster 6 / slower 11, geo 1.061; Tutorial 2 82 vs 174 s, lost Witch's House, TPs, Tutorial 4,
+  Christmas Town): BOTH NEGATIVE, both stay opt-in. The main thread's planning is not what holds most first routes (worker
+  use 0.8-0.96 before the first route in b0): the workers' time is, and 62% of it goes to pairs that never go (NEXT: an
+  edge whose rung-r attempt got no nearer, closest > 60 units (1,330 of b0's 2,964 never-solved s), waits behind the
+  anchor's other edges' rung r; 63% of the never-solved time is on edges solved from another anchor).
 - **In the app**: the level editor's **Compile** button (POST / GET `/api/editor/compile`, section 9) runs the CLI in its own
   process in `<data>/editor/compile/`, shows its stage lines, replays the route once more, makes a job `<name> (compiled)`
   (watch it, optimize it like any run) and copies its `/loadtas` line. `src/plan.js` is the headless runner (JSON lines):
