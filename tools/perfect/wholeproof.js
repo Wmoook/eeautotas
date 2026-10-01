@@ -42,6 +42,8 @@ const EG = require('../../src/endgame.js');
 const BO = require('../../src/plan/bounds.js');
 
 const TROPHY = 121;
+// (a pass stops at this share of the V8 heap limit: --max-old-space-size)
+const HEAP_STOP = 0.8 * require('v8').getHeapStatistics().heap_size_limit;
 
 /** the bound object for a level: h(sim) -> admissible ticks until has_silver_crown (Infinity: never) */
 function createH(L, o = {}) {
@@ -209,6 +211,8 @@ function pass(L, starts, H, D, o) {
 		let n = 0, found = null;
 		for (let i = 0; i < curN && found === null; i++) {
 			if ((i & 255) === 0 && Date.now() > deadline) { st.seen = seen.size; st.seconds = (Date.now() - t0) / 1000; return { status: 'time', next, stats: st }; }
+			// (the heap: a pass that would run out of it stops as 'mem', a claim of nothing, instead of the process dying)
+			if ((i & 4095) === 0 && process.memoryUsage().heapUsed > HEAP_STOP) { st.seen = seen.size; st.seconds = (Date.now() - t0) / 1000; return { status: 'mem', next, stats: st }; }
 			const masks = EG.probeMasks(sim, inp, cur[i]);
 			st.ticks++;
 			let noJump = 0;
