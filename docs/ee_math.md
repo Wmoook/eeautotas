@@ -2153,6 +2153,18 @@ nodes (an edge is free iff both ends are), a touch of a cell [16X, 16X + 16)^2 f
 an L1-type geodesic among lattice-aligned obstacles runs on the lattice (it turns only at obstacle edges: lattice lines,
 or floored toward its own side). Only the exact start point pays its floor offset (once). Node (i, j) is blocked iff a
 wall lies in cols(i) x rows(j), cols(2a) = {a - 1, a}, cols(2a + 1) = {a}.
+The engine tests overlaps on the real px (eesim.js rectHit: p in (rx - 16, rx + w)), so the true obstacle is the open
+(16W - 8, 16W + 24) and the lattice one a subset of it: a relaxation. HALF BLOCKS (F_HALF, lookup rotation 0 / 1 / 2 / 3:
+only the right / lower / left / upper half solid) are their own rectangles, the centre obstacle of [rx, rx + w) being
+[rx - 7, rx + w + 8): rotation 2 blocks node columns {2a, 2a + 1} (rows {2b, 2b + 1, 2b + 2}), rotation 0 {2a + 1, 2a + 2},
+rotation 3 / 1 the same in rows; the model's classes make rotations 2 / 3 whole-tile walls (the centre is never in such a
+TILE), which blocked nodes the centre does reach (On And On And On, the bound Infinity at a reachable state). THE REGIONS:
+a touch of a cell enters it from the left / above at its own lattice line, but from the right / below the path is at x >=
+16X + 16 just before and its first point inside floors to 16X + 8, 8 px further than it moved: a cell's region is 3 x 3
+nodes, its own 2 x 2 and the next column / row (the 2 x 2 regions overcharged a leftward / upward arrival by up to 8 px:
+2.137 two ticks before the crown on the precision puzzle); as a START region the next column / row covers a rightward /
+downward departure from anywhere in the cell; a blocked node of a region is never the floor of a point on a path (the
+flooring lemma): skipped.
 
 ### 9.2 Local speed caps (sound)
 U(c) = the most |speed| after the update of a tick that STARTS in tile c, per axis direction, a fixpoint from below of
