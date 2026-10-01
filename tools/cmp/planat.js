@@ -51,6 +51,18 @@ const out = es.map((e) => ({ label: e.X ? e.X.label : 'TROPHY', est: Math.round(
 out.sort((x, y) => (x.lm ?? 0) - (y.lm ?? 0) || (y.gain ?? 0) - (x.gain ?? 0) || x.est - y.est);
 for (const o of out.slice(0, +(process.env.TOPE || 40))) console.log(`  ${o.label.padEnd(40)} est ${String(o.est).padStart(8)}${o.relax ? ' RELAX' : '      '} gain ${o.gain} lm ${o.lm} hSteps ${o.hs}`);
 if (lm) console.log(`root lm ${lm(a.S)} gain ${a.S.gain} hSteps ${planner._hSteps ? planner._hSteps(a.pos) : '-'}`);
+// (LEARN=<edge>@<closest tile>@<rungs>[;...]: that edge's budget failures from this anchor fed to planner.learn first,
+// rungs 0 .. rungs-1, the closest tile on every rung but the first: the learn rules (needs, walls) as the compile has them)
+if (process.env.LEARN) {
+	for (const spec of process.env.LEARN.split(';').filter(Boolean)) {
+		const [edge, tileS, rungsS] = spec.split('@');
+		const X = model.triggers[+String(edge).replace(/^trig:/, '')];
+		for (let r = 0; r < +(rungsS || 2); r++) {
+			const facts2 = planner.learn({ edge, nodeClass: a.S.key + '|' + a.cls, rung: r, waypoint: X ? { trig: X.id, tiles: X.tiles, label: X.label } : null }, { ok: false, fail: { why: 'budget', closest: r ? { tile: +tileS, dist: 20 } : null, touched: [], blockedBy: [] } }, A);
+			console.log(`learn ${edge} rung ${r}: ${facts2.map((f) => f.kind + (f.kind === 'needs' ? ` ${f.feat}=${f.value}` : '')).join(', ')}`);
+		}
+	}
+}
 for (let r = 0; r < reps; r++) {
 	const t1 = Date.now();
 	const pr = planner.plan(A, { k: 3, depth: Infinity, runBound: Infinity, tickBound: Infinity, epoch: 0, ms });

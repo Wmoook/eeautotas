@@ -170,6 +170,18 @@ const TIMER_LATE = TIMER && process.env.EEAT_PLAN_TIMER_LATE !== '0';
 // 'trophy~t<ids>', its own rungs from 0; the waypoint carries their tiles, types.js goalOf: the field to them, the test
 // still the crown). Ordering only: the lb / proofs read every trophy tile as before, the crown on any tile finishes.
 const NEEDS_DEATHS = process.env.EEAT_NEEDS_DEATHS === '1';   // (THE DEATH DOOR'S NEED: openValue, executor.js blockedOnWay)
+// THE ROOM'S DOOR (LH b9; OPT-IN EEAT_NEEDS_NEAR=<R tiles>, off = the learn byte for byte): a leg can need a door's room
+// that is NOT on the all-open field's way (the executor's blockedBy reads only the gates within 2 tiles of that way):
+// Bad EE Level 9's mini at switch 18: every leg from a team-0 anchor stopped at the same tile 21.8 field-tiles short (rungs
+// 0-4, up to 135-s windows, 4 runs), every leg from a team-6 anchor found the switch in 1.7-3.8 s: the found route runs
+// into the team-6 door's pocket 10 tiles from that tile and back (its run-up), the field's way passes it by. With the knob
+// a budget failure at rung >= EEAT_NEEDS_NEAR_RUNG (1) whose closest tile has a gate shut in the anchor's state within R
+// tiles that a trigger opens makes a 'needs' fact (the nearest such gate's feature and open value) for (edge, class): the
+// next plans from that class touch the opener first (the planner's existing needs rule), the class's rungs are not spent.
+const NEEDS_NEAR = Math.max(0, +(process.env.EEAT_NEEDS_NEAR || 0) | 0);
+const NEEDS_NEAR_RUNG = Math.max(0, +(process.env.EEAT_NEEDS_NEAR_RUNG || 1) | 0);
+const NEEDS_NEAR_EDGE = NEEDS_NEAR > 0 && process.env.EEAT_NEEDS_NEAR_EDGE === '1';
+const NEEDS_OPEN_K = Math.max(1, +(process.env.EEAT_NEEDS_OPEN_K || 1) | 0);
 const TCOMP = process.env.EEAT_TROPHY_COMP === '1';
 const TCOMP_RUNG = Math.max(0, +(process.env.EEAT_TROPHY_COMP_RUNG || 2) | 0);
 const TCOMP_NEAR = Math.max(0, +(process.env.EEAT_TROPHY_COMP_NEAR || 2));
@@ -821,6 +833,7 @@ function createPlanner(model, facts, o = {}) {
 				if (facts) {
 					if (facts.blocked(edge, cls, proofKey(S, pos))) return;
 					if (facts.needsOf(edge, cls).some((n) => S.feats[n.feat] !== n.value)) return;
+					if (NEEDS_NEAR_EDGE && facts.needsOf(edge, '*').some((n) => S.feats[n.feat] !== n.value)) return;
 					const ok = facts.okTicks(edge, cls);
 					if (ok !== undefined) { g.est = Math.max(g.lb, ok); g.pen = ''; }
 					else {
@@ -1514,6 +1527,9 @@ function createPlanner(model, facts, o = {}) {
 			} catch (e) { if (process.env.EEAT_CRUMB_DBG === '1') console.error('crumbPlan', e.stack); }
 		}
 		if (longP) plans.unshift(longP);
+		if (NEEDS_NEAR_EDGE && edgeNeeds.size && facts) {
+			try { const op = openerPlans(a, plans); if (op.length) plans.unshift(...op); } catch (e) { if (process.env.EEAT_NEEDS_DBG === '1') console.error('openerPlans', e.stack); }
+		}
 		if (!plans.length) {
 			why = rootEdges < 0 ? 'budget' : rootEdges === 0 && !(facts && facts.list().length) ? 'proof' : 'exhausted';
 			// (no edge at the root because the facts took them all: exhausted; none at all without facts: a walk proof)
@@ -1554,6 +1570,46 @@ function createPlanner(model, facts, o = {}) {
 	 * 319 vs 358 run ticks), The Glitch 8 vs the baseline's 4; the lane's 23 levels side by side with the base: progress
 	 * 78 vs 72 (Booty Return 16 vs 11, SPOT THE DIDFERNECE 4 vs 1, Beaches in Space 4 vs 2). EEAT_PLAN_NEAR=0: off.
 	 */
+	/**
+	 * THE OPENER PLANS (EEAT_NEEDS_NEAR_EDGE=1 with EEAT_NEEDS_NEAR): an edge the room's-door rule bound to a feature
+	 * value from every class (learn: 'needs' with nodeClass '*') is no edge of a state without that value, so the plan
+	 * search reaches it only through the trigger that sets the value: two steps whose first has no gain of its own, which
+	 * the partial pick (the most gain among the few nodes a call expands) never chooses. Here, per such edge E that would
+	 * add gain: the root's cheapest trigger X whose touch sets the value (not a relaxation-only or death edge), then E from
+	 * X's state: a two-step plan in front (at most NEEDS_OPEN_K, the cheapest est first). Ordering only.
+	 */
+	function openerPlans(a, plans) {
+		const cls = a.S.key + '|' + a.cls;
+		const out = [];
+		let es = null;
+		const root = { S: a.S, pos: a.pos, e: null, parent: null };
+		for (const [edge, ns] of edgeNeeds) {
+			const live = facts.needsOf(edge, '*');
+			for (const n of ns) {
+				// (the facts' reset at a deepening drops the need: so does this rule)
+				if (!live.some((m) => m.feat === n.feat && m.value === n.value)) continue;
+				if (a.S.feats[n.feat] === n.value) continue;
+				if (!es) es = edgesOf(a.S, a.pos, a.base, 'plan', true, cls, a);
+				let best = null;
+				for (const e of es) {
+					if (!e.X || e.relaxOnly || e.viaDeath || !e.S2 || e.S2.feats[n.feat] !== n.value) continue;
+					const node1 = { S: e.S2, pos: e.pos2, e, parent: root };
+					const es2 = edgesOf(e.S2, e.pos2, a.base, 'plan', false, e.S2.key + '|*', null);
+					const E = es2.find((x) => x.edge === edge);
+					if (!E || !E.S2 || !(E.S2.gain > e.S2.gain)) continue;
+					const est = e.est + E.est;
+					if (!best || est < best.est) best = { est, node: { S: E.S2, pos: E.pos2, e: E, parent: node1 }, e, E };
+				}
+				if (!best) continue;
+				const steps = stepsOf(a, best.node);
+				if (!steps.length) continue;
+				out.push({ id: `p${ST.plans}.o${out.length}`, steps, cost: best.est, lb: best.e.lb + best.E.lb, partial: true, why: `opener: '${best.E.X ? best.E.X.label : edge}' needs ${n.feat}=${n.value}: '${best.e.X.label}' first`, opener: true, est: best.est });
+			}
+		}
+		out.sort((x, y) => x.est - y.est);
+		ST.openerPlans = (ST.openerPlans || 0) + Math.min(out.length, NEEDS_OPEN_K);
+		return out.slice(0, NEEDS_OPEN_K);
+	}
 	function nearPlans(a, plans) {
 		const p0 = plans[0];
 		if (!p0 || !p0.steps || !p0.steps.length) return [];
@@ -1850,6 +1906,9 @@ function createPlanner(model, facts, o = {}) {
 	/**
 	 * learn(step, result, anchor) -> Fact[]: at least one whenever !result.ok (the facts' version bumps with each).
 	 */
+	// (EEAT_NEEDS_NEAR_EDGE: the feature values of the states each edge was done from; the edges bound from every class)
+	const okFeats = new Map();
+	const edgeNeeds = new Map();
 	function learn(step, result, anchor) {
 		ST.learned++;
 		const out = [];
@@ -1860,6 +1919,7 @@ function createPlanner(model, facts, o = {}) {
 			const arr = result.arrivals && result.arrivals[0];
 			const ticks = arr && a ? Math.max(0, arr.tick - a.tick) : (result.ticks || 0);
 			out.push(facts.add({ kind: 'ok', edge, nodeClass: cls, ticks, lb: step.lb || 0 }));
+			if (NEEDS_NEAR_EDGE && a && a.S && a.S.feats) { if (!okFeats.has(edge)) okFeats.set(edge, []); const l = okFeats.get(edge); if (l.length < 16) l.push(a.S.feats); }
 			if (a && step.waypoint && step.waypoint.tiles) {
 				const d = model.pairSteps(a.S, a.pos, step.waypoint.tiles, 'est', a.base);
 				if (d > 0 && d < INF && ticks > 0) paceSamples.push(ticks / d);
@@ -1891,6 +1951,34 @@ function createPlanner(model, facts, o = {}) {
 				if (model.L.fg[t] === 1011 && model.L.lookup0[t] > d0 && (need === 0 || model.L.lookup0[t] < need)) need = model.L.lookup0[t];
 			}
 			if (need > 0 && !had.some((n) => n.feat === 'deaths' && n.value === need)) out.push(facts.add({ kind: 'needs', edge, nodeClass: cls, feat: 'deaths', value: need }));
+		}
+		// (THE ROOM'S DOOR, OPT-IN EEAT_NEEDS_NEAR=<R tiles>: a budget failure at rung >= EEAT_NEEDS_NEAR_RUNG (1) whose
+		// closest approach has a gate SHUT in the anchor's state within R tiles (Chebyshev) that a trigger can open: the
+		// edge from this class needs that gate's open value first (the nearest such gate; one need a failure))
+		if (NEEDS_NEAR > 0 && a && a.S && a.S.feats && Math.max(facts.rungOf(edge, cls), (step && step.rung) | 0) >= NEEDS_NEAR_RUNG && (fail.why || 'budget') === 'budget' && fail.closest && fail.closest.tile !== undefined && fail.closest.tile !== null && fail.closest.tile >= 0) {
+			const cx = fail.closest.tile % W, cy = (fail.closest.tile / W) | 0, had = facts.needsOf(edge, cls);
+			let bf = null, bv = null, bd = Infinity;
+			for (let dy = -NEEDS_NEAR; dy <= NEEDS_NEAR; dy++) for (let dx = -NEEDS_NEAR; dx <= NEEDS_NEAR; dx++) {
+				const x = cx + dx, y = cy + dy;
+				if (x < 0 || y < 0 || x >= W || y >= H) continue;
+				const t = y * W + x;
+				if (model.A.cls[t] !== 3) continue;
+				const f = model.A.gateFeat[t];
+				const v = openValue(t, a.S);
+				if (!f || v === null || v === undefined || a.S.feats[f] === undefined || a.S.feats[f] === v) continue;
+				const d = Math.max(Math.abs(dx), Math.abs(dy));
+				if (d < bd) { bd = d; bf = f; bv = v; }
+			}
+			if (bf !== null && !had.some((n) => n.feat === bf && n.value === bv)) { out.push(facts.add({ kind: 'needs', edge, nodeClass: cls, feat: bf, value: bv })); ST.needsNear = (ST.needsNear || 0) + 1; }
+			// (EEAT_NEEDS_NEAR_EDGE=1: the need binds the edge from EVERY class (nodeClass '*'), unless the edge was already
+			// done from a state without that value: a new class (another switch set, another checkpoint) does not try the
+			// same wall again)
+			if (bf !== null && NEEDS_NEAR_EDGE && !facts.needsOf(edge, '*').some((n) => n.feat === bf && n.value === bv) && !(okFeats.get(edge) || []).some((F) => F[bf] !== bv)) {
+				out.push(facts.add({ kind: 'needs', edge, nodeClass: '*', feat: bf, value: bv }));
+				if (!edgeNeeds.has(edge)) edgeNeeds.set(edge, []);
+				edgeNeeds.get(edge).push({ feat: bf, value: bv });
+				ST.needsEdge = (ST.needsEdge || 0) + 1;
+			}
 		}
 		const rung = facts.rungOf(edge, cls);
 		// (the est walk's path to the waypoint, cut just past the point nearest the closest approach: the next plans'
