@@ -2051,6 +2051,8 @@ function escStarts() {
 /** the next escape's start: the kind of start next in the rotation (esc.nextFrom first: 'near' after a retarget or a
  *  chain), else the next kind in the rotation that has one; null: none left */
 function escPick() {
+	// (THE HYBRID's hint, hint(): an outside start first, once)
+	if (esc.hint) { const h = esc.hint; esc.hint = null; return h; }
 	const all = escStarts(), F = esc.from, want = esc.nextFrom || F[esc.fromTurn % F.length];
 	// (progStart: a start at a new most progress first, before the rotation's kinds; escLaunch keeps the rotation where it is)
 	if (cur.opts.progStart && all.progress.length) return all.progress[0];
@@ -2120,6 +2122,7 @@ function escLaunch(n, st) {
 	// (the kinds of start in rotation: a start put first once (nextFrom, or a progress start: escPick) does not move the
 	// rotation on; a progress start leaves nextFrom for the escape after it)
 	if (st.kind === 'progress') esc.progMax = st.prog;
+	else if (st.kind === 'hint') { /* (an outside start: the rotation stays where it is) */ }
 	else if (esc.nextFrom) esc.nextFrom = null;
 	else esc.fromTurn++;
 	const cfg = escCfgNext();
@@ -2147,11 +2150,31 @@ function escLaunch(n, st) {
 		S.escape = Object.assign(S.escape, { runs: esc.runs, run });
 		S.escape.hist = (S.escape.hist || []).concat([run]).slice(-32);
 	}
-	note(`${V.label} ${esc.runs}: ${esc.runs === 1 ? `no attempt nearer by ${BREAK_TILES} tiles and no new room for ${esc.first} s` : 'the next'}: from tick ${st.inputs.length} of ${st.what}, ${cfgText}, ${E} of the ${W} CPU workers`);
+	note(`${V.label} ${esc.runs}: ${st.kind === 'hint' ? st.what : esc.runs === 1 ?`no attempt nearer by ${BREAK_TILES} tiles and no new room for ${esc.first} s` : 'the next'}: from tick ${st.inputs.length} of ${st.what}, ${cfgText}, ${E} of the ${W} CPU workers`);
 	Object.assign(V, { layer: 0, states: 0, ticksPerSec: 0, state: 'starting', best: undefined, bestAt: 0, bestTry: null, found: V.found || null, passes: esc.runs,
 		detail: `escape ${esc.runs}: from tick ${st.inputs.length} of ${st.what}, ${cfg.label}, ${E} thread${E > 1 ? 's' : ''}` });
 	kids[n] = launch(n);
 	save();
+}
+/** THE HYBRID's HINT (tools/hybrid.js): an outside start, another solver's furthest point (the compiler's deepest anchor:
+ *  the inputs that reach it, .eetas characters) for the running search: into the CPU search's archive (feedOne: the one
+ *  search's 'import', else 'seed' cells along it) and, where the stall escape runs (coarse cells), the next escape's start
+ *  at once (escPick takes it first; a live escape gives way: halt 'escstall', escAfter starts the next one). Before a
+ *  route only. -> {fed, escape} (escape false: no escape strategy here; the caller searches from it itself) */
+function hint(inputs, what) {
+	const s = String(inputs || '');
+	if (!S || !S.running || S.result || !cur || !/^[0-O]+$/.test(s)) return { fed: false, escape: false };
+	feedOne(s, undefined, true);
+	const n = S.strategies.findIndex((q) => q.key === 'escape');
+	if (n < 0 || !esc) return { fed: true, escape: false };
+	const key = crypto.createHash('sha1').update(s).digest('hex');
+	if (esc.tried.has(key)) return { fed: true, escape: true, again: true };
+	esc.hint = { inputs: s, what: String(what || 'an outside start'), dist: Infinity, key, room: undefined, sig: '', kind: 'hint' };
+	esc.next = true;
+	note(`hint: ${esc.hint.what} (${s.length} ticks): the next escape starts there`);
+	if (alive(kids[n])) { if (!kids[n].stopWhy) halt(kids[n], 'escstall'); }
+	else { const S0 = S, t = setTimeout(() => { if (S === S0) escKick(); }, 100); if (t.unref) t.unref(); }
+	return { fed: true, escape: true };
 }
 /** THE GPU RANDOM RUNS IN THE ROTATION (ESC_ROLLS): the portfolio sweep's long random runs routed through the GPU random
  *  runs, so an escape whose configuration differs from the one the GPU random runs run with (their search's own at first)
@@ -4440,7 +4463,7 @@ function shutdown() {
 	if (alive(proofKid)) { try { proofKid.kill(); } catch (e) { /* gone */ } }
 }
 
-module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown, heatState,
+module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown, heatState, hint,
 	compileStart, compileState, compileStop, PLAN_STRATEGY, stratOf, planOn,
 	EXP_REPLAY_MS, EXP_TIP, IMPROVE_KEEP,
 	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, burstSizeArgs, breakShareOpen, breakDryAfter, rollsDryAfter, sourcesOf, classRoutes, coinsOfDesc, progOfDesc, progGt, progressCands, breakCmp, evictVictim, gateEnter, reachInfo, reachBase,

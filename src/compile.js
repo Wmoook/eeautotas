@@ -14,7 +14,7 @@
 //   wrote    <out file>
 //   node src/compile.js <level.eelvl | level.json | job id> [--out=<file.eetas>] [--seconds=60] [--workers=N] [--json]
 //       [--report=<file.json>] [--quiet] [--verbose] [--known=0] [--seed=1] [--first=1] [--polish=0] [--stallS=0] [--joins=<s>]
-//       [--parts=<module of mock parts: tests>]
+//       [--parts=<module of mock parts: tests>] [--stdin=1 (control lines: route / import / stop)] [--sourceDist=1]
 //   --out: default <level name>.eetas next to the level (src/out/compile/<name>.eetas for a job id); --json: the compile
 //   loop's events as JSON lines (src/plan/strategy.js), then {"ev":"report", ...}; --report: the report as a JSON file.
 //   Exit codes: 0 = routed, the .eetas written (the evaluated inputs, cut at the finish) and read back to the same finish;
@@ -150,6 +150,12 @@ async function main() {
 	const emitW = (ev) => { if (ev.ev === 'stage' || ev.ev === 'step' || ev.ev === 'plan') wd.note(ev); emit0(ev); };
 	const opts = { file: lv.file || undefined, md5: lv.md5 || undefined, seconds, workers, seed: Number.isFinite(+a.seed) ? +a.seed : 1, first: a.first === '1', polish: a.polish !== '0',
 		stallS: +a.stallS || 0, parseMs, known: a.known === '0' ? false : undefined, joinsS, loopsS, ...(endgameS > 0 ? { endgameS } : {}) };
+	// (THE HYBRID, tools/hybrid.js: --stdin=1 reads control lines from stdin while the compile runs (strategy.js onLine:
+	// "route <inputs>" a known route's run ticks bound the B&B, "import <inputs>" another search's state, an anchor where its
+	// model state is new, "stop" the moves end now and the stages after them run); --sourceDist=1 the 'source' events carry
+	// the anchor's distance to the trophy (the reach field's, a build): the hybrid's furthest anchor)
+	if (a.stdin === '1') opts.stdinLines = require('readline').createInterface({ input: process.stdin, crlfDelay: Infinity });
+	if (a.sourceDist === '1') opts.sourceDist = true;
 	if (a.inflight) opts.inflight = +a.inflight;
 	if (a.parts) opts.parts = path.resolve(a.parts);
 	if (a.runOut) opts.out = path.resolve(a.runOut);
