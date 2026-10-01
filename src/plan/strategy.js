@@ -84,6 +84,19 @@ const RUNG_PLACE = process.env.EEAT_RUNG_PLACE === '1';
 // one a real state replayed from the level start (a death or a finish in the jitter: the arrival as it is).
 const START_JITTER = process.env.EEAT_START_JITTER === '1';
 const JITTER_MASKS = [1, 5, 3, 4, 2, 0];
+// THE LEADER'S LINEAGE (B7 lane b9, cycle 5; OPT-IN EEAT_PLAN_DOM=1, off = the anchor pick byte for byte): on a level of
+// independent sub-goals (Bad EE Level 9: 5 switches a wave in any order) the anchors fork into lineages of every subset,
+// and a lineage that holds a SUBSET of another's progress re-solves legs the other already holds: box 7's 1,800-s c15L
+// found switch 12 (73,99) SIX times (the executor's 135-s rung and the stretch child's 40-s windows, from anchors holding
+// switches 1-11, 13, 14 while the leader held 1-14), and in its last 320 s the leader's own next switch 15 (277,202) got
+// 16 steps / 145 worker-s and never its 135-s rung while the workers' 135-s windows went to those re-solves. With the
+// knob, before the first route an anchor B is DOMINATED when another open anchor A has a higher gain and holds every
+// feature value B changed from the start (the deaths count aside) and every coin B took: B's steps at rung EEAT_DOM_RUNG
+// (2: the 15-s window) or above are not picked while another job is in flight (with nothing in flight they run as before:
+// no worker waits and no deepening comes of it), and the stretch child takes no stretch of B. Its cheap rungs still run
+// (a dominated lineage's next trigger may make an incomparable one). Ordering only: no fact, no prune.
+const PLAN_DOM = process.env.EEAT_PLAN_DOM === '1';
+const DOM_RUNG = Math.max(0, +(process.env.EEAT_DOM_RUNG || 2));
 // THE ONE SHOT (n5-oneshot part 3, OPT-IN EEAT_ONESHOT=1; off = the loop below byte for byte): the MOVES stage's first
 // tier: src/plan/oneshot/solve.js, ONE A* over (the move graph x the trigger state) from the level start with the
 // planner's plans and the bounds as its heuristic, for OS_SHARE of the time left before the loop; then in the loop's
@@ -1141,6 +1154,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		let bestC = null;
 		for (const c of stCands.values()) {
 			if (c.solved || c.inflight || c.rung < ST_RUNG || c.tries >= ST_TRIES || (c.tries > 0 && !/budget/.test(c.why)) || c.A.exhausted || !c.A.arrivals.length) continue;
+			if (domOn && !best && domSet().has(c.A.id)) { domStSkips++; continue; }
 			if (!bestC || c.tries < bestC.tries || (c.tries === bestC.tries && (c.A.gain > bestC.A.gain || (c.A.gain === bestC.A.gain && (c.cost < bestC.cost || (c.cost === bestC.cost && c.seq < bestC.seq)))))) bestC = c;
 		}
 		return bestC;
@@ -1362,6 +1376,34 @@ async function compile(L, opts = {}, emit = () => {}) {
 		return p;
 	};
 	const scoreOf = (A, N) => (Number.isFinite(A.costEst) ? A.costEst : 1e7) + A.firstTick + FAIL_TICKS * A.fails - UCB_C * Math.sqrt(Math.log(N + 1) / (1 + A.picks));
+	// (THE LEADER'S LINEAGE, EEAT_PLAN_DOM=1: the ids of the open anchors another open anchor dominates, kept while the
+	// anchors and their exhausted flags stand)
+	const domOn = PLAN_DOM && Array.isArray(model.feats) && !!model.init;
+	const domFeat = domOn ? model.feats.map((f, n) => (f === 'deaths' ? -1 : n)).filter((n) => n >= 0) : [];
+	const domInit = domOn ? model.feats.map((f) => model.init[f]) : [];
+	let domMemo = { n: -1, ex: -1, set: new Set() };
+	let domSkips = 0, domStSkips = 0;
+	const domSet = () => {
+		let ex = 0;
+		for (const A of anchors.values()) if (A.exhausted) ex++;
+		if (domMemo.n === anchors.size && domMemo.ex === ex) return domMemo.set;
+		const open = [...anchors.values()].filter((A) => !A.exhausted && A.S && Array.isArray(A.S.vals));
+		const set = new Set();
+		const takenIn = (b, a) => { if (!b) return true; for (let k = 0; k < b.length; k++) if (b[k] && !(a && a[k])) return false; return true; };
+		for (const B of open) {
+			const bv = B.S.vals;
+			for (const A of open) {
+				if (A === B || !(A.gain > B.gain)) continue;
+				const av = A.S.vals;
+				let ok = true;
+				for (const n of domFeat) if (bv[n] !== domInit[n] && av[n] !== bv[n]) { ok = false; break; }
+				if (ok && takenIn(B.S.taken, A.S.taken) && takenIn(B.S.btaken, A.S.btaken)) { set.add(B.id); break; }
+			}
+		}
+		domMemo = { n: anchors.size, ex, set };
+		return set;
+	};
+	const domStep = (A, step) => domOn && !best && !step.synthetic && (step.rung | 0) >= DOM_RUNG && domSet().has(A.id);
 	/** the next job: {anchor, plan, step} not in flight, or null (none: every anchor exhausted or busy) */
 	const nextJob = () => {
 		const N = picksN + 1;
@@ -1404,6 +1446,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 					if (!tried.get(tk).ok) bug('repeat', { edge: step.edge, nodeClass: step.nodeClass, rung: step.rung, anchor: A.id, label: labelOf(step) });
 					continue;
 				}
+				// (THE LEADER'S LINEAGE: a dominated anchor's dear rung waits while another job runs)
+				if (domOn && inflight.size > 0 && domStep(A, step)) { domSkips++; continue; }
 				return { anchor: A, plan, step, plans };
 			}
 		}
@@ -2103,7 +2147,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const maxTick = Math.max(0, ...[...anchors.values()].map((A) => A.firstTick));
 		say({ ev: 'progress', states: anchors.size, rooms: anchors.size, anchors: anchors.size, triggers: Math.max(0, ...[...anchors.values()].map((A) => A.gain)), steps, okSteps, facts: factsCount(), sec: Math.round(secNow() * 10) / 10,
 			workers, layer: maxTick, tick: maxTick, ticksPerSec: 0, imports, bugs, deepenings, stalls, exhausted: [...anchors.values()].filter((A) => A.exhausted).length,
-			...(best ? { runTicks: best.runTicks, lb: LB, gap: gapOf(best.runTicks) } : { lb: LB }), detail: detail() });
+			...(best ? { runTicks: best.runTicks, lb: LB, gap: gapOf(best.runTicks) } : { lb: LB }), ...(PLAN_DOM ? { dom: { n: domMemo.set.size, skips: domSkips, st: domStSkips } } : {}), detail: detail() });
 	};
 	const saveFiles = () => {
 		if (!out) return;
