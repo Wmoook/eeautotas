@@ -46,6 +46,22 @@ const T = require('./types.js');
 const E = require('../eesim.js');
 
 const RUNG_MS = [1500, 5000, 15000, 45000];
+// THE DEEP RUNG (B7 lane b9, cycle 2; OPT-IN EEAT_RUNG_DEEP=<ms>, unset / 0: off, the ladder as before byte for byte): one
+// more rung of that many ms after the 45-s one (the facts block an (edge, node class) after 5 failures instead of 4; the
+// executor runs it at its top tier, level 3, with the longer window; the relay start goes on from rung 3's closest). Bad EE
+// Level 9's mini 5 (a ladder maze between spike columns, 700 ticks) from its own entrance, tools/cmp/legab.js on box 7, 6
+// knob arms x 3 reps: 0 finds at rungs 1-2 (5 / 15 s) in every rep, found at rung 3 in 34-45 s (skel+leg / skel+portfolio,
+// 585-839 ticks): a leg that needs ~40 s in ONE window, where the compile's 45-s rung is the edge (box 7's c4X: 108 steps
+// of it, 0 finds, 1,583 worker-s, the rung-3 calls closest 27-37 tiles; the same wall on minis 7, 12, 13, 15).
+const RUNG_DEEP = +process.env.EEAT_RUNG_DEEP > 0 ? +process.env.EEAT_RUNG_DEEP : 0;
+const RUNG_LADDER = RUNG_DEEP ? RUNG_MS.concat([RUNG_DEEP]) : RUNG_MS;
+// THE WARM RUNG (B7 lane b9, cycle 2; OPT-IN EEAT_RUNG_WARM=1, off = the steps' rungs as the facts give them): the facts'
+// ladder is per (edge, node class) and a node class is the whole abstract state + the checkpoint + the start's speed, so
+// a hard leg climbs rungs 0-3 again from EVERY new class (box 7's c4X: mini 5's switch 108 steps from ~27 classes, each
+// class's 1.5 + 5 + 15 s rungs spent before its one 45-s window: 0 finds). With the knob a step of an edge that already
+// failed rung r by its BUDGET from another class starts at rung r (never above the ladder's top): the windows proven too
+// short for that leg are not run again. A found leg returns at once, so a higher rung costs only when it fails.
+const RUNG_WARM = process.env.EEAT_RUNG_WARM === '1';
 // THE ONE SHOT (n5-oneshot part 3, OPT-IN EEAT_ONESHOT=1; off = the loop below byte for byte): the MOVES stage's first
 // tier: src/plan/oneshot/solve.js, ONE A* over (the move graph x the trigger state) from the level start with the
 // planner's plans and the bounds as its heuristic, for OS_SHARE of the time left before the loop; then in the loop's
@@ -423,7 +439,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	const total = seconds * 1000;
 	const workers = Math.max(1, Math.round(+opts.workers || 2));
 	const P = Math.max(1, Math.round(+opts.inflight || workers));
-	const rungMs = Array.isArray(opts.rungMs) ? opts.rungMs : RUNG_MS;
+	const rungMs = Array.isArray(opts.rungMs) ? opts.rungMs : RUNG_LADDER;
 	const stallWindow = (+opts.stallWindowS > 0 ? +opts.stallWindowS : Math.max(STALL_MIN_S, Math.min(STALL_S, seconds * STALL_F))) * 1000;
 	const watchMs = +opts.watchMs > 0 ? +opts.watchMs : WATCH_MS;
 	const progressMs = +opts.progressMs > 0 ? +opts.progressMs : PROGRESS_MS;
@@ -492,7 +508,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	if (parts.createBounds) {
 		try { bounds = await parts.createBounds(L, { model }); } catch (e) { bounds = null; say({ ev: 'warning', text: `the bounds could not be built (${e.message}): no admissible bound but the planner's` }); }
 	}
-	const facts = parts.createFacts({ rungs: 4, model });
+	const facts = parts.createFacts({ rungs: RUNG_DEEP && rungMs === RUNG_LADDER ? RUNG_LADDER.length : 4, model });
 	// (the planner's floor probe runs in a worker thread off the bounds stage: EEAT_PLAN_FLOOR_ASYNC=0 in line, as before)
 	const planner = parts.createPlanner(model, facts, { bounds, seed: opts.seed, file: opts.file, floorAsync: process.env.EEAT_PLAN_FLOOR_ASYNC !== '0' });
 	const floorVerOf = () => { try { return typeof planner.floorVersion === 'function' ? planner.floorVersion() : 0; } catch (e) { return 0; } };
@@ -1115,6 +1131,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 
 	// ---- the no-stall bookkeeping
 	const tried = new Map();   // `${edge}|${nodeClass}|${rung}|${epoch}` -> {ok}
+	const warmRung = new Map();   // (EEAT_RUNG_WARM: edge -> the highest rung it failed by the budget (lowered by a find below it))
 	const localBlock = new Set();   // `${anchor.key}|${edge}|${nodeClass}`: blocked here (a part's bug)
 	let epoch = 0, mult = 1, deepenings = 0, stalls = 0, lastSteps = [], lastFails = [], bugs = 0, nothingSince = -1;
 	const inflight = new Map();   // edgeKey -> {promise, job, started, budgetMs}
@@ -1242,7 +1259,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const ms = Math.max(50, Math.min(rungMs[r] * mult, room));
 		const deadline = Date.now() + ms;
 		// (fast: before the first route a found leg's tightening is capped by the time it took to find it: executor.js RATE_ON)
-		return { ms, level: r, k: ARRIVALS_K, deadline, fast: !best, stop: () => stopped || left() <= 0 || Date.now() > deadline + 2000 };
+		// (THE DEEP RUNG: the executor's tiers know levels 0..3; the deep rung is level 3 with the longer window)
+		return { ms, level: RUNG_DEEP ? Math.min(r, RUNG_MS.length - 1) : r, k: ARRIVALS_K, deadline, fast: !best, stop: () => stopped || left() <= 0 || Date.now() > deadline + 2000 };
 	};
 	/** the waypoint a step runs to: its own, with beforeTick filled from beforeTickFrom (ticks after the earliest start) */
 	const waypointOf = (step, A) => {
@@ -1375,6 +1393,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 	/** one job run: exec.reach, verify, learn, anchors; resolves when done */
 	const runJob = async (job) => {
 		const { anchor: A, step, plan } = job;
+		// (THE WARM RUNG: an edge's rung failed by the budget from another class: this class starts there)
+		if (RUNG_WARM && !step.synthetic && warmRung.has(String(step.edge))) { const w = Math.min(rungMs.length - 1, warmRung.get(String(step.edge))); if (w > (step.rung | 0)) { step.warmFrom = step.rung | 0; step.rung = w; } }
 		const ek = edgeKey(step), tk = `${ek}|${step.rung}|${epoch}`;
 		tried.set(tk, { ok: false });
 		A.picks++; picksN++;
@@ -1460,6 +1480,13 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const rec = { ev: 'step', n: steps, anchor: A.id, label: labelOf(step), edge: step.edge, nodeClass: step.nodeClass, rung: step.rung, epoch, tool: res.tool || null, ok: !!res.ok, ms, budgetMs: Math.round(budget.ms),
 			why: res.ok ? '' : (fail && fail.why) || '', arrivals: arr.length, news, routes: routes.length };
 		if (fail && fail.closest) rec.closest = { tile: fail.closest.tile, dist: fail.closest.dist };
+		// (THE WARM RUNG: a budget failure lifts the edge's start rung for the other classes; a find at a lower rung lowers it)
+		if (RUNG_WARM && !step.synthetic) {
+			const ke = String(step.edge);
+			if (res.ok) { if (warmRung.has(ke) && (step.rung | 0) < warmRung.get(ke)) warmRung.set(ke, step.rung | 0); }
+			else if (rec.why === 'budget' && (step.rung | 0) > (warmRung.get(ke) || 0)) warmRung.set(ke, step.rung | 0);
+			if (step.warmFrom !== undefined) rec.warmFrom = step.warmFrom;
+		}
 		if (FAR_TROPHY > 0) { rec.est = Number.isFinite(+step.estTicks) ? Math.round(+step.estTicks) : null; if (windowRung(step) !== step.rung) rec.farTrophy = windowRung(step); }
 		// (the executor's exact end search from a near start, when it ran: tier 0b)
 		const nearT = Array.isArray(res.tiers) ? res.tiers.find((x) => x && x.tier === 'near') : null;
@@ -1973,7 +2000,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 					const idle = new Uint8Array(k);
 					const Sk = k === 0 ? a0 : T.arrivalOf(L, T.playTo(L, idle).sim, idle, RM);
 					const wp = { kind: 'trophy', tiles: Array.from(trophy.tiles), expect: null, label: 'trophy (the proof)', beforeTick: k + Cost - 1, allowDeath: !noDeath };
-					const r = await exec.reach([Sk], wp, { ms, level: rungMs.length - 1, k: ARRIVALS_K, deadline, stop: () => stopped || Date.now() > deadline + 2000 });
+					const r = await exec.reach([Sk], wp, { ms, level: RUNG_DEEP ? Math.min(rungMs.length, RUNG_MS.length) - 1 : rungMs.length - 1, k: ARRIVALS_K, deadline, stop: () => stopped || Date.now() > deadline + 2000 });
 					if (r && r.ok) {
 						const arr = (r.arrivals || []).filter((a) => a && a.masks && a.tick <= k + Cost - 1).sort((a, b) => a.tick - b.tick);
 						if (!arr.length) { bug('prove', { why: `the executor returned arrivals past the waypoint's beforeTick ${k + Cost - 1}` }); fail = 'its arrivals were past the bound (a bug)'; lbMin = 0; break; }
