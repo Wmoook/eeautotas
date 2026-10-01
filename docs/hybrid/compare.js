@@ -15,9 +15,10 @@ const jl = (f) => fs.readFileSync(f, 'utf8').split('\n').filter((l) => l.trim())
 const AB = jl(abF);
 const man = JSON.parse(fs.readFileSync(manF, 'utf8'));
 const nameOf = new Map(man.map((m) => [m.rel, m.name]));
-const relOfMd5 = new Map(man.map((m) => [m.md5, m.rel]));
+const keyOf = (set, file) => `${set}|${String(file).split(/[\/]/).pop()}`;   // (by the set and the file: two sets share md5s)
+const relOfKey = new Map(man.map((m) => [keyOf(m.set, m.file), m.rel]));
 const S = new Map();
-for (const r of jl(sF)) { const rel = relOfMd5.get(r.md5); if (rel) S.set(rel, r); }
+for (const r of jl(sF)) { const rel = relOfKey.get(keyOf(r.set, r.file)); if (rel) S.set(rel, r); }
 const H = new Map();
 for (const r of jl(hF)) H.set(r.rel, r);   // (the last line of a level wins)
 // (the 900-s scoreboard's 15: their best route, run ticks)
@@ -38,8 +39,17 @@ const rows = AB.map((a) => {
 	const min = (...v) => { const x = v.filter((q) => q != null); return x.length ? Math.min(...x) : null; };
 	return { rel: a.rel, name: nameOf.get(a.rel) || a.rel, set: a.rel.split('/')[0], best: a.best || null, H: hT, C: c, C900: c900, S: sT, CS: min(c, sT), C900S: min(c900, sT), sRan: !!s,
 		hFirst: h && h.first && hT != null ? h.first : null, sFirst: s && s.routed ? s.firstRouteS : null, hStop: h && h.stop ? h.stop.why : (h ? 'none' : 'not run'), hStopT: h && h.stop ? h.stop.t : null,
-		hWall: h ? h.wallS : null, hFinalBy: h && h.final ? h.final.by : null, hLeg: h && h.compiler && h.compiler.hybrid ? h.compiler.hybrid : null, hLastProg: h ? h.lastProgress : null, hRun: !!h };
+		hWall: h ? h.wallS : null, hFinalBy: h && h.final ? h.final.by : null, hLeg: h && h.compiler && h.compiler.hybrid ? h.compiler.hybrid : null, hLastProg: h ? h.lastProgress : null, hRun: !!h,
+		hNear: h && h.search && h.search.nearest ? h.search.nearest.tiles : null, hGain: h && h.compiler ? h.compiler.maxGain : null, hCompFirst: h && h.compiler && h.compiler.firstRoute ? h.compiler.firstRoute : null };
 });
+if (opt.diff) {
+	// (the levels H and C u S disagree on, with H's stop and the references' times: --diff=1)
+	for (const r of rows) {
+		if (!r.hRun || (r.H != null) === (r.CS != null)) continue;
+		console.log(`${r.H != null ? 'GAINED' : 'LOST  '} ${r.name.slice(0, 32).padEnd(32)} S ${r.sFirst != null ? `${r.sFirst} s ${r.S}` : '-'} | C ${r.C != null ? r.C : '-'} | H ${r.H != null ? `first ${r.hFirst.by} ${r.hFirst.t} s, ${r.H}` : `stop ${r.hStop} ${r.hStopT} s, near ${r.hNear}, gain ${r.hGain}`}`);
+	}
+	process.exit(0);
+}
 const pct = (v, p) => { if (!v.length) return null; const s = [...v].sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.floor(p * (s.length - 1) + 0.5))]; };
 const med = (v) => { if (!v.length) return null; const s = [...v].sort((x, y) => x - y), n = s.length; return n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2; };
 const geo = (v) => (v.length ? Math.exp(v.reduce((t, x) => t + Math.log(x), 0) / v.length) : null);
