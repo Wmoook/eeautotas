@@ -36,7 +36,22 @@ const xo = flags.opts ? JSON.parse(flags.opts) : {};
 const xy = (t) => `(${t % W},${(t / W) | 0})`;
 console.log('start', xy(T.tileOf(sim, W, L.height)), 'tick', masks.length, 'v', sim.speed_x.toFixed(2), sim.speed_y.toFixed(2), 'goals', goals.slice(0, 4).map(xy).join(''), goals.length > 4 ? `(+${goals.length - 4})` : '');
 console.log('goalField (the executor\'s) cost', RF.costAt(T.goalField(Lc0, goals, {}), sim));
-const f = RF.reachField(Lc, Object.assign({ goals: goals.map((t) => ({ tile: t, cost: 0 })), deaths: false, debug: true }, xo));
+// --unprot=1: the way of an UNPROTECTED ball as the executor's protection layer prices it (types.js goalField's fU: the
+// level without its protection tiles, every killer deadly, the goals the targets at 0 and each protection-on tile at the
+// protected field's cost there at rest: an upper bound of goalField's least over the tile's states, for the diagnosis)
+let LcW = Lc, gl = goals.map((t) => ({ tile: t, cost: 0 }));
+if (flags.unprot === '1') {
+	const lk = Lc.lookup0, on = [];
+	for (let i = 0; i < Lc.fg.length; i++) if (Lc.fg[i] === 420 && lk && lk[i] !== 0) on.push(i);
+	const fP = RF.reachField(Lc, Object.assign({ goals: gl, deaths: false }, xo));
+	const fgU = Int32Array.from(Lc.fg);
+	for (let i = 0; i < fgU.length; i++) if (fgU[i] === 420) fgU[i] = 0;
+	for (const p of on) { const c = RF.costAt(fP, (p % W) * 16, ((p / W) | 0) * 16, 0, true); if (c >= 0) gl.push({ tile: p, cost: c }); }
+	LcW = Object.assign({}, Lc, { fg: fgU });
+	console.log('unprotected: protection-on tiles', on.map(xy).join(''), 'their protected costs', gl.slice(goals.length).map((x) => x.cost.toFixed(1)).join(' '));
+	for (const p of on) goals.push(p);
+}
+const f = RF.reachField(LcW, Object.assign({ goals: gl, deaths: false, debug: true }, xo));
 if (!f._m) { console.log('no physics model (walk mode): the way is the walk'); process.exit(0); }
 const m = f._m;
 const st = RF.stateOf(f, sim.px, sim.py, sim.speed_y, sim._q0, sim._q1, sim._slippery);
