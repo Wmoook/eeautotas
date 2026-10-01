@@ -791,6 +791,34 @@ function createPlanner(model, facts, o = {}) {
 	// relaxation (the death itself is not modelled: any killer, any time after the touch)
 	const PHYS_RESPAWN = process.env.EEAT_PHYS_RESPAWN === '1';
 	const PHYS_RESP_D = +process.env.EEAT_PHYS_RESP_D > 0 ? +process.env.EEAT_PHYS_RESP_D | 0 : 10;
+	// THE RESPAWN WAYPOINT (LH cold, 2026-10-01; OPT-IN EEAT_RESP_CRUMB=1, with EEAT_PHYS_RESPAWN=1 and the physics crumbs;
+	// off = byte for byte): the respawn seeds made the target's PRICE finite, but the plan's step still went straight at it
+	// and the executor's goal field (RCH3, deaths off) reads NO WAY (-1) from any state but the respawn's (Cold World from
+	// the chapter-2 blue coin's respawn: 'coin (73,222) -> purple switch 2 (73,220) -> trophy', closest -1 at every rung:
+	// the crates (57-58, 240) only from the checkpoint (59,239)'s respawn). With the knob the physics pass keeps, per tile,
+	// the checkpoint whose respawn seed reached it first (-1: reached without one), the anchor's OWN respawn seeded too (a
+	// death back there is a move: the respawn stands at rest, where the arrival was rising), and a root step whose target the
+	// physics crumbs' goal field reads no way to, but the pass reaches only through a respawn seed c, goes: c not the
+	// anchor's respawn -> the crumb toward c (the physics crumbs with c as the target, else c itself); c the anchor's
+	// respawn -> 'die, back at a respawn' first. Ordering only: waypoints, never a gate (each its own rungs, CRUMB_RUNGS).
+	const RESP_CRUMB = PHYS_RESPAWN && process.env.EEAT_RESP_CRUMB === '1';
+	// THE STALL WALLS IN THE PHYSICS PASS (LH cold; OPT-IN EEAT_PHYS_CRUMBWALLS=1, inside PHYS_EST; off = byte for byte): the
+	// crumb field's stall walls of the anchor's class (EEAT_CRUMB_WALLS' crumbWallsOf: the closest approaches of the class's
+	// failed steps, rung >= 1) are solid in the pass's level copy too, so the pass's way (its prices, the crumbs' d1, the
+	// respawn waypoint's seeds) leaves a climb the executor failed: Cold World's chamber climb (104-108, 206-211) from the
+	// chapter-2 blue coin, which the pass took to the checkpoint (91,196) and its respawn by the exit portal (79,201) (25
+	// moves) while the real way out is down (the respawn chain (59,239) -> (58,235) -> (66,230) -> purple switch 2).
+	// (EEAT_CUT_PROG's rule leaves those failures without est walls, so EEAT_PHYS_WALLS never walled the climb.)
+	const PHYS_CRUMBWALLS = process.env.EEAT_PHYS_CRUMBWALLS === '1';
+	// (the respawn an anchor holds: the checkpoint under its centre (an arrival ON a checkpoint takes it at the next tick's
+	// start: its sim still names the one before), else its sim's checkpoint; -1 none)
+	function ownCpOf(s) {
+		const tx = Math.floor((s.px + 8) / 16), ty = Math.floor((s.py + 8) / 16), t = ty * W + tx;
+		const c = (tx >= 0 && tx < W && t >= 0 && t < L.fg.length && L.fg[t] === 360) ? t : (s.checkpoint && s.checkpoint.x >= 0 ? s.checkpoint.y * W + s.checkpoint.x : -1);
+		// (a ball at rest on that very checkpoint IS its respawn state (just respawned): a death there is no move)
+		if (c === t && Math.abs(s.speed_x) < 1e-3 && Math.abs(s.speed_y) < 1e-3) return -1;
+		return c;
+	}
 	// THE CEGAR WALLS IN THE PHYSICS PASS (B7 cold, cycle 6; OPT-IN EEAT_PHYS_WALLS=1, inside PHYS_EST; off = the pass before,
 	// byte for byte): syncWalls walls the est walk where failed steps stalled (their closest approach's 3 x 3, the cuts),
 	// but the root edges' price is max(est walk, the physics pass's moves x pace), and the pass (RCH3's relaxed forward
@@ -811,7 +839,21 @@ function createPlanner(model, facts, o = {}) {
 			for (let j = 0; j < estWallMask.length; j++) if (estWallMask[j] && !(Math.abs((j % W) - ax) <= 2 && Math.abs(((j / W) | 0) - ay) <= 2)) pw.push(j);
 			if (!pw.length) pw = null;
 		}
-		const key = a.S.pkey + '|' + a.sim.stateHash() + (pw ? '|w' + pw.length + ':' + pw[0] + ':' + pw[pw.length - 1] : '');
+		// (PHYS_CRUMBWALLS: the crumb field's stall walls of the anchor's class (crumbWallsOf) in the pass's level copy too)
+		let pwSig = '';
+		if (PHYS_CRUMBWALLS && a.S && a.cls !== undefined) {
+			const at = Math.floor((a.sim.py + 8) / 16) * W + Math.floor((a.sim.px + 8) / 16);
+			const cw = crumbWallsOf(a.S.key + '|' + a.cls, at);
+			if (cw && cw.size) {
+				pw = pw || [];
+				for (const j of cw) pw.push(j);
+				let h = 0;
+				for (const j of Array.from(cw).sort((p, q) => p - q)) h = (Math.imul(h, 31) + j) | 0;
+				pwSig = '|cw' + cw.size + ':' + h;
+				ST.physCrumbWalled = (ST.physCrumbWalled || 0) + 1;
+			}
+		}
+		const key = a.S.pkey + '|' + a.sim.stateHash() + (pw ? '|w' + pw.length + ':' + pw[0] + ':' + pw[pw.length - 1] : '') + pwSig;
 		let d = physMemo.get(key);
 		if (d !== undefined) return d;
 		d = null;
@@ -835,17 +877,30 @@ function createPlanner(model, facts, o = {}) {
 				// normal tile), PHYS_RESP_D moves later; pend: depth -> the seeds)
 				const resp = PHYS_RESPAWN && model.canDie ? new Uint8Array(N) : null;
 				const pend = resp ? new Map() : null;
+				// (RESP_CRUMB: viaS = the respawn seed (a checkpoint tile) of each state's entry, -1 none; d.via per tile; the
+				// anchor's own respawn seeded PHYS_RESP_D moves on)
+				const viaS = RESP_CRUMB && resp ? new Int32Array(N * NT).fill(-1) : null;
+				const viaT = viaS ? new Int32Array(N).fill(-1) : null;
+				let curVia = -1;
+				const addV = viaS ? (t, ty, l, list) => { if (add(t, ty, l, list)) viaS[t * NT + ty] = curVia; } : add;
+				if (viaS) {
+					const c0 = ownCpOf(s);
+					if (c0 >= 0 && c0 < N && L.fg[c0] === 360) { resp[c0] = 1; pend.set(PHYS_RESP_D, [c0]); }
+				}
 				while ((cur.length || (pend && pend.size)) && n < PHYS_MAX_STATES) {
-					if (pend && pend.has(depth)) { for (const t of pend.get(depth)) { add(t, 1, 0, cur); add(t, 0, 0, cur); } pend.delete(depth); }
+					if (pend && pend.has(depth)) { for (const t of pend.get(depth)) { curVia = t; addV(t, 1, 0, cur); addV(t, 0, 0, cur); } curVia = -1; pend.delete(depth); }
 					for (let i = 0; i < cur.length && n < PHYS_MAX_STATES; i += 3) {
 						const t = cur[i], ty = cur[i + 1], l = cur[i + 2];
 						n++;
-						if (d[t] > depth) d[t] = depth;
+						if (viaS) curVia = viaS[t * NT + ty];
+						if (d[t] > depth) { d[t] = depth; if (viaT) viaT[t] = curVia; }
 						if (resp && !resp[t] && depth > 0 && L.fg[t] === 360) { resp[t] = 1; const k = depth + PHYS_RESP_D; if (!pend.has(k)) pend.set(k, []); pend.get(k).push(t); ST.physResp = (ST.physResp || 0) + 1; }
-						f._m.edgesOf(t, ty, l, (t2, ty2, l2) => { add(t2, ty2, l2, t2 === t ? cur : nxt); });
+						f._m.edgesOf(t, ty, l, (t2, ty2, l2) => { addV(t2, ty2, l2, t2 === t ? cur : nxt); });
 					}
+					curVia = -1;
 					cur = nxt; nxt = []; depth++;
 				}
+				if (viaT) d.via = viaT;
 				ST.physStates = (ST.physStates || 0) + n;
 			}
 		} catch (e) { d = null; }
@@ -1358,6 +1413,7 @@ function createPlanner(model, facts, o = {}) {
 		if (!g) return undefined;
 		const s = a.sim;
 		const D = RFm.costAt(g, s.px, s.py, s.speed_y, !!s.on_ground);
+		if (RESP_CRUMB && !(D >= 0) && !a._respCrumb) { const r = respCrumb(a, e, cls, S, tgt); if (r) return r; }
 		if (!(D >= CRUMB_MIN)) return null;
 		const fwd = physFwdOf(a);
 		const dA = fwd ? null : model.dist(S, a.pos, 'now', a.base);
@@ -1386,6 +1442,51 @@ function createPlanner(model, facts, o = {}) {
 		ST.crumbPhys = (ST.crumbPhys || 0) + 1;
 		return { edge: c.edge, nodeClass: cls, rung: facts ? facts.rungOf(c.edge, cls) : 0, estTicks: Math.round(c.d1 * pace()), lb: 0, crumb: true,
 			waypoint: { kind: 'trigger', tiles: c.live.slice(), trig: c.X.id, expect: null, label: `crumb ${c.X.label}` } };
+	}
+	/** THE RESPAWN WAYPOINT (EEAT_RESP_CRUMB=1, see RESP_CRUMB): the target tgt has no way by the crumbs' goal field from the
+	 *  anchor; the physics pass reaches it only through the respawn seed c -> the death step (c the anchor's respawn), else
+	 *  the crumb toward c (or c itself); null: not this rule's */
+	function respCrumb(a, e, cls, S, tgt, depth) {
+		depth = depth | 0;
+		const fwd = physFwdOf(a);
+		if (!fwd || !fwd.via) return null;
+		let best = INF, c = -1;
+		for (const t of tgt) if (fwd[t] < best) { best = fwd[t]; c = fwd.via[t]; }
+		if (!(best < INF) || c < 0) return null;
+		const s = a.sim, own = ownCpOf(s);
+		const xy = (t) => `(${t % W},${(t / W) | 0})`;
+		if (c === own) {
+			const deaths = s.deaths | 0, edge = `death:${deaths}`;
+			const rung = facts ? facts.rungOf(edge, cls) : 0;
+			if (rung >= CRUMB_RUNGS) return null;
+			ST.respDie = (ST.respDie || 0) + 1;
+			if (CRUMB_DBG) console.error('respCrumb die at', xy(c), 'for', e.X ? e.X.label : 'trophy', 'pass', best);
+			return { edge, nodeClass: cls, rung, estTicks: DEAD_TICKS, lb: DEAD_TICKS,
+				waypoint: dieField({ kind: 'region', tiles: [c], expect: { feat: 'deaths', value: deaths + 1 }, allowDeath: true, label: `die, back at a respawn (deaths ${deaths + 1}) ${xy(c)}` }) };
+		}
+		const X = crumbCands.find((Y) => Y.tiles.includes(c));
+		if (!X) return null;
+		const live = model.liveTiles(S, X);
+		if (!live.length) return null;
+		// (c itself reached first through another respawn in the pass: that seed's way first, at most 4 respawns deep; Cold
+		// World: the coin (73,222) <- (66,230) <- (58,235) <- (59,239): from an arrival ON (59,239) the death there first)
+		if (depth < 4 && fwd.via[c] >= 0 && fwd.via[c] !== c) {
+			const r2 = respCrumb(a, e, cls, S, [c], depth + 1);
+			if (r2) return r2;
+		}
+		let r = null;
+		a._respCrumb = true;
+		try { r = crumbPhys(a, e, cls, S, live); } catch (err) { r = null; } finally { a._respCrumb = false; }
+		if (r) { ST.respCrumb = (ST.respCrumb || 0) + 1; if (CRUMB_DBG) console.error('respCrumb toward', xy(c), 'by', r.waypoint.label); return r; }
+		const edge = 'trig:' + X.id;
+		const rung = facts ? facts.rungOf(edge, cls) : 0;
+		if (rung >= CRUMB_RUNGS) return null;
+		ST.respCrumb = (ST.respCrumb || 0) + 1;
+		if (CRUMB_DBG) console.error('respCrumb the checkpoint', xy(c), 'for', e.X ? e.X.label : 'trophy', 'pass', best);
+		let d1 = INF;
+		for (const t of live) if (fwd[t] < d1) d1 = fwd[t];
+		return { edge, nodeClass: cls, rung, estTicks: Math.round((d1 < INF ? d1 : 40) * pace()), lb: 0, crumb: true,
+			waypoint: { kind: 'trigger', tiles: live.slice(), trig: X.id, expect: null, label: `crumb ${X.label} (respawn)` } };
 	}
 	function crumbStep(a, e, cls) {
 		if (!CRUMBS || e.viaDeath) return null;
@@ -2184,7 +2285,7 @@ function createPlanner(model, facts, o = {}) {
 	const stats = () => Object.assign({}, ST, { pace: pace(), model: model.stats() });
 	/** the floors' version: bumps when an async floor probe adds floors (plans made before it priced the trophy edge without) */
 	const floorVersion = () => floorVer;
-	return { plan, learn, lowerBound, costOf, explain, stats, floorVersion, _edgesOf: edgesOf, _hLb: hLb, _anchorOf: anchorOf, _zoneNeed: zoneNeed };
+	return { plan, learn, lowerBound, costOf, explain, stats, floorVersion, _edgesOf: edgesOf, _hLb: hLb, _anchorOf: anchorOf, _zoneNeed: zoneNeed, _crumbStep: crumbStep, _physFwdOf: physFwdOf };
 }
 
 module.exports = { createPlanner, PACE0 };
