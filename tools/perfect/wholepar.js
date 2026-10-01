@@ -35,8 +35,20 @@ const TOGO_EPS = +(process.env.EEAT_TOGO_EPS || 0.01);
 function makeCtx(L, tiers) {
 	const useTogo = tiers.has('togo');
 	const useKin = useTogo || tiers.has('kin');
-	const lp = LP.contextOf(L, { field: useTogo });
 	const mine = (tiers.has('rel') || tiers.has('gate')) ? WP.createH(L, { gate: tiers.has('gate'), noEndgame: useKin && process.env.EEAT_WP_ATEG !== '1' }) : null;
+	// THE DEATH WAY'S RESPAWN BOUND (cycle 5; EEAT_WP_RESPFIELD=0: off, the tiers as before): with the endgame dedup the rel /
+	// gate tiers drop bounds.at's endgame max, whose death way is DEATH_MIN + the rel field at the respawns, and the kin tier
+	// caps a way through a death by DEATH_MIN + 1 + the respawns' speed-limit bound alone (celeste 31c0's start: kin 74 where
+	// rel alone read 87: 13 ticks lost); the rel field's least value over the respawn tiles is admissible for any state there
+	// (bounds.at starts from it), so the kin tier takes the larger
+	let hResp;
+	if (useKin && mine !== null && process.env.EEAT_WP_RESPFIELD !== '0') {
+		const SB = require('../../src/plan/bounds.js').staticOf(L);
+		let r = Infinity;
+		for (const t of SB.respawn) if (mine.fRel[t] < r) r = mine.fRel[t];
+		if (Number.isFinite(r)) hResp = r;
+	}
+	const lp = LP.contextOf(L, { field: useTogo, hResp });
 	// 'reach': reach.js's field (RCH3, the searches' prune field: every rule errs toward reachable, its -1 a proof in physics
 	// mode, deaths as edges where a death can move the ball) cuts a state it calls cut off (h = Infinity); walk mode: no tier
 	let RF = null;

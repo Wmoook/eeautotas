@@ -58,6 +58,9 @@ function contextOf(L, o = {}) {
 			if (v < hResp) hResp = v;
 		}
 		if (!Number.isFinite(hResp)) hResp = 0;
+		// o.hResp: a sound bound from every respawn tile to a trophy given by the caller (wholepar.js: the rel field's least
+		// value over the respawn tiles, bounds.js at()'s own death way): the larger kept; absent = as before
+		if (o.hResp !== undefined && Number.isFinite(o.hResp) && o.hResp > hResp) hResp = o.hResp;
 	}
 	// the field part: per abstract state key the order-aware cost-to-go field over the 8-px lattice (routelb.togo)
 	const RL = o.field ? require('../math/routelb.js').createRouteLB(L, { togoCheap: o.field !== 'full' }) : null;
