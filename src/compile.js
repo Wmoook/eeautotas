@@ -177,7 +177,7 @@ async function main() {
 		gapPct: r.ok && r.runTicks > 0 ? Math.round((r.gap / r.runTicks) * 1000) / 10 : null, legs: r.legs || [], provenLegs: proven, stages: Object.assign({}, r.stages, { parse: parseMs }),
 		known: r.known || null, ratio, why: r.why || '', steps: r.steps, anchors: r.anchors, bugs: r.bugs, deepenings: r.deepenings, stalls: r.stalls, relayRuns: r.relayRuns, relaySet: r.relaySet, relayDrop: r.relayDrop, out: wrote || null, verified,
 		loadtas: wrote ? `/loadtas ${wrote}` : null, inputs: r.ok ? T.strOf(r.masks) : null, math, patterns: ex && Array.isArray(ex.patterns) ? ex.patterns : [], perfect: r.perfect || null, joins: r.joins || null, ...(r.stretch ? { stretch: r.stretch } : {}),
-		...(r.oneshot !== undefined ? { oneshot: r.oneshot } : {}) };
+		...(r.oneshot !== undefined ? { oneshot: r.oneshot } : {}), ...(r.lbRoute !== undefined ? { lbRoute: r.lbRoute } : {}) };
 	if (a.report) { fs.mkdirSync(path.dirname(path.resolve(a.report)), { recursive: true }); fs.writeFileSync(path.resolve(a.report), JSON.stringify(report, null, 1)); }
 	if (json) emitJ(Object.assign({ ev: 'report' }, report));
 	else if (r.ok) {
