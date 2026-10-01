@@ -120,11 +120,15 @@ function route(by, masks, how) {
 	return ev;
 }
 let ownJob = null;   // (the AutoTASer ended without a job (Find a route ended): a job of our own for a later route)
+let ownJobFailed = false;   // (its import refused the route (jobs.importJob: e.g. random portals no exit combination of which finishes): not again)
 function toJob(ms, source) {
 	try {
 		const r = ctl && !atEnded ? ctl.outside(ms, source) : null;
 		if (r) { if (!R.search.job) { R.search.job = r.job; R.search.jobFrom = source; } return; }
 	} catch (e) { R.errors.push(`outside: ${e.message}`); }
+	// (the AutoTASer's own import of a route failed the same way: jobs.importJob's random-portal analysis can take minutes
+	// in this thread (Pretty How Town: 131 s) and refuses again)
+	if (ownJobFailed || (R.search.end && /could not be made a job/.test(String(R.search.end.why || '')))) return;
 	if (Date.now() > END - 20e3) return;
 	try {
 		if (!ownJob) {
@@ -136,7 +140,7 @@ function toJob(ms, source) {
 			R.search.job = ownJob; R.search.jobFrom = `${source} (the hybrid's own job: the AutoTASer had ended)`;
 			log(`a job of our own from ${source}: ${ownJob}`);
 		} else J.tryCandidate(ownJob, C.eetasBytes(ms), { source, wait: 0 }).catch(() => {});
-	} catch (e) { R.errors.push(`own job: ${e.message}`); }
+	} catch (e) { R.errors.push(`own job: ${e.message}`); ownJobFailed = true; }
 }
 function guardGrind(pid) {
 	if (!pid || process.platform === 'win32') return;
