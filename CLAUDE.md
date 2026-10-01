@@ -1088,3 +1088,18 @@ ways in.
   gate with the default (60 s): exit 0, compiled 15 vs the baseline's 11, worse 1 (First Person Maze, the base's own).
   Tests that require src/plan/strategy.js directly read the environment (test/planstrategy.js's mock T-STALL fails with
   `EEAT_BW_LEVEL=1`: the child solves the real toy file).
+- **THE WHOLE-LEVEL PROOF** (box 7 lane 'proof', 2026-09-30; `tools/perfect/wholeproof.js`, `test/wholeproof.js` 37/0; a tool,
+  the compile unchanged): is a route TICK-PERFECT? `node tools/perfect/wholeproof.js <level> [--route=<a.eetas>,..] [--U=<run
+  ticks>] [--seconds=600] [--cap=4000000] [--out=<faster.eetas>] [--gate=0] [--deaths=0]`: an exact search over ENGINE states
+  (every input of every tick, stateHash merge: the trigger order is in the state; deaths as moves) from EVERY idle start at
+  run tick 0 (the timer starts at the first input: the idle trajectory until it rests or repeats), in IDA* contours over the
+  run ticks with an admissible h = bounds.js `at` on the rel trophy field (+ the crown's tick) and THE ORDER TIER (the doors
+  as the state holds them (types.js levelNow) until the ball reaches a door-changing trigger or a killer tile t, then t's rel
+  value: one multi-source field per door state, bounds.js `field(..., {init})`, fo.init OPT-IN: absent = the field byte for
+  byte); every closed pass PROVES lb = the next contour; a crown = the optimum (replayed: `FASTER` when below the routes
+  given, else `PROVEN`), a closed pass at U - 1 = `PROVEN`; `--check` (default): h never above the ticks left along every
+  route given, else no claim. The toys: the optimum = exact.js's from the same starts, PROVEN with the optimum as U, FASTER
+  with U + 1. THE WALL (box 7, 1,500 s a level, one thread): the bounds are far below the routes at the start (h / U:
+  Switch Labyrinth 9 / 27 (the portal keeps the speed, the fields do not), celeste 87 / 235, NC Naos 49 / 111, My level
+  fef0 4 / 59) and each tick of slack multiplies the states 3-5x: no whole level proven; the proven lbs it reached are the
+  B7 proof ORCHESTRATOR lines. The order tier: Ruins lb 64 vs 52 at the same time.
