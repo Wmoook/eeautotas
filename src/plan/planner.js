@@ -147,6 +147,19 @@ const TIMER_START = TIMER && process.env.EEAT_PLAN_TIMER_START !== '0';
 // (the late rule alone: EEAT_PLAN_TIMER_LATE=0 = no anchor marked late, the deadline plans kept; the 36 timed levels' A/B, block 2:
 // the knob on lost progress on 12 of 21 unrouted levels, gained on 2, and every one of 3 both-routed routes was slower)
 const TIMER_LATE = TIMER && process.env.EEAT_PLAN_TIMER_LATE !== '0';
+// THE TROPHY AS RANKED COMPONENTS (C6 lane 3 block 4; OPT-IN EEAT_TROPHY_COMP=1, off = the planner byte for byte): the
+// trophy edge's target was the UNION of every trophy tile, so its est and the executor's goal field went to the NEAREST
+// trophy, and a decorative one decoys the whole compile: Ice Cream Expedition has 6 trophy tiles, (5,177) sealed (solids
+// on three sides, a one-way above that passes only a ball moving left), the routes end at (95,339); the chief's run ended
+// 'trophy rung 3, closest 2 tiles at (5,175)'; DEEPER's (25,91) stands on live portals, the real one (42,91). With the
+// knob a trophy step that fails at rung >= TCOMP_RUNG with its closest tile within TCOMP_NEAR tiles (Chebyshev) of a
+// trophy component, while another component is still a target, adds a 'tdrop' fact (facts.js) for the anchor's abstract
+// state (its doors / counts): the trophy edge from that state then goes to the other components only (edge
+// 'trophy~t<ids>', its own rungs from 0; the waypoint carries their tiles, types.js goalOf: the field to them, the test
+// still the crown). Ordering only: the lb / proofs read every trophy tile as before, the crown on any tile finishes.
+const TCOMP = process.env.EEAT_TROPHY_COMP === '1';
+const TCOMP_RUNG = Math.max(0, +(process.env.EEAT_TROPHY_COMP_RUNG || 2) | 0);
+const TCOMP_NEAR = Math.max(0, +(process.env.EEAT_TROPHY_COMP_NEAR || 2));
 /** {left, id}: the ticks a ball has before its soonest running timed killer kills it (Infinity: none running; eesim.js's
  *  rule, Player.as:399-404: it dies on the first tick t with t - start > duration) and that killer's effect block (421
  *  curse, 422 zombie, 1584 poison, 0 fire: no remover block) */
@@ -851,7 +864,14 @@ function createPlanner(model, facts, o = {}) {
 			}
 		}
 		if (only) return out;
-		finish(null, trophyTiles, 'trophy', null);
+		// (THE TROPHY'S COMPONENTS, TCOMP: the components a near miss ruled out from this abstract state are not targets)
+		const tdrop = TCOMP && facts && model.trophies.length > 1 && typeof facts.tdropOf === 'function' ? facts.tdropOf(S.key) : null;
+		if (tdrop && tdrop.length) {
+			const keep = [];
+			model.trophies.forEach((X, i) => { if (!tdrop.includes(i)) for (const t of X.tiles) keep.push(t); });
+			if (keep.length) finish(null, keep, 'trophy~t' + tdrop.slice().sort((x, y) => x - y).join('.'), null);
+			else finish(null, trophyTiles, 'trophy', null);
+		} else finish(null, trophyTiles, 'trophy', null);
 		// (the stepping stones: an irrelevant coin / blue coin as a step of its own, the state unchanged; plan mode only)
 		if (wantEst && STONES && stones.length) {
 			// (STONE_WAY: the node's walk to the trophy on the open level, the stones' detour against it)
@@ -1228,7 +1248,8 @@ function createPlanner(model, facts, o = {}) {
 				push({ edge: eh, nodeClass: cls, rung: 0, estTicks: Math.max(0, Math.round(e.est) - 8), lb: 0,
 					waypoint: { kind: 'region', tiles: [X.boost], expect: null, label: `${X.label}: its boost` } });
 			}
-			const wp = X ? { kind: 'trigger', tiles: e.live.slice(), trig: X.id, expect: e.expect, label: e.anyOf > 1 ? `${X.label} (any of ${e.anyOf})` : X.label } : { kind: 'trophy', label: 'trophy' };
+			const wp = X ? { kind: 'trigger', tiles: e.live.slice(), trig: X.id, expect: e.expect, label: e.anyOf > 1 ? `${X.label} (any of ${e.anyOf})` : X.label }
+				: /^trophy~t/.test(e.edge) ? { kind: 'trophy', tiles: e.live.slice(), label: `trophy (${e.live.length} of ${trophyTiles.length} tiles)` } : { kind: 'trophy', label: 'trophy' };
 			push({ edge: e.edge, nodeClass: cls, rung: facts ? facts.rungOf(e.edge, cls) : 0, waypoint: wp, estTicks: Math.round(e.est), lb: e.lb, pen: e.pen || '' });
 			// a key followed by its door: the passage while the key is on
 			if (X && X.kind === 'key' && i + 1 < path.length) {
@@ -1848,15 +1869,30 @@ function createPlanner(model, facts, o = {}) {
 		if (CUT_PROG && a && fail.why !== 'exhausted' && fail.closest && fail.closest.tile !== undefined && fail.closest.tile !== null) {
 			// (THE PROGRESS RULE: a budget failure whose closest approach is less than CUT_PROG_F of the est walk's way from
 			// the anchor to the waypoint is no counterexample: see CUT_PROG)
-			const tiles = step.waypoint && step.waypoint.kind !== 'trophy' && step.waypoint.tiles ? step.waypoint.tiles : trophyTiles;
+			const tiles = step.waypoint && (step.waypoint.kind !== 'trophy' || TCOMP) && step.waypoint.tiles && step.waypoint.tiles.length ? step.waypoint.tiles : trophyTiles;
 			const dC = model.pairSteps(a.S, a.pos, [fail.closest.tile], 'est', a.base), dT = model.pairSteps(a.S, a.pos, tiles, 'est', a.base);
 			if (dT > 0 && dT < INF && !(dC >= CUT_PROG_F * dT)) { noWall = true; ST.cutSkipped = (ST.cutSkipped || 0) + 1; }
 		}
 		if (!isStone && !noWall && a && fail.closest && fail.closest.tile !== undefined && fail.closest.tile !== null && !(process.env.EEAT_FIELD_MEMO === '1' && !(fail.closest.dist >= 0)) && (rung + 1 >= 2 || fail.why === 'exhausted')) {
-			const tiles = step.waypoint && step.waypoint.kind !== 'trophy' && step.waypoint.tiles ? step.waypoint.tiles : trophyTiles;
+			const tiles = step.waypoint && (step.waypoint.kind !== 'trophy' || TCOMP) && step.waypoint.tiles && step.waypoint.tiles.length ? step.waypoint.tiles : trophyTiles;
 			cut = cutPast(a.S, a.pos, tiles, a.base, fail.closest.tile);
 		}
 		out.push(facts.add(Object.assign({ kind: 'fail', edge, nodeClass: cls, rung, why: fail.why || 'budget', closest: fail.closest ? { tile: fail.closest.tile, dist: fail.closest.dist } : null, blockedBy: fail.blockedBy || [], cut }, noWall ? { noWall: true } : {})));
+		// (THE TROPHY'S COMPONENTS, TCOMP: a near miss beside one trophy component at rung >= TCOMP_RUNG rules it out from
+		// this abstract state while another component is still a target)
+		if (TCOMP && a && model.trophies.length > 1 && step.waypoint && step.waypoint.kind === 'trophy' && rung >= TCOMP_RUNG && fail.why !== 'stopped'
+			&& fail.closest && fail.closest.tile !== undefined && fail.closest.tile !== null && fail.closest.tile >= 0) {
+			const cur = step.waypoint.tiles && step.waypoint.tiles.length ? new Set(Array.from(step.waypoint.tiles)) : null;
+			const dropped = facts.tdropOf(a.S.key);
+			const live = [];
+			model.trophies.forEach((X, i) => { if (!dropped.includes(i) && (!cur || X.tiles.some((t) => cur.has(t)))) live.push(i); });
+			if (live.length >= 2) {
+				const cx = fail.closest.tile % W, cy = (fail.closest.tile / W) | 0;
+				let bi = -1, bd = Infinity;
+				for (const i of live) for (const t of model.trophies[i].tiles) { const d = Math.max(Math.abs(t % W - cx), Math.abs(((t / W) | 0) - cy)); if (d < bd) { bd = d; bi = i; } }
+				if (bi >= 0 && bd <= TCOMP_NEAR) { out.push(facts.add({ kind: 'tdrop', sKey: a.S.key, comp: bi })); ST.tdrops = (ST.tdrops || 0) + 1; }
+			}
+		}
 		if (rung + 1 >= facts.RUNG_MAX || (isStone && rung + 1 >= STONE_RUNGS)) out.push(facts.add({ kind: 'block', edge, nodeClass: cls }));
 		return out;
 	}

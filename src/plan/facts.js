@@ -11,9 +11,12 @@
 //   {kind: 'needs', edge, nodeClass, feat, value}   a shut gate near the closest approach: the edge needs that value first
 //   {kind: 'proof', edge, sKey}                     an RCH3 -1 from that abstract state: never tried from it again
 //   {kind: 'block', edge, nodeClass}                RUNG_MAX failures: the edge is out for that node class
+//   {kind: 'tdrop', sKey, comp}                     a DECOY TROPHY (planner.js EEAT_TROPHY_COMP): the trophy component
+//                                                   `comp` (model.trophies index) is out of the trophy edge from abstract
+//                                                   state sKey (a near miss at rung >= 2 beside it); kept by reset's keepProofs
 // o.rungMax (or o.rungs, the strategy's budget rungs; default 3). The version counts every add (and every reset).
 const RUNG_MAX = 3;
-const KINDS = new Set(['ok', 'fail', 'needs', 'proof', 'block']);
+const KINDS = new Set(['ok', 'fail', 'needs', 'proof', 'block', 'tdrop']);
 
 function createFacts(o = {}) {
 	// (o.rungs: the strategy's number of budget rungs, e.g. 4 = 1.5 / 5 / 15 / 45 s: the block after that many failures)
@@ -22,6 +25,7 @@ function createFacts(o = {}) {
 	let fails = new Map(), blocks = new Set(), proofs = new Set(), needs = new Map(), oks = new Map();
 	// (per edge, over EVERY node class: the failed rungs (the sum of each class's rung count) and whether some class did it)
 	let failAny = new Map(), okAny = new Set();
+	let tdrops = new Map();   // sKey -> [trophy component indices out]
 	const ek = (edge, cls) => `${edge}\u0001${cls}`;
 	function index(f) {
 		switch (f.kind) {
@@ -35,6 +39,7 @@ function createFacts(o = {}) {
 			case 'needs': { const k = ek(f.edge, f.nodeClass); if (!needs.has(k)) needs.set(k, []); const l = needs.get(k); if (!l.some((x) => x.feat === f.feat && x.value === f.value)) l.push({ feat: f.feat, value: f.value }); break; }
 			case 'proof': proofs.add(ek(f.edge, f.sKey)); break;
 			case 'block': blocks.add(ek(f.edge, f.nodeClass)); break;
+			case 'tdrop': { const k = String(f.sKey), l = tdrops.get(k) || []; if (!l.includes(f.comp | 0)) l.push(f.comp | 0); tdrops.set(k, l); break; }
 			default: break;
 		}
 	}
@@ -65,12 +70,14 @@ function createFacts(o = {}) {
 		okTicks: (edge, cls) => oks.get(ek(edge, cls)),
 		/** [{feat, value}] the edge needs first (from 'needs' facts) */
 		needsOf: (edge, cls) => needs.get(ek(edge, cls)) || [],
+		/** the trophy components out of the trophy edge from abstract state sKey ('tdrop' facts; [] none) */
+		tdropOf: (sKey) => tdrops.get(String(sKey)) || [],
 		list: () => facts.slice(),
 		/** reset({keepProofs}): forget the rungs, blocks, needs and estimates (the strategy's deepening); proofs stay on
 		 *  request; the version still bumps */
 		reset(ro = {}) {
-			const keep = ro.keepProofs ? facts.filter((f) => f.kind === 'proof') : [];
-			facts = []; fails = new Map(); blocks = new Set(); proofs = new Set(); needs = new Map(); oks = new Map(); failAny = new Map(); okAny = new Set();
+			const keep = ro.keepProofs ? facts.filter((f) => f.kind === 'proof' || f.kind === 'tdrop') : [];
+			facts = []; fails = new Map(); blocks = new Set(); proofs = new Set(); needs = new Map(); oks = new Map(); failAny = new Map(); okAny = new Set(); tdrops = new Map();
 			for (const f of keep) { facts.push(f); index(f); }
 			ver++;
 		},
