@@ -29,11 +29,20 @@
 // NOT defaults (measured, opt-in): the stones (EEAT_PLAN_STONES) and the prices (EEAT_WALL_PRICE, EEAT_PHYS_PRICE: Late
 // christmas compiled, Treasure Trove Cove 7 -> 5 in 2 of 2), the cover from rung 2 (EEAT_COVER_RUNG=2: lost Stone Ruin and
 // Perilous Endeavor, no control faster).
+// THE CHAINS-LAB JUDGE (2026-09-30, src/out/n5/lab/JUDGE.md): EEAT_BW_LEVEL=last (the lab's backward solver on the whole
+// level in a child process next to the moves stage, its route a LAST RESORT: taken only when the moves stage ends with no
+// route; the moves' first route ends the child): box 5, 300 s, W3: the child's route where the base's moves found none:
+// The Blank Page 2,025 (=last) / 2,011 (=1 with the corridor) vs the base 0 of 1, INVASION 4,091 (=1 with the corridor) vs
+// 0 of 1, Gravity's Rainbow 2,059 (=last) / 2,019 / 2,020 (=1) vs the base's none / 3,402; none of the 28 levels the
+// compile routes lost (the moves' route is the compile's wherever they have one: the base's code path); =1 (the child's
+// route at once, the lab's) made the refinement start from the child's route instead of the executor's: Rosa dei Venti
+// +56 / +148 in two pairs, celeste +5: opt-in.
 const DEFAULTS = [
 	['EEAT_COVER', '3'], ['EEAT_CRUMBS', '1'], ['EEAT_FIELD_MEMO', '1'],
 	['EEAT_PLAN_ANY', '1'], ['EEAT_PLAN_UNTOGGLE', '1'],
 	['EEAT_FX_FIELD', '1'], ['EEAT_FX_STATE', '1'], ['EEAT_ICE_LOCAL', '1'], ['EEAT_PROT_LAYER', '1'],
 	['EEAT_CRUMB_RANK', '3'],
+	['EEAT_BW_LEVEL', 'last'],
 ];
 /** set the defaults the environment does not name (EEAT_COMPILER_DEFAULTS=0: none of them) */
 function apply() {

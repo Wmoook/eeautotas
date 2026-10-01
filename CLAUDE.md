@@ -486,7 +486,7 @@ ways in.
   src/compile.js and src/plan.js turn on, unless the environment names them (=0 off; `EEAT_COMPILER_DEFAULTS=0` none),
   EEAT_COVER=3 (the coverage leg finder as the fallback), EEAT_CRUMBS=1 (coins no gate reads as breadcrumb relays),
   EEAT_FIELD_MEMO=1, EEAT_PLAN_ANY=1 (a set-kind trigger group = one edge), EEAT_PLAN_UNTOGGLE=1, EEAT_FX_FIELD=1 /
-  EEAT_FX_STATE=1 (physics goal fields on effect levels), EEAT_ICE_LOCAL=1, EEAT_PROT_LAYER=1; the modules themselves stay
+  EEAT_FX_STATE=1 (physics goal fields on effect levels), EEAT_ICE_LOCAL=1, EEAT_PROT_LAYER=1, EEAT_BW_LEVEL=last (the chains-lab judge: the last bullet of this section); the modules themselves stay
   opt-in (their tests and the truth checkers read them as before). Box 5, 300 s, W3, one run a level: all of them on (the
   combo, 22 levels) compiled 15 vs the base's 9, none lost (+K Underground, On And On And On, Crypts Of Anubis, Presto
   Penguins, The Witch's House; Vignettes, Perilous Endeavor and Stone Ruin Speedrun compiled in the single-group arms, not
@@ -923,3 +923,28 @@ ways in.
   per level (one or two runs an arm), only in the sums. LEFT: more runs an arm; the reserve (the pass's 20 s come out of
   THE REST / THE LAST's time on a long route: Ruins' same moves route 6.9% vs 6.5% in sample 1); the pass's own gains are
   the polish at the joins (the order B&B: 0 / 6 legs on most levels at 300 s).
+- **THE CHAINS LAB, judged** (2026-09-30; the three lab branches merged into n5-plan, `src/plan/lab/`; the judge's record
+  `src/out/n5/lab/JUDGE.md` in its worktree, gitignored): **`EEAT_BW_LEVEL`** (n5-lab-backward: `backward.js`, backward
+  reachability + meet in the middle + relay, solving the WHOLE LEVEL as one leg in a child process next to the moves stage,
+  `bwlevel_child.js`, at most 0.5 of the budget / 150 s, heap 2 GB): **`last` IS A COMPILER DEFAULT** (src/plan/defaults.js;
+  the child's route only when the moves stage ends with no route of its own; the moves' first route ends the child: where
+  the moves route, the compile is the base's code path), `1` = its route at once (the lab's: opt-in), `0` off;
+  `EEAT_BACKWARD=1` its executor tier B, `EEAT_CORRIDOR=1` (+ `EEAT_CORR_MIN=0 EEAT_CORR_REPLACE=1`) the corridor's tier MC
+  (n5-lab-corridor, `corridor.js`), `EEAT_PROFILE=1` the speed profiles' tier P (n5-lab-profile, `profile.js`): OPT-IN,
+  off = the executor byte for byte. THE LEGS (`tools/lab/judge_legs.js`: the 55 stuck waypoints with a known route
+  (`tools/lab/corridor_cases.js`) from the known route's own exact state at its previous trigger / 300 / 120 ticks before
+  the target, 129 legs, one 30-s clock an arm, every answer replayed): the backward solver **99 / 129** (81 within 5 s,
+  median 1.7 s), the executor as it stands 90 (the best ticks: 46 <= the route), the profiles 80, the corridor 78,
+  msolve.chain 35; the union 107 = executor + backward + corridor (the profiles add none on top); FINDER legs 1 / 11 by
+  any. THE COMPILES (box 5, 300 s, W3, one tree, arms side by side, one run a level unless said): the whole-level child
+  compiled what the base's moves did not: The Blank Page (2,025 `last`; 2,011 `1` + corridor), INVASION (4,091 `1` +
+  corridor), Gravity's Rainbow (2,059 `last`; 2,019 / 2,020 `1`; the base none / 3,402); the 28 levels the compile routes:
+  `1` 28 / 28 vs the base 27 / 28 and 10 / 10 in the replicate, run ticks geo-mean 0.999, but where its early route was
+  taken the refinement started from it instead of the executor's: Rosa dei Venti +56 / +148 in two pairs, celeste +5 (and
+  Tree Decorating -283 / -197, Endless Space -104 / -135 faster): hence `last` as the default; the corridor tier with `1`
+  on the 20 failing levels 5 vs 4 compiled (lost Buuwuu's Stronghold and Snow Jumping; the corridor alone failed Snow
+  Jumping again, 0 / 2 with it vs 2 / 2 without): opt-in. THE SPREAD of one 300-s run a level (the same code: the child
+  ended at once): Bygone Tutorial 1,906 vs 2,477, Tutorial 2 3,972 vs 4,892, Level 1 Overworld 10,745 vs 12,463. Shared
+  gate with the default (60 s): exit 0, compiled 15 vs the baseline's 11, worse 1 (First Person Maze, the base's own).
+  Tests that require src/plan/strategy.js directly read the environment (test/planstrategy.js's mock T-STALL fails with
+  `EEAT_BW_LEVEL=1`: the child solves the real toy file).

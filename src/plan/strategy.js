@@ -225,7 +225,13 @@ const LB0_MS = +process.env.EEAT_LB0_MS || 500;
 // THE WHOLE LEVEL AS ONE LEG (the lab's backward solver, src/plan/lab/bwlevel_child.js, a child process next to the moves
 // stage; OPT-IN EEAT_BW_LEVEL=1, off = the compile byte for byte): the level's start -> the trophy in one solve, at most
 // BW_LEVEL_F of the budget and BW_LEVEL_MAX_S; its route is a route like the moves' (routeOf), the moves go on
-const BW_LEVEL = process.env.EEAT_BW_LEVEL === '1', BW_LEVEL_F = +process.env.EEAT_BW_LEVEL_F || 0.5, BW_LEVEL_MAX_S = +process.env.EEAT_BW_LEVEL_MAX_S || 150;
+// EEAT_BW_LEVEL=last (the chains-lab judge, 2026-09-30): the child's route is a LAST RESORT, taken only when the moves stage
+// ends with no route of its own (a level the compile would fail); where the moves have a route the compile is theirs, byte
+// for byte (the child's earlier route, taken at once with =1, became the refinement's seed in place of the executor's: Rosa
+// dei Venti 3,602 / 3,698 vs 3,546 / 3,550 in two pairs)
+const BW_LEVEL_MODE = process.env.EEAT_BW_LEVEL === 'last' ? 'last' : process.env.EEAT_BW_LEVEL === '1' ? 'now' : '';
+const BW_LEVEL = !!BW_LEVEL_MODE, BW_LEVEL_F = +process.env.EEAT_BW_LEVEL_F || 0.5, BW_LEVEL_MAX_S = +process.env.EEAT_BW_LEVEL_MAX_S || 150;
+// (=last: the whole level alone, no legs, no arrivals: BW_LEGS / BW_GATE below act with =1 only; EEAT_BW_CHAIN=1 its own)
 // (THE WHOLE LEVEL AS LEGS, with BW_LEVEL: a trophy behind a gate gets the first plan's waypoints; each leg's new model state
 // comes back as an imported anchor; EEAT_BW_LEGS=0: the trophy alone, as before)
 const BW_LEGS = process.env.EEAT_BW_LEGS !== '0';
@@ -738,7 +744,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	};
 
 	// ---- THE WHOLE LEVEL AS ONE LEG (EEAT_BW_LEVEL=1; BW_LEVEL above): started with the moves loop, killed at its end
-	let bwlChild = null, bwlDone = null, bwlWpFile = null, bwlWpKey = '';
+	let bwlChild = null, bwlDone = null, bwlWpFile = null, bwlWpKey = '', bwlPending = null;
 	// (the gate: BW_GATE above; the held arrivals' inputs in the order they came)
 	let bwlOpen = !BW_GATE, bwlWant = '', bwlReleased = 0;
 	const bwlHeld = [];
@@ -795,7 +801,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const cp = require('child_process'), t1 = Date.now();
 		// (BW_LEGS: the first plan's waypoints from the start, in order, for the child's legs when the trophy is gated)
 		let wpFile = null, nWp = 0;
-		if (BW_LEGS && !BW_CHAIN) {
+		if (BW_LEGS && !BW_CHAIN && BW_LEVEL_MODE !== 'last') {
 			try {
 				wpFile = path.join(require('os').tmpdir(), `eeat_bwl_${process.pid}_${Date.now()}.json`);
 				const A = anchors.get(String(S0.key));
@@ -815,7 +821,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 			const onExit = () => { try { ch.kill('SIGKILL'); } catch (e) { /* gone */ } };
 			process.once('exit', onExit);
 			const kill = setTimeout(onExit, (secs + 20) * 1000);
-			const poll = setInterval(() => { if (stopped || left() <= 0) onExit(); }, 500);
+			// (=last: the moves' first route ends the child: its route would never be taken)
+			const poll = setInterval(() => { if (stopped || left() <= 0 || (BW_LEVEL_MODE === 'last' && !BW_CHAIN && best)) onExit(); }, 500);
 			if (kill.unref) kill.unref();
 			if (poll.unref) poll.unref();
 			ch.stdout.on('data', (d) => {
@@ -827,9 +834,10 @@ async function compile(L, opts = {}, emit = () => {}) {
 					try { ev = JSON.parse(line); } catch (e) { continue; }
 					if (ev.ev === 'result' && ev.kind === 'finish' && typeof ev.inputs === 'string') {
 						found = ev.inputs;
+						if (BW_LEVEL_MODE === 'last' && !BW_CHAIN) { bwlPending = found; say({ ev: 'bwlevel', end: 'finish', runTicks: typeof ev.runTicks === 'number' ? ev.runTicks : null, deferred: true, ms: Date.now() - t1 }); continue; }
 						const x = routeOf(T.masksOf(found.replace(/[^0-O]/g, '')), BW_CHAIN ? 'the level as a chain of backward legs' : 'the whole level as one leg (backward)', null);
 						say({ ev: 'bwlevel', end: 'finish', runTicks: x && x.ev ? x.ev.runTicks : null, better: !!(x && x.better), ms: Date.now() - t1 });
-					} else if (ev.ev === 'arrival' && typeof ev.inputs === 'string' && !best) {
+					} else if (ev.ev === 'arrival' && typeof ev.inputs === 'string' && !best && (BW_LEVEL_MODE !== 'last' || BW_CHAIN)) {
 						// (a leg of the whole level: its new model state an anchor, as an imported state: replayed, addArrival)
 						say({ ev: 'bwlevel', leg: ev.label || '', ticks: ev.ticks, ms: Date.now() - t1, ...(bwlOpen ? {} : { held: true }) });
 						if (bwlOpen) onLine(`import ${ev.inputs.replace(/[^0-O]/g, '')}`);
@@ -1797,6 +1805,11 @@ async function compile(L, opts = {}, emit = () => {}) {
 		if (bwlChild && !best && !stopped && left() > 1000) {
 			const wms = Math.max(0, left() - 500);
 			await Promise.race([bwlDone, new Promise((res) => { const tt = setTimeout(res, wms); if (tt.unref) tt.unref(); })]);
+		}
+		// (EEAT_BW_LEVEL=last: the child's route only now, and only when the moves stage has none)
+		if (BW_LEVEL_MODE === 'last' && !BW_CHAIN && bwlPending && !best) {
+			const x = routeOf(T.masksOf(bwlPending.replace(/[^0-O]/g, '')), 'the whole level as one leg (backward, last resort)', null);
+			say({ ev: 'bwlevel', end: 'taken', runTicks: x && x.ev ? x.ev.runTicks : null, better: !!(x && x.better) });
 		}
 		// (in-flight steps: told to stop, awaited briefly)
 		const wasStopped = stopped;
