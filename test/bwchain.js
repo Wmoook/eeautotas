@@ -73,6 +73,29 @@ const levelOfFile = (f) => E.prepareLevel(EL.toSimLevel(EL.readEelvl(fs.readFile
 		const done = evs.find((e) => e.ev === 'done');
 		ok(done && done.end === 'finish' && done.mode !== 'chain', `the child on a free room finishes by the whole-level solve (${done && done.end} / '${done && done.mode}')`);
 	}
+	// 4 the P4 knobs (their own process: bwchain.js reads them when it loads): the nearest-first order + the memory of failed
+	// legs + the order bound + the relay finish the gated room, every reported route replays, the best no slower than the
+	// first; a root (o.roots) becomes a node; the child with --roots reads its file and prints each faster route
+	{
+		const knobs = { EEAT_BWC_RANK: 'est', EEAT_BWC_LEARN: '1', EEAT_BWC_MORE: '1', EEAT_BWC_RELAY: '1' };
+		const prog = `const T=require(${JSON.stringify(path.join(__dirname, '..', 'src', 'plan', 'types.js'))}), BC=require(${JSON.stringify(path.join(__dirname, '..', 'src', 'plan', 'lab', 'bwchain.js'))}), C=require(${JSON.stringify(path.join(__dirname, '..', 'src', 'common.js'))});
+const L=T.loadLevelFile(${JSON.stringify(fg)}); const routes=[]; let sent=false;
+const r=BC.chainLevel(L,{ms:12000, onRoute:(b)=>routes.push({runTicks:b.runTicks, inputs:T.strOf(b.masks)}), roots:()=>{ if(sent) return []; sent=true; return [new Uint8Array(30)]; }});
+console.log(JSON.stringify({ok:r.ok, runTicks:r.runTicks, routes, roots:r.stats.roots||0, why:r.why}));`;
+		const res = cp.spawnSync(process.execPath, ['-e', prog], { env: Object.assign({}, process.env, knobs), encoding: 'utf8', timeout: 120000 });
+		let o = null; try { o = JSON.parse(String(res.stdout).trim().split('\n').pop()); } catch (e) { o = null; }
+		ok(o && o.ok, `the knobs: the chain finishes the gated room (${o && o.why})`);
+		ok(o && o.routes.length >= 1 && o.routes.every((x) => { const ev = C.evaluate(L, Uint8Array.from(x.inputs, (c) => c.charCodeAt(0) - 48), false); return ev && ev.runTicks === x.runTicks; }), `the knobs: every reported route replays (${o && o.routes.map((x) => x.runTicks).join(', ')})`);
+		ok(o && o.runTicks === Math.min(...o.routes.map((x) => x.runTicks)) && o.routes[0].runTicks >= o.runTicks, 'the knobs: the best route is the fastest reported, no slower than the first');
+		ok(o && o.roots === 1, `the knobs: a root becomes a node (${o && o.roots})`);
+		const rf = path.join(tmp, 'roots.txt');
+		fs.writeFileSync(rf, '0'.repeat(20) + '\n');
+		const r2 = cp.spawnSync(process.execPath, [path.join(__dirname, '..', 'src', 'plan', 'lab', 'bwchain_child.js'), fg, '--ms=12000', `--roots=${rf}`], { env: Object.assign({}, process.env, knobs), encoding: 'utf8', timeout: 120000 });
+		const evs = String(r2.stdout).split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch (e) { return null; } }).filter(Boolean);
+		const ch = evs.find((e) => e.ev === 'chain'), res2 = evs.filter((e) => e.ev === 'result');
+		ok(ch && ch.roots === 1, `the child reads its roots file (${ch && ch.roots})`);
+		ok(res2.length >= 1 && res2.every((e) => C.evaluate(L, Uint8Array.from(e.inputs, (c) => c.charCodeAt(0) - 48), false)), `the child prints each faster route (${res2.map((e) => e.runTicks).join(', ')})`);
+	}
 	try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* left */ }
 	console.log(`bwchain: ${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);
