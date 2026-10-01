@@ -791,6 +791,34 @@ ways in.
   the side-arrow-priced RCH3 field reads 2,515 tiles, took ~290 of 300 s; the switch leg it needs first is found from the
   route's states at rung 3; `EEAT_PHYS_PRICE=1` ranks the switch plans first: 300 s, box 6, one run: switch 0 taken at tick 8,419 (gain 1; the chief's run 0), no route (switch 1 left at 300 tiles); `EEAT_WALL_PRICE=1` the same, 8,497); Tutorial 4's 1.55-2x is crumbs (4
   blue coins the known route never takes).
+- **The run-up relay and the side-arrow price** (C6 push 3 lane 4 block 3; `src/out/n5/lanes/c6_lane4_b3.md`). THE RUN-UP
+  RELAY (executor.js `runupRelay`, OPT-IN `EEAT_RUNUP=1`, off = the executor byte for byte): a skeleton sub-level set that
+  failed twice is tried once more (once a level a call) through the far end of a RUN (a row's maximal stretch of tiles the
+  ball moves along: open tiles over a floor, or dots 4 / 414; 16+ tiles `EEAT_RUNUP_MIN`, within 8 rows `EEAT_RUNUP_RY` of
+  the stuck arrival and over its column; the end farther from the goal by the sub-leg's own field, 8+ tiles away
+  `EEAT_RUNUP_DMIN`; the longest 2 `EEAT_RUNUP_K`, 0.6 of what is left `EEAT_RUNUP_SHARE`; `EEAT_RUNUP_GAP=g`: a run goes on
+  over gaps of up to g open tiles): a region leg to its 3 end tiles, then the stuck set from those arrivals; waypoints only.
+  Sentinel Ravines' first wall IS a run-up (the known route: up the arrow column to (90,108), 29 tiles LEFT, into the
+  45-tile dot row 102 at its left end, right along it to 6.4 px/tick, the dot column (106, 99-102) at speed): from the
+  route's t 200 to the 878 set (block 2: failed with every finder knob) the relay at level 900 then 888 found, closest 909.2
+  -> 890.2; from the start to the trophy 909.2 -> 867.6 (45 s legtrace); its next wall (98-103, 81) is a second run-up
+  (left to (84,85), then a bouncing run right at 6-7.5 px/tick over (104-115, 82-83)) that the gap runs (g 3) do not take
+  (871.6). In the compile (box 6, 300 s, W3, side by side, one tree): 6 ONE-LEG levels (Sentinel, Hold Jump, MegaMan Dash,
+  Revenge of Syssba, Ice O Slide, OCTOS) compiled 0 = 0, the same gain on all 6, the closest nearer on Ice O Slide (54.8 vs
+  127.2 tiles), the rest within a few tiles; Sentinel twice more no route either way (base 811.2 at (153,72) and 772.8:
+  the S99 stack now passes both walls without it; the relay arm 2,516.6 at (99,124), its 2 relays ok at 60 / 64 s, then
+  lost in a side-arrow region, and 772.8); the relays fired on Hold Jump (0 of 2 ok), Revenge of Syssba (1 of 23), MegaMan
+  (0 of 2), Sentinel (1-2 ok); Don't Stop Jumping's switch 1 leg from the route's state after switch 0: 317.6 -> 300.2, no
+  leg. The shared gate with it ON (gate20, 60 s, par 2, vs gate_c6b2.json): exit 0, 15 vs 14, worse 0, better 8, 15 / 15
+  replayed. NO GAIN SHOWN in a compile: opt-in. THE SIDE-ARROW PRICE (planner.js `EEAT_PHYS_PRICE=sa`, OPT-IN; unset / =1 as before, byte for byte: the physics
+  price only for an edge whose RCH3 cost holds reach.js's side-arrow price, 2,500 tiles): Don't Stop Jumping's 64-tick
+  trophy plan goes last (300 s, box 6, 2 runs an arm side by side: gain 0 / 0 -> 2 / 2, purple switch 0 at 199 s), Trick Or
+  Treat slower 2 of 2 (2,974 / 2,993 -> 3,372 / 4,041: its trophy ways hold the price's known misprice), Late christmas
+  5,366 / 5,617 vs 5,553 / 5,519, Hold Jump 0 = 0; the shared gate with it ON (60 s, par 3, vs gate_c6b2.json) exit 1, 14 vs
+  14, better 9, worse 2 (Level 1 Overworld progress 45 -> 37, NC Naos lost): again side by side off / on Naos 153 = 153,
+  Overworld 47 / 44 (the 60-s flips). Past switch 0 DSJ's walls are LONG legs, not the order: from the god route's own
+  state right after switch 0 the 1,398-tick leg to switch 1 fails at rung 3 (found from 718 ticks out), the 2,484-tick leg
+  to switch 2 from after switch 1 fails too.
 - **The stretch solver in its own process** (n5-s99-budget, 2026-09-30; `EEAT_STRETCH=1`, OPT-IN, off = the compile byte for
   byte; `src/plan/lab/stretch_child.js`, strategy.js `st*`; `test/s99stretch.js`): the executor's rung ladder (1.5 / 5 / 15 /
   45 s windows) restarts every solver of a stretch at every rung, and the lab's backward solver (`src/plan/lab/backward.js`)
