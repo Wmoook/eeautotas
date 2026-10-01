@@ -15,8 +15,9 @@
 //   then  every answer is replayed HERE from the level start (strategy.js verified: the waypoint's own goal test, alive;
 //         routeOf for a route): its inputs become the leg (tool 'search'), the arrival an anchor, the child is stopped, and
 //         the compiler goes on with its own math (planner, executor) for the next legs.
-// One child at a time, started only before the first route (a route stops it, but a TROPHY leg's search, whose own route it
-// is, goes on to the end of its slice: every faster route it prints is a route here too), never past the moves. The knobs:
+// One child at a time, started only before the first route (a route stops it), never past the moves. A TROPHY leg's search
+// gets the moves' whole time left: stopped at its slice's end when it has no route, else it goes on (its after-route heads
+// L / W) and every faster route it prints is a route here too, until the moves end (EEAT_HY_TROPHY_ON=0: its slice). The knobs:
 // EEAT_HY_RUNG (1), EEAT_HY_REPEAT (2), EEAT_HY_S (60), EEAT_HY_MIN_S (10), EEAT_HY_TRIES (3), EEAT_HY_W (2),
 // EEAT_HY_MEM (MB a worker, 1000), EEAT_HY_GPU (1), EEAT_HY_TOOL (the eegpu path), EEAT_HY_ROOMS (the rooms imported a
 // call, 24; 0 none), EEAT_HY_GX (more goexplore.js options), EEAT_HY_NICE (0).
@@ -28,7 +29,7 @@ const cp = require('child_process');
 const num = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' && Number.isFinite(+process.env[k]) ? +process.env[k] : d);
 const HY_RUNG = num('EEAT_HY_RUNG', 1), HY_REPEAT = num('EEAT_HY_REPEAT', 2), HY_S = num('EEAT_HY_S', 60), HY_MIN_S = num('EEAT_HY_MIN_S', 10);
 const HY_TRIES = num('EEAT_HY_TRIES', 3), HY_W = Math.max(1, num('EEAT_HY_W', 2)), HY_MEM = num('EEAT_HY_MEM', 1000), HY_ROOMS = num('EEAT_HY_ROOMS', 24);
-const HY_GPU = process.env.EEAT_HY_GPU !== '0', HY_NICE = num('EEAT_HY_NICE', 0);
+const HY_GPU = process.env.EEAT_HY_GPU !== '0', HY_NICE = num('EEAT_HY_NICE', 0), HY_TROPHY_ON = process.env.EEAT_HY_TROPHY_ON !== '0';
 // (Find a route's goexplore.js defaults: editor.js GX_DEFAULTS, kept in step by hand: this file must not load the editor)
 const GX_DEFAULTS = ['--opts=1', '--frontier=1', '--fBrake=1', '--fPhys=1'];
 const EXTEND = 3;   // (a goal touch: the last input held up to this many ticks more for the waypoint's test, bursts.js extend)
@@ -99,7 +100,8 @@ function createHybrid(ctx) {
 		if (!trophy) { goalFile = path.join(tmp, `goal_${id}.json`); fs.writeFileSync(goalFile, JSON.stringify(Array.from(c.wp.tiles))); }
 		const work = path.join(tmp, `work_${id}`);
 		const depth = Number.isFinite(ctx.depth()) ? Math.max(masks.length + 1, ctx.depth()) : 100000;
-		const secs = Math.max(1, Math.round(ms / 1000));
+		// (a trophy leg: the clock of the moves' time left, its slice kept by halt below while it has no route)
+		const secs = Math.max(1, Math.round((trophy && HY_TROPHY_ON ? Math.max(ms, ctx.left() - 3000) : ms) / 1000));
 		const args = [path.join(__dirname, '..', 'goexplore.js'), String(ctx.file), `--prefix=${pre}`, `--seconds=${secs}`, `--workers=${HY_W}`, `--seed=${1 + 1000 * id}`,
 			`--depth=${depth}`, '--stdin=1', '--rooms=1', `--mem=${HY_MEM}`, ...(goalFile ? [`--goalTiles=${goalFile}`] : []),
 			...(tool ? ['--bursts=1', `--tool=${tool.tool}`, ...tool.cache, `--work=${work}`] : []), ...(HY_NICE > 0 ? [`--nice=${HY_NICE}`] : []),
@@ -110,7 +112,7 @@ function createHybrid(ctx) {
 		if (env.NODE_OPTIONS) env.NODE_OPTIONS = env.NODE_OPTIONS.replace(/--max[-_]old[-_]space[-_]size[= ]\d+/g, '').trim();
 		try { ch = cp.spawn(process.execPath, args, { stdio: ['pipe', 'pipe', 'ignore'], env }); } catch (e) { stats.errors++; ctx.say({ ev: 'warning', text: `the hybrid's search: ${e.message}` }); return false; }
 		child = ch;
-		busy = { id, c, a, t: Date.now(), ms, trophy, rooms: 0, solved: false, why: whyOf(c), done: false };
+		busy = { id, c, a, t: Date.now(), ms, trophy, rooms: 0, solved: false, why: whyOf(c), done: false, slice: Date.now() + ms };
 		c.inflight = true; c.tries++;
 		stats.byWhy[busy.why] = (stats.byWhy[busy.why] || 0) + 1;
 		ctx.say({ ev: 'hybrid', what: 'request', id, anchor: c.A.id, gain: c.A.gain, label: ctx.labelOf(c.step), rung: c.rung, fails: c.n, why: busy.why, from: a.tick, seconds: secs, gpu: !!tool, goal: trophy ? 'trophy' : `${c.wp.tiles.length} tiles` });
@@ -125,7 +127,7 @@ function createHybrid(ctx) {
 			}
 		});
 		ch.stdin.on('error', () => { /* the child ended */ });
-		const kill = setTimeout(() => { try { ch.kill('SIGKILL'); } catch (e) { /* gone */ } }, ms + 20000);
+		const kill = setTimeout(() => { try { ch.kill('SIGKILL'); } catch (e) { /* gone */ } }, secs * 1000 + 20000);
 		if (kill.unref) kill.unref();
 		const gone = () => { clearTimeout(kill); if (child === ch) child = null; q.push({ ev: '_exit', _id: id }); };
 		ch.on('error', gone);
@@ -225,6 +227,7 @@ function createHybrid(ctx) {
 	};
 	/** an idle slot: the next candidate, before the first route, on a slice of the time left */
 	const schedule = () => {
+		if (child && busy && !busy.solved && !busy.halted && Date.now() > busy.slice) halt('the slice');
 		if (child || busy || ctx.stopped() || ctx.hasRoute()) { if (child && busy && ctx.hasRoute() && !(busy.trophy && busy.solved)) halt('a route'); return; }
 		const c = pick();
 		if (!c) return;
