@@ -1331,7 +1331,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	const RJ_MS = Math.max(1, +(process.env.EEAT_REJOIN_MS || 250));
 	const legLib = new Map();   // step.edge -> [leg mask strings], newest first
 	const rjKeys = new Map();   // leg mask string -> Map(physical key -> its first tick j in the leg)
-	let tpHits = 0, tpTries = 0, rjHits = 0, rjTries = 0, rjMs = 0;
+	let tpHits = 0, tpTries = 0, rjHits = 0, rjTries = 0, rjMs = 0, rjBack = 0;
 	const tpSim = new E.EESim(L), tpInp = new E.EEInput();
 	const rjF64 = new Float64Array(1), rjU32 = new Uint32Array(rjF64.buffer);
 	const rjMix = (h, v) => { h = Math.imul(h ^ v, 0x9e3779b1); return (h ^ (h >>> 15)) >>> 0; };
@@ -1352,10 +1352,9 @@ async function compile(L, opts = {}, emit = () => {}) {
 		try { tpSim.reset(); tpSim.restore(s.snap); if (!s.hash || tpSim.stateHash() === s.hash) return s.snap; } catch (e) { /* replay */ }
 		try { const r = T.playTo(L, s.masks, { allowDeath: true }); return r.sim.snapshot(); } catch (e) { return null; }
 	};
-	/** the physical keys along a kept leg played from its own start (j = 0: the start itself) */
-	const rjKeysOf = (s, leg) => {
+	/** the physical keys along inputs played from an engine state (j = 0: the state itself) */
+	const keysAlong = (base, leg) => {
 		const m = new Map();
-		const base = baseOf(s);
 		if (!base) return null;
 		try { tpSim.reset(); tpSim.restore(base); } catch (e) { return null; }
 		m.set(physOf(tpSim), 0);
@@ -1368,6 +1367,32 @@ async function compile(L, opts = {}, emit = () => {}) {
 		}
 		return m;
 	};
+	/** the physical keys along a kept leg played from its own start */
+	const rjKeysOf = (s, leg) => keysAlong(baseOf(s), leg);
+	// (THE REJOIN FROM BEFORE THE START, EEAT_REJOIN_BACK ticks, 0 = off: an anchor made at a mini's entrance checkpoint
+	// is past the entrance's funnel already (the portal's landing came a few ticks before the checkpoint's touch), so the
+	// start's own last RJ_BACK inputs are given back: the approach starts from its state RJ_BACK ticks earlier, against
+	// the kept leg EXTENDED by its own start's last RJ_BACK inputs (rjExt), and a rejoin anywhere on that extended
+	// trajectory replaces the start's last ticks. Such an arrival does not extend its start's inputs: it is verified from
+	// the level start like any (its goal after the start's tick), and kept out of the leg library.)
+	const RJ_BACK = Math.max(0, +(process.env.EEAT_REJOIN_BACK || 90));
+	const rjExt = new Map();    // leg mask string -> {ext: the start's last RJ_BACK inputs + the leg, keys}
+	const rjSnaps = new Map();  // `${hash}|${n}` -> the engine state after the first n inputs of a start (newest 64)
+	const snapAt = (s, n) => {
+		const k = `${s.hash}|${s.masks.length}|${n}`;
+		let v = rjSnaps.get(k);
+		if (v) return v;
+		const sm = s.masks instanceof Uint8Array ? s.masks : T.masksOf(String(s.masks));
+		try { v = T.playTo(L, sm.subarray(0, n), { allowDeath: true }).sim.snapshot(); } catch (e) { return null; }
+		rjSnaps.set(k, v);
+		if (rjSnaps.size > 64) rjSnaps.delete(rjSnaps.keys().next().value);
+		return v;
+	};
+	const extends_ = (masks, sm) => {
+		if (masks.length < sm.length) return false;
+		for (let t = 0; t < sm.length; t++) if ((masks[t] & 31) !== (sm[t] & 31)) return false;
+		return true;
+	};
 	const tpOk = (wp) => wp && wp.kind === 'trigger' && !wp.allowDeath && !(Number.isFinite(+wp.beforeTick)) && wp.beforeRel === undefined;
 	const libAdd = (step, wp, arr, starts, res) => {
 		if (!tpOk(wp) || step.synthetic) return;
@@ -1375,14 +1400,23 @@ async function compile(L, opts = {}, emit = () => {}) {
 			const masks = a.masks instanceof Uint8Array ? a.masks : T.masksOf(a.masks);
 			const { s } = startOf(starts, masks, i, res);
 			if (!s || masks.length <= s.masks.length || masks.length - s.masks.length > TP_MAX) return;
+			const sm = s.masks instanceof Uint8Array ? s.masks : T.masksOf(String(s.masks));
+			if (REJOIN && !extends_(masks, sm)) return;
 			const legM = masks.subarray(s.masks.length);
 			const leg = T.strOf(legM);
 			const list = legLib.get(step.edge) || [];
 			if (list.includes(leg)) return;
 			list.unshift(leg);
-			if (list.length > TP_LEGS) { for (const old of list.slice(TP_LEGS)) rjKeys.delete(old); list.length = TP_LEGS; }
+			if (list.length > TP_LEGS) { for (const old of list.slice(TP_LEGS)) { rjKeys.delete(old); rjExt.delete(old); } list.length = TP_LEGS; }
 			legLib.set(step.edge, list);
 			if (REJOIN && !rjKeys.has(leg)) { const m = rjKeysOf(s, legM); if (m) rjKeys.set(leg, m); }
+			if (REJOIN && RJ_BACK > 0 && !rjExt.has(leg)) {
+				const n0 = Math.max(0, sm.length - RJ_BACK);
+				const ext = new Uint8Array(sm.length - n0 + legM.length);
+				ext.set(sm.subarray(n0), 0); ext.set(legM, sm.length - n0);
+				const keys = keysAlong(snapAt(s, n0), ext);
+				if (keys) rjExt.set(leg, { ext, keys });
+			}
 		});
 	};
 	/** the rejoin of a kept leg from a start's engine state `base`: the masks past the start, or null */
@@ -1494,12 +1528,36 @@ async function compile(L, opts = {}, emit = () => {}) {
 					break;
 				}
 			}
+			// (from before the start: the start's state RJ_BACK ticks back against the kept legs' extended trajectories)
+			for (let si = 0; RJ_BACK > 0 && si < starts.length && out.length < ARRIVALS_K && Date.now() < until; si++) {
+				const s = starts[si];
+				if (legs.some((x) => x.start === si)) continue;
+				const sm = s.masks instanceof Uint8Array ? s.masks : T.masksOf(String(s.masks));
+				const n0 = Math.max(0, sm.length - RJ_BACK);
+				if (n0 >= sm.length) continue;
+				const base = snapAt(s, n0);
+				if (!base) continue;
+				for (const str of list) {
+					if (out.length >= ARRIVALS_K || Date.now() >= until) break;
+					const e = rjExt.get(str);
+					if (!e) continue;
+					const tail = rejoinFrom(base, e.ext, e.keys, goal, until);
+					if (!tail || n0 + tail.length <= sm.length) continue;
+					const masks = new Uint8Array(n0 + tail.length);
+					masks.set(sm.subarray(0, n0), 0); masks.set(tail, n0);
+					if (out.some((x) => x.masks.length === masks.length && T.strOf(x.masks) === T.strOf(masks))) continue;
+					out.push({ masks });
+					legs.push({ start: si, ticks: masks.length - sm.length, lb: null, proven: false, tool: 'rejoin-back' });
+					rj++; rjBack++;
+					break;
+				}
+			}
 			rjMs += Date.now() - r0;
 			if (rj) rjHits++;
 		}
 		if (!out.length) return null;
 		tpHits++;
-		say({ ev: 'transplant', label: labelOf(step), edge: step.edge, arrivals: out.length, rejoined: rj, ms: Date.now() - t0, hits: tpHits, tries: tpTries, rjHits, rjTries, rjMs });
+		say({ ev: 'transplant', label: labelOf(step), edge: step.edge, arrivals: out.length, rejoined: rj, ms: Date.now() - t0, hits: tpHits, tries: tpTries, rjHits, rjBack, rjTries, rjMs });
 		return { ok: true, arrivals: out, tool: 'transplant', ms: Date.now() - t0, legs, lb: null };
 	};
 	/** one job run: exec.reach, verify, learn, anchors; resolves when done */
