@@ -116,6 +116,7 @@ function route(by, masks, how) {
 	// base, else its inbox)
 	if (OUTSIDE.has(by) && !ending) toJob(ev.ms, `hybrid: ${by}${how ? ` (${how})` : ''}`);
 	if (faster && by !== 'compiler') boundCompiler(ev.ms);
+	if (faster && finalized) { finalize(); log(`after the end: the final is now ${ev.runTicks} by ${by}`); }
 	writeReport();
 	return ev;
 }
@@ -365,7 +366,20 @@ function tick() {
 	if (now - (tick.lastW || 0) > 15e3) { tick.lastW = now; writeReport(); }
 }
 
-let finished = false;
+let finished = false, finalized = false;
+/** the final: the best verified route of all, written, read back and replayed once more (again for a route that arrives
+ *  after the end: the AutoTASer's last routes come in while its job import blocks this thread) */
+function finalize() {
+	finalized = true;
+	if (!best) return;
+	const f = path.join(OUT, 'best.eetas');
+	C.writeEetas(f, best.ms);
+	const back = C.evaluate(L, C.readEetas(f));
+	R.final = back ? { runTicks: back.runTicks, time: C.fmt(back.runTicks), deaths: back.deaths, chance: back.chance, by: best.by, t: best.t, file: f, verified: back.runTicks === best.runTicks } :
+		{ error: 'best.eetas does not replay', file: f, verified: false };
+	R.polish = R.first ? { before: R.first.runTicks, after: best.runTicks, saved: R.first.runTicks - best.runTicks, ratio: Math.round((best.runTicks / R.first.runTicks) * 1000) / 1000,
+		firstBy: R.first.by, finalBy: best.by } : null;
+}
 async function finishAll(why) {
 	if (ending) return;
 	ending = true;
@@ -379,16 +393,7 @@ async function finishAll(why) {
 	for (let i = 0; i < 16 && compAlive; i++) await new Promise((r) => setTimeout(r, 500));
 	if (compAlive) { try { comp.kill('SIGKILL'); } catch (e) { /* gone */ } await new Promise((r) => setTimeout(r, 500)); }
 	jobBestIn();
-	// the final: the best verified route of all, written, read back and replayed once more
-	if (best) {
-		const f = path.join(OUT, 'best.eetas');
-		C.writeEetas(f, best.ms);
-		const back = C.evaluate(L, C.readEetas(f));
-		R.final = back ? { runTicks: back.runTicks, time: C.fmt(back.runTicks), deaths: back.deaths, chance: back.chance, by: best.by, t: best.t, file: f, verified: back.runTicks === best.runTicks } :
-			{ error: 'best.eetas does not replay', file: f, verified: false };
-		R.polish = R.first ? { before: R.first.runTicks, after: best.runTicks, saved: R.first.runTicks - best.runTicks, ratio: Math.round((best.runTicks / R.first.runTicks) * 1000) / 1000,
-			firstBy: R.first.by, finalBy: best.by } : null;
-	}
+	finalize();
 	R.ended = new Date().toISOString();
 	writeReport();
 	log(`RESULT ${NAME}: ${R.first ? `first route by ${R.first.by} after ${R.first.t} s (${R.first.runTicks}), final ${R.final ? `${R.final.runTicks} by ${R.final.by}${R.final.verified ? ', verified' : ', NOT VERIFIED'}` : '-'}` : 'no route'}`);
