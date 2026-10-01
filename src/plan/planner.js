@@ -40,9 +40,8 @@ const LM_W = 60;              // ticks of the plan search's f per landmark not y
 const GAIN_BONUS = 3;         // walk steps of the plan search's f per unit of gain (the relevant triggers achieved)
 const KEY_TICKS = 500;
 // the diversification rule (nearPlans): one-step plans to the nearest untried triggers once every plan's first leg
-// failed its rung; DEFAULT 1 since COMPILE-ALL block 3 lane 4 (with the executor's true skeleton closest,
-// EEAT_SKEL_CLOSEST): EEAT_PLAN_NEAR=K (K near plans; 0: off, the planner as before)
-const NEAR_K = process.env.EEAT_PLAN_NEAR !== undefined ? Math.max(0, +process.env.EEAT_PLAN_NEAR | 0) : 1;
+// failed its rung; OPT-IN: EEAT_PLAN_NEAR=K (K near plans; unset / 0: off, the planner as before)
+const NEAR_K = process.env.EEAT_PLAN_NEAR !== undefined ? Math.max(0, +process.env.EEAT_PLAN_NEAR | 0) : 0;
 // the floor probe's time (steer.js buildSteer on a level with count gates: the plan the steer's physics layers walk, run
 // again with the gates the model leaves open as floors; env EEAT_PLAN_FLOOR=0: off)
 const FLOOR_MS = +process.env.EEAT_PLAN_FLOOR_MS || 8000;
@@ -372,8 +371,7 @@ function createPlanner(model, facts, o = {}) {
 			pos = { id: pos.id + 'p' + Sp.dkey.length + ':' + (rec && rec.lbTiles ? rec.lbTiles.length : 0), tiles: pos.tiles, extra: 0, grace: rec ? rec.grace : null, lbTiles: rec ? rec.lbTiles : null };
 			S = Sp;
 		}
-		// (an anchor the strategy keeps apart by the trigger edge it was re-entered by (strategy addArrival): its facts too)
-		const cls = (arr ? `${Math.round(arr.vx || 0)},${arr.onGround ? 1 : 0}` : '0,1') + (anchor.qual ? `@${anchor.qual}` : '');
+		const cls = arr ? `${Math.round(arr.vx || 0)},${arr.onGround ? 1 : 0}` : '0,1';
 		// (the lb's base: the counts the coin / blue coin / death GATES read: the engine's _show_* copies, which lag the
 		// live counts by >= 1 tick and freeze while the ball overlaps a gate; the least of the copy and the count)
 		const live = (k) => (S.feats[k] !== undefined ? S.feats[k] : 0);
@@ -465,13 +463,12 @@ function createPlanner(model, facts, o = {}) {
 			if (!tr.changed) continue;
 			finish(X, live, 'trig:' + X.id, tr);
 		}
-		finish(null, trophyTiles, 'trophy', null);
 		// DEATHS AS MOVES (lane 2's die edge, lane 5): where a death door (1011) or gate (1012) reads the death count, a death
 		// is an edge of its own (plan mode: the est walk to the nearest killer, the dead ticks, back at the respawn with one
 		// death more), so the door that needs N deaths opens in the plan: Tutorial 2's est walk passed its death door only in
 		// the relaxation, every plan carried the 1e6 penalty and no death step. The lb needs none (it keeps 1011 open).
 		// EEAT_PLAN_DIE=0: none
-		if (wantEst && DIE_EDGE && dieIdx !== undefined && dvE && S.vals[dieIdx] < model.deathT && dieNear(S.vals[dieIdx]) && (DIE_ALWAYS || out.some((e) => e.relaxOnly))) {
+		if (wantEst && DIE_EDGE && dieIdx !== undefined && dvE && S.vals[dieIdx] < model.deathT && dieNear(S.vals[dieIdx])) {
 			const vals = S.vals.slice();
 			vals[dieIdx] = S.vals[dieIdx] + 1;
 			const S2 = model.mkState(vals, S.taken, S.btaken, S.cp);
@@ -485,30 +482,16 @@ function createPlanner(model, facts, o = {}) {
 				out.push({ X, S2, pos2: diePos(rp), expect: { feat: 'deaths', value: vals[dieIdx] }, lb: lbD, est, steps: dvE.dk, viaDeath: false, relaxOnly: false, edge, live: rp.tiles });
 			}
 		}
+		finish(null, trophyTiles, 'trophy', null);
 		return out;
 	}
 	const DIE_EDGE = process.env.EEAT_PLAN_DIE !== '0';
-	// (a death toward a door's count holds back at ANY respawn (a checkpoint touched on the way is where the engine puts
-	// the ball): the count opens the door wherever the ball comes back, and the strategy re-anchors on the real state.
-	// The Ten Commandments: its start room's only way out is a portal onto the checkpoint (2,21), so a death "back at the
-	// spawn" never held (every leg 'budget', closest 0 at a killer, rungs 2-3 spent). A viaDeath step (a death as a
-	// teleport to its respawn) keeps its respawn. EEAT_PLAN_DIE_ANY=0: the state's own respawn)
-	const DIE_ANY = process.env.EEAT_PLAN_DIE_ANY !== '0';
-	// (a death is offered only where an edge of the node is reachable in the relaxation alone (a shut death door is what
-	// the relaxation opens): The Ten Commandments' trophy is reachable without a death (666 run ticks), and offered at every
-	// node the death became its plan after one failed trophy rung (2,212 run ticks, 2 of 2; before the gain fix: its
-	// compile lost, 3 of 3); Tutorial 2's trophy is behind its death door (relaxation only): offered. EEAT_PLAN_DIE_WHEN=always)
-	const DIE_ALWAYS = process.env.EEAT_PLAN_DIE_WHEN === 'always';
 	// (a death is a move only toward a death door / gate threshold at most DIE_GAP deaths on: First Person Maze's 999-death
 	// door made "die" its first plan step (est 138), a way no route takes; each death costs 54 dead ticks at least)
 	const DIE_GAP = +process.env.EEAT_PLAN_DIE_GAP || 3;
 	const deathThs = (() => {
 		const set = new Set(), fg = model.L && model.L.fg, lk = model.L && model.L.lookup0;
-		// (the DOORS' thresholds (1011: open from N deaths on); a death gate (1012) SHUTS at its count, which the est walk
-		// (a shut gate a wall, never a floor) can only lose by: a die edge there is branching for nothing (Polar Eclipse's
-		// 16 gates at 1..16); EEAT_PLAN_DIE_GATES=1: gates too)
-		const gatesToo = process.env.EEAT_PLAN_DIE_GATES === '1';
-		if (fg && lk) for (let i = 0; i < fg.length; i++) if ((fg[i] === 1011 || (gatesToo && fg[i] === 1012)) && lk[i] > 0) set.add(lk[i]);
+		if (fg && lk) for (let i = 0; i < fg.length; i++) if ((fg[i] === 1011 || fg[i] === 1012) && lk[i] > 0) set.add(lk[i]);
 		return [...set].sort((x, y) => x - y);
 	})();
 	const dieNear = (cur) => deathThs.some((t) => t > cur && t <= cur + DIE_GAP);
@@ -712,7 +695,7 @@ function createPlanner(model, facts, o = {}) {
 				// (a death as a move: the respawn with one death more; a death shortcut after it counts from there)
 				deathsNow = e.expect.value;
 				push({ edge: e.edge, nodeClass: cls, rung: facts ? facts.rungOf(e.edge, cls) : 0, estTicks: Math.round(e.est), lb: e.lb,
-					waypoint: dieField({ kind: 'region', tiles: DIE_ANY && model.respawn && model.respawn.length ? model.respawn.slice() : e.live.slice(), expect: e.expect, allowDeath: true, label: X.label }) });
+					waypoint: dieField({ kind: 'region', tiles: e.live.slice(), expect: e.expect, allowDeath: true, label: X.label }) });
 				continue;
 			}
 			const wp = X ? { kind: 'trigger', tiles: e.live.slice(), trig: X.id, expect: e.expect, label: X.label } : { kind: 'trophy', label: 'trophy' };
@@ -849,12 +832,6 @@ function createPlanner(model, facts, o = {}) {
 	 * (all failed, 1 near plan) on lane 3's 45 FIRST-LEG levels 4 triggers vs 2 (noise level), gate20 7 compiled vs 9 of
 	 * the same code without it (Tutorial 1 / Bygone Tutorial: they compile in about half the runs), IWBTG 15 / 11 in two
 	 * runs: no gain shown, so OPT-IN; with EEAT_SKEL_CLOSEST=1 IWBTG 11 (15 -> 1 without the rule), MIHB 5, The Glitch 0.
-	 * DEFAULT ON (K 1) with the true skeleton closest since COMPILE-ALL block 3 lane 4: the pair measured together (box 3,
-	 * 60 s, --workers=3, n4-plan a137f8e, env EEAT_SKEL_CLOSEST=1 EEAT_PLAN_NEAR=1): the shared gate compiled 11 vs the
-	 * baseline's 9 (Tutorial 1 2,233 and Tree Decorating 1,320 run ticks, both compile in half the base runs), worse 0,
-	 * better 10 (Booty Return 25 vs 11, I Wanna be the Guy 16 vs 11, MIHB's Dream 22 vs 16, Starlight 22 vs 18, NC Naos
-	 * 319 vs 358 run ticks), The Glitch 8 vs the baseline's 4; the lane's 23 levels side by side with the base: progress
-	 * 78 vs 72 (Booty Return 16 vs 11, SPOT THE DIDFERNECE 4 vs 1, Beaches in Space 4 vs 2). EEAT_PLAN_NEAR=0: off.
 	 */
 	function nearPlans(a, plans) {
 		const p0 = plans[0];

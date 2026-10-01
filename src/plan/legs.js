@@ -356,9 +356,6 @@ function legBest(L, starts, goal, o) {
 	const deadline = o.deadline || Infinity, stop = o.stop || null;
 	const beforeTick = o.beforeTick >= 0 ? o.beforeTick : -1;
 	const field = o.field || null, region = o.region || null;
-	// (o.visited: a Uint8Array(W x H) the search marks with the centre tile of every state it reached in its region (the
-	// executor's counterexample walls: the tiles its field ranks below every tile reached, next to them, never entered))
-	const vis = o.visited instanceof Uint8Array && o.visited.length === L.width * L.height ? o.visited : null;
 	const w = o.w > 0 ? o.w : 5;   // (T-EXEC-LEGS, box 3, 3 s: 2.5 46% / 5 56% / 8 56% / 12 55% with the cells below)
 	const heapMax = o.heapMax > 0 ? o.heapMax : 300000;
 	// (the cell: px, py, vx, vy multipliers; default 2 px, 4 px, 1/8, 1/4 px/tick: T-EXEC-LEGS 3 s at w 5: 56% vs 1 px, 2 px,
@@ -398,19 +395,6 @@ function legBest(L, starts, goal, o) {
 	const near = [];
 	const finAt = FIN ? tStart + FIN_F * (deadline - tStart) : Infinity;
 	let finR = null;
-	// (the side-arrow crossings: a ball inside a run of side arrows, moving against their push slower than the rest of the
-	// run needs, where the field's way goes on past the run, ranks behind (the run-up it must go back for): ORDERING only)
-	const SAX = process.env.EEAT_SAX === '1' && field && field.mode !== 'walk' ? saxOf(L, field) : null;
-	const saxPen = SAX === null ? () => 0 : (s) => {
-		const cx = (s.px + 8) >> 4, cy = (s.py + 8) >> 4;
-		if (cx < 0 || cy < 0 || cx >= W || cy >= H) return 0;
-		const t = cy * W + cx, k = SAX.k[t];
-		if (!k) return 0;
-		const p = SAX.p[t], va = -p * s.speed_x, c = s.px + 8;
-		// (what is left of the run for the centre, px: to the far edge of its last tile against the push)
-		const D = p < 0 ? (cx + k) * 16 - c : c - (cx - k + 1) * 16;
-		return va < saxNeed(D / 16) ? SAX_PEN * k * FT : 0;
-	};
 	const keepNear = (j, d, tile) => {
 		let nt = 0, wt = -1, wa = -1;
 		for (let k = 0; k < near.length; k++) {
@@ -467,7 +451,7 @@ function legBest(L, starts, goal, o) {
 		ka = h; kb = dkOf(sim) | 0;
 	};
 	const goals = [];
-	const closest = { dist: -1, start: -1, tail: null, node: -1, pop: -1 };
+	const closest = { dist: -1, start: -1, tail: null, node: -1 };
 	let sims = 0, pops = 0, lastPoll = 0, found = -1;
 	const pathOfNode = (i, extraMask, extraReps) => {
 		const rev = [];
@@ -557,14 +541,13 @@ function legBest(L, starts, goal, o) {
 			const cx = (sim.px + 8) >> 4, cy = (sim.py + 8) >> 4;
 			if (cx < 0 || cy < 0 || cx >= W || cy >= H) { drop.oob++; continue; }
 			if (region !== null && !region[cy * W + cx]) { drop.region++; continue; }
-			if (vis !== null) vis[cy * W + cx] = 1;
 			if (!closed.add(ka, kb)) { drop.closed++; continue; }
 			const d = distD(field, sim, allowDeath);
 			const j = par.length;
 			par.push(i); msk.push(m); rp.push(reps); gg.push(g + reps); dst.push(d);
 			sn.push(sim.snapshot(pool.length ? pool.pop() : undefined));
-			hpush(j, g + reps + w * (scoreOf(d) + saxPen(sim)));
-			if (d < 1e9 && (closest.dist < 0 || d < closest.dist)) { closest.dist = d; closest.node = j; closest.pop = pops; }
+			hpush(j, g + reps + w * scoreOf(d));
+			if (d < 1e9 && (closest.dist < 0 || d < closest.dist)) { closest.dist = d; closest.node = j; }
 			if (FIN && d <= FIN_D && finR === null) keepNear(j, d, cy * W + cx);
 		}
 		pool.push(snap);
@@ -605,69 +588,6 @@ function legBest(L, starts, goal, o) {
 	return res(why);
 }
 
-/** THE SIDE-ARROW CROSSINGS (COMPILE-ALL lane 4, block 3): the goal field keeps no horizontal speed, so it crosses a run of
- *  side arrows against their push at any speed (reach.js prices only runs of 5+, which the running speed cannot cross);
- *  a run of 2-4 is crossed only by a ball that came in fast (Christmas Town's coin (397, 3): its known route enters 4 left
- *  arrows at 6.04 px/tick after a run-up and coasts out at 1.2; Beaches in Space's coin (69, 71) behind 3 right arrows):
- *  the finders sat at the run's slow states ("closest 2 tiles", 3 rungs) and never went back for the run-up.
- *  saxOf(L, field): per tile p (the push: -1 left arrows 1 / 411, +1 right arrows 3 / 413, else 0) and k (the arrows of
- *  that push from this tile on against the push, itself included; 0 where the field's way does not go on past the run:
- *  the least field cost on the tile past it (or a row up / down) not below this tile's). saxNeed(r): the least speed
- *  (px/tick) against the push that carries the centre r tiles on to the run's far edge (reach.js's crossing table
- *  1.05 / 3.15 / 4.55 / 5.65 / 6.75 / 7.5 for 1..6 tiles, linear between, +0.75 a tile past 6). OPT-IN (EEAT_SAX=1): a
- *  first version (one tile lenient: the need of k - 1 tiles) on the lane's 23 levels, box 3, 60 s: progress 58 vs 72 (Ice Cream Expedition 1 vs 8, CTM 2 0 vs 2, Two 2 vs 3; Christmas Town / Beaches in Space not reached
- *  either way): the runs' slow states were not what stalled those legs (their closest 0 / 2 tiles are the skeleton's and
- *  the pocket's); this version (the need by what is left of the run, px) is not measured in a compile. */
-const SAX_NEED = [0, 1.05, 3.15, 4.55, 5.65, 6.75, 7.5];
-const saxNeed = (r) => {
-	if (!(r > 0)) return 0;
-	const n = SAX_NEED.length - 1;
-	if (r >= n) return SAX_NEED[n] + 0.75 * (r - n);
-	const i = Math.floor(r), f = r - i;
-	return SAX_NEED[i] + f * (SAX_NEED[i + 1] - SAX_NEED[i]);
-};
-const SAX_PEN = +process.env.EEAT_SAX_PEN > 0 ? +process.env.EEAT_SAX_PEN : 4;
-const saxMemo = new WeakMap();
-function saxOf(L, f) {
-	let r = saxMemo.get(f);
-	if (r) return r;
-	const W = L.width, H = L.height, N = W * H, CUT = RF.CUT;
-	const p = new Int8Array(N), k = new Uint16Array(N);
-	let any = false;
-	for (let t = 0; t < N; t++) { const id = L.fg[t]; if (id === 1 || id === 411) { p[t] = -1; any = true; } else if (id === 3 || id === 413) { p[t] = 1; any = true; } }
-	if (any && f.costR) {
-		const tm = tileMinLegs(f);
-		for (let t = 0; t < N; t++) {
-			if (!p[t] || tm[t] >= CUT) continue;
-			const dx = -p[t], x = t % W, y = (t / W) | 0;
-			let n = 0, xx = x;
-			while (xx >= 0 && xx < W && p[y * W + xx] === p[t]) { n++; xx += dx; }
-			if (xx < 0 || xx >= W) continue;
-			let best = CUT;
-			for (let dy = -1; dy <= 1; dy++) { const yy = y + dy; if (yy >= 0 && yy < H && tm[yy * W + xx] < best) best = tm[yy * W + xx]; }
-			if (best < tm[t]) k[t] = n;
-		}
-	}
-	r = { p, k };
-	saxMemo.set(f, r);
-	return r;
-}
-/** per tile the least cost (fifths) of any ball state centred on it by the goal field f (executor.js tileMinOf's) */
-function tileMinLegs(f) {
-	const N = f.W * f.H, CUT = RF.CUT, m = new Uint32Array(N).fill(CUT);
-	const QR = f.Q + 3, KF1 = RF.KF + 1, NL = RF.NL;
-	for (let t = 0; t < N; t++) {
-		let v = CUT;
-		for (let i = t * QR, e = i + QR; i < e; i++) if (f.costR[i] < v) v = f.costR[i];
-		for (let i = t * KF1, e = i + KF1; i < e; i++) { if (f.costF[i] < v) v = f.costF[i]; if (f.costL[i] < v) v = f.costL[i]; }
-		const rc = f.rowC[t], rx = f.rowX[t];
-		if (rc >= 0) for (let i = rc * NL, e = i + NL; i < e; i++) if (f.costC[i] < v) v = f.costC[i];
-		if (rx >= 0) for (let i = rx * NL, e = i + NL; i < e; i++) if (f.costX[i] < v) v = f.costX[i];
-		m[t] = v;
-	}
-	return m;
-}
-
 /** the primitives' relaxed tick field for this goal (bounds.js field(tiles, null, {touch})), or null (no bounds, an
  *  error, or not asked): the finders' time estimate when asked (wall-aware, the level's top speeds per axis). OPT-IN
  *  since lane 4 block 2 (EEAT_LEG_BF=1): the admissible tick field is a weak ranking (the bound is a median 0.145 of the
@@ -677,7 +597,7 @@ function tileMinLegs(f) {
  *  Delusion Valley 2 vs 0, LoZ Skyward Sword 3 vs 2; Booty Return 11 vs 10-13, Pancake Quest 4 vs 5-6) */
 function boundsFieldOf(bounds, goal) {
 	if (!bounds || typeof bounds.field !== 'function' || typeof bounds.at !== 'function' || process.env.EEAT_LEG_BF !== '1') return null;
-	try { return bounds.field(T.fieldTilesOf(goal), goal.wallLc || null, { touch: T.fieldTouchOf(goal) }); } catch (e) { return null; }
+	try { return bounds.field(T.fieldTilesOf(goal), null, { touch: T.fieldTouchOf(goal) }); } catch (e) { return null; }
 }
 function bfTime(f, bounds, sim) {
 	const v = bounds.at(f, sim, { endgame: false });

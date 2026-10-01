@@ -11,7 +11,7 @@
 //   --truth (EEAT_TRUTH_ROOT: the main checkout or a copy on a box) adds:
 //   legs   T-EXEC-LEGS: the known routes cut at their trigger events, reach() from the route's exact state at event k to
 //          event k + 1's trigger (budget --budget ms): success % of the legs of <= 300 route ticks, the ticks ratio to the
-//          route's own leg, proven %, the tiers, the worst cases (--limit routes; --par processes; --minLegTicks / --maxLegTicks: the route legs measured, default 1-300)
+//          route's own leg, proven %, the tiers, the worst cases (--limit routes; --par processes)
 //   polish T-POLISH: 10 AutoTAS routes (god runs' best.eetas): never slower, every output finishes, the ticks saved
 //   chain  T-EXEC-CHAIN (informational, only with --only=chain): the executor alone compiling known routes from their
 //          waypoints, each leg from the leg before's arrivals, then the polish (--chainN routes, --polishMs, --out rows)
@@ -221,12 +221,10 @@ async function failCases() {
 		for (let y = 0; y < 6; y++) rows.push([...'#'.repeat(w)].map((c, x) => (y === 0 || y === 5 || x === 0 || x === w - 1 ? '#' : '.')));
 		rows[4][1] = 'S';
 		const dx = w - 5;
-		// (the key tile k is the GREEN key (7): a green door (e, 24) opens with it, and the math tier's engine-verified arrival
-		// showed the region beyond it reachable in 1.5 s; the doors here are red and blue, which it never opens)
-		for (let y = 1; y <= 4; y++) rows[y][dx] = ['d', 'f', 'd', 'f'][k];
+		for (let y = 1; y <= 4; y++) rows[y][dx] = ['d', 'e', 'f', 'd'][k] ;
 		rows[4][4] = 'k';
 		const beyond = [];
-		cases.push({ name: `door${k}`, rows: rows.map((r) => r.join('')), door: ['key0', 'key2', 'key0', 'key2'][k],
+		cases.push({ name: `door${k}`, rows: rows.map((r) => r.join('')), door: ['key0', 'key1', 'key2', 'key0'][k],
 			wp: (at) => { for (let y = 1; y <= 4; y++) for (let x = dx + 1; x < w - 1; x++) beyond.push(at(x, y)); return { kind: 'region', tiles: beyond, expect: null, label: 'beyond the door' }; } });
 	}
 	const budget = 1500;
@@ -311,7 +309,7 @@ async function legsOfRoute(e, budget, maxLegs) {
 		const legTicks = o.tick - prevTick;
 		const startMasks = tr.masks.subarray(0, prevTick);
 		prevTick = o.tick;
-		if (legTicks > (+args.maxLegTicks || 300) || legTicks < (+args.minLegTicks || 1)) { out.push({ name: e.name, k, tick: o.tick, legTicks, skipped: true }); continue; }
+		if (legTicks > 300 || legTicks < 1) { out.push({ name: e.name, k, tick: o.tick, legTicks, skipped: true }); continue; }
 		// (a key running out is the clock's, no trigger: no waypoint a plan would give; the next leg starts there)
 		if (/^key\d$/.test(o.feat) && !o.value) { out.push({ name: e.name, k, tick: o.tick, legTicks, skipped: true, why: 'clock (a key ran out)' }); continue; }
 		const wp = o.feat === 'silver' ? { kind: 'trophy', label: 'trophy' } : { kind: 'trigger', tiles: triggerTiles(L, o.tile, o.feat), expect: { feat: o.feat, value: o.value }, label: `${o.feat}=${o.value}` };
@@ -347,7 +345,7 @@ async function legsTruth() {
 		const runs = [];
 		for (let i = 0; i < par; i++) {
 			runs.push(new Promise((resolve) => {
-				const p = spawn(process.execPath, [__filename, '--only=legs', '--truth', `--limit=${limit}`, `--budget=${budget}`, `--shard=${i}/${par}`, '--json', `--maxLegs=${args.maxLegs || 40}`, `--maxLegTicks=${args.maxLegTicks || 300}`, `--minLegTicks=${args.minLegTicks || 1}`,
+				const p = spawn(process.execPath, [__filename, '--only=legs', '--truth', `--limit=${limit}`, `--budget=${budget}`, `--shard=${i}/${par}`, '--json', `--maxLegs=${args.maxLegs || 40}`,
 					...(args.parts ? [`--parts=${args.parts}`] : []), ...(args.noPrims ? ['--noPrims'] : [])], { stdio: ['ignore', 'pipe', 'inherit'] });
 				let s = '';
 				p.stdout.on('data', (d) => { s += d; });
@@ -372,7 +370,7 @@ async function legsTruth() {
 	const proven = okL.filter((x) => x.proven).length;
 	const routes = new Set(rows.map((x) => x.name)).size;
 	const succ = legs.length ? okL.length / legs.length : 0;
-	console.log(`T-EXEC-LEGS ${routes} routes, ${legs.length} legs of ${+args.minLegTicks || 1}-${+args.maxLegTicks || 300} ticks (${rows.length - legs.length} skipped): success ${(succ * 100).toFixed(1)}%, ` +
+	console.log(`T-EXEC-LEGS ${routes} routes, ${legs.length} legs <= 300 ticks (${rows.length - legs.length} skipped): success ${(succ * 100).toFixed(1)}%, ` +
 		`ticks / the route's median ${med.toFixed(3)}, <= 1.0 ${(le1 / Math.max(1, okL.length) * 100).toFixed(1)}%, proven ${(proven / Math.max(1, okL.length) * 100).toFixed(1)}%, tiers ${JSON.stringify(byTool)}`);
 	const worst = legs.filter((x) => !x.ok).sort((a, b) => a.legTicks - b.legTicks).slice(0, 12);
 	for (const w of worst) console.log(`  fail ${w.name} leg ${w.k} (${w.feat}, ${w.legTicks} route ticks at ${w.tick}): ${w.why} ${w.ms} ms`);
@@ -435,15 +433,10 @@ async function chainOfRoute(e, budget, polishMs) {
 		prevTick = o.tick;
 		const b = Math.max(budget, Math.min(15000, Math.round(budget * legTicks / 150)));
 		const r = await ex.reach(starts, wp, { ms: b, level: 1 });
-		if (!r.ok) {
-			failAt = k; why = r.fail ? r.fail.why : '?';
-			if (args.delays) console.error(`  leg ${k} ${wp.label}: FAILED (${why}) route ${legTicks} ticks from ${starts.length} starts, ${r.ms} ms` + (args.tiers ? ` tiers ${(r.tiers || []).map((t) => `${t.tier}:${t.ok === undefined ? t.status || '' : t.ok ? 'ok' : 'no'}${t.ms !== undefined ? '/' + t.ms : ''}${t.prof && t.ms > 700 ? JSON.stringify(t.prof) : ''}`).join(' ')}` : ''));
-			break;
-		}
+		if (!r.ok) { failAt = k; why = r.fail ? r.fail.why : '?'; break; }
 		starts = r.arrivals;
 		delays.push(Math.min(...starts.map((a) => a.masks.length)) - o.tick);
-		if (args.delays) console.error(`  leg ${k} ${wp.label}: route ${legTicks} ticks, from ${Math.min(...r.legs.map((l) => l.ticks))} (${r.tool}, lb ${r.lb}), delay ${delays[delays.length - 1]}, ${r.ms} ms, ${starts.length} arrivals` +
-			(args.tiers ? ` tiers ${(r.tiers || []).map((t) => `${t.tier}:${t.ok === undefined ? t.status || '' : t.ok ? 'ok' : 'no'}${t.ms !== undefined ? '/' + t.ms : ''}${t.prof && t.ms > 700 ? JSON.stringify(t.prof) : ''}`).join(' ')}` : ''));
+		if (args.delays) console.error(`  leg ${k} ${wp.label}: route ${legTicks} ticks, from ${Math.min(...r.legs.map((l) => l.ticks))} (${r.tool}, lb ${r.lb}), delay ${delays[delays.length - 1]}, ${r.ms} ms`);
 		done++;
 		if (wp.kind === 'trophy') break;
 	}
@@ -471,9 +464,7 @@ async function chainTruth() {
 	const budget = +args.budget || 3000, polishMs = +args.polishMs || 30000, limit = +args.chainN || 12;
 	const god = S.knownRoutes({ jobs: false });
 	const seen = new Set(), list = [];
-	// (--chainOnly=<regex>: only the routes whose level name matches)
-	const only = args.chainOnly ? new RegExp(String(args.chainOnly), 'i') : null;
-	for (const e of god) { if (seen.has(e.name) || (only && !only.test(e.name))) continue; seen.add(e.name); list.push(e); }
+	for (const e of god) { if (seen.has(e.name)) continue; seen.add(e.name); list.push(e); }
 	const shard = args.shard ? String(args.shard).split('/').map(Number) : null;
 	const mine = list.slice(0, limit).filter((e, i) => !shard || i % shard[1] === shard[0]);
 	const par = +args.par || 1;
@@ -483,7 +474,7 @@ async function chainTruth() {
 		const runs = [];
 		for (let i = 0; i < par; i++) {
 			runs.push(new Promise((resolve) => {
-				const p = spawn(process.execPath, [__filename, '--only=chain', '--truth', `--chainN=${limit}`, ...(args.chainOnly ? [`--chainOnly=${args.chainOnly}`] : []), `--budget=${budget}`, `--polishMs=${polishMs}`, `--chainStep=${+args.chainStep || 0}`, `--shard=${i}/${par}`, '--json'], { stdio: ['ignore', 'pipe', 'inherit'] });
+				const p = spawn(process.execPath, [__filename, '--only=chain', '--truth', `--chainN=${limit}`, `--budget=${budget}`, `--polishMs=${polishMs}`, `--chainStep=${+args.chainStep || 0}`, `--shard=${i}/${par}`, '--json'], { stdio: ['ignore', 'pipe', 'inherit'] });
 				let s = '';
 				p.stdout.on('data', (d) => { s += d; });
 				p.on('close', () => { try { resolve(JSON.parse(s.trim().split('\n').pop()).rows || []); } catch (e) { resolve([]); } });

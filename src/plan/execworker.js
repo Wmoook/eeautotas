@@ -11,20 +11,9 @@ const { parentPort, workerData } = require('worker_threads');
 const T = require('./types.js');
 const EX = require('./executor.js');
 
-// (EEAT_EXEC_PROF=1, a measurement: each answer carries {prof}: the worker's start-up, the wait for it, the RCH3 fields
-// built (reach.js reachField) and the bounds fields (bounds.field) inside the call, the call's own time)
-const PROF = process.env.EEAT_EXEC_PROF === '1';
-const acc = { rf: 0, rfN: 0, bf: 0, bfN: 0 };
-let initMs = -1, firstAnswer = true;
-if (PROF) {
-	const RF = require('../reach.js');
-	const rf0 = RF.reachField;
-	RF.reachField = function () { const t = Date.now(); try { return rf0.apply(this, arguments); } finally { acc.rf += Date.now() - t; acc.rfN++; } };
-}
 let core = null, L = null, loadError = null;
 let ready = null;
 async function init() {
-	const tI = Date.now();
 	try {
 		L = T.loadLevelFile(workerData.file);
 		let prims = null, bounds = null;
@@ -34,21 +23,13 @@ async function init() {
 		if (workerData.usePrims) {
 			try { const PM = require('./prims.js'); prims = await PM.createPrims(L, { file: workerData.file, bounds, model: null, workers: 0 }); } catch (e) { prims = null; }
 		}
-		if (PROF && bounds && typeof bounds.field === 'function') {
-			const bf0 = bounds.field;
-			bounds.field = function () { const t = Date.now(); try { return bf0.apply(this, arguments); } finally { const d = Date.now() - t; if (d >= 1) { acc.bf += d; acc.bfN++; } } };
-		}
 		core = EX.makeCore(L, { prims, bounds, model: null });
 	} catch (e) { loadError = String(e && e.message || e); }
-	initMs = Date.now() - tI;
 }
 ready = init();
 
 parentPort.on('message', async (msg) => {
-	const tRecv = Date.now();
 	await ready;
-	const tReady = Date.now();
-	const a0 = PROF ? Object.assign({}, acc) : null;
 	const id = msg.id;
 	if (loadError) { parentPort.postMessage({ id, error: `the level: ${loadError}` }); return; }
 	try {
@@ -57,11 +38,6 @@ parentPort.on('message', async (msg) => {
 		const stop = flag ? () => Atomics.load(flag, 0) !== 0 : null;
 		if (msg.type === 'reach') {
 			const result = await core.reach(msg.starts, msg.wp, Object.assign({}, msg.budget, { stop }));
-			if (PROF && result) {
-				result.prof = { post: msg.tPost || 0, recv: tRecv, wait: tReady - tRecv, run: Date.now() - tReady, init: firstAnswer ? initMs : 0,
-					rf: acc.rf - a0.rf, rfN: acc.rfN - a0.rfN, bf: acc.bf - a0.bf, bfN: acc.bfN - a0.bfN, ms: msg.budget && msg.budget.ms, end: Date.now() };
-				firstAnswer = false;
-			}
 			parentPort.postMessage({ id, result });
 			return;
 		}
