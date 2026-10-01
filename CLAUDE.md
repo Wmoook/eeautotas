@@ -486,7 +486,7 @@ ways in.
   src/compile.js and src/plan.js turn on, unless the environment names them (=0 off; `EEAT_COMPILER_DEFAULTS=0` none),
   EEAT_COVER=3 (the coverage leg finder as the fallback), EEAT_CRUMBS=1 (coins no gate reads as breadcrumb relays),
   EEAT_FIELD_MEMO=1, EEAT_PLAN_ANY=1 (a set-kind trigger group = one edge), EEAT_PLAN_UNTOGGLE=1, EEAT_FX_FIELD=1 /
-  EEAT_FX_STATE=1 (physics goal fields on effect levels), EEAT_ICE_LOCAL=1, EEAT_PROT_LAYER=1; the modules themselves stay
+  EEAT_FX_STATE=1 (physics goal fields on effect levels), EEAT_ICE_LOCAL=1, EEAT_PROT_LAYER=1, EEAT_BW_LEVEL=last (the chains-lab judge: the last bullet of this section); the modules themselves stay
   opt-in (their tests and the truth checkers read them as before). Box 5, 300 s, W3, one run a level: all of them on (the
   combo, 22 levels) compiled 15 vs the base's 9, none lost (+K Underground, On And On And On, Crypts Of Anubis, Presto
   Penguins, The Witch's House; Vignettes, Perilous Endeavor and Stone Ruin Speedrun compiled in the single-group arms, not
@@ -535,6 +535,7 @@ ways in.
   (real engine states x the trigger state) with the planner's steps and the bounds as its order, in a thread of its own next
   to the executor from the compile's start: its routes are routes (verified), the executor's anchors and routes go into it
   (a route = its bound: its refinement ladder then looks only for faster ones), its arrivals reach the executor only when the
+  executor stalls or has nothing left (THE GATE). Measured (box 6): with the arrivals given at once it HURT (slower routes on 10 of 15 levels, 2 levels lost); with the gate (300 s, 40 levels) 25 = 25 compiled (lost INFINITE and TPs The Horror, late base routes; gained Endless Space and K Underground), the first route 18% sooner (geo-mean), run ticks 0.7% fewer, one thread and ~1.7 GB more a compile: OPT-IN (it does not yet lose nothing). C6 push 3 lane 6: THE ONE SHOT IN A PROCESS OF ITS OWN (`EEAT_OS_PROC`, the default with the knob; 0 = the worker thread): osworker.js forked, every thread of it at nice 19 (its V8 GC threads too: in the thread mode they were the compile process's shared pool), `--max-old-space-size` = `EEAT_OS_HEAP_MB` (1,024: the live heap where its A* stops growing) + 512; the worker-thread mode gets its own nice and the same limit. THE FAR LEGS (`EEAT_OS_BW=1`, opt-in): a waypoint past `LEG_TILES` got no leg, so on the far-step levels the A* was a flood of 10-tick held-mask segments (0 legs, 99.9% 'fan' nodes in 300 s on Tutorial 2 / 4, Egg Quest II, Gravity's Rainbow); now the lab's backward solver from the first node of its abstract state, then from nodes 4 tiles nearer, its clock 1 -> 16 s (`EEAT_OS_BW_MSMAX`), at most half the one shot's time. The spread (box 6, 300 s, one run a level): the base 7 / 12 test levels, the thread 8 / 12 (w0), and over d300 + w0 on the late-route levels (TPs, INFINITE, K Underground, Endless Space) 7 of 10 either way: the one shot's losses are the late routes' spread, not shown to be its cost (a contention test, `src/out/l6/contend.js`: 3 executor stand-in threads 1.91-2.18 M ticks/s alone, 2.22 beside the A* thread, 2.42 beside the A* process). Still OPT-IN: ~1-1.6 GB and a core more a compile (a full compile at par 32 on box 5 would need ~40 GB more). C6 push 3 lane 6 block 2: THE CHASE (on with `EEAT_OS_BW=1`; `EEAT_OS_CHASE=0` off): Gravity's Rainbow's far leg reached the trophy's tile and its node was never expanded (the blind flood's cheaper f kept the heap's top: 0 routes in 300 s; the engine touches the trophy on the NEXT tick's start), so a far leg's end, every leg of a chased node and every injected executor anchor (inject, then leg) are now expanded at once, depth first (the plan's waypoints as a chain of exact legs: bwlevel_child.js's legs inside the A*; the closed claim unchanged). Side by side (box 6, 300 s, W3): Gravity's Rainbow no route without the chase, 2,063 and 2,169 run ticks with it (best known 2,197; the one shot's own route, then perfect / polish / joins; replayed); Tutorial 2's far legs from the executor's anchors 6 of 30 found (1 of 27 without). The far leg's RETRY (`EEAT_OS_BW_RETRY`: again from a node as near once the last clock has passed) and the clock's growth `EEAT_OS_BW_X`: the backward solver's closure is 0.6 of its clock, so 1 + 2 + ... + 32 s found nothing from the spawn where one 64-s clock found the trophy leg (`tools/cmp/osrun.js`, the one shot alone: 2,482 at 85.9 s with `EEAT_OS_BW_MS=4000 EEAT_OS_BW_X=4 EEAT_OS_BW_MSMAX=64000`). THE WHOLE-LEVEL GRAPH (`EEAT_OS_GRAPH=1`, edges.js) measured: Tutorial 2 7,761 supports / 94,954 edges in 182 s on 8 threads, Gravity's Rainbow 8,683 / 107,377 in 165 s, ~2 GB each (Tutorial 4 / Egg Quest II past 180 s); its edges are the same short families as the A*'s own (land / hop 73-77%, event 16-21%, touch <= 90 ticks): no long move, and a 300-s compile's single graph thread would need ~25 min: not the far-step levels' fix.
 - **The corridor's fields pass** (n5-s99-fields, 2026-09-30; `src/plan/lab/corridor.js`, the executor's tier MC under
   `EEAT_CORRIDOR=1`; `EEAT_CORR_FIELDS=1` = the pass, OPT-IN, off = the tier byte for byte; each knob of the corridor off =
   the corridor before). WHY the corridor lost chains through fields: in a field a direct leg (msolve.leg with the field tier
@@ -676,47 +677,7 @@ ways in.
   run replicated beside that compile A/B (its finds 1.8x slower) gave 94.2% (the 480+ bucket 66.7 vs 76.8%). Not a default:
   the compile count is a tie. `node test/portfolio.js` (20: the run-up room, each arm replayed, the session's long piece,
   class targets, the executor's tier).
-- **The stretch solver in its own process** (n5-s99-budget, 2026-09-30; `EEAT_STRETCH=1`, OPT-IN, off = the compile byte for
-  byte; `src/plan/lab/stretch_child.js`, strategy.js `st*`; `test/s99stretch.js`): the executor's rung ladder (1.5 / 5 / 15 /
-  45 s windows) restarts every solver of a stretch at every rung, and the lab's backward solver (`src/plan/lab/backward.js`)
-  needs 30-40 s IN ONE PIECE on a long leg (inside the rung windows it never finished one). ONE child process a compile
-  (`EEAT_ST_N` children, default 1) keeps that solver (and its closed closures' memo) across requests and gets ONE stretch at a
-  time on ONE continuous clock, next to the executor, whose rungs go on: (1) at the moves' start a SHORT first plan (at most
-  `EEAT_ST_SHORT` 3 steps: the ONE-LEG levels' trophy) from the level start, its legs in order (shares by the plan's est
-  ticks), on `EEAT_ST_SHORT_F` 0.9 of the budget (at most 270 s; before a route the moves have the whole time, the polish /
-  proof reserves are a route's); (2) then, before the first route, the stretch (anchor, plan step) the executor failed at rung
-  >= 1 from the anchor of the most progress, from its earliest arrival, `EEAT_ST_MS` 40 s (80 s on a retry after 'budget'),
-  with THE REST OF A SHORT PLAN (its anchor's plan through it has at most 3 steps: its later legs too, 40 s a leg;
-  `EEAT_ST_CHAIN=0` off); (3) a leg the child did not finish hands back the backward solve's node of the least time to go
-  (backward.js `o.closest`, opt-in there), replayed here and made that stretch's RELAY start for the executor's next rung
-  when it has none (`EEAT_ST_RELAY=0` off: "keep partial progress as the next rung's start"); (4) a request made stale (its
-  stretch done by the executor before the child's first leg, or a route known and it is no whole-level request) is stopped
-  and the child started again. Every child answer is replayed there (the waypoint's goal test, `T.goalOf`) and again here
-  (`verified`: the engine from the level start) before it is an anchor (`addArrival`) or a route (`routeOf`); the loop that
-  would end 'exhausted' waits while a child works (`stHold`). `report.stretch` {requests, ok, anchors, routes, legs, ms,
-  relays, stale, children, short}. MEASURED (the lab's 48-level A/B set, W3, par 3 an arm side by side, one tree, joins and
-  loops off in both arms): 120 s, box 5, two A/Bs (6f04001 without the relay / chain; bdd076a with them): compiled 20 vs 22
-  and 23 vs 23, pooled 43 vs 45 of 96; The Blank Page (2,942 / 2,024) and INVASION (4,093; the child's whole-level route at
-  ~40 s) 2 of 2 vs 0 of 2; lost once each Tutorial 3, INFINITE, Crypts Of Anubis, Presto Penguins (the base 1 of 2 on each:
-  the moves' spread); the executor's own work the same with the child (the levels failing in both arms: 1,460 / 1,465 steps
-  vs 1,451 / 1,472, simulated ticks -3% / +4%). 300 s, two A/Bs (box 6 6f04001; box 5 767e305 = + the stale kill): 38 vs
-  39 and 31 vs 33 (the loaded box 5), pooled 69 vs 72 of 96; Stone Ruin Speedrun (3,707) and Gravity's Rainbow (2,022, under
-  the best known 2,197) 2 of 2 vs 0 of 2 (the child's whole-level routes); lost Tutorial 3, Buuwuu, Christmas Town, Late
-  christmas once each (the base 2 / 2 / 2 / 1 of 2); both compiled run ticks geo-mean 0.979 / 0.960. A fifth A/B (120 s,
-  box 5, c98d21c = + nice, three arms): base 27, the solver 28, the short plan's request alone (`EEAT_ST_GENERAL=0`) 28 (both:
-  + Stone Ruin, + The Blank Page, + Gravity's Rainbow). ALL FIVE POOLED (240 level runs): base 139 vs 145; by level Stone
-  Ruin 0 -> 3 / 5, Gravity's Rainbow 0 -> 3 / 5, The Blank Page 1 -> 5 / 5, INVASION 3 -> 5 / 5, Accident Prone 4 -> 5, Tutorial
-  2 3 -> 4, Snow Jumping 1 -> 2; WATCH Tutorial 3 3 -> 1 / 5 and Buuwuu's Stronghold 3 -> 1 / 5 (the executor's own work the
-  same in both arms there: steps and simulated ticks), INFINITE, Crypts, Presto, K Underground, the precision puzzle 1 run
-  fewer each. The 41 ONE-LEG levels n5-plan 3d52987's 300-s full compile (44 / 230) failed, the solver on (box 6, 300 s): the
-  child's own routes Just One More Time 2,899, Stone Ruin 3,707, Gravity's Rainbow 2,022; the 36 left again with THE REST OF
-  THE CLOCK (the child's variants in the time a solve leaves: a longer relay, finer x speeds; `EEAT_ST_VARIANTS=0` off): the
-  child's clock used to the end (240-270 s), no further route of the child's (1 of the 36 compiled, EX Crew Fall of Zeal 11,851, by
-  the executor). Per
-  stretch (the lab's krt data, box 5): from the known route's previous trigger the executor's rungs 1-2 (5 + 15-s windows)
-  30 / 49, one continuous 30-s backward clock 34 / 49, either 36 / 49; every start kind 89 / 129 -> 105 / 129 (69% -> 81%).
-  The child runs at nice +10 over the compile (`EEAT_ST_NICE`; 0: the same priority); `EEAT_ST_GENERAL=0`: the short plan's
-  request alone. OPT-IN (it has lost single runs; its gains are the one-leg levels' whole-level routes).
+  executor stalls or has nothing left (THE GATE). Measured (box 6): with the arrivals given at once it HURT (slower routes on 10 of 15 levels, 2 levels lost); with the gate (300 s, 40 levels) 25 = 25 compiled (lost INFINITE and TPs The Horror, late base routes; gained Endless Space and K Underground), the first route 18% sooner (geo-mean), run ticks 0.7% fewer, one thread and ~1.7 GB more a compile: OPT-IN (it does not yet lose nothing).
 - **THE GATED LEVELS: the level as a chain of backward legs** (n5-s99-gated, 2026-09-30; `src/plan/lab/bwchain.js`,
   `bwchain_child.js`; OPT-IN `EEAT_BW_CHAIN=1`, off = the compile byte for byte; `test/bwchain.js` 9/0). 77 of the 206
   levels the 300-s compile of main failed have the trophy behind doors a trigger opens (the lab's whole-level stage
@@ -762,6 +723,63 @@ ways in.
   some field levels (Need for Steed 409 of 774 worker-s, 280 s of it failing at rungs 2-3; Stone Ruin 676 of 894, 402 s),
   but crumbs also succeed at rung 3 (Need for Steed 1, Stone Ruin 3, Flight Path 1); the A/B (box 5, 300 s, those 3 levels, R 2, one run an arm side by side): compiled 0 = 0, progress Need for Steed 3 vs 2, Stone Ruin 10 = 10 (ok steps 13 vs 9), Flight Path 5 vs 7 (6 crumb plans in either arm: the spread): no gain shown. THE PORTFOLIO on the 21
   STUCK-FIELD levels (300 s, W3, one run an arm side by side, box 5 at load 130-140): compiled 2 vs 1 of 21 (Snow Jumping 4,454 run ticks only with it, 1.21 of the best known; Endless Space 2,143 vs 2,493, 1.20 of the best known; both by the backward meet arm, `pfBy_bw`), the unrouted levels' progress better 1 (The Memory Game 10 vs 8), worse 4 (Ring Of Chaos 13 vs 22: 127 portfolio calls took 253 worker-s for 2 legs, 21 anchors vs 40; EXCrew Trolled Minis 24 vs 26, The 7 Depths of Hell 2 vs 4, Forgotten Veil b7be 10 vs 12), the same 14 (+-1); peak RSS mean 2.9 vs 2.8 GB; every .eetas replayed. One run an arm: not a default.
+- **The whole level as one leg, and the ONE-LEG walls** (C6 push 3 lane 4; `src/out/n5/lanes/c6_lane4_b2.md`): strategy.js
+  `wholeLevel` (OPT-IN `EEAT_BW_LEVEL=1`: the lab's backward solver on the whole level in a child process next to the
+  moves, `src/plan/lab/bwlevel_child.js`; with a gated trophy the plan's triggers as its legs, `EEAT_BW_LEGS`) now behind
+  THE ONE SHOT'S GATE (`EEAT_BW_GATE=0`: at once, as before): its legs' arrivals are held until the executor's watchdog
+  stall or its end with no route, its routes taken at once (the imported anchors had slowed Ruins, 1,510 vs 1,302 run
+  ticks; with the gate 1,279 vs the base's 1,270). THE A/B: box 6, 300 s, W3, one run an arm side by side, 25 of the 45 levels in the block: compiled 14 vs 13 (+ Gravity's Rainbow 2,018 run ticks, the child's route at 27 s; none lost), the 13 both compiled faster 5 / slower 8, run ticks geo-mean 0.897 (median 1.006; Tutorial 2 8,942 -> 5,139 and Tutorial 3 7,131 -> 2,583 carry the mean, Tutorial 4 5,447 -> 6,122 and On And On 3,049 -> 3,539 the other way), the 11 unrouted progress better 1 / worse 1 / same 9; the shared gate (gate20, 60 s) exit 0, 14 vs 13; the gate opened only at the loop's end (Happy Spookaween's leg arrival at 54 s stayed held: no watchdog stall in 300 s); NOT a default (one run an arm, half the list). THE WALLS, measured from the known routes' own states
+  (`tools/cmp/legtrace.js`, `tools/cmp/uphill.js`): Sentinel Ravines' first wall is a run-up detour the goal field cannot
+  see (the route goes 26 tiles left and up and back along an upper corridor: the field +24.4 tiles above its running
+  min): the skeleton's sub-leg from the route's state before it fails at 45 s with every finder knob (`EEAT_EXEC_LEG`
+  best / beam / mix, `EEAT_REGION_M` 24 / 36 / 48, `EEAT_BEST_W` 5 / 2 / 1, `EEAT_BEST_ENERGY=1`), from the state past it
+  prims solve it in 3.5 s; My level de42's 140-tick route pumps twice in an up-arrow shaft with a sideways jump in a
+  left-arrow tile: nothing from ticks 0-40 (45 s, 18 M sims; the one shot 471 k expansions), the math tier's coupled
+  family from tick 60 in 1.7 s; Don't Stop Jumping is an ORDER wall (the relaxation's 64-tick trophy plan, a false near
+  the side-arrow-priced RCH3 field reads 2,515 tiles, took ~290 of 300 s; the switch leg it needs first is found from the
+  route's states at rung 3; `EEAT_PHYS_PRICE=1` ranks the switch plans first: 300 s, box 6, one run: switch 0 taken at tick 8,419 (gain 1; the chief's run 0), no route (switch 1 left at 300 tiles); `EEAT_WALL_PRICE=1` the same, 8,497); Tutorial 4's 1.55-2x is crumbs (4
+  blue coins the known route never takes).
+- **The stretch solver in its own process** (n5-s99-budget, 2026-09-30; `EEAT_STRETCH=1`, OPT-IN, off = the compile byte for
+  byte; `src/plan/lab/stretch_child.js`, strategy.js `st*`; `test/s99stretch.js`): the executor's rung ladder (1.5 / 5 / 15 /
+  45 s windows) restarts every solver of a stretch at every rung, and the lab's backward solver (`src/plan/lab/backward.js`)
+  needs 30-40 s IN ONE PIECE on a long leg (inside the rung windows it never finished one). ONE child process a compile
+  (`EEAT_ST_N` children, default 1) keeps that solver (and its closed closures' memo) across requests and gets ONE stretch at a
+  time on ONE continuous clock, next to the executor, whose rungs go on: (1) at the moves' start a SHORT first plan (at most
+  `EEAT_ST_SHORT` 3 steps: the ONE-LEG levels' trophy) from the level start, its legs in order (shares by the plan's est
+  ticks), on `EEAT_ST_SHORT_F` 0.9 of the budget (at most 270 s; before a route the moves have the whole time, the polish /
+  proof reserves are a route's); (2) then, before the first route, the stretch (anchor, plan step) the executor failed at rung
+  >= 1 from the anchor of the most progress, from its earliest arrival, `EEAT_ST_MS` 40 s (80 s on a retry after 'budget'),
+  with THE REST OF A SHORT PLAN (its anchor's plan through it has at most 3 steps: its later legs too, 40 s a leg;
+  `EEAT_ST_CHAIN=0` off); (3) a leg the child did not finish hands back the backward solve's node of the least time to go
+  (backward.js `o.closest`, opt-in there), replayed here and made that stretch's RELAY start for the executor's next rung
+  when it has none (`EEAT_ST_RELAY=0` off: "keep partial progress as the next rung's start"); (4) a request made stale (its
+  stretch done by the executor before the child's first leg, or a route known and it is no whole-level request) is stopped
+  and the child started again. Every child answer is replayed there (the waypoint's goal test, `T.goalOf`) and again here
+  (`verified`: the engine from the level start) before it is an anchor (`addArrival`) or a route (`routeOf`); the loop that
+  would end 'exhausted' waits while a child works (`stHold`). `report.stretch` {requests, ok, anchors, routes, legs, ms,
+  relays, stale, children, short}. MEASURED (the lab's 48-level A/B set, W3, par 3 an arm side by side, one tree, joins and
+  loops off in both arms): 120 s, box 5, two A/Bs (6f04001 without the relay / chain; bdd076a with them): compiled 20 vs 22
+  and 23 vs 23, pooled 43 vs 45 of 96; The Blank Page (2,942 / 2,024) and INVASION (4,093; the child's whole-level route at
+  ~40 s) 2 of 2 vs 0 of 2; lost once each Tutorial 3, INFINITE, Crypts Of Anubis, Presto Penguins (the base 1 of 2 on each:
+  the moves' spread); the executor's own work the same with the child (the levels failing in both arms: 1,460 / 1,465 steps
+  vs 1,451 / 1,472, simulated ticks -3% / +4%). 300 s, two A/Bs (box 6 6f04001; box 5 767e305 = + the stale kill): 38 vs
+  39 and 31 vs 33 (the loaded box 5), pooled 69 vs 72 of 96; Stone Ruin Speedrun (3,707) and Gravity's Rainbow (2,022, under
+  the best known 2,197) 2 of 2 vs 0 of 2 (the child's whole-level routes); lost Tutorial 3, Buuwuu, Christmas Town, Late
+  christmas once each (the base 2 / 2 / 2 / 1 of 2); both compiled run ticks geo-mean 0.979 / 0.960. A fifth A/B (120 s,
+  box 5, c98d21c = + nice, three arms): base 27, the solver 28, the short plan's request alone (`EEAT_ST_GENERAL=0`) 28 (both:
+  + Stone Ruin, + The Blank Page, + Gravity's Rainbow). ALL FIVE POOLED (240 level runs): base 139 vs 145; by level Stone
+  Ruin 0 -> 3 / 5, Gravity's Rainbow 0 -> 3 / 5, The Blank Page 1 -> 5 / 5, INVASION 3 -> 5 / 5, Accident Prone 4 -> 5, Tutorial
+  2 3 -> 4, Snow Jumping 1 -> 2; WATCH Tutorial 3 3 -> 1 / 5 and Buuwuu's Stronghold 3 -> 1 / 5 (the executor's own work the
+  same in both arms there: steps and simulated ticks), INFINITE, Crypts, Presto, K Underground, the precision puzzle 1 run
+  fewer each. The 41 ONE-LEG levels n5-plan 3d52987's 300-s full compile (44 / 230) failed, the solver on (box 6, 300 s): the
+  child's own routes Just One More Time 2,899, Stone Ruin 3,707, Gravity's Rainbow 2,022; the 36 left again with THE REST OF
+  THE CLOCK (the child's variants in the time a solve leaves: a longer relay, finer x speeds; `EEAT_ST_VARIANTS=0` off): the
+  child's clock used to the end (240-270 s), no further route of the child's (1 of the 36 compiled, EX Crew Fall of Zeal 11,851, by
+  the executor). Per
+  stretch (the lab's krt data, box 5): from the known route's previous trigger the executor's rungs 1-2 (5 + 15-s windows)
+  30 / 49, one continuous 30-s backward clock 34 / 49, either 36 / 49; every start kind 89 / 129 -> 105 / 129 (69% -> 81%).
+  The child runs at nice +10 over the compile (`EEAT_ST_NICE`; 0: the same priority); `EEAT_ST_GENERAL=0`: the short plan's
+  request alone. OPT-IN (it has lost single runs; its gains are the one-leg levels' whole-level routes).
 - **Checks**: unit tests `test/plantypes.js`, `planmodel.js`, `planplanner.js`, `planbounds.js`, `planprims.js`,
   `planexec.js --only=unit,fail`, `planstrategy.js`, `plancompile.js` (the CLI and the Compile API with the mock parts
   `test/planmock.js`), `plantruth.js`, `msolve.js --quick`, `kin.js --quick`, `mathsep.js`. The truth checkers on the known routes
@@ -967,3 +985,28 @@ ways in.
   per level (one or two runs an arm), only in the sums. LEFT: more runs an arm; the reserve (the pass's 20 s come out of
   THE REST / THE LAST's time on a long route: Ruins' same moves route 6.9% vs 6.5% in sample 1); the pass's own gains are
   the polish at the joins (the order B&B: 0 / 6 legs on most levels at 300 s).
+- **THE CHAINS LAB, judged** (2026-09-30; the three lab branches merged into n5-plan, `src/plan/lab/`; the judge's record
+  `src/out/n5/lab/JUDGE.md` in its worktree, gitignored): **`EEAT_BW_LEVEL`** (n5-lab-backward: `backward.js`, backward
+  reachability + meet in the middle + relay, solving the WHOLE LEVEL as one leg in a child process next to the moves stage,
+  `bwlevel_child.js`, at most 0.5 of the budget / 150 s, heap 2 GB): **`last` IS A COMPILER DEFAULT** (src/plan/defaults.js;
+  the child's route only when the moves stage ends with no route of its own; the moves' first route ends the child: where
+  the moves route, the compile is the base's code path), `1` = its route at once (the lab's: opt-in), `0` off;
+  `EEAT_BACKWARD=1` its executor tier B, `EEAT_CORRIDOR=1` (+ `EEAT_CORR_MIN=0 EEAT_CORR_REPLACE=1`) the corridor's tier MC
+  (n5-lab-corridor, `corridor.js`), `EEAT_PROFILE=1` the speed profiles' tier P (n5-lab-profile, `profile.js`): OPT-IN,
+  off = the executor byte for byte. THE LEGS (`tools/lab/judge_legs.js`: the 55 stuck waypoints with a known route
+  (`tools/lab/corridor_cases.js`) from the known route's own exact state at its previous trigger / 300 / 120 ticks before
+  the target, 129 legs, one 30-s clock an arm, every answer replayed): the backward solver **99 / 129** (81 within 5 s,
+  median 1.7 s), the executor as it stands 90 (the best ticks: 46 <= the route), the profiles 80, the corridor 78,
+  msolve.chain 35; the union 107 = executor + backward + corridor (the profiles add none on top); FINDER legs 1 / 11 by
+  any. THE COMPILES (box 5, 300 s, W3, one tree, arms side by side, one run a level unless said): the whole-level child
+  compiled what the base's moves did not: The Blank Page (2,025 `last`; 2,011 `1` + corridor), INVASION (4,091 `1` +
+  corridor), Gravity's Rainbow (2,059 `last`; 2,019 / 2,020 `1`; the base none / 3,402); the 28 levels the compile routes:
+  `1` 28 / 28 vs the base 27 / 28 and 10 / 10 in the replicate, run ticks geo-mean 0.999, but where its early route was
+  taken the refinement started from it instead of the executor's: Rosa dei Venti +56 / +148 in two pairs, celeste +5 (and
+  Tree Decorating -283 / -197, Endless Space -104 / -135 faster): hence `last` as the default; the corridor tier with `1`
+  on the 20 failing levels 5 vs 4 compiled (lost Buuwuu's Stronghold and Snow Jumping; the corridor alone failed Snow
+  Jumping again, 0 / 2 with it vs 2 / 2 without): opt-in. THE SPREAD of one 300-s run a level (the same code: the child
+  ended at once): Bygone Tutorial 1,906 vs 2,477, Tutorial 2 3,972 vs 4,892, Level 1 Overworld 10,745 vs 12,463. Shared
+  gate with the default (60 s): exit 0, compiled 15 vs the baseline's 11, worse 1 (First Person Maze, the base's own).
+  Tests that require src/plan/strategy.js directly read the environment (test/planstrategy.js's mock T-STALL fails with
+  `EEAT_BW_LEVEL=1`: the child solves the real toy file).
