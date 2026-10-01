@@ -2232,6 +2232,19 @@ async function compile(L, opts = {}, emit = () => {}) {
 	else if (opts.known !== false && (opts.file || opts.md5)) { try { known = knownOf(opts.file, { md5: opts.md5 }); } catch (e) { known = null; } }
 	progress();
 	const why = best ? '' : `no route (end ${end}): ${whyNow().text}`;
+	// THE ANCHOR DUMP (a diagnosis aid, OPT-IN EEAT_ANCHOR_DUMP=<file.jsonl>; unset = nothing written): one JSON line per
+	// anchor {id, gain, tick, fails, via, masks (every arrival's input string)}, so the last mile of a NEAR level (a failed
+	// leg 1-3 tiles from its target) can be replayed from the anchor's exact engine state (tools/cmp/nearkrt.js)
+	if (process.env.EEAT_ANCHOR_DUMP) {
+		try {
+			const lines = [...anchors.values()].map((A) => JSON.stringify({ id: A.id, gain: A.gain, tick: A.firstTick, fails: A.fails, via: A.via || '', edgeVia: A.edgeVia || null,
+				masks: A.arrivals.map((a) => (typeof a.masks === 'string' ? a.masks : T.strOf(a.masks instanceof Uint8Array ? a.masks : T.masksOf(a.masks)))) }));
+			const fs = require('fs'); let f = process.env.EEAT_ANCHOR_DUMP;
+			// (a directory: one file a level, <dir>/<level>.anchors.jsonl, for a full compile's levels)
+			try { if (fs.statSync(f).isDirectory()) f = path.join(f, path.basename(String(opts.file || 'level'), '.eelvl') + '.anchors.jsonl'); } catch (e) { /* a file name */ }
+			fs.writeFileSync(f, lines.join('\n') + '\n');
+		} catch (e) { /* a diagnosis file only */ }
+	}
 	say({ ev: 'done', end, sec: Math.round(secNow() * 10) / 10, steps, okSteps, anchors: anchors.size, routes: best ? 1 : 0, best: best ? best.ticks : null, runTicks: best ? best.runTicks : null, lb: LB, gap: best ? gapOf(best.runTicks) : null,
 		bugs, deepenings, stalls, bnbPlans, bnbArrivals, layers: Math.max(0, ...[...anchors.values()].map((A) => A.firstTick)), ...(why ? { why } : {}) });
 	saveFiles();
