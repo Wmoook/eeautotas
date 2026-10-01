@@ -62,7 +62,7 @@ const ENV = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? +
 const DEF = {
 	vxq: ENV('EEAT_BW_VXQ', 2), vyq: ENV('EEAT_BW_VYQ', 1), airStep: ENV('EEAT_BW_AIRSTEP', 6), maxT: ENV('EEAT_BW_MAXT', 48),
 	corrF: ENV('EEAT_BW_CORRF', 1.5), corrAdd: ENV('EEAT_BW_CORRADD', 40), maxCells: ENV('EEAT_BW_MAXCELLS', 400000),
-	w: ENV('EEAT_BW_W', 1.0), closeF: ENV('EEAT_BW_CLOSEF', 0.6), meetNodes: ENV('EEAT_BW_MEET', 400000), maxNodes: ENV('EEAT_BW_MAXNODES', 900000), keep: ENV('EEAT_BW_KEEP', 2), quick: ENV('EEAT_BW_QUICK', 50000), quickF: ENV('EEAT_BW_QUICKF', 0.3), reach: ENV('EEAT_BW_REACH', 1), perim: ENV('EEAT_BW_PERIM', 0), corrReach: ENV('EEAT_BW_CORRREACH', 1), relay: ENV('EEAT_BW_RELAY', 6), memo: ENV('EEAT_BW_MEMO', 2), variants: ENV('EEAT_BW_VARIANTS', 2), relayMin: ENV('EEAT_BW_RELAYMIN', 20), meetF: ENV('EEAT_BW_MEETF', 1), finish: ENV('EEAT_BW_FINISH', 1), ladder: ENV('EEAT_BW_LADDER', 3), finishShare: ENV('EEAT_BW_FINISHSHARE', 0.25), finishH: ENV('EEAT_BW_FINISHH', 100), finishEvery: ENV('EEAT_BW_FINISHEVERY', 8), finishMs: ENV('EEAT_BW_FINISHMS', 25), finishT: ENV('EEAT_BW_FINISHT', 120), fw: ENV('EEAT_BW_FW', 3), fadd: ENV('EEAT_BW_FADD', 200), ell: ENV('EEAT_BW_ELL', 0), sat: ENV('EEAT_BW_SAT', 0), hold: ENV('EEAT_BW_HOLD', 0), rot: ENV('EEAT_BW_ROT', 0), satLazy: ENV('EEAT_BW_SATLAZY', 4),
+	w: ENV('EEAT_BW_W', 1.0), closeF: ENV('EEAT_BW_CLOSEF', 0.6), meetNodes: ENV('EEAT_BW_MEET', 400000), maxNodes: ENV('EEAT_BW_MAXNODES', 900000), keep: ENV('EEAT_BW_KEEP', 2), quick: ENV('EEAT_BW_QUICK', 50000), quickF: ENV('EEAT_BW_QUICKF', 0.3), reach: ENV('EEAT_BW_REACH', 1), perim: ENV('EEAT_BW_PERIM', 0), corrReach: ENV('EEAT_BW_CORRREACH', 1), relay: ENV('EEAT_BW_RELAY', 6), memo: ENV('EEAT_BW_MEMO', 2), variants: ENV('EEAT_BW_VARIANTS', 2), relayMin: ENV('EEAT_BW_RELAYMIN', 20), meetF: ENV('EEAT_BW_MEETF', 1), finish: ENV('EEAT_BW_FINISH', 1), ladder: ENV('EEAT_BW_LADDER', 3), finishShare: ENV('EEAT_BW_FINISHSHARE', 0.25), finishH: ENV('EEAT_BW_FINISHH', 100), finishEvery: ENV('EEAT_BW_FINISHEVERY', 8), finishMs: ENV('EEAT_BW_FINISHMS', 25), finishT: ENV('EEAT_BW_FINISHT', 120), fw: ENV('EEAT_BW_FW', 3), fadd: ENV('EEAT_BW_FADD', 200), ell: ENV('EEAT_BW_ELL', 0), sat: ENV('EEAT_BW_SAT', 0), hold: ENV('EEAT_BW_HOLD', 1), rot: ENV('EEAT_BW_ROT', 1), vpen: ENV('EEAT_BW_VPEN', 4), deadPen: ENV('EEAT_BW_DEADPEN', 0), satLazy: ENV('EEAT_BW_SATLAZY', 4), mix: ENV('EEAT_BW_MIX', 0), openWalk: ENV('EEAT_BW_OPENWALK', 0), deaths: ENV('EEAT_BW_DEATHS', 0), mixSat: ENV('EEAT_BW_MIXSAT', 4),
 };
 
 // ------------------------------------------------------------------ a small binary heap (key, value pairs)
@@ -106,14 +106,14 @@ function createBackward(L, opts = {}) {
 	const idOf = (i) => (i >= 0 && i < nId ? i : 0);
 
 	// the static solid map (doors as they stand in the state given: solidOf)
-	function solidOf(s, clockOpen) {
+	function solidOf(s, clockOpen, doorsOpen) {
 		const sol = new Uint8Array(N);
 		for (let i = 0; i < N; i++) {
 			const id = s.tiles[i], f = flags[id] | 0;
 			if ((f & F_SOLID) === 0) continue;
 			if (f & F_JUMPTHRU) sol[i] = 3;
 			else if (f & (F_HALF | F_ROTHALF)) sol[i] = 4;
-			else if (f & F_DOOR) sol[i] = clockOpen && (id === 156 || id === 157) ? 0 : s.is_tile_solid_now(i % W, (i / W) | 0) ? 1 : 0;   // (clockOpen: time doors open: they open every 1000 ticks)
+			else if (f & F_DOOR) sol[i] = (doorsOpen && id !== 50) || (clockOpen && (id === 156 || id === 157)) ? 0 : s.is_tile_solid_now(i % W, (i / W) | 0) ? 1 : 0;   // (clockOpen: time doors open: they open every 1000 ticks; doorsOpen: every door but the secret block 50, which never lets the ball through)
 			else sol[i] = 1;
 		}
 		return sol;
@@ -141,17 +141,20 @@ function createBackward(L, opts = {}) {
 	// (a memo of the last state's fields: the discrete state rarely changes along a leg, and the key's string was a fifth of a
 	// meet's time)
 	const DM = { ok: false, tb: 0, c: 0, b: 0, k: 0, sw: null, osw: null, t: 0, j: 0, mj: 0, jb: 0, sb: 0, fl: 0, fg: 0, d: 0 };
+	// (THE DEATHS AS MOVES (P.deaths) on a level with death doors / gates: the death count is part of the discrete state)
+	const DEATHK = !!(opts.deaths !== undefined ? +opts.deaths : DEF.deaths) && !!(L.hasDeathDoor || L.hasDeathGate);
 	function discOf(s, noClock) {
 		const tb = L.hasTimeDoors && !noClock ? Math.floor((s._ticks % 1000) / TD_BUCKET) : 0;
 		const fl = (s.low_gravity ? 1 : 0) | (s.is_invulnerable ? 2 : 0) | (s.has_levitation ? 4 : 0) | (s.is_cursed ? 8 : 0) | (s.is_zombie ? 16 : 0) | (s.is_poisoned ? 32 : 0) | (s.is_on_fire ? 64 : 0) | (s.has_crown ? 128 : 0);
 		const j = s.max_jumps > 1 ? s.jump_count : 0;
-		if (DM.ok && !s._swOwned && !s._oswOwned && DM.tb === tb && DM.c === s.coins && DM.b === s.blue_coins && DM.k === s._keysMask && DM.sw === s._switches && DM.osw === s._oswitches && DM.t === s.team && DM.j === j && DM.mj === s.max_jumps && DM.jb === s.jump_boost && DM.sb === s.speed_boost && DM.fl === fl && DM.fg === s.flip_gravity) return DM.d;
+		const dth = DEATHK ? Math.min(s.deaths, 64) : 0;
+		if (DM.ok && DM.dth === dth && !s._swOwned && !s._oswOwned && DM.tb === tb && DM.c === s.coins && DM.b === s.blue_coins && DM.k === s._keysMask && DM.sw === s._switches && DM.osw === s._oswitches && DM.t === s.team && DM.j === j && DM.mj === s.max_jumps && DM.jb === s.jump_boost && DM.sb === s.speed_boost && DM.fl === fl && DM.fg === s.flip_gravity) return DM.d;
 		const sw = swKey(s._switches, s._swOwned), osw = swKey(s._oswitches, s._oswOwned);
 		// (a level with time doors: the clock's phase in TD_BUCKET-tick buckets, so a ball that waits for a door is not its own earlier cell)
-		const k = `${L.hasTimeDoors ? Math.floor((s._ticks % 1000) / TD_BUCKET) : ''},${s.coins},${s.blue_coins},${s._keysMask},${sw},${osw},${s.team},${s.max_jumps > 1 ? s.jump_count : 0},${s.max_jumps},${s.jump_boost},${s.speed_boost},${s.low_gravity ? 1 : 0},${s.is_invulnerable ? 1 : 0},${s.has_levitation ? 1 : 0},${s.flip_gravity},${s.is_cursed ? 1 : 0},${s.is_zombie ? 1 : 0},${s.is_poisoned ? 1 : 0},${s.is_on_fire ? 1 : 0},${s.has_crown ? 1 : 0}`;
+		const k = `${L.hasTimeDoors ? Math.floor((s._ticks % 1000) / TD_BUCKET) : ''},${s.coins},${s.blue_coins},${s._keysMask},${sw},${osw},${s.team},${s.max_jumps > 1 ? s.jump_count : 0},${s.max_jumps},${s.jump_boost},${s.speed_boost},${s.low_gravity ? 1 : 0},${s.is_invulnerable ? 1 : 0},${s.has_levitation ? 1 : 0},${s.flip_gravity},${s.is_cursed ? 1 : 0},${s.is_zombie ? 1 : 0},${s.is_poisoned ? 1 : 0},${s.is_on_fire ? 1 : 0},${s.has_crown ? 1 : 0}` + (DEATHK ? `,${dth}` : '');
 		let d = discIds.get(k);
 		if (d === undefined) { d = discIds.size; discIds.set(k, d); }
-		if (!s._swOwned && !s._oswOwned) { DM.ok = true; DM.tb = tb; DM.c = s.coins; DM.b = s.blue_coins; DM.k = s._keysMask; DM.sw = s._switches; DM.osw = s._oswitches; DM.t = s.team; DM.j = j; DM.mj = s.max_jumps; DM.jb = s.jump_boost; DM.sb = s.speed_boost; DM.fl = fl; DM.fg = s.flip_gravity; DM.d = d; }
+		if (!s._swOwned && !s._oswOwned) { DM.ok = true; DM.tb = tb; DM.c = s.coins; DM.b = s.blue_coins; DM.k = s._keysMask; DM.sw = s._switches; DM.osw = s._oswitches; DM.t = s.team; DM.j = j; DM.mj = s.max_jumps; DM.jb = s.jump_boost; DM.sb = s.speed_boost; DM.fl = fl; DM.fg = s.flip_gravity; DM.dth = dth; DM.d = d; }
 		return d;
 	}
 
@@ -194,11 +197,12 @@ function createBackward(L, opts = {}) {
 		if (inTgt(sim)) return { ok: true, masks: new Uint8Array(0), T: 0, why: 'at the target', stats };
 		const sol = solidOf(sim);
 		const solC = L.hasTimeDoors ? solidOf(sim, true) : sol;     // (the corridor's: time doors open)
+		let solW = solC;                                            // (the walk's: solC, or every door open (P.openWalk))
 
 		// ------------------------------------------------------------ THE CORRIDOR: the gravity-blind walk from the target
 		const wd = new Int32Array(N).fill(-1);
 		// (the walk from a set of tiles: 8-way, no corner cut between two walls, portals both ways; into dist)
-		let walkFrom = null;
+		let walkFrom = null, walkTarget = null;
 		{
 			// portals: a portal tile and its exits are neighbours both ways (a relaxation: the corridor only)
 			const padj = new Map();
@@ -225,9 +229,9 @@ function createBackward(L, opts = {}) {
 						if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
 						const u = ny * W + nx;
 						if (dist[u] >= 0) continue;
-						const qq = solC[u];
+						const qq = solW[u];
 						if (qq === 1 || qq === 4) continue;
-						if (dx && dy) { const a = solC[y * W + nx], b = solC[ny * W + x]; if ((a === 1 || a === 4) && (b === 1 || b === 4)) continue; }
+						if (dx && dy) { const a = solW[y * W + nx], b = solW[ny * W + x]; if ((a === 1 || a === 4) && (b === 1 || b === 4)) continue; }
 						dist[u] = dist[t] + 1; q[qt++] = u;
 					}
 					const pa = padj.get(t);
@@ -235,29 +239,36 @@ function createBackward(L, opts = {}) {
 				}
 				return dist;
 			};
-			const q = new Int32Array(N);
-			let qh = 0, qt = 0;
-			for (const t of target.tiles) if (t >= 0 && t < N && wd[t] < 0) { wd[t] = 0; q[qt++] = t; }
-			while (qh < qt) {
-				const t = q[qh++], x = t % W, y = (t / W) | 0;
-				for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
-					if (!dx && !dy) continue;
-					const nx = x + dx, ny = y + dy;
-					if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
-					const u = ny * W + nx;
-					if (wd[u] >= 0) continue;
-					const qq = solC[u];
-					if (qq === 1 || qq === 4) continue;
-					// no corner cut between two walls
-					if (dx && dy) { const a = solC[y * W + nx], b = solC[ny * W + x]; if ((a === 1 || a === 4) && (b === 1 || b === 4)) continue; }
-					wd[u] = wd[t] + 1; q[qt++] = u;
+			walkTarget = () => {
+				const q = new Int32Array(N);
+				let qh = 0, qt = 0;
+				for (const t of target.tiles) if (t >= 0 && t < N && wd[t] < 0) { wd[t] = 0; q[qt++] = t; }
+				while (qh < qt) {
+					const t = q[qh++], x = t % W, y = (t / W) | 0;
+					for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+						if (!dx && !dy) continue;
+						const nx = x + dx, ny = y + dy;
+						if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+						const u = ny * W + nx;
+						if (wd[u] >= 0) continue;
+						const qq = solW[u];
+						if (qq === 1 || qq === 4) continue;
+						// no corner cut between two walls
+						if (dx && dy) { const a = solW[y * W + nx], b = solW[ny * W + x]; if ((a === 1 || a === 4) && (b === 1 || b === 4)) continue; }
+						wd[u] = wd[t] + 1; q[qt++] = u;
+					}
+					const pa = padj.get(t);
+					if (pa) for (const u of pa) if (wd[u] < 0) { wd[u] = wd[t] + 1; q[qt++] = u; }
 				}
-				const pa = padj.get(t);
-				if (pa) for (const u of pa) if (wd[u] < 0) { wd[u] = wd[t] + 1; q[qt++] = u; }
-			}
+			};
+			walkTarget();
 		}
 		const sTile = (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4);
-		const dS = sTile >= 0 && sTile < N ? wd[sTile] : -1;
+		let dS = sTile >= 0 && sTile < N ? wd[sTile] : -1;
+		// THE OPEN WALK (P.openWalk): the start outside the target's walk with the doors as they stand: the walk with every door open
+		// (the leg takes a key, a switch, coins on its way: the corridor and the fallback a relaxation; the reach field keeps the
+		// doors as they stood, its -1 an order behind them, no prune)
+		if (dS < 0 && P.openWalk && sTile >= 0 && sTile < N) { solW = solidOf(sim, true, true); wd.fill(-1); walkTarget(); dS = wd[sTile]; stats.openWalk = dS >= 0 ? 1 : 0; }
 		if (dS < 0) {
 			if (o.debugWalk) {
 				let n = 0; for (let t = 0; t < N; t++) if (wd[t] >= 0) n++;
@@ -275,6 +286,38 @@ function createBackward(L, opts = {}) {
 		let rfield = null;
 		if (P.reach) { try { rfield = rfOf(target.tiles, sim); } catch (e) { rfield = null; } }
 		stats.reach = rfield ? rfield.mode : null;
+		// THE DEATH'S WAY (P.deaths): a death takes the ball to its respawn (the checkpoint touched last, else the next spawn)
+		// with its dead ticks; the fallback of a state is the least of its own and the way to the nearest killer tile + the dead
+		// ticks + the respawn's own (the respawn state: a synthetic death of the start at a killer tile, the target's reach field
+		// with the doors as they stand after it); on a level with death doors / gates the fallback reads the reach field of the
+		// state's own death count (its doors)
+		let rKill = null, hResp = Infinity;
+		const sim0Deaths = sim.deaths;
+		const rfByDeaths = new Map();
+		if (P.deaths && rfield) {
+			try {
+				const kt = [];
+				for (let i = 0; i < N; i++) { const id = sim.tiles[i]; if (L.gFlags && (L.gFlags[id] & 4) !== 0 && sol[i] !== 1) kt.push(i); }
+				// (a killer tile with no checkpoint in its 3 x 3: the synthetic death touches none)
+				let ks = -1;
+				for (const i of kt) { const x = i % W, y = (i / W) | 0; let cp = false; for (let dy = -1; dy <= 1 && !cp; dy++) for (let dx = -1; dx <= 1; dx++) { const xx = x + dx, yy = y + dy; if (xx >= 0 && yy >= 0 && xx < W && yy < H && sim.tiles[yy * W + xx] === 360) { cp = true; break; } } if (!cp) { ks = i; break; } }
+				if (ks >= 0) {
+					rKill = rfCache.get('kill|' + TY.fgHash(TY.levelNow(L, sim).fg)) || null;
+					if (!rKill) { rKill = RF.reachField(TY.levelNow(L, sim), { goals: kt.map((t) => ({ tile: t, cost: 0 })), deaths: false }); rfCache.set('kill|' + TY.fgHash(TY.levelNow(L, sim).fg), rKill); }
+					const px = 16 * (ks % W), py = 16 * ((ks / W) | 0), id0 = sim.tiles[ks];
+					sim.px = px; sim.py = py; sim.prev_px = px; sim.prev_py = py; sim.speed_x = 0; sim.speed_y = 0; sim.modifier_x = 0; sim.modifier_y = 0;
+					sim.on_ground = false; sim.jump_count = 0; sim.teleported = false; sim._pastx = px; sim._pasty = py; sim._ox = px; sim._oy = py; sim._last_portal_set = false;
+					sim._q0 = id0; sim._q1 = id0; sim.current_tile = id0; sim._current = id0;
+					for (let k = 0; k < 4 && !sim.is_dead; k++) { E.applyMask(inp, 0); sim.tick(inp); }
+					if (sim.is_dead) {
+						for (let k = 0; k < DEAD_T && sim.is_dead; k++) { E.applyMask(inp, 0); sim.tick(inp); }
+						if (!sim.is_dead) { const fR = rfOf(target.tiles, sim); const cR = RF.costAt(fR, sim); if (cR >= 0) hResp = cR * KAPPA; stats.respawn = [Math.trunc(sim.px + 8) >> 4, Math.trunc(sim.py + 8) >> 4, Math.round(hResp)]; }
+					}
+				}
+			} catch (e) { rKill = null; }
+			sim.restore(snap0);
+			if (hResp === Infinity) rKill = null;
+		}
 		const lim = Math.ceil(dS * P.corrF + P.corrAdd);
 		const inCorr = new Uint8Array(N);
 		let corrTiles = 0;
@@ -308,9 +351,23 @@ function createBackward(L, opts = {}) {
 		// THE FALLBACK ORDER of a state no value covers: the reach field to the target (src/reach.js, deaths off: physics-aware,
 		// a relaxation, in tiles) at the top running speed (P.reach; else the gravity-blind walk), x P.fw + P.fadd (a cell
 		// with a value is preferred: the meet heads for the backward region)
-		const hFall = (s, t) => {
-			if (rfield) { const c = RF.costAt(rfield, s); if (c >= 0) return c * KAPPA * P.fw + P.fadd; if (rfield.mode === 'physics') return hWalk(t) * P.fw + P.fadd + 1000; }   // (-1: behind the doors as they stood at the start: an order, no prune)
+		const hOwn = (s, t) => {
+			let rf = rfield;
+			if (DEATHK && rf && s.deaths !== sim0Deaths) {
+				const dk = Math.min(s.deaths, 64);
+				rf = rfByDeaths.get(dk);
+				if (rf === undefined) { try { rf = rfOf(target.tiles, s); } catch (e) { rf = rfield; } rfByDeaths.set(dk, rf); }
+			}
+			if (rf) { const c = RF.costAt(rf, s); if (c >= 0) return c * KAPPA * P.fw + P.fadd; if (rf.mode === 'physics') return hWalk(t) * P.fw + P.fadd + 1000; }   // (-1: behind the doors as they stood at the start: an order, no prune)
 			return hWalk(t) * P.fw + P.fadd;
+		};
+		const hFall = (s, t) => {
+			const h = hOwn(s, t);
+			if (rKill === null || s.is_dead) return h;
+			const ck = RF.costAt(rKill, s);
+			if (!(ck >= 0)) return h;
+			const hd = (ck * KAPPA + DEAD_T + hResp) * P.fw + P.fadd;
+			return hd < h ? hd : h;
 		};
 
 		// ------------------------------------------------------------ cells
@@ -356,6 +413,10 @@ function createBackward(L, opts = {}) {
 		};
 		let cellId = new Map();                  // key -> id
 		let cellKey = [], cellSnap = [], cellTile = [];
+		// (cellOpen: 1 = a cell whose moves the closure did not record in full: not expanded, a move out of the corridor, a
+		// child the cap refused; dead (after the values): D Infinity and no open cell reachable from it in the closure's graph:
+		// every recorded way from it stays among recorded cells and none meets the target)
+		let cellOpen = [], dead = null;
 		const revFrom = [], revTicks = [];       // reversed edges per child id: parents and ticks (flat arrays per cell)
 		const toTarget = new Map();              // parent id -> least ticks to the target
 		let byPlace = new Map();                 // place -> [ids]
@@ -371,7 +432,7 @@ function createBackward(L, opts = {}) {
 			if (id !== undefined) return id;
 			if (cellKey.length >= P.maxCells) { stats.capped = true; return -1; }
 			id = cellKey.length;
-			cellId.set(key, id); cellKey.push(key); cellSnap.push(s.snapshot()); cellTile.push(tile);
+			cellId.set(key, id); cellKey.push(key); cellSnap.push(s.snapshot()); cellTile.push(tile); cellOpen.push(1);
 			revFrom.push(null); revTicks.push(null);
 			const pl = placeOf(key);
 			let a = byPlace.get(pl); if (!a) { a = []; byPlace.set(pl, a); } a.push(id);
@@ -407,7 +468,7 @@ function createBackward(L, opts = {}) {
 		 * with sim at the event's state: kind 0 a child, 1 the target; the landing's hop too (kind 0, its own masks).
 		 * masks: a shared buffer (valid until the next call); ticks = its length.
 		 */
-		const buf = new Uint8Array(Math.max(MAXT, DEAD_T) + 2);
+		const buf = new Uint8Array(MAXT + DEAD_T + 2);
 		function play(snap, m, p, out) {
 			sim.restore(snap);
 			if (sim.is_dead) {
@@ -428,7 +489,16 @@ function createBackward(L, opts = {}) {
 				const mk = p === 2 || (t === 0 && p) ? (m | 1) : m;
 				buf[t] = mk;
 				E.applyMask(inp, mk); sim.tick(inp);
-				if (sim.is_dead) return;
+				if (sim.is_dead) {
+					// THE DEATH AS A MOVE (P.deaths): the dead ticks played to the respawn (no input), its state the child (the earliest
+					// arrival per cell survives the dedup: a death that pays is the first one there in its discrete state)
+					if (!P.deaths) return;
+					for (let k = 0; k < DEAD_T; k++) {
+						buf[t + 1 + k] = 0; E.applyMask(inp, 0); sim.tick(inp);
+						if (!sim.is_dead) { if (inTgt(sim)) out(1, t + 2 + k, buf); else out(0, t + 2 + k, buf); return; }
+					}
+					return;
+				}
 				if (inTgt(sim, px, py)) { out(1, t + 1, buf); return; }
 				const tele = Math.abs(sim.px - px) > TELEPORT_PX || Math.abs(sim.py - py) > TELEPORT_PX;
 				const g = sim.on_ground ? 1 : 0;
@@ -528,6 +598,7 @@ function createBackward(L, opts = {}) {
 			cellSnap[id] = null;                   // (expanded once: its state is no longer needed)
 			sim.restore(snap);
 			const ms = macrosOf();
+			let esc = 0;
 			for (const [m, p] of ms) {
 				play(snap, m, p, (kind, ticks) => {
 					if (kind === 1) {
@@ -537,12 +608,13 @@ function createBackward(L, opts = {}) {
 						return;
 					}
 					const tl = tileOfS(sim);
-					if (tl < 0 || !inCorr[tl]) return;
+					if (tl < 0 || !inCorr[tl]) { esc = 1; return; }
 					const k = keyOf(sim);
 					const cid = addCell(k, sim, tl);
-					if (cid >= 0) addEdge(id, cid, ticks);
+					if (cid >= 0) addEdge(id, cid, ticks); else esc = 1;
 				});
 			}
+			cellOpen[id] = esc;
 		};
 		const closure = (until) => {
 			const tc = Date.now();
@@ -579,6 +651,18 @@ function createBackward(L, opts = {}) {
 			let finite = 0;
 			for (let i = 0; i < n; i++) if (D[i] < Infinity) finite++;
 			stats.finite = finite;
+			// THE DEAD CELLS (P.deadPen > 0): back from every open cell over the reversed edges: what can reach an open cell may
+			// escape; the rest of the cells without a value are the closure's dead ends
+			if (P.deadPen > 0) {
+				const may = new Uint8Array(n), q = new Int32Array(n);
+				let qh = 0, qt = 0;
+				for (let i = 0; i < n; i++) if (cellOpen[i]) { may[i] = 1; q[qt++] = i; }
+				while (qh < qt) { const c = q[qh++]; const a = revFrom[c]; if (!a) continue; for (let k = 0; k < a.length; k++) { const p = a[k]; if (!may[p]) { may[p] = 1; q[qt++] = p; } } }
+				dead = new Uint8Array(n);
+				let nd = 0;
+				for (let i = 0; i < n; i++) if (!(D[i] < Infinity) && !may[i]) { dead[i] = 1; nd++; }
+				stats.dead = nd;
+			}
 			stats.dStart = D[startCell] < Infinity ? D[startCell] : null;
 			stats.dijMs += Date.now() - tD0;
 		};
@@ -587,7 +671,12 @@ function createBackward(L, opts = {}) {
 		const hOf = (key, tile, hf) => {
 			if (D.length === 0) return hf;               // (no values yet: the quick meet)
 			const id = cellId.get(key);
-			if (id !== undefined && D[id] < Infinity) return D[id];
+			if (id !== undefined && D[id] < Infinity) { stats.hCell = (stats.hCell | 0) + 1; return D[id]; }
+			if (id !== undefined) {
+				stats.hCellInf = (stats.hCellInf | 0) + 1;
+				// (a dead cell: the fallback's order behind every live one)
+				if (dead !== null && dead[id]) { stats.hDead = (stats.hDead | 0) + 1; return hf + P.deadPen; }
+			}
 			const a = byPlace.get(placeOf(key));
 			if (a) {
 				const [vx, vy] = speedsOf(key);
@@ -597,8 +686,9 @@ function createBackward(L, opts = {}) {
 					const q = speedsOf(cellKey[c]), dd = Math.abs(q[0] - vx) / VXQ + Math.abs(q[1] - vy) / VYQ;
 					if (dd < bd || (dd === bd && D[c] < best)) { bd = dd; best = D[c]; }
 				}
-				if (best < Infinity) return best + bd * 4;
+				if (best < Infinity) { stats.hNear = (stats.hNear | 0) + 1; return best + bd * P.vpen; }
 			}
+			stats.hFall = (stats.hFall | 0) + 1;
 			return hf;
 		};
 
@@ -632,7 +722,12 @@ function createBackward(L, opts = {}) {
 			// the order (the fallback's false near, a value's dead end) is spread over, not exhausted cell by cell, before the
 			// way out that first leads away from the target is taken; lazy: a popped node whose tile's count rose by P.satLazy
 			// is pushed again at its new priority
-			const satN = P.sat > 0 ? new Uint32Array(N) : null;
+			const satN = P.sat > 0 || P.mix > 0 ? new Uint32Array(N) : null;
+			// THE SECOND HEAD (P.mix > 0, P.sat 0): a second heap over the same nodes ordered with the tile saturation (P.mixSat a
+			// tile's expansion), popped for the share P.mix of the expansions: the plain order where it leads, the saturated one out
+			// of a basin of the plain order's (a node is expanded once, by whichever head pops it first)
+			const heap2 = P.mix > 0 && !(P.sat > 0) ? makeHeap() : null;
+			let mixAcc = 0;
 			const push = (snap, par, masks, g, key, tile, hsh, hf, mkey) => {
 				const a = seenG.get(mkey);
 				if (a && a.length >= keep && a[a.length - 1] <= g) return;
@@ -648,7 +743,8 @@ function createBackward(L, opts = {}) {
 				// (hr: the node's time to go in ticks: its value, else the fallback's own ticks without its weight)
 				const nd0 = { snap, par, masks, g, hsh, h: hv === hf ? (hf - P.fadd) / P.fw : hv };
 				nodes.push(nd0);
-				if (satN !== null) { const tt = tile >= 0 ? tile : 0; nd0.st = tt; nd0.sc = satN[tt]; nd0.f0 = g + P.w * hv; heap.push(nd0.f0 + P.sat * nd0.sc, id); }
+				if (heap2 !== null) { const tt = tile >= 0 ? tile : 0; nd0.st = tt; nd0.sc = satN[tt]; nd0.f0 = g + P.w * hv; heap.push(nd0.f0, id); heap2.push(nd0.f0 + P.mixSat * nd0.sc, id); }
+				else if (satN !== null) { const tt = tile >= 0 ? tile : 0; nd0.st = tt; nd0.sc = satN[tt]; nd0.f0 = g + P.w * hv; heap.push(nd0.f0 + P.sat * nd0.sc, id); }
 				else heap.push(g + P.w * hv, id);
 			};
 			// a child (sim holds it, its masks the first `ticks` of mbuf): push's tests in push's order, the snapshot, the state's
@@ -670,10 +766,27 @@ function createBackward(L, opts = {}) {
 			push(root.snap, -1, null, 0, root === root0 ? startKey : keyOf(sim), tileOfS(sim), undefined, hFall(sim, tileOfS(sim)), mkeyOf(sim, res));
 			let found = null, ex = 0, lastFinish = -Infinity;
 			const tMeet0 = Date.now() - 50;
-			while (heap.size && !found && Date.now() < until && ex < cap && nodes.length < P.maxNodes) {
-				const id = heap.pop();
-				const nd = nodes[id];
-				if (satN !== null) {
+			while ((heap.size || (heap2 !== null && heap2.size)) && !found && Date.now() < until && ex < cap && nodes.length < P.maxNodes) {
+				let id, nd;
+				if (heap2 !== null) {
+					// (the head of this pop: the second one for the share P.mix; an empty head gives its turn to the other)
+					mixAcc += P.mix;
+					let two = mixAcc >= 1;
+					if (two) mixAcc -= 1;
+					if (two && !heap2.size) two = false; else if (!two && !heap.size) two = true;
+					id = two ? heap2.pop() : heap.pop();
+					nd = nodes[id];
+					if (nd.snap === null) continue;                 // (expanded by the other head)
+					if (two) {
+						const c = satN[nd.st];
+						if (c >= nd.sc + P.satLazy) { nd.sc = c; heap2.push(nd.f0 + P.mixSat * c, id); continue; }
+					}
+					satN[nd.st]++;
+				} else {
+					id = heap.pop();
+					nd = nodes[id];
+				}
+				if (heap2 === null && satN !== null) {
 					const c = satN[nd.st];
 					if (c >= nd.sc + P.satLazy) { nd.sc = c; heap.push(nd.f0 + P.sat * c, id); continue; }
 					satN[nd.st] = c + 1;
@@ -722,13 +835,13 @@ function createBackward(L, opts = {}) {
 					});
 				}
 			}
-			stats.exhausted = !found && heap.size === 0;
+			stats.exhausted = !found && heap.size === 0 && (heap2 === null || heap2.size === 0);
 			if (o.closest && !found && lastBest && (!bestC || lastBest.h < bestC.h)) {
 				const pm = pathTo(lastBest.id), pre = root.prefix || new Uint8Array(0);
 				const mm = new Uint8Array(pre.length + pm.length); mm.set(pre, 0); mm.set(pm, pre.length);
 				bestC = { h: Math.round(lastBest.h), masks: mm };
 			}
-			stats.meetCapped = !found && heap.size > 0 && (ex >= cap || nodes.length >= P.maxNodes);   // (stopped by its node caps, not its clock)
+			stats.meetCapped = !found && (heap.size > 0 || (heap2 !== null && heap2.size > 0)) && (ex >= cap || nodes.length >= P.maxNodes);   // (stopped by its node caps, not its clock)
 			// (the meets' log: [res, relay root 0 / 1, ms since the call's start, expansions, found, exhausted, capped, the least
 			// time to go reached])
 			let bt = null;
@@ -746,7 +859,7 @@ function createBackward(L, opts = {}) {
 			const mKey = `${Array.from(target.tiles).sort((a, b) => a - b).join(',')}|${discOf(sim.restore(snap0) || sim)}`;
 			const mm = P.memo ? valMemo.get(mKey) : null;
 			if (mm && mm.lim >= lim && tileOfS(sim) >= 0 && mm.inCorr[tileOfS(sim)]) {
-				cellId = mm.cellId; cellKey = mm.cellKey; byPlace = mm.byPlace; D = mm.D;
+				cellId = mm.cellId; cellKey = mm.cellKey; byPlace = mm.byPlace; D = mm.D; dead = mm.dead || null;
 				stats.memo = true; stats.cells = cellKey.length; stats.finite = mm.finite;
 			} else {
 				seedAll();
@@ -754,7 +867,7 @@ function createBackward(L, opts = {}) {
 				dijkstra();
 				stats.tClose = Date.now() - t0;
 				if (P.memo && stats.closed) {
-					valMemo.set(mKey, { lim, inCorr, cellId, cellKey, byPlace, D, finite: stats.finite });
+					valMemo.set(mKey, { lim, inCorr, cellId, cellKey, byPlace, D, dead, finite: stats.finite });
 					while (valMemo.size > P.memo) valMemo.delete(valMemo.keys().next().value);
 				}
 			}
@@ -808,7 +921,7 @@ function createBackward(L, opts = {}) {
 		sim.restore(snap0);
 		let hit = 0;
 		let alive = !sim.is_dead;   // (a dead start plays its dead ticks first)
-		for (let t = 0; t < masks.length; t++) { const px = sim.px, py = sim.py; E.applyMask(inp, masks[t]); sim.tick(inp); if (sim.is_dead) { if (alive) break; continue; } alive = true; if (inTgt(sim, px, py)) { hit = t + 1; break; } }
+		for (let t = 0; t < masks.length; t++) { const px = sim.px, py = sim.py; E.applyMask(inp, masks[t]); sim.tick(inp); if (sim.is_dead) { if (alive && !P.deaths) break; continue; } alive = true; if (inTgt(sim, px, py)) { hit = t + 1; break; } }
 		if (!hit) {
 			if (o.debugReplay) {
 				// the first move whose replay leaves the chain's own states
