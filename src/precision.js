@@ -491,6 +491,37 @@ function movingAnchorsOf(ctx, states, floor) {
 	}
 	return out;
 }
+/** THE EARLY BRAKE (C6 lane 5 block 4; OPT-IN EEAT_PREC_AIR_EARLY=1, with EEAT_PREC_AIR=1): the air pass's moving anchors
+ *  where the brake toward X must START, not the attempts' latest states. The precision puzzle's best known (111) and our
+ *  153 route are the same run up to tick 56 (x 5745.08, vx -3.53); the known brakes from tick 57 and rests 0.36 px off X at
+ *  tick 77, then jumps and lands x == X in the air; movingAnchorsOf's latest 48 states of an attempt are its late creep
+ *  (ours rests at 5721.21 only at tick ~113), and its node budget spread over every anchor never covers a 20-tick brake.
+ *  Here: every kept state of every attempt on this floor moving toward X whose hardest brake (stopDist, a lower bound of
+ *  every input word) still stops at X or before it by at most EARLY_SPAN px, the same state once (prefixes of one route
+ *  share it), the EARLIEST EARLY_K of them: the whole fast-rest budget on the brakes that can rest near X soonest. */
+const PREC_AIR_EARLY = process.env.EEAT_PREC_AIR_EARLY === '1';
+const EARLY_K = +process.env.EEAT_PREC_EARLY_K || 4, EARLY_SPAN = +process.env.EEAT_PREC_EARLY_SPAN || 12;
+function earlyAnchorsOf(ctx, states, floor, X, side) {
+	const sim = ctx.sim, out = [], seen = new Set();
+	const dir = side === 'right' ? -1 : 1;
+	for (let a = 0; a < states.length; a++) {
+		for (let t = 0; t < states[a].length; t++) {
+			if (!states[a][t]) continue;
+			sim.restore(states[a][t]);
+			if (!sim.on_ground || sim.is_dead || sim.py !== floor.py || !inFloor(floor, sim.px) || !plainX(ctx)) continue;
+			const v = sim.speed_x * dir, d = (X - sim.px) * dir;
+			if (!(v > 0) || !(d > 0)) continue;
+			const s = d - stopDist(v);
+			if (s < 0 || s > EARLY_SPAN) continue;
+			const key = `${sim.px},${sim.speed_x}`;
+			if (seen.has(key)) continue;
+			seen.add(key);
+			out.push({ snap: states[a][t], px: sim.px, py: sim.py, a, t, coast: 0, sx: sim.speed_x });
+		}
+	}
+	out.sort((x, y) => x.t - y.t);
+	return out.slice(0, EARLY_K);
+}
 /** the fast rests: [{px, anchor, code, len, coast, total}] (distinct rest x, each with its fewest ticks from the start) */
 function fastRestsOf(anchors, floor, o) {
 	const K = o && o.k || FAST_K, CO = o && o.coast || FAST_COAST, budget = o && o.nodes || FAST_NODES;
@@ -798,10 +829,12 @@ async function realizeOn(ctx, t, st, F0, side, o, res, emit) {
 		if (o.fast) {
 			// (the rests braked from the attempts' moving states first: the airborne piece pays where its rest comes early;
 			// the coasted rests' anchors are the attempts' late rests; the hits checked fewest ticks first)
-			const fa = movingAnchorsOf(ctx, st.states, F0.floor).filter((A) => (side === 'right' ? A.px > t.x : A.px < t.x));
+			let fa = movingAnchorsOf(ctx, st.states, F0.floor).filter((A) => (side === 'right' ? A.px > t.x : A.px < t.x));
+			// (THE EARLY BRAKE, EEAT_PREC_AIR_EARLY=1: the brakes that can rest near X soonest, earlyAnchorsOf; none: as before)
+			if (PREC_AIR_EARLY) { const ea = earlyAnchorsOf(ctx, st.states, F0.floor, t.x, side); if (ea.length) fa = ea; }
 			const secsLeft = Math.max(0, (oa.deadline - Date.now()) / 1000);
 			const fr = fastRestsOf(fa, fl, { nodes: o.fastNodes || Math.max(FAST_NODES_MIN, Math.min(FAST_NODES, secsLeft * FAST_NS)) });
-			emit({ ev: 'progress', phase: 'airfast', anchors: fa.length, rests: fr.rests.length, sec: o.sec() });
+			emit({ ev: 'progress', phase: 'airfast', anchors: fa.length, early: PREC_AIR_EARLY ? fa.map((A) => A.t) : undefined, rests: fr.rests.length, first: fr.rests.length ? fr.rests[0].total : null, nodes: fr.nodes, sec: o.sec() });
 			const FA = { floor: F0.floor, anchors: fa, rests: fr.rests };
 			const oaf = Object.assign({}, oa, { fast: true, firstOnly: false });
 			for (const step of FAST_STEPS) {
@@ -1026,7 +1059,7 @@ async function round(level, attempts, o) {
 	return out;
 }
 
-module.exports = { latSpeed, latMove, latAlign, latTick, gridOf, stopDist, movingAnchorsOf, fastRestsOf, localSearch, stallStates, nudged, nudgeTest, floorOf, anchorsOf, floorsOf, restsOf, libraryOf,
+module.exports = { latSpeed, latMove, latAlign, latTick, gridOf, stopDist, movingAnchorsOf, earlyAnchorsOf, fastRestsOf, localSearch, stallStates, nudged, nudgeTest, floorOf, anchorsOf, floorsOf, restsOf, libraryOf,
 	arrivalsOf, makeHash, hashPut, hashGet, scanChunk, realize, round, makeCtx, VMAX, NUDGE_STEP, NUDGE_EPS, PREC_REACH };
 
 // ---------------------------------------------------------------- CLI (the editor's child)
