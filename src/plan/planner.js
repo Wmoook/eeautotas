@@ -629,6 +629,7 @@ function createPlanner(model, facts, o = {}) {
 	// those moves x the pace), a target the pass never reaches PHYS_CUT_TILES x the pace: a price only, never a drop (the
 	// transit tables are no proof). Off = the planner byte for byte as before.
 	const PHYS_EST = process.env.EEAT_PHYS_EST === '1';
+	const PHYS_PRE = process.env.EEAT_PHYS_PRE !== '0';   // (plan(): the pass outside the plan budget)
 	// THE PROGRESS RULE FOR THE CEGAR WALLS (OPT-IN EEAT_CUT_PROG=1; n5 doctor 'cold'): learn() walls a failed step's closest
 	// approach (its 3 x 3 in the est walk, and a cut of the est path just past it) at its second rung, as a counterexample
 	// to the relaxation's way. A BUDGET failure of a long leg is often no counterexample: the leg ran out of time early on
@@ -1368,7 +1369,14 @@ function createPlanner(model, facts, o = {}) {
 		const so = { ms: po.ms || (first ? 2000 : 300), maxExpand: po.maxExpand || 200000, depth: po.depth || 0 };
 		const plans = [], exclude = new Set();
 		let why = '', rootEdges = -1, anyExhausted = false;
-		const deadline = t0 + so.ms;
+		// (THE PHYSICS PASS OUTSIDE THE BUDGET, inside the opt-in PHYS_EST; EEAT_PHYS_PRE=0: inside it, as before: the pass is
+		// ~1 s on a 300 x 300 level and ran inside the first search's share of the 2-s / 0.3-s plan budget, so on a loaded box
+		// the plan came from a search cut before its root edges had their physics price: Cold World's first plan was the
+		// blue coin (98,207) on an idle box and the bare trophy (the pool's false near) on box 7 at load ~170 (one run each)).
+		// The pass is memoized per (state, anchor hash): the root edges read it at once.
+		let tPhys = 0;
+		if (PHYS_EST && PHYS_PRE && a && a.sim) { const tp = Date.now(); physFwdOf(a); tPhys = Date.now() - tp; }
+		const deadline = t0 + so.ms + tPhys;
 		for (let r = 0; r < k; r++) {
 			let res = search(a, Object.assign({}, so, { ms: Math.max(50, (deadline - Date.now()) / Math.max(1, k - r)) }), exclude);
 			// (with the physics price a PARTIAL plan's path is checked too: its first legs are what the executor runs next)
