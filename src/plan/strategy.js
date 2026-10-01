@@ -62,6 +62,16 @@ const RUNG_LADDER = RUNG_DEEP ? RUNG_MS.concat([RUNG_DEEP]) : RUNG_MS;
 // failed rung r by its BUDGET from another class starts at rung r (never above the ladder's top): the windows proven too
 // short for that leg are not run again. A found leg returns at once, so a higher rung costs only when it fails.
 const RUNG_WARM = process.env.EEAT_RUNG_WARM === '1';
+// THE PLACE RUNG (B7 lane b9, cycle 3; OPT-IN EEAT_RUNG_PLACE=1, off = the steps' rungs as the facts give them): the facts'
+// ladder is per (edge, node class), and a node class is the whole abstract state, so every new lineage that arrives at the
+// SAME place (a mini's entrance checkpoint: the anchor's first arrival tile) climbs the same hard leg's rungs 0-3 again
+// (Bad EE Level 9, box 7 c6D1: switch 5 from 7 anchors made at its mini's entrance (262,246), 14 + 10 + 8 + 4 steps at
+// rungs 0-3 found 0, the 135-s rung 2 of 3). With the knob a step of an edge whose (edge, place) failed rung r by the
+// BUDGET runs at rung r + 1 at least (the lowest such rung its own (edge, class) has not run in this epoch; none left:
+// the anchor leaves that edge for the epoch, as a repeated triple does); a find at rung r lowers the place's floor to r.
+// Unlike the warm rung (by edge alone, from any place) it lifts only the steps that start where the window was proven
+// too short. Cleared at a deepening (the facts start over).
+const RUNG_PLACE = process.env.EEAT_RUNG_PLACE === '1';
 // THE ONE SHOT (n5-oneshot part 3, OPT-IN EEAT_ONESHOT=1; off = the loop below byte for byte): the MOVES stage's first
 // tier: src/plan/oneshot/solve.js, ONE A* over (the move graph x the trigger state) from the level start with the
 // planner's plans and the bounds as its heuristic, for OS_SHARE of the time left before the loop; then in the loop's
@@ -1212,6 +1222,9 @@ async function compile(L, opts = {}, emit = () => {}) {
 	// ---- the no-stall bookkeeping
 	const tried = new Map();   // `${edge}|${nodeClass}|${rung}|${epoch}` -> {ok}
 	const warmRung = new Map();   // (EEAT_RUNG_WARM: edge -> the highest rung it failed by the budget (lowered by a find below it))
+	const placeRung = new Map();   // (EEAT_RUNG_PLACE: `${edge}|${place}` -> the rung a step from that place starts at)
+	const placeOf = (A) => (A && A.arrivals && A.arrivals[0] && Number.isFinite(A.arrivals[0].tile) ? A.arrivals[0].tile : null);
+	const placeKey = (step, A) => { const p = placeOf(A); return p === null ? null : `${step.edge}|${p}`; };
 	const localBlock = new Set();   // `${anchor.key}|${edge}|${nodeClass}`: blocked here (a part's bug)
 	let epoch = 0, mult = 1, deepenings = 0, stalls = 0, lastSteps = [], lastFails = [], bugs = 0, nothingSince = -1;
 	const inflight = new Map();   // edgeKey -> {promise, job, started, budgetMs}
@@ -1319,6 +1332,17 @@ async function compile(L, opts = {}, emit = () => {}) {
 				const step = plan.steps[0];
 				const ek = edgeKey(step);
 				if (inflight.has(ek) || localBlock.has(`${A.key}|${ek}`)) continue;
+				// (THE PLACE RUNG: the lowest rung at or above the place's floor that this (edge, class) has not run in this epoch;
+				// none left: this anchor leaves the edge for the epoch)
+				if (RUNG_PLACE && !step.synthetic && step.placeFrom === undefined) {
+					const pk = placeKey(step, A), f = pk === null ? undefined : placeRung.get(pk);
+					if (f !== undefined && f > (step.rung | 0)) {
+						let w = -1;
+						for (let r = Math.min(rungMs.length - 1, f); r < rungMs.length; r++) if (!tried.has(`${ek}|${r}|${epoch}`)) { w = r; break; }
+						if (w < 0) { localBlock.add(`${A.key}|${ek}`); continue; }
+						step.placeFrom = step.rung | 0; step.rung = w;
+					}
+				}
 				const tk = `${ek}|${step.rung}|${epoch}`;
 				if (tried.has(tk)) {
 					// (a triple already run in this epoch: the planner proposes it again; blocked here so it never runs twice: a
@@ -1756,6 +1780,16 @@ async function compile(L, opts = {}, emit = () => {}) {
 			else if (rec.why === 'budget' && (step.rung | 0) > (warmRung.get(ke) || 0)) warmRung.set(ke, step.rung | 0);
 			if (step.warmFrom !== undefined) rec.warmFrom = step.warmFrom;
 		}
+		// (THE PLACE RUNG: a budget failure lifts the (edge, place)'s floor to the next rung; a find at a lower rung lowers it)
+		if (RUNG_PLACE && !step.synthetic) {
+			const pk = placeKey(step, A);
+			if (pk !== null) {
+				const r = step.rung | 0, f = placeRung.get(pk);
+				if (res.ok) { if (f !== undefined && r < f) placeRung.set(pk, r); }
+				else if (rec.why === 'budget') { const nx = Math.min(rungMs.length - 1, r + 1); if (!(f >= nx)) placeRung.set(pk, nx); }
+			}
+			if (step.placeFrom !== undefined) { rec.placeFrom = step.placeFrom; delete step.placeFrom; }
+		}
 		if (FAR_TROPHY > 0 || FAR_WALK > 0) { rec.est = Number.isFinite(+step.estTicks) ? Math.round(+step.estTicks) : null; if (windowRung(step) !== step.rung) rec.farTrophy = windowRung(step); }
 		// (the executor's exact end search from a near start, when it ran: tier 0b)
 		const nearT = Array.isArray(res.tiers) ? res.tiers.find((x) => x && x.tier === 'near') : null;
@@ -1854,6 +1888,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		if (deepenings >= maxDeepen || rungMs[0] * mult * 2 > left() - (best ? endRes() : 0)) return false;
 		deepenings++; epoch++; mult *= 2;
 		warmRung.clear();   // (THE WARM RUNG: the facts start over at a deepening, so does the warm start)
+		placeRung.clear();   // (THE PLACE RUNG: likewise)
 		try { if (facts && typeof facts.reset === 'function') facts.reset({ keepProofs: true, boost: 2 }); } catch (e) { bug('reset', { error: e.message }); }
 		for (const A of anchors.values()) { if (A.why !== 'bound') { A.exhausted = false; A.why = ''; } A.plans = null; }
 		localBlock.clear();
