@@ -464,7 +464,7 @@ async function chainTruth() {
 	const budget = +args.budget || 3000, polishMs = +args.polishMs || 30000, limit = +args.chainN || 12;
 	const god = S.knownRoutes({ jobs: false });
 	const seen = new Set(), list = [];
-	for (const e of god) { if (seen.has(e.name)) continue; seen.add(e.name); list.push(e); }
+	for (const e of god) { if (seen.has(e.name)) continue; seen.add(e.name); if (!args.chainName || e.name.includes(String(args.chainName))) list.push(e); }
 	const shard = args.shard ? String(args.shard).split('/').map(Number) : null;
 	const mine = list.slice(0, limit).filter((e, i) => !shard || i % shard[1] === shard[0]);
 	const par = +args.par || 1;
