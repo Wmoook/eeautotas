@@ -46,6 +46,57 @@ const T = require('./types.js');
 const E = require('../eesim.js');
 
 const RUNG_MS = [1500, 5000, 15000, 45000];
+// THE DEEP RUNG (B7 lane b9, cycle 2; OPT-IN EEAT_RUNG_DEEP=<ms>, unset / 0: off, the ladder as before byte for byte): one
+// more rung of that many ms after the 45-s one (the facts block an (edge, node class) after 5 failures instead of 4; the
+// executor runs it at its top tier, level 3, with the longer window; the relay start goes on from rung 3's closest). Bad EE
+// Level 9's mini 5 (a ladder maze between spike columns, 700 ticks) from its own entrance, tools/cmp/legab.js on box 7, 6
+// knob arms x 3 reps: 0 finds at rungs 1-2 (5 / 15 s) in every rep, found at rung 3 in 34-45 s (skel+leg / skel+portfolio,
+// 585-839 ticks): a leg that needs ~40 s in ONE window, where the compile's 45-s rung is the edge (box 7's c4X: 108 steps
+// of it, 0 finds, 1,583 worker-s, the rung-3 calls closest 27-37 tiles; the same wall on minis 7, 12, 13, 15).
+const RUNG_DEEP = +process.env.EEAT_RUNG_DEEP > 0 ? +process.env.EEAT_RUNG_DEEP : 0;
+const RUNG_LADDER = RUNG_DEEP ? RUNG_MS.concat([RUNG_DEEP]) : RUNG_MS;
+// THE WARM RUNG (B7 lane b9, cycle 2; OPT-IN EEAT_RUNG_WARM=1, off = the steps' rungs as the facts give them): the facts'
+// ladder is per (edge, node class) and a node class is the whole abstract state + the checkpoint + the start's speed, so
+// a hard leg climbs rungs 0-3 again from EVERY new class (box 7's c4X: mini 5's switch 108 steps from ~27 classes, each
+// class's 1.5 + 5 + 15 s rungs spent before its one 45-s window: 0 finds). With the knob a step of an edge that already
+// failed rung r by its BUDGET from another class starts at rung r (never above the ladder's top): the windows proven too
+// short for that leg are not run again. A found leg returns at once, so a higher rung costs only when it fails.
+const RUNG_WARM = process.env.EEAT_RUNG_WARM === '1';
+// THE PLACE RUNG (B7 lane b9, cycle 3; OPT-IN EEAT_RUNG_PLACE=1, off = the steps' rungs as the facts give them): the facts'
+// ladder is per (edge, node class), and a node class is the whole abstract state, so every new lineage that arrives at the
+// SAME place (a mini's entrance checkpoint: the anchor's first arrival tile) climbs the same hard leg's rungs 0-3 again
+// (Bad EE Level 9, box 7 c6D1: switch 5 from 7 anchors made at its mini's entrance (262,246), 14 + 10 + 8 + 4 steps at
+// rungs 0-3 found 0, the 135-s rung 2 of 3). With the knob a step of an edge whose (edge, place) failed rung r by the
+// BUDGET runs at rung r + 1 at least (the lowest such rung its own (edge, class) has not run in this epoch; none left:
+// the anchor leaves that edge for the epoch, as a repeated triple does); a find at rung r lowers the place's floor to r.
+// Unlike the warm rung (by edge alone, from any place) it lifts only the steps that start where the window was proven
+// too short. Cleared at a deepening (the facts start over).
+const RUNG_PLACE = process.env.EEAT_RUNG_PLACE === '1';
+// THE START JITTER (B7 lane b9, cycle 3; OPT-IN EEAT_START_JITTER=1, off = the steps' starts byte for byte): lineages that
+// reach a place through the same portal arrive in the SAME physical state (Bad EE Level 9: the anchors at mini 5's
+// entrance (262,246) of c6D1 and c11D, different switch sets, px / speed / ground equal), so every new class's try of a hard
+// leg from there is the same search again; and the leg's finders find it in a 45-s window only from some starts
+// (tools/cmp/legab.js, box 7, 3 reps each: from cycle 2's start, jumping at the entrance, 3 / 3 at 42.6 s; from the
+// compile's own arrival 1.4 px left, standing, 0 / 3; the same arrival + a jump tick 0 / 3; cycle 2's start one tick
+// earlier, standing, 0 / 3). With the knob, once an (edge, place) has failed by the budget, each later step of it from
+// that place swaps the anchor's first arrival for that arrival followed by k ticks of one held input (the k-th try's:
+// jump, right + jump, left + jump, right, left, idle, then the same with 3, 5, .. ticks): another start each time, every
+// one a real state replayed from the level start (a death or a finish in the jitter: the arrival as it is).
+const START_JITTER = process.env.EEAT_START_JITTER === '1';
+const JITTER_MASKS = [1, 5, 3, 4, 2, 0];
+// THE LEADER'S LINEAGE (B7 lane b9, cycle 5; OPT-IN EEAT_PLAN_DOM=1, off = the anchor pick byte for byte): on a level of
+// independent sub-goals (Bad EE Level 9: 5 switches a wave in any order) the anchors fork into lineages of every subset,
+// and a lineage that holds a SUBSET of another's progress re-solves legs the other already holds: box 7's 1,800-s c15L
+// found switch 12 (73,99) SIX times (the executor's 135-s rung and the stretch child's 40-s windows, from anchors holding
+// switches 1-11, 13, 14 while the leader held 1-14), and in its last 320 s the leader's own next switch 15 (277,202) got
+// 16 steps / 145 worker-s and never its 135-s rung while the workers' 135-s windows went to those re-solves. With the
+// knob, before the first route an anchor B is DOMINATED when another open anchor A has a higher gain and holds every
+// feature value B changed from the start (the deaths count aside) and every coin B took: B's steps at rung EEAT_DOM_RUNG
+// (2: the 15-s window) or above are not picked while another job is in flight (with nothing in flight they run as before:
+// no worker waits and no deepening comes of it), and the stretch child takes no stretch of B. Its cheap rungs still run
+// (a dominated lineage's next trigger may make an incomparable one). Ordering only: no fact, no prune.
+const PLAN_DOM = process.env.EEAT_PLAN_DOM === '1';
+const DOM_RUNG = Math.max(0, +(process.env.EEAT_DOM_RUNG || 2));
 // THE ONE SHOT (n5-oneshot part 3, OPT-IN EEAT_ONESHOT=1; off = the loop below byte for byte): the MOVES stage's first
 // tier: src/plan/oneshot/solve.js, ONE A* over (the move graph x the trigger state) from the level start with the
 // planner's plans and the bounds as its heuristic, for OS_SHARE of the time left before the loop; then in the loop's
@@ -464,7 +515,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	const total = seconds * 1000;
 	const workers = Math.max(1, Math.round(+opts.workers || 2));
 	const P = Math.max(1, Math.round(+opts.inflight || workers));
-	const rungMs = Array.isArray(opts.rungMs) ? opts.rungMs : RUNG_MS;
+	const rungMs = Array.isArray(opts.rungMs) ? opts.rungMs : RUNG_LADDER;
 	const stallWindow = (+opts.stallWindowS > 0 ? +opts.stallWindowS : Math.max(STALL_MIN_S, Math.min(STALL_S, seconds * STALL_F))) * 1000;
 	const watchMs = +opts.watchMs > 0 ? +opts.watchMs : WATCH_MS;
 	const progressMs = +opts.progressMs > 0 ? +opts.progressMs : PROGRESS_MS;
@@ -536,7 +587,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	if (parts.createBounds) {
 		try { bounds = await parts.createBounds(L, { model }); } catch (e) { bounds = null; say({ ev: 'warning', text: `the bounds could not be built (${e.message}): no admissible bound but the planner's` }); }
 	}
-	const facts = parts.createFacts({ rungs: 4, model });
+	const facts = parts.createFacts({ rungs: RUNG_DEEP && rungMs === RUNG_LADDER ? RUNG_LADDER.length : 4, model });
 	// (the planner's floor probe runs in a worker thread off the bounds stage: EEAT_PLAN_FLOOR_ASYNC=0 in line, as before)
 	const planner = parts.createPlanner(model, facts, { bounds, seed: opts.seed, file: opts.file, floorAsync: process.env.EEAT_PLAN_FLOOR_ASYNC !== '0' });
 	const floorVerOf = () => { try { return typeof planner.floorVersion === 'function' ? planner.floorVersion() : 0; } catch (e) { return 0; } };
@@ -1103,6 +1154,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		let bestC = null;
 		for (const c of stCands.values()) {
 			if (c.solved || c.inflight || c.rung < ST_RUNG || c.tries >= ST_TRIES || (c.tries > 0 && !/budget/.test(c.why)) || c.A.exhausted || !c.A.arrivals.length) continue;
+			if (domOn && !best && domSet().has(c.A.id)) { domStSkips++; continue; }
 			if (!bestC || c.tries < bestC.tries || (c.tries === bestC.tries && (c.A.gain > bestC.A.gain || (c.A.gain === bestC.A.gain && (c.cost < bestC.cost || (c.cost === bestC.cost && c.seq < bestC.seq)))))) bestC = c;
 		}
 		return bestC;
@@ -1234,6 +1286,12 @@ async function compile(L, opts = {}, emit = () => {}) {
 
 	// ---- the no-stall bookkeeping
 	const tried = new Map();   // `${edge}|${nodeClass}|${rung}|${epoch}` -> {ok}
+	const warmRung = new Map();   // (EEAT_RUNG_WARM: edge -> the highest rung it failed by the budget (lowered by a find below it))
+	const placeRung = new Map();   // (EEAT_RUNG_PLACE: `${edge}|${place}` -> the rung a step from that place starts at)
+	const placeOf = (A) => (A && A.arrivals && A.arrivals[0] && Number.isFinite(A.arrivals[0].tile) ? A.arrivals[0].tile : null);
+	const placeKey = (step, A) => { const p = placeOf(A); return p === null ? null : `${step.edge}|${p}`; };
+	const placeFails = new Map();   // (EEAT_START_JITTER: `${edge}|${place}` -> the budget failures from there; the jitter's turn)
+	let jitterRuns = 0;
 	const localBlock = new Set();   // `${anchor.key}|${edge}|${nodeClass}`: blocked here (a part's bug)
 	let epoch = 0, mult = 1, deepenings = 0, stalls = 0, lastSteps = [], lastFails = [], bugs = 0, nothingSince = -1;
 	const inflight = new Map();   // edgeKey -> {promise, job, started, budgetMs}
@@ -1319,6 +1377,34 @@ async function compile(L, opts = {}, emit = () => {}) {
 		return p;
 	};
 	const scoreOf = (A, N) => (Number.isFinite(A.costEst) ? A.costEst : 1e7) + A.firstTick + FAIL_TICKS * A.fails - UCB_C * Math.sqrt(Math.log(N + 1) / (1 + A.picks));
+	// (THE LEADER'S LINEAGE, EEAT_PLAN_DOM=1: the ids of the open anchors another open anchor dominates, kept while the
+	// anchors and their exhausted flags stand)
+	const domOn = PLAN_DOM && Array.isArray(model.feats) && !!model.init;
+	const domFeat = domOn ? model.feats.map((f, n) => (f === 'deaths' ? -1 : n)).filter((n) => n >= 0) : [];
+	const domInit = domOn ? model.feats.map((f) => model.init[f]) : [];
+	let domMemo = { n: -1, ex: -1, set: new Set() };
+	let domSkips = 0, domStSkips = 0;
+	const domSet = () => {
+		let ex = 0;
+		for (const A of anchors.values()) if (A.exhausted) ex++;
+		if (domMemo.n === anchors.size && domMemo.ex === ex) return domMemo.set;
+		const open = [...anchors.values()].filter((A) => !A.exhausted && A.S && Array.isArray(A.S.vals));
+		const set = new Set();
+		const takenIn = (b, a) => { if (!b) return true; for (let k = 0; k < b.length; k++) if (b[k] && !(a && a[k])) return false; return true; };
+		for (const B of open) {
+			const bv = B.S.vals;
+			for (const A of open) {
+				if (A === B || !(A.gain > B.gain)) continue;
+				const av = A.S.vals;
+				let ok = true;
+				for (const n of domFeat) if (bv[n] !== domInit[n] && av[n] !== bv[n]) { ok = false; break; }
+				if (ok && takenIn(B.S.taken, A.S.taken) && takenIn(B.S.btaken, A.S.btaken)) { set.add(B.id); break; }
+			}
+		}
+		domMemo = { n: anchors.size, ex, set };
+		return set;
+	};
+	const domStep = (A, step) => domOn && !best && !step.synthetic && (step.rung | 0) >= DOM_RUNG && domSet().has(A.id);
 	/** the next job: {anchor, plan, step} not in flight, or null (none: every anchor exhausted or busy) */
 	const nextJob = () => {
 		const N = picksN + 1;
@@ -1342,6 +1428,17 @@ async function compile(L, opts = {}, emit = () => {}) {
 				const step = plan.steps[0];
 				const ek = edgeKey(step);
 				if (inflight.has(ek) || localBlock.has(`${A.key}|${ek}`)) continue;
+				// (THE PLACE RUNG: the lowest rung at or above the place's floor that this (edge, class) has not run in this epoch;
+				// none left: this anchor leaves the edge for the epoch)
+				if (RUNG_PLACE && !step.synthetic && step.placeFrom === undefined) {
+					const pk = placeKey(step, A), f = pk === null ? undefined : placeRung.get(pk);
+					if (f !== undefined && f > (step.rung | 0)) {
+						let w = -1;
+						for (let r = Math.min(rungMs.length - 1, f); r < rungMs.length; r++) if (!tried.has(`${ek}|${r}|${epoch}`)) { w = r; break; }
+						if (w < 0) { localBlock.add(`${A.key}|${ek}`); continue; }
+						step.placeFrom = step.rung | 0; step.rung = w;
+					}
+				}
 				const tk = `${ek}|${step.rung}|${epoch}`;
 				if (tried.has(tk)) {
 					// (a triple already run in this epoch: the planner proposes it again; blocked here so it never runs twice: a
@@ -1350,6 +1447,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 					if (!tried.get(tk).ok) bug('repeat', { edge: step.edge, nodeClass: step.nodeClass, rung: step.rung, anchor: A.id, label: labelOf(step) });
 					continue;
 				}
+				// (THE LEADER'S LINEAGE: a dominated anchor's dear rung waits while another job runs)
+				if (domOn && inflight.size > 0 && domStep(A, step)) { domSkips++; continue; }
 				return { anchor: A, plan, step, plans };
 			}
 		}
@@ -1362,7 +1461,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const ms = Math.max(50, Math.min(rungMs[r] * mult, room));
 		const deadline = Date.now() + ms;
 		// (fast: before the first route a found leg's tightening is capped by the time it took to find it: executor.js RATE_ON)
-		return { ms, level: r, k: ARRIVALS_K, deadline, fast: !best, stop: () => stopped || left() <= 0 || Date.now() > deadline + 2000 };
+		// (THE DEEP RUNG: the executor's tiers know levels 0..3; the deep rung is level 3 with the longer window)
+		return { ms, level: RUNG_DEEP ? Math.min(r, RUNG_MS.length - 1) : r, k: ARRIVALS_K, deadline, fast: !best, stop: () => stopped || left() <= 0 || Date.now() > deadline + 2000 };
 	};
 	/** the waypoint a step runs to: its own, with beforeTick filled from beforeTickFrom (ticks after the earliest start) */
 	const waypointOf = (step, A) => {
@@ -1433,11 +1533,104 @@ async function compile(L, opts = {}, emit = () => {}) {
 	// the level start), and the executor is not called. Offline on that 600-s run: 5 of 21 (anchor, leg) pairs met the goal
 	// as they stand (switch 5's leg from 3 other anchors, switch 6's from 2). Exact (every arrival the engine's replay);
 	// ~a few thousand ticks a step
-	const TRANSPLANT = process.env.EEAT_PLAN_TRANSPLANT === '1';
+	// ---- THE LANDMARK REJOIN (box 7 lane b9, 2026-09-30; OPT-IN EEAT_PLAN_REJOIN=1, which also turns the leg library on;
+	// off = as before): a kept leg replayed as it stands meets the goal only from a start in the same physical state as its
+	// own, and the anchors that reach a mini's entrance come through its portal at their own speeds (c1B, box 7, 250 s:
+	// 69 transplant hits, 65 of them hub legs to a checkpoint, 1 a mini's switch). But such entrances FUNNEL: a portal exit
+	// into a 1-wide shaft, a landing, a wall stop make the physical states of different arrivals EQUAL a few ticks later.
+	// So from each start the kept leg's inputs are played shifted (idle ticks first, or its first ticks skipped), and at
+	// every tick the ball's physical state (position, speeds, the gravity queue, jumps, ground, the effects) is looked up in
+	// the kept leg's own trajectory: an equal state at its tick j continues with the leg's inputs from j. Every candidate
+	// meets the goal in the engine here (the waypoint's goal test, each tick) and is verified from the level start like any
+	// arrival (`verified`): the physical key only proposes; a wrong door or timer state just fails the replay. Bounded:
+	// RJ_D shifts each way, RJ_K approach ticks, RJ_MS ms a call.
+	// ---- THE FUNNEL (box 7 lane b9, cycle 4, 2026-10-01; OPT-IN EEAT_PLAN_FUNNEL=1, which also turns the rejoin on; off =
+	// as before): a kept leg of a trigger step passes TELEPORTS (a portal's exit puts every ball on one tile), and the
+	// physical states of balls that came through the same exit converge a few ticks later (a landing): Bad EE Level 9's
+	// minis are entered by one arch portal each, and from another lineage's entry state the kept mini leg rejoins in 7-8
+	// ticks (c13J's two switch-5 tails, both ways, 1 ms). The rejoin above serves only starts at or just past such a place;
+	// a lineage whose anchor is elsewhere (the hub) searched the whole mini again (switch 5 found 3 times, 91-130 s each at
+	// the 135-s rung). So every kept leg also keeps its teleports (from its start's last RJ_BACK ticks on: the leg's own
+	// trajectory from each exit, `fnLib`), and a step of its edge that no replay or rejoin served first runs a short leg
+	// (the executor, `FN_MS`) from its starts far from those exits TO the exit tiles, then the landmark rejoin from each
+	// arrival against the kept trajectory from that exit. Every candidate is verified from the level start (`verified`);
+	// a funnel that finds nothing hands the step to the executor with its own full window, as before.
+	const FUNNEL = process.env.EEAT_PLAN_FUNNEL === '1';
+	const REJOIN = process.env.EEAT_PLAN_REJOIN === '1' || FUNNEL;
+	const TRANSPLANT = process.env.EEAT_PLAN_TRANSPLANT === '1' || REJOIN;
+	const FN_MS = Math.max(200, +(process.env.EEAT_FUNNEL_MS || 5000)), FN_NEAR = Math.max(0, +(process.env.EEAT_FUNNEL_NEAR || 3));
+	const FN_MAX = 4;   // (the last teleports of a kept leg kept as its funnels)
+	const fnLib = new Map();   // leg mask string -> [{tile, ext, keys}]: the leg's trajectory from each of its last teleports
+	let fnRuns = 0, fnOk = 0, fnMs = 0;
+	const fnDone = new Map();   // `${edge}|${start tile}` -> the edge's library version when its funnel failed
+	const fnVer = new Map();    // edge -> the number of legs kept for it so far
 	const TP_LEGS = 6, TP_MAX = 4000;
+	const RJ_D = Math.max(0, +(process.env.EEAT_REJOIN_D || 40)), RJ_K = Math.max(1, +(process.env.EEAT_REJOIN_K || 240));
+	const RJ_MS = Math.max(1, +(process.env.EEAT_REJOIN_MS || 250));
 	const legLib = new Map();   // step.edge -> [leg mask strings], newest first
-	let tpHits = 0, tpTries = 0;
+	const rjKeys = new Map();   // leg mask string -> Map(physical key -> its first tick j in the leg)
+	let tpHits = 0, tpTries = 0, rjHits = 0, rjTries = 0, rjMs = 0, rjBack = 0;
 	const tpSim = new E.EESim(L), tpInp = new E.EEInput();
+	const rjF64 = new Float64Array(1), rjU32 = new Uint32Array(rjF64.buffer);
+	const rjMix = (h, v) => { h = Math.imul(h ^ v, 0x9e3779b1); return (h ^ (h >>> 15)) >>> 0; };
+	const rjMixD = (h, d) => { rjF64[0] = d + 0; return rjMix(rjMix(h, rjU32[0]), rjU32[1]); };
+	/** the ball's physical state (a 53-bit hash): what the next ticks' movement reads, no doors, keys, coins or clocks */
+	const physOf = (sim) => {
+		let a = rjMixD(0x2545f491, sim.px), b = rjMixD(0x9e3779b9, sim.py);
+		a = rjMixD(a, sim.speed_x); b = rjMixD(b, sim.speed_y);
+		a = rjMix(a, (sim._q0 & 0xffff) | ((sim._q1 & 0xffff) << 16));
+		b = rjMix(b, (sim.jump_count << 1) | (sim.on_ground ? 1 : 0) | (sim.is_dead ? 4 : 0));
+		const fl = (sim.has_levitation ? 1 : 0) | (sim.low_gravity ? 2 : 0) | (sim.is_invulnerable ? 4 : 0) | (sim.has_crown ? 8 : 0);
+		a = rjMix(a, fl | ((sim.max_jumps & 0x3ff) << 4)); b = rjMix(b, (sim.jump_boost & 0xff) | ((sim.speed_boost & 0xff) << 8) | ((sim.flip_gravity & 0x3f) << 16));
+		a = rjMixD(a, sim.py); b = rjMixD(b, sim.px);
+		return (a >>> 0) * 2097152 + ((b >>> 0) & 0x1fffff);
+	};
+	/** a start's engine state as a snapshot (its own snap when it holds, else replayed from the level start) */
+	const baseOf = (s) => {
+		try { tpSim.reset(); tpSim.restore(s.snap); if (!s.hash || tpSim.stateHash() === s.hash) return s.snap; } catch (e) { /* replay */ }
+		try { const r = T.playTo(L, s.masks, { allowDeath: true }); return r.sim.snapshot(); } catch (e) { return null; }
+	};
+	/** the physical keys along inputs played from an engine state (j = 0: the state itself) */
+	const keysAlong = (base, leg) => {
+		const m = new Map();
+		if (!base) return null;
+		try { tpSim.reset(); tpSim.restore(base); } catch (e) { return null; }
+		m.set(physOf(tpSim), 0);
+		for (let t = 0; t < leg.length; t++) {
+			E.applyMask(tpInp, leg[t] & 31);
+			tpSim.tick(tpInp);
+			if (tpSim.is_dead) break;
+			const k = physOf(tpSim);
+			if (!m.has(k)) m.set(k, t + 1);
+		}
+		return m;
+	};
+	/** the physical keys along a kept leg played from its own start */
+	const rjKeysOf = (s, leg) => keysAlong(baseOf(s), leg);
+	// (THE REJOIN FROM BEFORE THE START, EEAT_REJOIN_BACK ticks, 0 = off: an anchor made at a mini's entrance checkpoint
+	// is past the entrance's funnel already (the portal's landing came a few ticks before the checkpoint's touch), so the
+	// start's own last RJ_BACK inputs are given back: the approach starts from its state RJ_BACK ticks earlier, against
+	// the kept leg EXTENDED by its own start's last RJ_BACK inputs (rjExt), and a rejoin anywhere on that extended
+	// trajectory replaces the start's last ticks. Such an arrival does not extend its start's inputs: it is verified from
+	// the level start like any (its goal after the start's tick), and kept out of the leg library.)
+	const RJ_BACK = Math.max(0, +(process.env.EEAT_REJOIN_BACK || 90));
+	const rjExt = new Map();    // leg mask string -> {ext: the start's last RJ_BACK inputs + the leg, keys}
+	const rjSnaps = new Map();  // `${hash}|${n}` -> the engine state after the first n inputs of a start (newest 64)
+	const snapAt = (s, n) => {
+		const k = `${s.hash}|${s.masks.length}|${n}`;
+		let v = rjSnaps.get(k);
+		if (v) return v;
+		const sm = s.masks instanceof Uint8Array ? s.masks : T.masksOf(String(s.masks));
+		try { v = T.playTo(L, sm.subarray(0, n), { allowDeath: true }).sim.snapshot(); } catch (e) { return null; }
+		rjSnaps.set(k, v);
+		if (rjSnaps.size > 64) rjSnaps.delete(rjSnaps.keys().next().value);
+		return v;
+	};
+	const extends_ = (masks, sm) => {
+		if (masks.length < sm.length) return false;
+		for (let t = 0; t < sm.length; t++) if ((masks[t] & 31) !== (sm[t] & 31)) return false;
+		return true;
+	};
 	const tpOk = (wp) => wp && wp.kind === 'trigger' && !wp.allowDeath && !(Number.isFinite(+wp.beforeTick)) && wp.beforeRel === undefined;
 	const libAdd = (step, wp, arr, starts, res) => {
 		if (!tpOk(wp) || step.synthetic) return;
@@ -1445,13 +1638,156 @@ async function compile(L, opts = {}, emit = () => {}) {
 			const masks = a.masks instanceof Uint8Array ? a.masks : T.masksOf(a.masks);
 			const { s } = startOf(starts, masks, i, res);
 			if (!s || masks.length <= s.masks.length || masks.length - s.masks.length > TP_MAX) return;
-			const leg = T.strOf(masks.subarray(s.masks.length));
+			const sm = s.masks instanceof Uint8Array ? s.masks : T.masksOf(String(s.masks));
+			if (REJOIN && !extends_(masks, sm)) return;
+			const legM = masks.subarray(s.masks.length);
+			const leg = T.strOf(legM);
 			const list = legLib.get(step.edge) || [];
 			if (list.includes(leg)) return;
 			list.unshift(leg);
-			if (list.length > TP_LEGS) list.length = TP_LEGS;
+			if (FUNNEL) fnVer.set(step.edge, (fnVer.get(step.edge) || 0) + 1);
+			if (list.length > TP_LEGS) { for (const old of list.slice(TP_LEGS)) { rjKeys.delete(old); rjExt.delete(old); fnLib.delete(old); } list.length = TP_LEGS; }
 			legLib.set(step.edge, list);
+			if (REJOIN && !rjKeys.has(leg)) { const m = rjKeysOf(s, legM); if (m) rjKeys.set(leg, m); }
+			if (REJOIN && RJ_BACK > 0 && !rjExt.has(leg)) {
+				const n0 = Math.max(0, sm.length - RJ_BACK);
+				const ext = new Uint8Array(sm.length - n0 + legM.length);
+				ext.set(sm.subarray(n0), 0); ext.set(legM, sm.length - n0);
+				const keys = keysAlong(snapAt(s, n0), ext);
+				if (keys) rjExt.set(leg, { ext, keys });
+			}
+			// (THE FUNNEL: the leg's teleports, from its start's last RJ_BACK ticks on, each with the trajectory from its exit)
+			if (FUNNEL && !fnLib.has(leg)) {
+				const n0 = Math.max(0, sm.length - RJ_BACK);
+				const ext = new Uint8Array(sm.length - n0 + legM.length);
+				ext.set(sm.subarray(n0), 0); ext.set(legM, sm.length - n0);
+				const base = snapAt(s, n0), tps = [];
+				try {
+					tpSim.reset(); tpSim.restore(base);
+					let px = tpSim.px, py = tpSim.py;
+					for (let t = 0; t < ext.length - 1; t++) {
+						E.applyMask(tpInp, ext[t] & 31);
+						tpSim.tick(tpInp);
+						if (tpSim.is_dead) break;
+						if (Math.abs(tpSim.px - px) > 24 || Math.abs(tpSim.py - py) > 24) tps.push({ t: t + 1, snap: tpSim.snapshot(), tile: T.tileOf(tpSim, L.width, L.height) });
+						px = tpSim.px; py = tpSim.py;
+					}
+				} catch (e) { tps.length = 0; }
+				const fns = [];
+				for (const x of tps.slice(-FN_MAX)) {
+					const e2 = ext.subarray(x.t);
+					const k2 = keysAlong(x.snap, e2);
+					if (k2) fns.push({ tile: x.tile, ext: e2, keys: k2 });
+				}
+				fnLib.set(leg, fns);
+			}
 		});
+	};
+	/** THE FUNNEL: a step of an edge with kept legs that no replay or rejoin served: a short leg from its starts far from the
+	 *  kept legs' teleport exits to those exits, then the landmark rejoin from each arrival; {res, ran} */
+	const funnel = async (step, wp, starts) => {
+		if (!FUNNEL || !tpOk(wp) || step.synthetic) return { res: null, ran: false };
+		const list = legLib.get(step.edge);
+		if (!list || !list.length) return { res: null, ran: false };
+		const fns = [];
+		for (const str of list) for (const f of (fnLib.get(str) || [])) fns.push(f);
+		if (!fns.length) return { res: null, ran: false };
+		const tiles = [...new Set(fns.map((f) => f.tile))];
+		const near = (s) => tiles.some((t) => Math.max(Math.abs((t % L.width) - (s.tile % L.width)), Math.abs(((t / L.width) | 0) - ((s.tile / L.width) | 0))) <= FN_NEAR);
+		// (a place's funnel that found nothing is not run again until the edge keeps another leg)
+		const fk = (s) => `${step.edge}|${s.tile}`;
+		const far = starts.filter((s) => s && Number.isInteger(s.tile) && !near(s) && fnDone.get(fk(s)) !== (fnVer.get(step.edge) || 0));
+		if (!far.length) return { res: null, ran: false };
+		const t0 = Date.now();
+		fnRuns++;
+		const room = left() - (best ? endRes() : 0) - 100;
+		const ms = Math.max(50, Math.min(FN_MS, room)), deadline = Date.now() + ms;
+		const fb = { ms, level: 1, k: ARRIVALS_K, deadline, fast: !best, stop: () => stopped || left() <= 0 || Date.now() > deadline + 2000 };
+		let r = null;
+		try { r = await exec.reach(far, { kind: 'region', tiles, expect: null, label: `funnel of ${labelOf(step)}` }, fb); } catch (e) { r = null; }
+		const goal = T.goalOf(L, wp);
+		const out = [], legs = [];
+		let rj = 0;
+		if (r && r.ok && Array.isArray(r.arrivals)) {
+			const until = Date.now() + 4 * RJ_MS;
+			for (const a of r.arrivals) {
+				if (!a || !a.masks || out.length >= ARRIVALS_K || Date.now() > until) continue;
+				const am = typeof a.masks === 'string' ? T.masksOf(a.masks) : Uint8Array.from(a.masks);
+				let sim;
+				try { sim = T.playTo(L, am, { allowDeath: false }).sim; } catch (e) { continue; }
+				if (sim.is_dead) continue;
+				const at = T.tileOf(sim, L.width, L.height), base = sim.snapshot();
+				for (const f of fns) {
+					if (f.tile !== at) continue;
+					const tail = rejoinFrom(base, f.ext, f.keys, goal, until);
+					if (!tail) continue;
+					const masks = new Uint8Array(am.length + tail.length);
+					masks.set(am, 0); masks.set(tail, am.length);
+					if (out.some((x) => x.masks.length === masks.length && T.strOf(x.masks) === T.strOf(masks))) break;
+					const { s } = startOf(starts, masks, -1, {});
+					out.push({ masks });
+					legs.push({ start: s ? starts.indexOf(s) : null, ticks: masks.length - (s ? s.masks.length : 0), lb: null, proven: false, tool: 'funnel' });
+					rj++;
+					break;
+				}
+			}
+		}
+		const dt = Date.now() - t0;
+		fnMs += dt;
+		if (out.length) fnOk++;
+		else for (const s of far) fnDone.set(fk(s), fnVer.get(step.edge) || 0);
+		say({ ev: 'funnel', label: labelOf(step), edge: step.edge, starts: far.length, exits: tiles.length, reached: r && r.ok ? r.arrivals.length : 0, rejoined: rj, ms: dt, runs: fnRuns, ok: fnOk, fnMs });
+		return { res: out.length ? { ok: true, arrivals: out, tool: 'funnel', ms: dt, legs, lb: null } : null, ran: true };
+	};
+	/** the rejoin of a kept leg from a start's engine state `base`: the masks past the start, or null */
+	const rejoinFrom = (base, leg, keys, goal, until) => {
+		const n = leg.length;
+		const shifts = [0];
+		for (let d = 1; d <= RJ_D; d++) { shifts.push(d); shifts.push(-d); }
+		const app = new Uint8Array(RJ_K + 1);
+		const failed = new Set();   // (the leg tick j, the physical key) continuations that missed: the same again misses
+		// (the continuation from the leg's tick j on the sim as it stands: the ticks to the goal, or -1)
+		const cont = (j) => {
+			for (let t = j; t < n; t++) {
+				E.applyMask(tpInp, leg[t] & 31);
+				tpSim.tick(tpInp);
+				if (tpSim.is_dead && !goal.allowDeath) return -1;
+				if (goal.test(tpSim)) return t + 1;
+			}
+			return -1;
+		};
+		for (const d of shifts) {
+			if (Date.now() > until) return null;
+			rjTries++;
+			try { tpSim.reset(); tpSim.restore(base); } catch (e) { return null; }
+			for (let k = 0; k <= RJ_K; k++) {
+				// (the state after k approach ticks: on the leg's trajectory at some j? then the leg from j)
+				const pk = physOf(tpSim);
+				const j = keys.get(pk);
+				const fk = j === undefined ? '' : j + ':' + pk;
+				if (j !== undefined && j < n && !failed.has(fk) && !(d === 0 && j === k)) {
+					failed.add(fk);
+					const snap = tpSim.snapshot();
+					const hit = cont(j);
+					if (hit > 0) {
+						const out = new Uint8Array(k + hit - j);
+						out.set(app.subarray(0, k), 0); out.set(leg.subarray(j, hit), k);
+						return out;
+					}
+					tpSim.restore(snap);
+				}
+				if (k === RJ_K) break;
+				const li = k - d;
+				if (li >= n) break;
+				const m = li < 0 ? 0 : (leg[li] & 31);
+				app[k] = m;
+				E.applyMask(tpInp, m);
+				tpSim.tick(tpInp);
+				if (tpSim.is_dead && !goal.allowDeath) break;
+				if (goal.test(tpSim)) return app.slice(0, k + 1);
+			}
+		}
+		return null;
 	};
 	/** the kept legs of step's edge replayed from each start: a StepResult (ok, the arrivals) or null */
 	const transplant = (step, wp, starts) => {
@@ -1487,18 +1823,73 @@ async function compile(L, opts = {}, emit = () => {}) {
 				legs.push({ start: si, ticks: hit, lb: null, proven: false, tool: 'transplant' });
 			}
 		}
+		// (the landmark rejoin: the kept legs from the starts no exact replay served, within the call's clock)
+		let rj = 0;
+		if (REJOIN && out.length < ARRIVALS_K) {
+			const r0 = Date.now(), until = r0 + RJ_MS;
+			for (let si = 0; si < starts.length && out.length < ARRIVALS_K && Date.now() < until; si++) {
+				const s = starts[si];
+				if (legs.some((x) => x.start === si)) continue;
+				const base = baseOf(s);
+				if (!base) continue;
+				for (const str of list) {
+					if (out.length >= ARRIVALS_K || Date.now() >= until) break;
+					const keys = rjKeys.get(str);
+					if (!keys) continue;
+					const tail = rejoinFrom(base, T.masksOf(str), keys, goal, until);
+					if (!tail) continue;
+					const sm = s.masks instanceof Uint8Array ? s.masks : T.masksOf(String(s.masks));
+					const masks = new Uint8Array(sm.length + tail.length);
+					masks.set(sm, 0); masks.set(tail, sm.length);
+					if (out.some((x) => x.masks.length === masks.length && T.strOf(x.masks) === T.strOf(masks))) continue;
+					out.push({ masks });
+					legs.push({ start: si, ticks: tail.length, lb: null, proven: false, tool: 'rejoin' });
+					rj++;
+					break;
+				}
+			}
+			// (from before the start: the start's state RJ_BACK ticks back against the kept legs' extended trajectories)
+			for (let si = 0; RJ_BACK > 0 && si < starts.length && out.length < ARRIVALS_K && Date.now() < until; si++) {
+				const s = starts[si];
+				if (legs.some((x) => x.start === si)) continue;
+				const sm = s.masks instanceof Uint8Array ? s.masks : T.masksOf(String(s.masks));
+				const n0 = Math.max(0, sm.length - RJ_BACK);
+				if (n0 >= sm.length) continue;
+				const base = snapAt(s, n0);
+				if (!base) continue;
+				for (const str of list) {
+					if (out.length >= ARRIVALS_K || Date.now() >= until) break;
+					const e = rjExt.get(str);
+					if (!e) continue;
+					const tail = rejoinFrom(base, e.ext, e.keys, goal, until);
+					if (!tail || n0 + tail.length <= sm.length) continue;
+					const masks = new Uint8Array(n0 + tail.length);
+					masks.set(sm.subarray(0, n0), 0); masks.set(tail, n0);
+					if (out.some((x) => x.masks.length === masks.length && T.strOf(x.masks) === T.strOf(masks))) continue;
+					out.push({ masks });
+					legs.push({ start: si, ticks: masks.length - sm.length, lb: null, proven: false, tool: 'rejoin-back' });
+					rj++; rjBack++;
+					break;
+				}
+			}
+			rjMs += Date.now() - r0;
+			if (rj) rjHits++;
+		}
 		if (!out.length) return null;
 		tpHits++;
-		say({ ev: 'transplant', label: labelOf(step), edge: step.edge, arrivals: out.length, ms: Date.now() - t0, hits: tpHits, tries: tpTries });
+		say({ ev: 'transplant', label: labelOf(step), edge: step.edge, arrivals: out.length, rejoined: rj, ms: Date.now() - t0, hits: tpHits, tries: tpTries, rjHits, rjBack, rjTries, rjMs });
 		return { ok: true, arrivals: out, tool: 'transplant', ms: Date.now() - t0, legs, lb: null };
 	};
 	/** one job run: exec.reach, verify, learn, anchors; resolves when done */
 	const runJob = async (job) => {
 		const { anchor: A, step, plan } = job;
+		// (THE WARM RUNG: an edge's rung failed by the budget from another class: this class starts there)
+		// (never onto a triple already run in this epoch: the planner's own rung then, as without the knob)
+		if (RUNG_WARM && !step.synthetic && warmRung.has(String(step.edge))) { const w = Math.min(rungMs.length - 1, warmRung.get(String(step.edge))); if (w > (step.rung | 0) && !tried.has(`${edgeKey(step)}|${w}|${epoch}`)) { step.warmFrom = step.rung | 0; step.rung = w; } }
 		const ek = edgeKey(step), tk = `${ek}|${step.rung}|${epoch}`;
 		tried.set(tk, { ok: false });
 		A.picks++; picksN++;
-		const budget = budgetOf(windowRung(step));
+		let budget = budgetOf(windowRung(step));
 		const wp = waypointOf(step, A);
 		// (the plan's next waypoint: the executor ranks this step's arrivals by the next leg's cost from them, executor.js
 		// NEXT_ON; a death step, a synthetic step or a plan of one step: none)
@@ -1512,10 +1903,38 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const rl = RELAY ? relays.get(rk) : null;
 		let rlUsed = false;
 		if (rl && !Number.isFinite(runBound()) && rl.arrival.masks.length < tickBound && !starts.some((s) => s.hash === rl.arrival.hash)) { starts.push(rl.arrival); relayRuns++; rlUsed = true; }
+		// (THE START JITTER: the k-th step of an (edge, place) that failed by the budget starts from the first arrival + a
+		// held input instead of the first arrival itself)
+		let jitter = null;
+		if (START_JITTER && !step.synthetic && starts.length && starts[0] === A.arrivals[0]) {
+			const pk = placeKey(step, A), nf = pk === null ? 0 : (placeFails.get(pk) || 0);
+			if (nf > 0) {
+				const k = nf - 1, mk = JITTER_MASKS[k % JITTER_MASKS.length], len = 1 + 2 * Math.floor(k / JITTER_MASKS.length);
+				const a0 = starts[0], m0 = a0.masks instanceof Uint8Array ? a0.masks : T.masksOf(a0.masks);
+				const m = new Uint8Array(m0.length + len); m.set(m0); m.fill(mk, m0.length);
+				try {
+					const r = replay(m, null, false, m0.length);
+					const h = r.sim.stateHash();
+					if (r.dead < 0 && !r.sim.is_dead && r.finished < 0 && !starts.some((x) => x.hash === h)) {
+						const leg = addLeg({ label: `jitter ${labelOf(step)}`, fromTick: m0.length, ticks: len, lb: null, proven: false, tool: 'jitter', prev: a0.leg || null });
+						starts[0] = Object.assign(T.arrivalOf(L, r.sim, m, RM), { run: r.run, leg, jitter: true });
+						jitter = { k, mask: mk, len };
+						jitterRuns++;
+					}
+				} catch (e) { /* the arrival as it is */ }
+			}
+		}
 		const t1 = Date.now();
 		steps++;
 		const verBefore = factsVer(facts), anchorsBefore = anchors.size;
 		let res = TRANSPLANT ? transplant(step, wp, starts) : null;
+		// (THE FUNNEL: a short leg to a kept leg's teleport exit, then the rejoin; one that ran and found nothing gives the
+		// executor its own full window, a fresh budget)
+		if (!res && FUNNEL) {
+			const fr = await funnel(step, wp, starts);
+			if (fr.res) res = fr.res;
+			else if (fr.ran) { const nx2 = budget.next; budget = budgetOf(windowRung(step)); if (nx2) budget.next = nx2; }
+		}
 		if (!res) {
 			try { res = await exec.reach(starts, wp, budget); } catch (e) { res = { ok: false, arrivals: [], tool: null, ms: Date.now() - t1, fail: Object.assign(failOf(null, budget), { error: e.message }) }; bug('reach', { error: e.message, label: labelOf(step) }); }
 		}
@@ -1580,6 +1999,29 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const rec = { ev: 'step', n: steps, anchor: A.id, label: labelOf(step), edge: step.edge, nodeClass: step.nodeClass, rung: step.rung, epoch, tool: res.tool || null, ok: !!res.ok, ms, budgetMs: Math.round(budget.ms),
 			why: res.ok ? '' : (fail && fail.why) || '', arrivals: arr.length, news, routes: routes.length };
 		if (fail && fail.closest) rec.closest = { tile: fail.closest.tile, dist: fail.closest.dist };
+		// (THE WARM RUNG: a budget failure lifts the edge's start rung for the other classes; a find at a lower rung lowers it)
+		if (RUNG_WARM && !step.synthetic) {
+			const ke = String(step.edge);
+			if (res.ok) { if (warmRung.has(ke) && (step.rung | 0) < warmRung.get(ke)) warmRung.set(ke, step.rung | 0); }
+			else if (rec.why === 'budget' && (step.rung | 0) > (warmRung.get(ke) || 0)) warmRung.set(ke, step.rung | 0);
+			if (step.warmFrom !== undefined) rec.warmFrom = step.warmFrom;
+		}
+		// (THE PLACE RUNG: a budget failure lifts the (edge, place)'s floor to the next rung; a find at a lower rung lowers it)
+		if (RUNG_PLACE && !step.synthetic) {
+			const pk = placeKey(step, A);
+			if (pk !== null) {
+				const r = step.rung | 0, f = placeRung.get(pk);
+				if (res.ok) { if (f !== undefined && r < f) placeRung.set(pk, r); }
+				else if (rec.why === 'budget') { const nx = Math.min(rungMs.length - 1, r + 1); if (!(f >= nx)) placeRung.set(pk, nx); }
+			}
+			if (step.placeFrom !== undefined) { rec.placeFrom = step.placeFrom; delete step.placeFrom; }
+		}
+		// (THE START JITTER: a budget failure from a place makes the next step from there start elsewhere)
+		if (START_JITTER && !step.synthetic) {
+			const pk = placeKey(step, A);
+			if (pk !== null && !res.ok && rec.why === 'budget') placeFails.set(pk, (placeFails.get(pk) || 0) + 1);
+			if (jitter) rec.jitter = jitter;
+		}
 		if (FAR_TROPHY > 0 || FAR_WALK > 0) { rec.est = Number.isFinite(+step.estTicks) ? Math.round(+step.estTicks) : null; if (windowRung(step) !== step.rung) rec.farTrophy = windowRung(step); }
 		// (the executor's exact end search from a near start, when it ran: tier 0b)
 		const nearT = Array.isArray(res.tiers) ? res.tiers.find((x) => x && x.tier === 'near') : null;
@@ -1680,6 +2122,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 	const deepen = (why) => {
 		if (deepenings >= maxDeepen || rungMs[0] * mult * 2 > left() - (best ? endRes() : 0)) return false;
 		deepenings++; epoch++; mult *= 2;
+		warmRung.clear();   // (THE WARM RUNG: the facts start over at a deepening, so does the warm start)
+		placeRung.clear();   // (THE PLACE RUNG: likewise)
 		try { if (facts && typeof facts.reset === 'function') facts.reset({ keepProofs: true, boost: 2 }); } catch (e) { bug('reset', { error: e.message }); }
 		for (const A of anchors.values()) { if (A.why !== 'bound') { A.exhausted = false; A.why = ''; } A.plans = null; }
 		localBlock.clear();
@@ -1704,7 +2148,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const maxTick = Math.max(0, ...[...anchors.values()].map((A) => A.firstTick));
 		say({ ev: 'progress', states: anchors.size, rooms: anchors.size, anchors: anchors.size, triggers: Math.max(0, ...[...anchors.values()].map((A) => A.gain)), steps, okSteps, facts: factsCount(), sec: Math.round(secNow() * 10) / 10,
 			workers, layer: maxTick, tick: maxTick, ticksPerSec: 0, imports, bugs, deepenings, stalls, exhausted: [...anchors.values()].filter((A) => A.exhausted).length,
-			...(best ? { runTicks: best.runTicks, lb: LB, gap: gapOf(best.runTicks) } : { lb: LB }), detail: detail() });
+			...(best ? { runTicks: best.runTicks, lb: LB, gap: gapOf(best.runTicks) } : { lb: LB }), ...(PLAN_DOM ? { dom: { n: domMemo.set.size, skips: domSkips, st: domStSkips } } : {}), detail: detail() });
 	};
 	const saveFiles = () => {
 		if (!out) return;
@@ -2097,7 +2541,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 					const idle = new Uint8Array(k);
 					const Sk = k === 0 ? a0 : T.arrivalOf(L, T.playTo(L, idle).sim, idle, RM);
 					const wp = { kind: 'trophy', tiles: Array.from(trophy.tiles), expect: null, label: 'trophy (the proof)', beforeTick: k + Cost - 1, allowDeath: !noDeath };
-					const r = await exec.reach([Sk], wp, { ms, level: rungMs.length - 1, k: ARRIVALS_K, deadline, stop: () => stopped || Date.now() > deadline + 2000 });
+					const r = await exec.reach([Sk], wp, { ms, level: RUNG_DEEP ? Math.min(rungMs.length, RUNG_MS.length) - 1 : rungMs.length - 1, k: ARRIVALS_K, deadline, stop: () => stopped || Date.now() > deadline + 2000 });
 					if (r && r.ok) {
 						const arr = (r.arrivals || []).filter((a) => a && a.masks && a.tick <= k + Cost - 1).sort((a, b) => a.tick - b.tick);
 						if (!arr.length) { bug('prove', { why: `the executor returned arrivals past the waypoint's beforeTick ${k + Cost - 1}` }); fail = 'its arrivals were past the bound (a bug)'; lbMin = 0; break; }

@@ -1371,6 +1371,124 @@ ways in.
   gate with the default (60 s): exit 0, compiled 15 vs the baseline's 11, worse 1 (First Person Maze, the base's own).
   Tests that require src/plan/strategy.js directly read the environment (test/planstrategy.js's mock T-STALL fails with
   `EEAT_BW_LEVEL=1`: the child solves the real toy file).
+- **Bad EE Level 9's mini walls: the deep rung and the warm rung** (B7 lane b9, cycle 2, 2026-09-30, branch n5-b7-b9;
+  strategy.js, both OPT-IN, off = the compile byte for byte): `EEAT_RUNG_DEEP=<ms>` = one more rung of that many ms after
+  the 45-s one (the facts block an (edge, node class) after 5 failures instead of 4; the executor runs it at its top tier,
+  level 3, with the longer window; the relay start goes on from rung 3's closest); `EEAT_RUNG_WARM=1` = an edge that failed
+  rung r by its BUDGET from one node class starts at rung r from the next (never onto a triple already run in its epoch;
+  cleared at a deepening, as the facts are; a find at a lower rung lowers it). WHY: the 54-switch chain stops at minis whose
+  leg needs one long window. Mini 5 (switch 5 (227,264), a ladder maze between spike columns) from its own entrance
+  (tools/cmp/legab.js, box 7 at load 150-190, 6 knob arms x 3 reps: n5-plan's defaults, without the portfolio / the cover /
+  the field memo + corridor fields, with none, + EEAT_Q_CELL): 18 / 18 found, ALL at rung 3 (34-45 s, skel+leg /
+  skel+portfolio, 585-866 ticks), 0 at rungs 1-2 (closest 35.6 / 30.8 tiles in every rep): no knob matters, the WINDOW
+  does; in the compile the 45-s rung is the edge: switch 5's rung-3 steps over 9 runs of 900 s found it 3 of 61 (cycle 1's
+  c4X 0 of 23), its rung-0-2 steps ~0 of 200 (each new node class climbs rungs 0-2 again: 1.5 + 5 + 15 s spent before its
+  one 45-s window). MEASURED (box 7, 900 s, W3, cycle 1's best config FX_CELL + TRANSPLANT + FX_FIELD=0 + FX_STATE=0, one
+  run an arm): with `EEAT_RUNG_DEEP=135000` the 135-s steps on switch 5 found it **5 of 7** (c6D1 2 / 3, c6D2 2 / 3, +WARM
+  c7W2 1 / 1; at 298-427 s), where the same runs' 45-s steps found it 0 of 17; the deep rung took the next walls too: mini 7
+  (5,140) (a blue-spike course, closest (15,114) 39 tiles: 0 of ~50 steps at rungs 0-3, 2 of 7 at rung 4, at 856 / 859 s),
+  mini 13 (225,119) (closest (218,137) 20.8 since cycle 1: 1 of 2 at rung 4, 863 s), switch 10 2 of 2; the two runs'
+  rung-4 steps 9 of 18 found (mini 12 (73,99) 0 of 1); every run's rung-4 steps 17 of 33. CHAIN IDS (of 54, held by one
+  anchor) at 900 s, this cycle side by side (load 160-190): the config's base 4 / 6 (c5C, c9X1: mini 5 never passed; c9X1's
+  switch-5 steps 109, 0 found, 1,560 worker-s), + DEEP **11 / 10** (c6D1 1-11: wave 3 entered; c6D2 1-10), + DEEP + WARM 9 / 6;
+  n5-plan's defaults 11 (c5A: mini 5 passed at rung 3, 1 of 4; walls mini 7 and team 2 (59,194)), + DEEP 10, + DEEP + WARM 6
+  (cycle 1's base samples of the config 17 / 16 / 6 at load ~100-150). So the deep rung passes the wall where the config
+  stalls, and is a tie on the defaults; THE WARM RUNG IS NEGATIVE: it bumps every new class to the 45-s rung and those
+  classes, once failed there, wait behind the planner's lower-rung edges (nearPlans' rung order), so the 135-s rung came
+  late or never (c10DW: 28 rung-3 switch steps, no rung 4). SEEN ON THE WAY (not fixed): with
+  that config one run's main thread planned 3.6-11 s before every step from 56 s on (every plan 'budget: the most gain',
+  856 of 900 s planning; median 0.3 s in the 6 other runs of the config: c5C, 4 ids) and a rung-2 step of it held a worker
+  305 s on its 15-s budget (exec.reach 840 k sims: waiting, not searching); the warm rung's first version repeated a
+  bumped triple (79 transplant steps at rung 1 with no news: c7W1) until the guard above. The landmark rejoin of cycle 1
+  (`EEAT_PLAN_REJOIN=1`, the same branch) found no gain (15-44 hits a run, all on hub checkpoints and solved minis).
+- **Bad EE Level 9, cycle 3: the place rung, and the start is the wall** (B7 lane b9, 2026-10-01, branch n5-b7-b9 = cycle 2
+  + origin/n5-plan e08ad21; strategy.js, both OPT-IN, off = the compile byte for byte; test/planstrategy.js 27/0 with them
+  on and off). THE WALL, again purple switch 5 (227,264) (mini 5's ladder maze): the current compiler at 900 s (box 7, W3,
+  load ~150 beside the scoreboard's full compile, one run an arm, side by side) 6 chain ids (c11A: 1-4, 41, 101; switch 5
+  66 steps, 0 found, 1,038 worker-s), + `EEAT_RUNG_DEEP=135000` 5 (c11D: 1-5; switch 5 0 of 49 at rungs 0-3, 3 of 10 at
+  the 135-s rung, the finds at 91 / 119 / 124 s of their windows). EVERY LINEAGE ENTERS THE MINI IN THE SAME PHYSICAL
+  STATE (c11D a10 and c6D1 a21, other switch sets: px 4198.65, vx -1.37, standing; the door state and the goal field the
+  same, 48.2 tiles), and from it the leg is not found in a 45-s window: tools/cmp/legab.js (rung 3, `--defaults=1`: the
+  compiler's knobs) 0 / 3, and 0 / 1 each from it + one tick of jump, right, left, right + jump, left + jump, 0 / 2 with
+  `EEAT_FX_FIELD=0 EEAT_FX_STATE=0`, 0 / 2 with `EEAT_Q_CELL=1`, every one stuck at (250,255) 30.8 tiles; from cycle 2's
+  start (the entrance reached directly, jumping, 1.3 px right) 3 / 3 at 42.6 s (skel+portfolio, 564 ticks: down the
+  ladder at x 260, then UP the ladder at x 252 between its spike columns to (252,250) and out left, the x 244 ladder, the
+  pocket); that start one tick earlier (standing) 0 / 3. So the finders' 45-s window passes this leg only from a lucky
+  start, and identical arrivals make every new class's try the same failing search. THE PLACE RUNG (`EEAT_RUNG_PLACE=1`):
+  the rung ladder also kept per (edge, the anchor's first arrival tile): a step of an edge whose (edge, place) failed rung
+  r by the budget starts at rung r + 1 at least (the lowest rung its own (edge, class) has not run this epoch; none: the
+  anchor leaves the edge for the epoch); a find lowers the floor; cleared at a deepening. With the deep rung (c12P, the
+  same box and time, one run): **10 ids at 900 s (1-10: waves 1 and 2 complete)**, switch 5 at 424 s (a step bumped
+  r0 -> r3 found it; switch 5 28 steps vs 59-66), mini 7 (5,140) 3 of 3 at the 135-s rung (25 steps), the next wall
+  wave 3's switch 13 (225,119) (closest 15 tiles at rung 3); bumped steps 48, 33 found, 962 worker-s. THE START JITTER
+  (`EEAT_START_JITTER=1`: after a budget failure from a place the next try starts from the first arrival + k ticks of a
+  held input) gained nothing in the leg tests above (every one-tick jitter stuck at the same (250,255)), but IN THE COMPILE
+  (deep + place + jitter, c13J, round 2 of the same box, one run): **13 ids at 900 s (1-13: wave 3 entered, switches 11,
+  12, 13)**, 154 jittered steps 50 found: switch 5 at 162 s (a jittered rung-3 step, 45 s), mini 7 2 finds (a bumped
+  r1 -> r3 jittered step in 42 s, a rung-4 one in 124 s), switch 13 (225,119) (cycle 1's and 2's wall) at 891 s by a
+  jittered rung-3 step in 17 s; deep + place + `EEAT_PLAN_TRANSPLANT=1` (c13T) 10 ids (1-6, 8, 9, 41, 101; switch 5 at
+  618 s; 17 transplant hits of 201, every one a hub checkpoint leg: no mini leg reused); deep + place again (c14P2, a
+  replicate) **13 ids (1-12, 101)**, switch 5 at 157 s (a bumped r0 -> r3 step, 40 s), the walls then wave 3's switch 13
+  (225,119) (closest (218,137) 20.8, cycle 1's) and 15 (277,202). One run an arm on a loaded box (the same code's spread
+  was 4-17 ids in cycles 1-2): the place rung's arms 10 / 13 / 10 / 13 vs 5-6 without it, side by side; no gain shown on
+  any other level (not run
+  there); not merged (no shared gate). NEXT: the minis' legs are ladder exits between spike columns (the found route's
+  x 252 and x 244 climbs: the goal field falls along it, 48.2 -> 33.2 -> 34 -> 31.2 -> 23.6 -> 12.6, so (250,255) is no
+  false near, the finders stall on the way); a dedicated long solve of an (edge, place) that failed twice (the stretch
+  child's 40 / 80 s windows failed switch 5 from 3 anchors) and these knobs on the gate levels.
+- **Bad EE Level 9, cycle 4: the mini legs re-solved per lineage, THE FUNNEL** (B7 lane b9, 2026-10-01, branch n5-b7-b9 =
+  cycle 3 + origin/n5-plan 04ecf95; strategy.js `funnel`, `fnLib`, OPT-IN `EEAT_PLAN_FUNNEL=1` (which turns the landmark
+  rejoin `EEAT_PLAN_REJOIN` on), off = the compile byte for byte; test/planstrategy.js 27/0 with it + the cycle-3 knobs and
+  with every knob off, box 7). WHY: each lineage searched the same mini again (c13J: switch 5 found 3 times, at 162 / 300 /
+  425 s, 91-130 s each at the 135-s rung; mini 7 twice). The lineages enter a mini through its one arch portal but at other
+  fall speeds (c13J switch 5's entry states py 3905.90 / vy 3.70 vs py 3907.16 / vy 5.03: the straight replay of one
+  lineage's mini tail from the other's entry fails both ways), and the landmark rejoin of that tail from the other's entry
+  state hits in 7-8 ticks (the landing; both ways, 1 ms: `src/out/b9c4/funnel2.js`). The rejoin serves only starts at or
+  near the kept leg's start; THE FUNNEL: every kept leg also keeps its last teleports (from its start's last `RJ_BACK` ticks
+  on, the leg's own trajectory from each exit with its physical keys), and a step of its edge that no replay or rejoin
+  served first runs a short executor leg (`EEAT_FUNNEL_MS` 5 s, level 1) from its starts more than `EEAT_FUNNEL_NEAR` 3
+  tiles from every exit to the exit tiles, then the landmark rejoin from each arrival; a place whose funnel found nothing
+  waits for the edge's next kept leg; a funnel that ran and found nothing gives the step's executor a fresh full window.
+  MEASURED (box 7, 900 s, W3, load ~165 beside the scoreboard's full compile, one run an arm, two rounds side by side;
+  K = `EEAT_RUNG_DEEP=135000 EEAT_RUNG_PLACE=1 EEAT_START_JITTER=1`, chain ids of 54 held by one anchor): round 1 the
+  current compiler (knobs off) 5 (1-4, 101; switch 5 57 steps, 0 found, 901 worker-s), K 5 (1-4, 101), K + `EEAT_PLAN_REJOIN=1`
+  **9** (1-6, 9, 10, 101; the rejoin served mini 3's switch at 344 s); round 2 K 5 (1-5), K + FUNNEL **10** (1-6, 8-10, 101)
+  and **11** (1-6, 8-10, 41, 101; 14 triggers); the rejoin served mini switches 4 times over the reuse arms (switch 3, switch
+  5 twice in 15 / 149 ms right after the first find at 584 s, switch 4); the funnel itself ran 12 times, all on hub legs
+  (checkpoints, blue keys, team 2), 5 rejoined, ~58 worker-s in all: no mini step reached it (their starts were near the
+  exits or served by the rejoin first). K alone at 1,800 s (one run): **14 ids (1-14: waves 1-2 complete, wave 3's 11-14;
+  15 triggers)**, ids 10 by 900 s; the walls then switch 12 (73,99) (35 steps, 3 found), mini 7 (5,140) (38 steps, 1,418
+  worker-s, 3 found, all at the 135-s rung) and wave 3's switch 15 (277,202) (0 of 16). The reuse arms 9 / 10 / 11 vs K
+  alone 5 / 5 this cycle (cycle 3's K 13, and the long run's 10 at 900 s): within the same code's spread, NO GAIN SHOWN by
+  the funnel itself; not merged (no shared gate). Seen: the special mini 41's blue coin (75,254) took 561-700 worker-s in 3
+  of 6 runs (closest (81,255) 6.4 tiles; the plans "switch 41 > blue coin > purple reset 41 > switch 41").
+- **Bad EE Level 9, cycle 5: 19 chain ids at 1,800 s, and THE LEADER'S LINEAGE** (B7 lane b9, 2026-10-01, branch
+  n5-b7-b9 = cycle 4 + origin/n5-plan 9bcf651 (CLAUDE.md only: the compiler is cycle 4's); strategy.js, OPT-IN
+  `EEAT_PLAN_DOM=1`, off = the anchor pick byte for byte; test/planstrategy.js 27/0 with it + the deep / place / jitter
+  knobs and with every knob off). THE RUNS (box 7, W3, load 150-170 beside the scoreboard's full compile, one run an arm,
+  side by side; chain ids of 54 held by one anchor; K = `EEAT_RUNG_DEEP=135000 EEAT_RUNG_PLACE=1 EEAT_START_JITTER=1`):
+  the current compiler (knobs off) at 900 s 6 (1-4, 41, 101; THE STOP purple switch 5 (227,264), mini 5's ladder maze: 73
+  steps, 0 found, 1,055 worker-s, closest (255,258) 37 tiles); K at 900 s 10 / 5 / 13 (c17K / c18K / c19K: waves 1-2, wave 3
+  entered at 752-871 s; c18K stopped at switch 5 again, 3 of 44); **K at 1,800 s (c17L) 19: 1-17, 19, 20, the best b9 run so
+  far** (wave 3's 11-15 by 1,414 s, wave 4's 16 / 17 / 19 / 20 by 1,800 s; THE STOP purple switch 18 (78,113), closest
+  (97,116) 21.8 tiles at rung 3, and switch 16 (126,191) from another lineage; the specials 41 / 42 / 202 / 303 never).
+  THE WASTE MEASURED (`tools/cmp/chainwaste.js`: a purple switch step judged at its start against the most chain ids any
+  anchor held then): cycle 4's 1,800-s c15L spent 1,671 worker-s (51 steps, 10 re-finds) and 470 s of the stretch child on
+  switches the leader already held (switch 12 found six times while the leader held 1-14; the leader's next switch 15
+  got 16 steps / 145 worker-s and never its 135-s rung); the 900-s runs 22-570 s. THE KNOB: before the first route an
+  anchor B is DOMINATED when another open anchor of higher gain holds every feature value B changed from the start (the
+  deaths count aside) and every coin B took; B's steps at rung `EEAT_DOM_RUNG` (2) or above wait while another job runs
+  (none in flight: they run as before, so no worker waits and no deepening comes of it) and the stretch child takes none
+  of B's stretches; the progress event's `dom` {n, skips, st}. MEASURED (the same box and rounds): K + DOM at 900 s 12 / 9
+  (c18D / c19D; c17DL 10 at 900 s) vs K 10 / 5 / 13; at 1,800 s 14 (c17DL: 1-13, 15) vs K's 19; the current compiler + DOM
+  9 (c19AD) vs 6: within the same code's spread (K alone 5-13 at 900 s this cycle), NO GAIN SHOWN, not merged. 77 of 89
+  anchors were dominated at c17DL's end, its executor skips 39: a dominated lineage's dear rungs were rare by then.
+  SEEN (the next wall): EVERY plan on this level is partial ('budget: the most gain': 100% of 178-505 plans a run), and
+  the stalled runs' leaders plan only an old mini's entrance checkpoint: c17DL from 1,513 s, its leader (1-13, 15) planned
+  'checkpoint (33,78)' / '(124,160)' / '(262,246)' (relaxation-only costs 1,000,556-1,000,903) and never its last wave-3
+  switch 14 (two components: (177,285) and (190,293) behind the special 303), 145 of its 505 plans a lone checkpoint (c17K
+  122 / 294) vs 34 / 427 in the 19-id c17L: the planner's budget cuts the 54-switch search and its partial pick takes a
+  checkpoint (a new cp makes a new anchor of the same switches, so the leader churns through hub legs).
 - **THE ENDGAME and THE AIRBORNE ARRIVAL** (C6 push 3 lane 5 block 3; `src/out/n5/lanes/c6_lane5_b3.md`). THE ENDGAME
   (strategy.js after JOINS, its own clock; **DEFAULT ON since lane 5 block 4** (`src/out/n5/lanes/c6_lane5_b4.md`): compile.js
   gives it a fifth of the budget, at most 60 s (`ENDGAME_F`, `ENDGAME_MAX_S`); `--endgame=<s>` / `EEAT_ENDGAME_S=<s>` its
