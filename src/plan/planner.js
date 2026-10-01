@@ -1417,7 +1417,17 @@ function createPlanner(model, facts, o = {}) {
 		// (the crumbs are a way to the first route: once a route is known (po.runBound finite) the plans are the plan
 		// search's own: box 5, Ruins (2 crumbs), 60 s: 1,597 run ticks with them vs 1,347 without, a crumb's detour kept)
 		if (plans.length && crumbs.length && !(po.runBound !== undefined && Number.isFinite(+po.runBound))) {
-			try { const cp = crumbPlan(a, plans); if (cp.length) plans.unshift(...cp); } catch (e) { if (process.env.EEAT_CRUMB_DBG === '1') console.error('crumbPlan', e.stack); }
+			try {
+				const cp = crumbPlan(a, plans);
+				// (THE STUCK CRUMB, EEAT_CRUMB_DEMOTE=R: a crumb plan whose crumb leg has failed R rungs from this anchor's class
+				// goes after the plan search's own plans instead of before them; unset = every crumb plan in front, as before)
+				if (cp.length && CRUMB_DEMOTE > 0) {
+					const fresh = cp.filter((p) => !(p.crumbRung >= CRUMB_DEMOTE)), stale = cp.filter((p) => p.crumbRung >= CRUMB_DEMOTE);
+					if (stale.length) ST.crumbDemoted = (ST.crumbDemoted || 0) + stale.length;
+					if (fresh.length) plans.unshift(...fresh);
+					if (stale.length) plans.push(...stale);
+				} else if (cp.length) plans.unshift(...cp);
+			} catch (e) { if (process.env.EEAT_CRUMB_DBG === '1') console.error('crumbPlan', e.stack); }
 		}
 		if (!plans.length) {
 			why = rootEdges < 0 ? 'budget' : rootEdges === 0 && !(facts && facts.list().length) ? 'proof' : 'exhausted';
@@ -1527,6 +1537,11 @@ function createPlanner(model, facts, o = {}) {
 	// Path: +73 on a D 34 leg): EX Crew Fall of Zeal 28 crumbs, up to 0.351; Stone Ruin 0.209; On And On 0.114.
 	const CRUMB_DETOUR_F = process.env.EEAT_CRUMB_DETOUR !== undefined ? Math.max(0, +process.env.EEAT_CRUMB_DETOUR || 0) : 0;
 	const CRUMB_DETOUR_MIN = process.env.EEAT_CRUMB_DETOUR_MIN !== undefined ? Math.max(0, +process.env.EEAT_CRUMB_DETOUR_MIN || 0) : 8;
+	// THE STUCK CRUMB (C6 push 3 block 2 lane 1; EEAT_CRUMB_DEMOTE=R, 0 / unset = off: the crumb plans in front, byte for
+	// byte): a crumb is never a plan's need (a coin no gate reads), so once its leg has failed R rungs from the anchor's class
+	// its plan goes after the plan search's own (ordering only: still tried when a worker is free). Why: Need for Steed's
+	// crumbs took 409 of its 774 worker-s at 300 s (280 s failing at rungs 2-3), Stone Ruin's 676 of 894 (402 s)
+	const CRUMB_DEMOTE = process.env.EEAT_CRUMB_DEMOTE !== undefined ? Math.max(0, +process.env.EEAT_CRUMB_DEMOTE | 0) : 0;
 	function crumbOnWay(a, s0, cands) {
 		const tgt = s0 && s0.waypoint && s0.waypoint.tiles;
 		if (!tgt || !tgt.length) return cands;
@@ -1572,7 +1587,9 @@ function createPlanner(model, facts, o = {}) {
 			if (out.length >= CRUMB_K) break;
 			const steps = stepsOf(a, { S: e.S2, pos: e.pos2, e, parent: root });
 			if (!steps.length) continue;
-			out.push({ id: `p${ST.plans}.c${out.length}`, steps, cost: p0.cost, lb: e.lb + hLb(e.pos2), partial: true, why: `crumb: a nearest breadcrumb before '${s0.waypoint && s0.waypoint.label}' (lb ${lb0})`, near: true, crumb: true });
+			const cp = { id: `p${ST.plans}.c${out.length}`, steps, cost: p0.cost, lb: e.lb + hLb(e.pos2), partial: true, why: `crumb: a nearest breadcrumb before '${s0.waypoint && s0.waypoint.label}' (lb ${lb0})`, near: true, crumb: true };
+			if (CRUMB_DEMOTE > 0) cp.crumbRung = facts ? facts.rungOf(e.edge, cls) : 0;
+			out.push(cp);
 		}
 		ST.crumbPlans = (ST.crumbPlans || 0) + out.length;
 		return out;

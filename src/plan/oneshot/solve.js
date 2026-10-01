@@ -72,6 +72,28 @@ const LEG_TRY_MIN = env('EEAT_OS_LEG_TRYMIN', 48), LEG_RATE = env('EEAT_OS_LEG_R
 // (the one shot runs in a process of its own: its time is not the executor's).
 const OS_BW = process.env.EEAT_OS_BW === '1';
 const BW_MS0 = env('EEAT_OS_BW_MS', 1000), BW_MSMAX = env('EEAT_OS_BW_MSMAX', 16000), BW_GAP = env('EEAT_OS_BW_GAP', 4), BW_SHARE = env('EEAT_OS_BW_SHARE', 0.5);
+// THE CHASE (lane 6, push 3 block 2; on with EEAT_OS_BW=1, EEAT_OS_CHASE=0 off): a far leg's end is the flood's most
+// advanced state (its waypoint's tiles reached), but it went on the heap at f = g + w x ord like any node and the blind
+// flood's cheap nodes (f below it) kept the heap's top for the whole run: Gravity's Rainbow's far leg arrived on the
+// trophy's tile (the engine touches the trophy on the NEXT tick's start: one more tick of any input) and was never
+// expanded (556 k fan nodes in 300 s, 0 routes). Now such a node is expanded AT ONCE, depth first: its own edges (the
+// direct leg or the far leg to the plan's next step, the fan) and every leg / far-leg child of a chased node again (the
+// plan's waypoints as a chain of legs, each from the exact state the one before left: the whole-level legs of
+// bwlevel_child.js inside the A*), CHASE_MAX deep. An injected state (the executor's new anchor, inject()) is chased too
+// (inject, then leg: the far legs start from the executor's anchors, not only from the flood's frontier). The chase only
+// orders expansions: every edge is still replayed, and the closed claim (no open fa below the route) is unchanged.
+const CHASE = OS_BW && process.env.EEAT_OS_CHASE !== '0';
+// THE FAR LEG'S RETRY (on with EEAT_OS_BW=1, EEAT_OS_BW_RETRY=0 off): a far leg came again only from a node BW_GAP tiles
+// nearer than the last try, and the blind flood gets nearer slowly (Gravity's Rainbow: 4 far legs of 1 + 2 + 4 + 8 s in
+// 150 s, the 16-s clock never asked for, while the lab's backward solver finds the trophy leg from the spawn in 17.7 s).
+// Now a node at least as near as the last try asks again once the last clock has passed since it (the clock doubling to
+// BW_MSMAX, the far legs still at most BW_SHARE of the A*'s time).
+const BW_RETRY = OS_BW && process.env.EEAT_OS_BW_RETRY !== '0';
+// (the clock's growth a try: x BW_X (2: as before, 1 -> 2 -> 4 ... s). The backward solver's phases are fractions of its
+// clock (the closure 0.6 of it): a short clock cuts its closure and the meet fails where a long one ends early with the
+// leg (the lab: Gravity's Rainbow's trophy leg in 17.7 s of a 90-s clock; 1 + 2 + ... + 32 s: none))
+const BW_X = env('EEAT_OS_BW_X', 2);
+const CHASE_MAX = env('EEAT_OS_CHASE_MAX', 48);
 const LEG_NOGAIN = env('EEAT_OS_LEG_NOGAIN', 12);   // a step's legs that changed nothing before it gets no more legs        // landings fan-outs per (abstract state, support tile, speed class)   // the landings fan-out from airborne nodes too
 const CLASS_MODE = String(process.env.EEAT_OS_CLASS || 'fine');   // the support class: 'fine' | 'coarse'
 const FAR_TILES = env('EEAT_OS_FAR', 800);         // the order's tiles where the reach field says 'no way while S holds'
@@ -164,11 +186,12 @@ function createOneShot(L, o = {}) {
 	}
 	const ST = { expanded: 0, pushed: 0, nodes: 0, dupHash: 0, dupClass: 0, dead: 0, deathEdges: 0, legs: 0, legOk: 0, lands: 0, fans: 0, graphEdges: 0, injected: 0, plans: 0, planMs: 0, planFail: 0,
 		states: 0, routes: 0, pruned: 0, dropped: 0, expandMs: 0, hMs: 0, legMs: 0, landMs: 0, fanMs: 0, firstMs: 0, runs: 0, ms: 0, byKind: {},
-		bwLegs: 0, bwOk: 0, bwMs: 0 };
+		bwLegs: 0, bwOk: 0, bwMs: 0, chased: 0, chaseDeep: 0 };
 	let BWS = null;
 	const bwSolver = () => BWS || (BWS = require('../lab/backward.js').createBackward(L));
 	const nodes = [];                 // id -> node
 	const heap = new Heap();
+	const chaseQ = [];                // (THE CHASE) nodes to expand at once, depth first (a stack)
 	const seen = new Map();           // stateHash -> least g
 	const classes = new Map();        // class key -> [g ...] (the CLASS_K least)
 	// (o.ladder: the refinement ladder of this instance (a portfolio worker starts further down it), o.w1: its greedy weight)
@@ -437,6 +460,9 @@ function createOneShot(L, o = {}) {
 		const lim = best ? Math.min(LEG_T, best.T - n.g - 1) : LEG_T;
 		if (lim <= 0) return;
 		const cand = [];   // [masks, kind]
+		// (THE CHASE: a chased node (n.cd > 0) tries its legs whatever the step's record: the full LEG_TILES, no sparse / no-gain
+		// skip, and its far leg whatever the last try's distance (it is an exact advanced state, not the flood's frontier))
+		const chasing = CHASE && n.cd > 0;
 		// (1) the direct legs to the plans' first waypoints within reach (a waypoint whose legs keep failing: only from
 		// nearer, LEG_FAIL tries with no find halve the distance they are tried from)
 		sim.restore(n.snap);
@@ -448,11 +474,13 @@ function createOneShot(L, o = {}) {
 			const wf = fieldOf(inf, wp);
 			const c = wf ? RF.costAt(wf, sim) : -1;
 			wp.tries = wp.tries || 0; wp.oks = wp.oks || 0;
-			const reachT = wp.oks > 0 ? LEG_TILES : LEG_TILES / (1 << Math.min(3, Math.floor(wp.tries / LEG_FAIL)));
-			if (OS_BW && c > reachT && !(wp.bwDone) && (wp.bwC === undefined || c < wp.bwC - BW_GAP) &&
+			const reachT = wp.oks > 0 || chasing ? LEG_TILES : LEG_TILES / (1 << Math.min(3, Math.floor(wp.tries / LEG_FAIL)));
+			if (OS_BW && c > reachT && (chasing || (!(wp.bwDone) && (wp.bwC === undefined || c < wp.bwC - BW_GAP ||
+				(BW_RETRY && c <= wp.bwC && Date.now() - wp.bwAt >= wp.bwMsLast)))) &&
 				ST.bwMs <= BW_SHARE * (runMs + Date.now() - tRun0)) {
-				wp.bwC = c; wp.bwN = (wp.bwN || 0) + 1;
-				const bms = Math.min(BW_MSMAX, BW_MS0 * (1 << Math.min(5, wp.bwN - 1)));
+				wp.bwC = Math.min(c, wp.bwC === undefined ? c : wp.bwC); wp.bwN = (wp.bwN || 0) + 1;
+				const bms = BW_X === 2 ? Math.min(BW_MSMAX, BW_MS0 * (1 << Math.min(5, wp.bwN - 1))) : Math.min(BW_MSMAX, BW_MS0 * Math.pow(BW_X, Math.min(8, wp.bwN - 1)));
+				wp.bwAt = Date.now(); wp.bwMsLast = bms;
 				const tb = Date.now();
 				let r = null;
 				try { r = bwSolver().solve(n.snap, { tiles: Array.from(wp.tiles) }, { ms: bms }); } catch (e) { r = null; ST.bwErr = String(e && e.message || e).slice(0, 120); }
@@ -462,10 +490,10 @@ function createOneShot(L, o = {}) {
 			}
 			if (c < 0 || c > reachT) continue;
 			// (a step whose legs arrive and change nothing (the same abstract state, no new node) LEG_NOGAIN times: no more legs)
-			if ((wp.noGain || 0) >= LEG_NOGAIN) continue;
+			if ((wp.noGain || 0) >= LEG_NOGAIN && !chasing) continue;
 			// (a step whose legs almost never come (under 1 in LEG_RATE of LEG_TRY_MIN tries or more): a leg at every LEG_SPARSE-th
 			// node that asks for one: the legs are the dear edge (My level fef0: 908 legs, 2 found, 19.2 of the 19.9 s))
-			if (wp.tries >= LEG_TRY_MIN && wp.oks * LEG_RATE < wp.tries) {
+			if (wp.tries >= LEG_TRY_MIN && wp.oks * LEG_RATE < wp.tries && !chasing) {
 				// (sparser as the failures grow: every LEG_SPARSE x (tries / (LEG_TRY_MIN x (oks + 1)))-th, at most every 256th)
 				wp.skip = (wp.skip || 0) + 1;
 				const every = Math.min(256, LEG_SPARSE * Math.max(1, Math.floor(wp.tries / (LEG_TRY_MIN * (wp.oks + 1)))));
@@ -529,6 +557,8 @@ function createOneShot(L, o = {}) {
 			}
 			const ch = addNode(n.id, ms, g, kind);
 			if (cw && (!ch || ch.S.key === n.S.key)) cw.noGain = (cw.noGain || 0) + 1;
+			// (THE CHASE: a far leg's end, and a leg / far leg of a chased node, expanded next, depth first)
+			if (CHASE && ch && (kind === 'bw' || (chasing && kind === 'leg')) && (n.cd || 0) < CHASE_MAX) { ch.cd = (n.cd || 0) + 1; chaseQ.push(ch); }
 		}
 		n.snap = null;   // (expanded: its children hold what is needed; the route is rebuilt from the edges)
 		release(n);
@@ -569,14 +599,16 @@ function createOneShot(L, o = {}) {
 		let done = false;
 		while (Date.now() < deadline) {
 			if (ro.stop && ro.stop()) break;
-			if (!heap.size) {
+			if (!heap.size && !chaseQ.length) {
 				// (a close with a route: optimal within this step's classes; the ladder goes on with it as the bound)
 				if (best && !uncertLv && level > closedLevel) { closedLevel = level; ST.closedLevel = level; ST.closedT = best.T; say({ ev: 'oneshot', what: 'closed', level, ticks: best.T, expanded: ST.expanded }); }
 				if (level + 1 < LAD.length && (!best || REFINE_BEST)) { refine(); continue; }
 				done = true; break;
 			}
-			const n = heap.pop();
+			// (THE CHASE: a chased node first)
+			const n = chaseQ.length ? chaseQ.pop() : heap.pop();
 			if (n.closed || !n.snap) continue;
+			if (n.cd > 0) { ST.chased++; if (n.cd > ST.chaseDeep) ST.chaseDeep = n.cd; }
 			// (stale: its exact state reached sooner since, or its class filled with sooner states)
 			if (seen.get(n.hash) < n.g) { ST.stale = (ST.stale || 0) + 1; n.snap = null; release(n); continue; }
 			const gs = classes.get(n.ck);
@@ -601,6 +633,8 @@ function createOneShot(L, o = {}) {
 		const n = addNode(-1, Uint8Array.from(masks), masks.length, 'inj');
 		if (!o.noLadderInj) injList.push(Uint8Array.from(masks));
 		if (n) { ST.injected++; ST.injH = Math.round(n.h); ST.injNear = n.near; }
+		// (THE CHASE: inject, then leg: the executor's anchor expanded next, its far leg from there)
+		if (n && CHASE) { n.cd = 1; chaseQ.push(n); }
 		return !!n;
 	}
 	function arrivals() {
