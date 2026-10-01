@@ -15,8 +15,9 @@
 //   then  every answer is replayed HERE from the level start (strategy.js verified: the waypoint's own goal test, alive;
 //         routeOf for a route): its inputs become the leg (tool 'search'), the arrival an anchor, the child is stopped, and
 //         the compiler goes on with its own math (planner, executor) for the next legs.
-// One child at a time (HY_N), only before the first route (a route stops it), never past the budget. The knobs:
-// EEAT_HY_RUNG (2), EEAT_HY_REPEAT (2), EEAT_HY_S (60), EEAT_HY_MIN_S (10), EEAT_HY_TRIES (3), EEAT_HY_W (2),
+// One child at a time, started only before the first route (a route stops it, but a TROPHY leg's search, whose own route it
+// is, goes on to the end of its slice: every faster route it prints is a route here too), never past the moves. The knobs:
+// EEAT_HY_RUNG (1), EEAT_HY_REPEAT (2), EEAT_HY_S (60), EEAT_HY_MIN_S (10), EEAT_HY_TRIES (3), EEAT_HY_W (2),
 // EEAT_HY_MEM (MB a worker, 1000), EEAT_HY_GPU (1), EEAT_HY_TOOL (the eegpu path), EEAT_HY_ROOMS (the rooms imported a
 // call, 24; 0 none), EEAT_HY_GX (more goexplore.js options), EEAT_HY_NICE (0).
 const fs = require('fs');
@@ -25,7 +26,7 @@ const path = require('path');
 const cp = require('child_process');
 
 const num = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' && Number.isFinite(+process.env[k]) ? +process.env[k] : d);
-const HY_RUNG = num('EEAT_HY_RUNG', 2), HY_REPEAT = num('EEAT_HY_REPEAT', 2), HY_S = num('EEAT_HY_S', 60), HY_MIN_S = num('EEAT_HY_MIN_S', 10);
+const HY_RUNG = num('EEAT_HY_RUNG', 1), HY_REPEAT = num('EEAT_HY_REPEAT', 2), HY_S = num('EEAT_HY_S', 60), HY_MIN_S = num('EEAT_HY_MIN_S', 10);
 const HY_TRIES = num('EEAT_HY_TRIES', 3), HY_W = Math.max(1, num('EEAT_HY_W', 2)), HY_MEM = num('EEAT_HY_MEM', 1000), HY_ROOMS = num('EEAT_HY_ROOMS', 24);
 const HY_GPU = process.env.EEAT_HY_GPU !== '0', HY_NICE = num('EEAT_HY_NICE', 0);
 // (Find a route's goexplore.js defaults: editor.js GX_DEFAULTS, kept in step by hand: this file must not load the editor)
@@ -201,11 +202,13 @@ function createHybrid(ctx) {
 				continue;
 			}
 			if (m.ev === 'done') { b.end = m.end; continue; }
-			if (b.solved || typeof m.inputs !== 'string' || !m.inputs) continue;
+			if (typeof m.inputs !== 'string' || !m.inputs) continue;
+			// (the leg solved: only a trophy leg's search goes on, its faster routes)
+			if (b.solved && !(b.trophy && m.ev === 'result' && m.kind === 'finish')) continue;
 			const masks = T.masksOf(m.inputs.replace(/[^0-O]/g, ''));
 			if (m.ev === 'result' && m.kind === 'finish') {
 				// (a route of the search: a route (routeOf replays it), and the leg when it passes the leg's target)
-				if (b.trophy) { if (tryLeg(b, masks, 'route')) { b.solved = true; halt('the leg'); } continue; }
+				if (b.trophy) { if (tryLeg(b, masks, 'route')) b.solved = true; continue; }
 				const x = ctx.routeOf(masks, `the search (hybrid, from ${ctx.labelOf(b.c.step)})`, null);
 				if (x) { stats.routes++; if (x.better) ctx.say({ ev: 'hybrid', what: 'route', id: b.id, runTicks: x.ev.runTicks }); }
 				if (tryLeg(b, masks, 'route')) b.solved = true;
@@ -222,7 +225,7 @@ function createHybrid(ctx) {
 	};
 	/** an idle slot: the next candidate, before the first route, on a slice of the time left */
 	const schedule = () => {
-		if (child || busy || ctx.stopped() || ctx.hasRoute()) { if (child && ctx.hasRoute()) halt('a route'); return; }
+		if (child || busy || ctx.stopped() || ctx.hasRoute()) { if (child && busy && ctx.hasRoute() && !(busy.trophy && busy.solved)) halt('a route'); return; }
 		const c = pick();
 		if (!c) return;
 		const ms = Math.min(HY_S * 1000 * (1 << Math.max(0, c.tries)), ctx.left() - 3000);
