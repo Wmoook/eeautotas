@@ -618,6 +618,7 @@ function createRouteLB(L, o = {}) {
 	}
 	const respKey = (S) => { const r = respawnNodes(S); r.key = r.key || ('r' + model.respawnOf(S, 'lb').id); return r; };
 	// the endgame's kinematic bound contexts per goal (trophy: its own; a trigger: its tiles)
+	let primB = null;   // (the primitives' bounds, made on the first start leg)
 	const egMemo = new Map();
 	function egCtx(goalKey, tiles) {
 		let c = egMemo.get(goalKey);
@@ -746,7 +747,11 @@ function createRouteLB(L, o = {}) {
 					}
 					if (DEATH_MIN + alt < eg) eg = DEATH_MIN + alt;
 				}
-				return Math.max(fieldLeg, eg);
+				// (and the primitives' bound from the exact state (bounds.js leg: the doors as the state holds them, which a leg does
+				// not change; its plain layer and its own endgame part), the larger)
+				let bl = 0;
+				try { if (!primB) primB = B.createBounds(L, { model }); const v = primB.leg(sim0, goalKey === 'trophy' ? { kind: 'trophy', tiles: goalTiles } : { kind: 'trigger', tiles: Array.from(goalTiles) }); if (Number.isFinite(v)) bl = goalKey === 'trophy' ? v - 1 : v; } catch (e) { bl = 0; }
+				return Math.max(fieldLeg, eg, bl);
 			};
 			// (the planner's walk bound of the same leg: the 8-way tile walk at 16.25 px/tick, the death shortcut to the state's
 			// respawn (model.pairLb, 'lb' mode): a sound relaxation of its own; the leg is the larger)

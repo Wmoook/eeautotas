@@ -2137,3 +2137,52 @@ trigger, 300 and 120 ticks before the route first enters the stuck waypoint; eve
   standalone, 150 s: 0.4 of the clock then the rest finished 4 of 5 (On And On And On and Gravity's Rainbow on the second
   clock), one 150-s clock lost On And On in 1 of 2 runs; inside the compile (W3 next to it, the box loaded ~100) On And
   On and Stone Ruin still 'budget' (A/B 4, 2 levels).
+
+## 9 Provably TAS-perfect: the order-aware route bound and the whole-level proof (n5-p4-perfect)
+
+(COMPILER-PUSH-4 lane P4 perfect, 2026-09-30.) Code: `src/math/routelb.js` (the bound), `src/plan/levelproof.js` (the
+proof), `tools/perfect/routelb_truth.js` (T-ROUTELB-ADMISSIBLE), `tools/perfect/provelevel.js`,
+`tools/perfect/proveladder.js`, `tools/perfect/gaprep.js` (the gap per compiled level); in the compiler
+`EEAT_ROUTELB=1` (OPT-IN: the route bound after the budget, `report.lbRoute`; off = byte for byte).
+
+### 9.1 The geometry of the centre (exact, no slack constant)
+The box overlaps a wall tile W along an axis iff floor(p) is in [16W - 15, 16W + 15], so the CENTRE c = p + 8 is in the
+obstacle [16W - 7, 16W + 24) on both axes. Every maximal free interval starts at 16W + 24, a multiple of 8, so flooring
+a free point to the 8-px lattice keeps it free; the floored copy of a continuous centre path is a lattice path over free
+nodes (an edge is free iff both ends are), a touch of a cell [16X, 16X + 16)^2 floors to one of its 4 lattice points, and
+an L1-type geodesic among lattice-aligned obstacles runs on the lattice (it turns only at obstacle edges: lattice lines,
+or floored toward its own side). Only the exact start point pays its floor offset (once). Node (i, j) is blocked iff a
+wall lies in cols(i) x rows(j), cols(2a) = {a - 1, a}, cols(2a + 1) = {a}.
+
+### 9.2 Local speed caps (sound)
+U(c) = the most |speed| after the update of a tick that STARTS in tile c, per axis direction, a fixpoint from below of
+v' = (v + push) x drag over (cell, phase): the delayed tile is the current tile of 2 ticks before, so the push of a tick
+comes from within 2 cells when the ball arrives (phase 0), from within 1 the next tick (phase 1) and from its own tile
+after (phase 2); a ball that began 2 ticks in a cell moved its speed each tick (a wall zeroes it), so it starts phase 2
+below (16 + 0.4 + push) / 2. Sources: jumps (the next tick within a cell of the tile jumped from), boosts (16), teleport
+exits (the entry's speed, x 1.42 turned). Then the CROSSING DPs per column / row (any row / column: a relaxation of where
+the pushes are): a run moving right crosses column x's 16 px with the column's most push, from every entry speed up to
+the carried one; a run starting in a line (a jump, a teleport) may start at its far edge (the next line gets its speed).
+The cap is the least of both. Per cell W = the 3 x 3 max (a tick's travel inside a cell belongs to a tick that started
+within one cell of it). Ice, fly, gravity effects, a gravity multiplier <= 0: 16.
+
+### 9.3 The leg bound and the order
+On an interval of n ticks, for any lam in [0, 1]: n >= sum of lam |dx| / Wx + (1 - lam)(up / Wup + down / Wdn) (each
+tick moves at most W per axis), so the lattice geodesic with those edge weights bounds a leg, one lam a leg (a leg is a
+time interval); portals and deaths are super edges of the same Dijkstra (an exit region's first popped node fires its
+entry at + 1; the respawn region's fires every killing node at + 54, the respawn = the checkpoint the abstract state
+holds). Each leg also the planner's own walk bound (model.pairLb, 'lb') and, from an exact state, the endgame's kinematic
+envelope (acceleration from the state's own speed, walls ignored; a way through a death DEATH_MIN + the field from its
+respawn); the larger. The ORDER: A* over (model state, the trigger just touched), edges = every relevant trigger whose
+touch changes the state and the trophy (+ 1), coin identities merged by the intersection of the taken coins, h = the
+open level's field (every gate open). The run bound = the least over the idle starts (until the ball rests by the
+clock-blind hash) of the bound - 1. The crumbs (coins no gate reads) are left out: a relaxation.
+
+### 9.4 The whole-level proof
+Every input sequence from every idle start (merged by layer: a finish at layer d is a route of d - 1 run ticks for any
+start), depth-first with a transposition table per worker (stateHash -> the least layer searched), cut where layer + h > C
+(h = 1 + the endgame's kinematic envelope; the least of it and DEATH_MIN + 1 + the respawns' speed limit where the level
+kills; RCH3's -1 = no way at all). Worker threads take tasks (a source + a prefix); a task past 20 M nodes is split 2
+layers further; a task that ends early clears its worker's table. Nothing below C = PROVEN: no route takes fewer than C
+run ticks (up to 53-bit hash collisions: P <= C x entries / 2^53, ~1e-7). The LADDER (proveladder.js) proves C = from,
+from + 1, ...: the largest C proven is a proven lower bound, and a route met on the way is the optimum.
