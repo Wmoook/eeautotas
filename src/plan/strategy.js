@@ -1568,7 +1568,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 			try { S2 = model.stateOf(r.sim); } catch (e) { return null; }
 			const res = addArrival(a, S2, parent, why, null);
 			if (!res.isNew) return null;
-			say({ ev: 'source', kind: 'room', room: a.room, desc: a.desc, key: res.anchor.key, gain: 1, tick: a.tick, inputs: T.strOf(a.masks), anchor: res.anchor.id, label: why });
+			say({ ev: 'source', kind: 'room', room: a.room, desc: a.desc, key: res.anchor.key, gain: 1, again: res.anchor.gain, tick: a.tick, inputs: T.strOf(a.masks), anchor: res.anchor.id, label: why });
 			return res.anchor;
 		},
 	}) : null;

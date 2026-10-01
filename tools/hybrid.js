@@ -4,7 +4,15 @@
 // a RACE to the first verified route, then the rest of the budget spent improving it.
 //   node tools/hybrid.js <level.eelvl> [--seconds=600] [--out=<dir>] [--gpu=<id>] [--cworkers=3] [--sworkers=4]
 //        [--pworkers=2] [--stallS=60] [--hint=1] [--feed=1] [--bound=1] [--joins=1] [--cseconds=<the compiler's budget>]
-//        [--seed=1] [--name=<label>] [--keep=0] [--quiet=0]
+//        [--seed=1] [--name=<label>] [--keep=0] [--quiet=0] [--leg=1] [--polishS=0] [--stallStopS=0]
+// - THE LEG (n5-hy-best, --leg=1 by default): the compiler child runs with EEAT_HYBRID=1 (src/plan/hybrid.js: a leg the
+//   executor failed goes to goexplore --goalTiles from the anchor's state); --leg=0: the compiler alone, as n5-hy-race.
+// - THE EARLY STOPS (the measurement, n5-hy-best; 0 = off, the run to --seconds): --polishS=<s>: the first verified route,
+//   then that many seconds of polish, then the end (the compiler, with a route of its own, gets 'stop' 75 s before it: its
+//   stages after the moves polish its route); --stallStopS=<s>: no route yet and no progress for that long (no new furthest
+//   compiler anchor (a higher gain, or the same gain 3 tiles nearer), no search attempt a tile nearer the trophy, no new
+//   room that opens territory, no more coins / switches on the search's progress front): the end. hybrid.json's stop:
+//   {why: 'polish' | 'stall' | 'cap' | <signal>, t}.
 // - The compiler: its own child process (--json --stdin=1 --sourceDist=1), its budget fitted so that its stages after the
 //   moves (joins, loops, endgame: compile.js) end before the hybrid's (--cseconds). Every route it announces ('result') is
 //   replayed here (common.js evaluate on the level file, the loader of tools/cmp/verify.js) before it counts.
@@ -52,6 +60,8 @@ const CW = Math.max(1, +(opt.cworkers || 3)), SW = Math.max(1, +(opt.sworkers ||
 const STALL_S = Math.max(5, +(opt.stallS || 60));
 const HINT = on('hint', true), FEED = on('feed', true), BOUND = on('bound', true), JOINS = on('joins', true);
 const QUIET = on('quiet', false);
+const LEG = on('leg', true);
+const POLISH_S = Math.max(0, +(opt.polishS || 0)), STALL_STOP_S = Math.max(0, +(opt.stallStopS || 0));
 // the compiler's budget: its moves' seconds S, its stages after them (compile.js: joins min(60, S/2), loops min(10, S/6),
 // endgame min(60, S/5)) ending 15 s before the hybrid's end
 const tailOf = (s) => Math.min(60, 0.5 * s) + Math.min(10, s / 6) + Math.min(60, 0.2 * s);
@@ -72,7 +82,10 @@ const ED = require(path.join(SRC, 'editor.js'));
 const J = require(path.join(SRC, 'jobs.js'));
 const AT = require(path.join(SRC, 'autotas.js'));
 
-const T0 = Date.now(), END = T0 + SECONDS * 1000;
+const T0 = Date.now(), END0 = T0 + SECONDS * 1000;
+let END = END0;   // (--polishS: the first route's time + polishS, when sooner)
+let progAt = T0, progWhy = 'the start';   // (--stallStopS: the last progress of either side)
+const progress = (why) => { progAt = Date.now(); progWhy = why; };
 const sec = () => Math.round((Date.now() - T0) / 100) / 10;
 const logF = path.join(OUT, 'hybrid.log');
 const log = (s) => { const l = `[hy ${sec().toFixed(1).padStart(6)}s] ${s}`; if (!QUIET) console.log(l); try { fs.appendFileSync(logF, l + '\n'); } catch (e) { /* read-only */ } };
@@ -81,7 +94,8 @@ const buf = fs.readFileSync(LEVEL);
 
 // ---- the report
 const R = { level: NAME, file: LEVEL, seconds: SECONDS, cseconds: CSECONDS, gpu: opt.gpu !== undefined ? String(opt.gpu) : null, host: os.hostname(),
-	workers: { compiler: CW, search: SW, prefix: PW }, stallS: STALL_S, flags: { hint: HINT, feed: FEED, bound: BOUND, joins: JOINS }, started: new Date(T0).toISOString(),
+	workers: { compiler: CW, search: SW, prefix: PW }, stallS: STALL_S, flags: { hint: HINT, feed: FEED, bound: BOUND, joins: JOINS, leg: LEG }, polishS: POLISH_S, stallStopS: STALL_STOP_S,
+	started: new Date(T0).toISOString(), stop: null, lastProgress: null,
 	first: null, routes: [], best: null, final: null, polish: null,
 	compiler: { firstRoute: null, routes: 0, anchors: 0, maxGain: 0, furthest: null, stalls: 0, imports: 0, stages: [], end: null, exit: null, report: null },
 	search: { firstRoute: null, job: null, jobFrom: null, handoff: null, bests: [], end: null, nearest: null },
@@ -110,6 +124,7 @@ function route(by, masks, how) {
 	if (!R.first) {
 		R.first = { by, t: rec.t, runTicks: ev.runTicks };
 		log(`FIRST ROUTE by ${by}: ${ev.runTicks} run ticks (${C.fmt(ev.runTicks)}) after ${rec.t} s${how ? ` (${how})` : ''}`);
+		if (POLISH_S > 0 && !ending) { END = Math.min(END, Date.now() + POLISH_S * 1000); log(`the polish: ${POLISH_S} s, the end at ${((END - T0) / 1000).toFixed(1)} s`); }
 		prefixStop('a route exists');
 	} else if (faster) log(`${by}: ${ev.runTicks} run ticks (best so far)${how ? ` (${how})` : ''}`);
 	// a route from outside the search (the compiler's, the prefix search's, the joins'): to the AutoTASer (the job's
@@ -163,7 +178,9 @@ function boundCompiler(ms) {
 function compStart() {
 	const args = [path.join(SRC, 'compile.js'), LEVEL, `--seconds=${CSECONDS}`, `--workers=${CW}`, '--json', '--stdin=1', '--sourceDist=1',
 		`--out=${path.join(OUT, 'compile.eetas')}`, `--report=${path.join(OUT, 'compile.json')}`];
-	comp = spawn(process.execPath, args, { cwd: ROOT, stdio: ['pipe', 'pipe', fs.openSync(path.join(OUT, 'compile.err'), 'w')] });
+	const env = Object.assign({}, process.env);
+	if (LEG) env.EEAT_HYBRID = '1'; else delete env.EEAT_HYBRID;
+	comp = spawn(process.execPath, args, { cwd: ROOT, env, stdio: ['pipe', 'pipe', fs.openSync(path.join(OUT, 'compile.err'), 'w')] });
 	compAlive = true;
 	comp.stdin.on('error', () => { /* ended */ });
 	const rl = readline.createInterface({ input: comp.stdout, crlfDelay: Infinity });
@@ -197,6 +214,7 @@ function compOn(e) {
 		if (ahead) {
 			furthest = a;
 			lastProgAt = Date.now();
+			progress(`the compiler's anchor ${a.id} (gain ${a.gain})`);
 			R.compiler.furthest = { id: a.id, gain: a.gain, dist: a.dist, tick: a.tick, desc: a.desc, t: a.t };
 		}
 		compEv.write(JSON.stringify({ t: sec(), ev: 'source', anchor: a.id, gain: a.gain, dist: a.dist, tick: a.tick, desc: a.desc, ahead }) + '\n');
@@ -325,6 +343,7 @@ function atStart() {
 }
 
 // ---- the loop: the stall hand-over, the feed back, the joins, the end
+tick.progTiles = Infinity; tick.rooms = new Set(); tick.front = 0;
 let lastHintAt = 0, hintedKey = null, lastFeedAt = 0, lastFedTiles = Infinity, compStopAt = 0;
 function tick() {
 	if (ending) return;
@@ -333,6 +352,12 @@ function tick() {
 	try { st = ED.state(); } catch (e) { st = null; }
 	const c = st && st.closest;
 	if (c && Number.isFinite(+c.tiles) && (!R.search.nearest || c.tiles < R.search.nearest.tiles)) R.search.nearest = { tiles: c.tiles, ticks: c.ticks, t: sec(), strategy: c.strategy };
+	// (--stallStopS: the search's progress: a tile nearer, a new room that opens territory, more coins / switches on its front)
+	if (c && Number.isFinite(+c.tiles) && +c.tiles <= tick.progTiles - 1) { tick.progTiles = +c.tiles; progress(`the search ${c.tiles} tiles from the trophy`); }
+	if (st && Array.isArray(st.sources)) for (const s of st.sources) if (s && s.gain > 0 && !tick.rooms.has(s.room)) { tick.rooms.add(s.room); progress(`the search's room ${s.room}`); }
+	const pf = st && st.progressFront;
+	if (pf && (+pf.coins || 0) + (+pf.switches || 0) > tick.front) { tick.front = (+pf.coins || 0) + (+pf.switches || 0); progress(`the search's front ${pf.coins} coins / ${pf.switches} switches`); }
+	if (!R.first && STALL_STOP_S > 0 && now - progAt >= STALL_STOP_S * 1000) { R.lastProgress = { t: Math.round((progAt - T0) / 100) / 10, why: progWhy }; finishAll('stall'); return; }
 	const stalled = compAlive && now - lastProgAt >= STALL_S * 1000;
 	if (!R.first && HINT && stalled && furthest && furthest.gain >= 1 && furthest.id !== hintedKey && now - lastHintAt >= 30e3 && now < END - 45e3) {
 		const a = furthest;
@@ -355,14 +380,17 @@ function tick() {
 	if (R.search.job && now - lastBestRead > 30e3) { lastBestRead = now; jobBestIn(); }
 	// (the compiler without a route of its own 90 s before the end, a route known: its moves end (stdin "stop"), and the
 	// joins get the best route for the last minute)
-	if (compAlive && !compStopAt && best && !R.compiler.firstRoute && now >= END - 90e3) { compStopAt = sec(); R.compiler.stopped = compStopAt; compSend('stop'); log('the compiler, no route of its own: stopped for the joins on the best'); }
+	if (compAlive && !compStopAt && best && !R.compiler.firstRoute && !POLISH_S && now >= END - 90e3) { compStopAt = sec(); R.compiler.stopped = compStopAt; compSend('stop'); log('the compiler, no route of its own: stopped for the joins on the best'); }
+	// (--polishS: the compiler with a route of its own 75 s before the end: its moves end, its stages after them polish it;
+	// without one it goes on to the end: its own route may still come, often far faster than the search's first)
+	if (compAlive && !compStopAt && best && R.compiler.firstRoute && POLISH_S && now >= END - 75e3) { compStopAt = sec(); R.compiler.stopped = compStopAt; compSend('stop'); log('the polish: the moves of the compiler end, its stages polish its route'); }
 	if (!compAlive && comp && best && !R.joins) joinsStart();
 	// (the compiler ended without a route, none known, a minute or more left: its CPU share to a prefix search of our own
 	// from its furthest anchor (a fresh archive, another seed than the search's escape))
 	if (!compAlive && comp && !R.first && HINT && !pre && !R.prefix.some((p) => p.why === 'the compiler ended') && furthest && furthest.gain >= 1 && now < END - 60e3) {
 		prefixStart(furthest, CW, 'the compiler ended');
 	}
-	if (now >= END - 3000) { finishAll('the budget'); return; }
+	if (now >= END - 3000) { finishAll(END < END0 ? 'polish' : 'cap'); return; }
 	if (now - (tick.lastW || 0) > 15e3) { tick.lastW = now; writeReport(); }
 }
 
@@ -383,6 +411,8 @@ function finalize() {
 async function finishAll(why) {
 	if (ending) return;
 	ending = true;
+	R.stop = { why, t: sec() };
+	if (!R.lastProgress) R.lastProgress = { t: Math.round((progAt - T0) / 100) / 10, why: progWhy };
 	log(`the end (${why})`);
 	prefixStop('the end');
 	if (joinsCh) { try { joinsCh.kill('SIGKILL'); } catch (e) { /* gone */ } }
