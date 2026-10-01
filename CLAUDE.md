@@ -1502,6 +1502,71 @@ ways in.
   masks end at the reported closest tile: checked). NEXT: the second wall (the lattice row's last 20 tiles from the
   glide's own arrival: the finder's state vs the route's, an exact search from it), the gate with more runs a level before
   any shared gate (with B7's merge of the deep rung).
+- **The hard set at 900 s, cycle 5: THE DIRECT RUNG (negative) and the stops vs the known routes** (B8 hard, 2026-10-01,
+  branch n5-b8-hard-c5 = origin/n5-plan 5214e62 + n5-b8-hard-c4 merged clean + the knob; box 8 `~/b8_hard_c5`, 900 s, W3,
+  load 185-215; `src/out/n5/b8/hard_c5.txt`). THE DIRECT RUNG (executor.js, OPT-IN `EEAT_DIRECT_RUNG=<rung>`, unset = the
+  portfolio byte for byte): on that rung a far (skeleton) leg is the direct leg ALONE with the whole window, and a later
+  rung runs the direct leg again only at `EEAT_SKEL_REDIRECT_F` (2) x the largest direct share tried for the key (else
+  the skeleton has the whole window); with =2 the ladder is direct 15 s, skeleton 45 s, deep direct 47 s + skeleton 88 s.
+  WHY tried: cycle 4's krt (the direct leg alone at rung 2 found momentum legs the portfolio's 5.25-s direct share did
+  not). THE KNOWN-ROUTE TEST, rungs 1, 2, 3 on one executor as a compile climbs them (`tools/cmp/krt.js --rungs=1,2,3
+  --backs=300,120`, the compiler's defaults via `node -r` of src/plan/defaults.js `apply()`), base vs =2, 13 stuck legs
+  of 10 hard levels, 34 (leg, start) pairs: found 25 vs **20**, 924 vs 1,055 s: NEGATIVE. It finds the momentum legs a rung
+  sooner (Stupid Fox checkpoint (55,46) from its previous trigger at 20.3 vs 27.9 s, Are You A God coin (93,114) from 300
+  before 19.7 vs 24.6 s, Wine Quest's protection 10.3 vs 15.8 s) and LOSES the field legs the base finds at rung 3
+  (Forgotten Veil 731 coin (324,119) from prev and 120 before, FV b7be (315,175) prev, Egg Quest II green key prev, NC
+  Naos de5f (220,122) prev): the base's rung-3 direct leg (15.75 s) finds them AFTER the rung-2 skeleton's sub-legs learned
+  their counterexample walls, which a direct-only rung 2 never learns (and the wall memo carries across calls: Forgotten
+  Veil 731 coin (332,143) from 120 before 0.5 s at rung 1 in the base, rung 3 with the knob, after its earlier starts).
+  The portfolio's interleaving is load-bearing; the knob stays OPT-IN, not merged. Three of the compile's stop targets
+  are coins the known route never takes (Egg Quest II base's blue coin (182,197), Stupid Fox's coin (102,72), and
+  Infinity Pain's checkpoint (120,81)): krt cannot test them. THE DEEP WINDOW from the known routes' own states (krt
+  `--rungs=3 --scale=3`: one 135-s level-3 call, the deep rung's window): from 300 route ticks before the target 7 / 8
+  legs found (the 1-2-3 ladder's 65 s: 3 / 8), from the previous trigger 3 / 8 (the ladder 4 / 8): the legs of 430-1,850
+  route ticks between triggers fail (Are You A God coin (93,114) 432, Forgotten Veil 731 coin (332,143) 798, Wine Quest's
+  protection (97,142) 1,847) and NC Naos's glide (385). THE RELAY from those failures (`relaykrt.js`, 45 s, then the leg
+  again from its own closest state, the compile's next-rung start): Are You A God's coin found by the relay (10.8 s) and NC
+  Naos de5f's coin (220,122) (28.4 s); Forgotten Veil 731 (closest 116.6 -> 117.6 tiles at (373,178)) and Wine Quest
+  (163.8 -> 163.8 at (185,74)) stand still. THE SPEED GATE: every stuck closest stands on or beside the known route's way
+  but SLOW, where the route passes fast: Forgotten Veil 731's (373,178) at (-0.2, -2.0) px/tick, the route by (368,173) at
+  (+6.0, -5.6); Wine Quest's (185,74) at vy +0.6, the route through (186,73) falling at +5.6; NC Naos (both versions):
+  x 226-230 rows 186-188 a block of RIGHT arrows over an up-arrow row (226-229, 189) over the pocket (219-227, 190-191)
+  that leads to the coin row: the route glides through the block at -5 px/tick to the wall at x 226.00, drifts right
+  while it falls, enters the up arrows at vy +2.49 and its centre just crosses into row 190 (vy +0.24 at y 189.55, tick
+  4385); the finder's arrival (x 230.5, y 188.7, vx -1.1, vy -0.6) sits in the block's right edge and is pushed right and
+  up: crossing 4-5 opposing arrows needs 5.65-6.75 px/tick (reach.js's crossing table). The stateless goal field prices
+  the up-arrow row as a sideways corridor (21.6 tiles from there), so the best-first finders spend the window on the slow
+  states of a FALSE NEAR. `EEAT_BEST_ENERGY=1` (legs.js's existing opt-in: a closed cell takes a faster later arrival)
+  found Are You A God's coin (93,114) from its previous trigger in one 135-s call (16.2 s, without: 46.2 tiles) and took
+  NC Naos 10a3 from 300 before past the glide's first wall (22 tiles at (227,188) vs 40.6), but on the rung ladder (krt
+  rungs 1-3, base again vs ENERGY side by side, the same 13 legs) 26 vs 24 of 34 found (803 vs 866 s): NO GAIN SHOWN (the base arm
+  rerun: 26 of 34 vs the first base arm's 25, single legs flipping both ways: the rungs' own spread on a loaded box). THE STOPS VS THE
+  KNOWN ROUTES (`tools/cmp/stopwhy.js <level> <route.eetas> <compile.log>`: a compile's last failing labels with their
+  rung / closest and whether the known route ever stands on each trigger's tiles), this cycle's 900-s runs: Stupid Fox
+  (7 triggers; its known route takes prot, team, 4 coins, the trophy) took 3 coins near the start the route skips and
+  is stuck on coins / checkpoints the route never takes ((61,58), (102,72), (130,51)) with the plan "checkpoint (55,46)
+  -> trophy" at cost 1,002,496 (the model's coin door shut: a PENALTY plan); Egg Quest II base (19) on blue coins the
+  route never takes ((183,125) 13.2 tiles) and the red key (297,153) 1,088.6 tiles away (the route's at tick 9,268);
+  Forgotten Veil 731 (12) on purple switch 0 (326,135) and coin (377,163) (never on the route) and the route's coins
+  (332,143) / (324,119) 256-548 tiles away; NC Naos de5f (12) on coin (208,186) at 28.4 tiles with its closest at
+  (226,188) = the right-arrow block; NC Naos 10a3 (6) on route coins 134-742 tiles away; Are You A God's d run (10) on
+  the route's coins (93,114) 48.2 / (115,124) 88.2 / (147,112) 132.4 at anchor 10 for 600 s. ROUND 3 (the deep rung d,
+  par 4, 6 levels: 0 compiled): **NC Naos de5f 16 triggers, this lane's furthest** (c2-c4 6-14): 13 of the route's 16 coins
+  + the red key at 843 s, then coin (364,167) r1 4.4 tiles and the red key door / coin (356,102) / trophy to 900 s, a clock
+  stop; Egg Quest II 430b 31 triggers (the route takes 10) on blue coins the route never takes + the red key (297,153) 293.6
+  tiles; Wine Quest 7 on route coin (119,65) 42.4; FV b7be 12 on route coins (315,175) 41.8 / (346,191) 64.4; FV 731 12 on
+  (324,119) / (332,143) 198-306; Octorage 4 on a death step r9 + coins the route never takes. ROUND 4 (box 8 calm then
+  load 195, d vs dX side by side): Are You A God dX **7,940** (first route 11,009 at 697 s; verified, 0 deaths; 1.48 of the
+  user's 5,375) vs d 17 triggers; NC Naos de5f d 8 vs dX **1** (the red key (139,17), then blue coins): over the cycle AYAG
+  dX 2 / 2 vs d 0 / 2, Stupid Fox 5 vs 7, NC Naos de5f 1 vs 8 (d alone 12 / 16 / 8 over rounds 2-4: the level's own spread):
+  THE DIRECT RUNG stays OPT-IN. **THE SECOND SPEED GATE** (NC Naos de5f's last stop, krt from the route's own states): coin
+  (364,167) lies under a 2-wide column of UP arrows (365-366, 163-166) that the route enters FALLING at vy +4.63 after a
+  300-tick loop (right along row 162 to x 389, up to (392,143), back left, down x 369-365); from the route's red-key state
+  rungs 1-3 fail (closest 9.8 at (360,162): row 162, a false near by the stateless field), the 135-s deep window too
+  (EEAT_BEST_ENERGY=1: 2.4 at (365,165), in the column but not through), found from 120 route ticks before at rung 3; the
+  next legs (coin (356,102) from the crown, the trophy) at rung 1 in 3.0 / 7.1 s. NC Naos de5f = these two speed gates +
+  time. NEXT: a goal field that prices an opposing-arrow run by the entry speed it needs (reach.js's crossing table), so the
+  finders stop parking on the gate's slow edge.
 - **THE ENDGAME and THE AIRBORNE ARRIVAL** (C6 push 3 lane 5 block 3; `src/out/n5/lanes/c6_lane5_b3.md`). THE ENDGAME
   (strategy.js after JOINS, its own clock; **DEFAULT ON since lane 5 block 4** (`src/out/n5/lanes/c6_lane5_b4.md`): compile.js
   gives it a fifth of the budget, at most 60 s (`ENDGAME_F`, `ENDGAME_MAX_S`); `--endgame=<s>` / `EEAT_ENDGAME_S=<s>` its
