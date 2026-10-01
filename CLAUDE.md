@@ -1088,3 +1088,27 @@ ways in.
   gate with the default (60 s): exit 0, compiled 15 vs the baseline's 11, worse 1 (First Person Maze, the base's own).
   Tests that require src/plan/strategy.js directly read the environment (test/planstrategy.js's mock T-STALL fails with
   `EEAT_BW_LEVEL=1`: the child solves the real toy file).
+- **THE DEATH STEP'S FLAG, and where Cold World stops** (B7 lane cold, cycle 1, 2026-09-30; branch n5-b7-cold;
+  `src/out/b7cold/` in its worktree: the probes rend.js, pl.js, estpath.js, die.js, dieexec.js, diebest.js). executor.js
+  `wpData` (the waypoint's plain-data copy the reach works on) dropped the planner's `dieField` (planner.js dieField: the
+  death step "die, back at a respawn"), so the reach behind it never had it: legs.js legBest ran every death step without
+  `dieStep` (diePri off: its best-first dive stopped on the killer's doorstep, as diePri's own comment describes), and the
+  proof pre-check / math / settle / backward tiers did not see a death step either. OPT-IN `EEAT_WP_DIEFIELD=1` carries
+  it (off = the data before byte for byte). Measured: the death step from the 8 anchors at the end of Cold World's chapter 1
+  (`dieexec.js`, the executor at rung 1, 5 s): 0 / 8 without (closest 0 on the die field: alive by a killer, 3.3 M sims),
+  **8 / 8 with** (155-269 ticks, the best tier in ~0.1 s); legBest alone with / without dieStep 0.1 s / not in 3 s. In
+  Cold World's 900-s compile with `EEAT_PHYS_EST=1 EEAT_CUT_PROG=1` (box 7 idle, one run) 425 of its 876 event lines were
+  that step: 30 rungs of 1.5-45 s, 9-14 M sims each. Death steps in the 300-s full compile (box 7's scoreboard run, logs so
+  far): Buuwuu's Stronghold 28 steps 0 ok, Trail Blazer 18 / 6 (197 s), Revenge of Syssba 4 / 0 (62 s), Katwalk 6 / 2,
+  The Glitch 5 / 1, Pretty How Town 8 / 2, The Ten Commandments 7 / 2, Spring Rose 4 / 0, Tutorial 2 11 / 4.
+  WHERE COLD WORLD STOPS (900 s, box 7, n5-plan 8a5d9a6, W3, one run an arm): the defaults: 0 triggers (185 steps on the
+  trophy room's targets: the est walk's gravity-free rise to the pool portal (224,138)); + `EEAT_PHYS_EST=1
+  EEAT_CUT_PROG=1` (the cold doctor's opt-ins): 4 triggers, 9 anchors = CHAPTER 1 DONE (purple switch 1 (182,218) by a
+  40-s rung-3 leg at 64 s, teams 3 / 2 / 1, the coin (182,226), tick 4,256), the chapter-2 blue coin (98,207) leg (the
+  chain's first unlock: the hub's blue door #1) from the spawn failed at rungs 0-1 (closest 57 tiles) and in the stretch
+  child (149 s from the spawn, 'budget'); from chapter 1's end the planner's plans are 'team 2 -> trophy' (est 240: the walk
+  goes back through a portal to the chapter-1 start and up to the pool portal (224,138), which needs the 33333 launch) and
+  the death step; the blue coin (98,207) plan is its 4th (cost 852) and never ran. RCH3 agrees with the walk there
+  (`EEAT_PHYS_PRICE=1` leaves 'team 2 -> trophy' at 240): its forward model's up-arrow bounce pump (reach.js bounceC gains
+  every bounce) is the relaxation to make sound next. The chapter-1 leg (3,700 ticks from the spawn) is load-sensitive: on
+  box 7 at load ~170 the same config had 0 triggers at 470 s.
