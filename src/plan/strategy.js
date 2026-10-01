@@ -125,6 +125,15 @@ const TIMER_PICK = process.env.EEAT_PLAN_TIMER === '1';
 // ~1,600-tick estimate) counts nothing.
 const CRUMB_RANK = process.env.EEAT_CRUMB_RANK === '1' ? 1 : process.env.EEAT_CRUMB_RANK === '2' ? 2 : process.env.EEAT_CRUMB_RANK === '3' ? 3 : 0;
 const CR_F_SLACK = +process.env.EEAT_CR_F_SLACK || 0.1, CR_F_ABS = +process.env.EEAT_CR_F_ABS || 60;
+// THE REFINEMENT PICK (P4, OPT-IN EEAT_REFINE_PICK, unset / 0 = the pick as before byte for byte): the most-progress-first
+// pick is a depth-first search for a FIRST route; once a route is known only an anchor whose f (its arrival tick + its
+// plan's cost, the score below) is under the route's can give a faster one, and gain-first keeps the workers on the
+// deepest anchors (the route's own neighbours) while a low-f anchor waits forever: Tutorial 2 (S99 full compile) the
+// stretch solver's checkpoint (245,28) at tick 1,730 (the known route's 1,628) was never picked (0 steps in 300 s: every
+// later crumb anchor had more gain) and the route went through a blue coin, its checkpoint at 4,099; b2's die anchor at
+// 2,421 tried 6 times in 10 s, then never. =f: after the first route the pick is the score first (f = arrival + plan cost
+// + FAIL_TICKS x fails - the UCB term), the gain only its tie-break; =mix: every other pick so (the rest as before)
+const REFINE_PICK = process.env.EEAT_REFINE_PICK === 'f' || process.env.EEAT_REFINE_PICK === '1' ? 'f' : process.env.EEAT_REFINE_PICK === 'mix' ? 'mix' : '';
 // THE FAR TROPHY (C6 push 3 lane 2 block 2, RATE; OPT-IN EEAT_FAR_TROPHY=<est ticks>, unset / 0: off, the compile byte for
 // byte as before): a plan whose first step is the trophy and whose est walk to it is longer than that runs at most at rung
 // EEAT_FAR_TROPHY_RUNG (1: a 5-s window) whatever rung its facts reached; its failures still climb the facts' ladder (the
@@ -1213,7 +1222,10 @@ async function compile(L, opts = {}, emit = () => {}) {
 		// anchor with no plan in its timed killer's time and no remover in time (a LATE anchor) after the others, whatever its gain)
 		const lateOf = (A) => (TIMER_PICK && A.plans && A.plans.late ? 1 : 0);
 		if (CRUMB_RANK === 3) crumbGate(live);
-		const list = live.filter((A) => !A.exhausted).sort((a, b) => (lateOf(a) - lateOf(b)) || (pickGain(b) - pickGain(a)) || (scoreOf(a, N) - scoreOf(b, N)));
+		// (THE REFINEMENT PICK, EEAT_REFINE_PICK: once a route is known, the score (f) first)
+		const fFirst = !!REFINE_PICK && !!best && (REFINE_PICK === 'f' || (picksN & 1) === 1);
+		const list = fFirst ? live.filter((A) => !A.exhausted).sort((a, b) => (lateOf(a) - lateOf(b)) || (scoreOf(a, N) - scoreOf(b, N)) || (pickGain(b) - pickGain(a)))
+			: live.filter((A) => !A.exhausted).sort((a, b) => (lateOf(a) - lateOf(b)) || (pickGain(b) - pickGain(a)) || (scoreOf(a, N) - scoreOf(b, N)));
 		for (const A of list) {
 			if (left() < 200 || stopped) return null;
 			const { plans, why } = planOfAnchor(A);
