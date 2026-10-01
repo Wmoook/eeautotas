@@ -26,8 +26,12 @@ for (const f of fs.readdirSync(dir).filter((f) => f.endsWith('.log')).sort()) {
 	for (const e of z) whys[e.why] = (whys[e.why] || 0) + 1;
 	const id = f.replace(/\.log$/, '');
 	const ix = idx.get(id) || {};
+	// (EEAT_EXEC_PROF=1 runs: the workers' goal-field builds (reach.js reachField: ms, count), bounds fields, late answers)
+	const pr = ev.filter((e) => e.ev === 'exec.prof');
+	const prof = pr.length ? { calls: pr.length, run: Math.round(sum(pr, 'run') / 100) / 10, rf: Math.round(sum(pr, 'rf') / 100) / 10, rfN: sum(pr, 'rfN'), bf: Math.round(sum(pr, 'bf') / 100) / 10,
+		bfN: sum(pr, 'bfN'), late: pr.filter((e) => e.late).length } : null;
 	const r = { id, t: last.t, ok: rep.ok, runTicks: rep.runTicks, reach: re.length, sims0: z.length, ms0: Math.round(sum(z, 'ms') / 100) / 10, msAll: Math.round(sum(re, 'ms') / 100) / 10,
-		steps: steps.length, okSteps: ok, triggers: lastP.triggers, anchors: lastP.anchors, firstTrigT: firstTrig, whys0: whys, stages, peakRssMB: ix.peakRssMB };
+		steps: steps.length, okSteps: ok, triggers: lastP.triggers, anchors: lastP.anchors, firstTrigT: firstTrig, whys0: whys, stages, peakRssMB: ix.peakRssMB, prof };
 	if (asJson) console.log(JSON.stringify(r));
-	else console.log(`${id} t ${r.t} ok ${r.ok} reach ${r.reach} sims0 ${r.sims0} (${r.ms0} s of ${r.msAll} s) steps ${r.steps} ok ${r.okSteps} triggers ${r.triggers} (first at ${r.firstTrigT}) anchors ${r.anchors} rss ${r.peakRssMB} ${JSON.stringify(whys)} | ${Object.entries(stages).map(([k, v]) => `${k} ${v}`).join(', ')}`);
+	else console.log(`${id} t ${r.t} ok ${r.ok} reach ${r.reach} sims0 ${r.sims0} (${r.ms0} s of ${r.msAll} s) steps ${r.steps} ok ${r.okSteps} triggers ${r.triggers} (first at ${r.firstTrigT}) anchors ${r.anchors} rss ${r.peakRssMB} ${JSON.stringify(whys)} | ${Object.entries(stages).map(([k, v]) => `${k} ${v}`).join(', ')}${prof ? ` | fields ${prof.rf} s / ${prof.rfN} builds of ${prof.run} worker-s, bounds ${prof.bf} s / ${prof.bfN}, late ${prof.late} of ${prof.calls}` : ''}`);
 }
