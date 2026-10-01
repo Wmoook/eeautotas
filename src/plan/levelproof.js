@@ -42,8 +42,9 @@ function loadLevel(spec) {
 	throw new Error('levelproof: no level');
 }
 
-/** the per-level search context: the bound and the engine */
-function contextOf(L) {
+/** the per-level search context: the bound and the engine (o.field: also the order-aware route bound's lattice field,
+ *  src/math/routelb.js, at the state's own abstract state: walls, gates, local speed caps, portals, deaths) */
+function contextOf(L, o = {}) {
 	const egB = EG.boundContext(L);
 	const SB = B.staticOf(L);
 	const canDie = !!SB.deaths || (() => { try { return require('../goexplore.js').deathsOf(L) !== null; } catch (e) { return true; } })();
@@ -58,6 +59,9 @@ function contextOf(L) {
 		}
 		if (!Number.isFinite(hResp)) hResp = 0;
 	}
+	// the field part: per abstract state key the order-aware cost-to-go field over the 8-px lattice (routelb.togo)
+	const RL = o.field ? require('../math/routelb.js').createRouteLB(L, {}) : null;
+	const togo = RL ? RL.togoFor : null;
 	/** h(sim, lim): the admissible ticks until has_silver_crown (> lim: only that it is above lim) */
 	function h(sim, lim) {
 		if (sim.has_silver_crown) return 0;
@@ -67,6 +71,10 @@ function contextOf(L) {
 		}
 		let v = EG.lowerBound(egB, sim, lim) + 1;
 		if (canDie && v > DEATH_MIN + 1 + hResp) v = DEATH_MIN + 1 + hResp;
+		if (togo !== null && v <= lim) {
+			const f = togo(sim);
+			if (f > v) v = f;
+		}
 		return v;
 	}
 	return { egB, canDie, h, hResp };
@@ -166,7 +174,7 @@ function makeSearcher(L, ctx, ttBits) {
 // ---------------------------------------------------------------- the worker
 if (!isMainThread && workerData && workerData.levelproof) {
 	const L = loadLevel(workerData.spec);
-	const ctx = contextOf(L);
+	const ctx = contextOf(L, { field: !!workerData.field });
 	const { sources } = sourcesOf(L, workerData.maxIdle);
 	const S = makeSearcher(L, ctx, workerData.ttBits);
 	S.setC(workerData.C);
@@ -191,7 +199,7 @@ if (!isMainThread && workerData && workerData.levelproof) {
 async function proveLevel(spec, o = {}) {
 	const t0 = Date.now();
 	const L = loadLevel(spec);
-	const ctx = contextOf(L);
+	const ctx = contextOf(L, { field: !!o.field });
 	const maxIdle = o.maxIdle || 3000;
 	const src = sourcesOf(L, maxIdle);
 	if (src.rests < 0) return { status: 'unsupported', why: src.why, ms: Date.now() - t0 };
@@ -271,7 +279,7 @@ async function proveLevel(spec, o = {}) {
 			w.postMessage({ type: 'task', id: next - 1, src: t.src, prefix: t.prefix, deadline });
 		};
 		for (let i = 0; i < threads; i++) {
-			const w = new Worker(__filename, { workerData: { levelproof: true, spec, C, ttBits, maxIdle } });
+			const w = new Worker(__filename, { workerData: { levelproof: true, spec, C, ttBits, maxIdle, field: !!o.field } });
 			wk.push(w);
 			w.on('message', (m) => {
 				if (m.type === 'ready') { give(w); give(w); live = Math.max(0, live); return; }
