@@ -615,6 +615,34 @@ ways in.
   run replicated beside that compile A/B (its finds 1.8x slower) gave 94.2% (the 480+ bucket 66.7 vs 76.8%). Not a default:
   the compile count is a tie. `node test/portfolio.js` (20: the run-up room, each arm replayed, the session's long piece,
   class targets, the executor's tier).
+  executor stalls or has nothing left (THE GATE). Measured (box 6): with the arrivals given at once it HURT (slower routes on 10 of 15 levels, 2 levels lost); with the gate (300 s, 40 levels) 25 = 25 compiled (lost INFINITE and TPs The Horror, late base routes; gained Endless Space and K Underground), the first route 18% sooner (geo-mean), run ticks 0.7% fewer, one thread and ~1.7 GB more a compile: OPT-IN (it does not yet lose nothing).
+- **THE GATED LEVELS: the level as a chain of backward legs** (n5-s99-gated, 2026-09-30; `src/plan/lab/bwchain.js`,
+  `bwchain_child.js`; OPT-IN `EEAT_BW_CHAIN=1`, off = the compile byte for byte; `test/bwchain.js` 9/0). 77 of the 206
+  levels the 300-s compile of main failed have the trophy behind doors a trigger opens (the lab's whole-level stage
+  `EEAT_BW_LEVEL=1` ends there at once: 'the start is not in the target's walk'). WHERE THEY BREAK (19 of them have a known
+  route; `tools/cmp/routechain.js`: a route's trigger legs by the backward solver from the ROUTE's own state and from the
+  CHAIN's own carried state; `tools/cmp/krtall.js` the executor on the same legs): the known routes' trigger legs are long
+  (2-30 legs >= 240 ticks a route, the longest 504-5,704), and from the right state both solvers take most of them: on
+  160 matched legs the executor (rungs 1-3) 85.6%, the backward solver (6 + 40 s in one piece) 82.5%, from the chain's
+  OWN carried state (its speed and sub-pixel as its last leg left them) 83.1%, the union 88.1% (legs >= 240 ticks 72.6 /
+  69.0 / 77.4%); over all 249 legs of 14 routes the backward solver 86% from the route's state and 85.5% from the chain's:
+  the carried state is NOT the break. THE ORDER is: along the planner's first step the first chain (v1) broke at depth
+  0-7 on legs from states the known route never passes. `chainLevel(L, o)`: a BEST-FIRST SEARCH OVER TRIGGER ORDERS with
+  the backward solver as its edge oracle: a node = an exact chain state (the model's gain its priority, at most 2 nodes an
+  abstract state), its candidates = the planner's plans' first steps and its nearest relevant edges (then the model's
+  other triggers once every try is spent: EXTEND), each (node, candidate) tried at a 1.5-s probe then one 40-s leg, the
+  next try the least cost = the clock x the candidate's weight (the planner's first step 0.1: its 40-s leg before most
+  probes) x the node's gain gap (x3) and place; knobs `EEAT_BWC_*`. ALONE (20 gated levels, 300 s, box 5, from the level
+  alone, every route C.evaluate'd): v4 4 FINISH: Tutorial 3 4,570, Late christmas 6,244 (best known 7,487), Frostbitten
+  7,573 (8,417), Vignettes 8,285 (10,056) (v1: Frostbitten 6,646); CHAOTIC under load: its legs take 20-40 s of one piece,
+  and at load 190 of 384 the same code reached Vignettes' gain 3 (a 24-s leg took over 40 s). IN THE COMPILE
+  (strategy.js `wholeLevel`: the child next to the moves, one thread, to the budget's end; its route a route (routeOf);
+  its frontier nodes (`EEAT_BWC_IMPORT`: 1 the frontier, 2 every node, 0 none) imported as anchors, held by THE GATE as
+  the one shot's (`EEAT_BWC_GATE=0`: at once) until the watchdog's stall or the loop's end): the 20 gated levels at 300 s,
+  W3: the base (n5-plan 2f7522f, knob off) already compiles 7 (Tutorial 3, Buuwuu, Animaly, Christmas Town, Summer Bee,
+  Frostbitten, Vignettes; main's f300: 0 of them); the v4 chain with every node imported at once 7 (+First Person Maze
+  1,179, -Vignettes), its first routes later on 6 of 6 both-compiled (Christmas Town 278 vs 106 s: the imports took the
+  executor's picks, as the one shot's arrivals did); THE SIDE-BY-SIDE A/B (box 5, one tree, 8 of them, 300 s, W3, one run an arm; every .eetas read back): compiled base 7 / frontier imports at once 7 / THE GATE 6 (Christmas Town lost once: the base's route at 142 s, neither the executor nor the chain that run; First Person Maze none of the three); THE CHAIN'S OWN ROUTES on 4 of 8 in both chain arms, far faster: Late christmas 5,086 / 6,137 vs the base's 8,851 (at 297.6 s; box 6's base run none; best known 7,487), Frostbitten 7,655 / 6,242 vs 8,212 (8,417), Vignettes 8,156 / 8,005 vs 11,303 (10,056), Christmas Town 4,210 (at once) vs 4,504 (6,340); on the 6 levels compiled by the base and the gate 41,703 -> 34,783 run ticks (-16.6%; at once 37,227); the imports at once slowed the executor's own routes (Tutorial 3 4,406 vs 2,197, Animaly 5,970 vs 5,022; with the gate 2,410 / 5,115). OPT-IN, NOT a default: the compile count is a tie within one run's spread (Christmas Town, Late christmas and Vignettes flip between runs of one code), and the chain's legs need 20-40 s of one piece on a loaded box. NEXT: its legs through the portfolio stretch solver (n5-s99-portfolio) and the compile's stuck anchors as chain roots (`o.starts`), more runs an arm.
 - **Checks**: unit tests `test/plantypes.js`, `planmodel.js`, `planplanner.js`, `planbounds.js`, `planprims.js`,
   `planexec.js --only=unit,fail`, `planstrategy.js`, `plancompile.js` (the CLI and the Compile API with the mock parts
   `test/planmock.js`), `plantruth.js`, `msolve.js --quick`, `kin.js --quick`, `mathsep.js`. The truth checkers on the known routes
