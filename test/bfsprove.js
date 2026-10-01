@@ -80,6 +80,16 @@ for (const [name, rows] of Object.entries(ROOMS)) {
 	check('seen table: the same key is seen', ins(k1) === false);
 	check('seen table: the same low word, another high word: new', ins(k2) === true && ins(k2) === false);
 	check('seen table: a low word 0 is stored', ins(k3) === true && ins(k3) === false);
+	// THE SHARDS: 4 tables, 20,000 keys inserted twice: each new once, then seen; two inserters on the same shards agree
+	const sh = [0, 1, 2, 3].map(() => new SharedArrayBuffer(8 * 16384));
+	const insA = BP.seenTable(sh), insB = BP.seenTable(sh);
+	let okNew = 0, okSeen = 0;
+	const keys = Array.from({ length: 20000 }, (_, i) => (i * 2654435761 + 977) * 4099 % 9007199254740881);
+	for (const k of keys) if (insA(k) === true) okNew++;
+	for (const k of keys) if (insB(k) === false) okSeen++;
+	const used = sh.map((b) => { const K = new Int32Array(b); let n = 0; for (let i = 0; i < K.length; i += 2) if (K[i] !== 0) n++; return n; });
+	check('seen table, 4 shards: 20,000 keys new once, then seen through another inserter', okNew === 20000 && okSeen === 20000, `${okNew} / ${okSeen}`);
+	check('seen table, 4 shards: every shard used', used.every((n) => n > 3000) && used.reduce((a, b) => a + b, 0) === 20000, used.join(','));
 }
 // the packed front: every field read back exactly (-0, NaN, booleans, null, undefined, references), whatever the base
 {

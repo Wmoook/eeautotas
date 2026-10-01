@@ -15,7 +15,7 @@
 // closed C is wrong only if a collision merged away EVERY shortest route's states (each of its ~C states against the n seen:
 // ~C n / 2^53, 1e-6 at n = 1e8).
 //   node tools/perfect/bfsprove.js <level.eelvl> --C=<layer bound> [--route=<a.eetas>,..] [--U=] [--threads=16]
-//        [--seconds=1800] [--ttBits=28] [--tiers=kin,rel,gate] [--out=<faster.eetas>] [--check=1] [--initPer=64]
+//        [--seconds=1800] [--ttBits=28 (past 30: 2^(ttBits-30) shards of 2^30 slots)] [--tiers=kin,rel,gate] [--out=<faster.eetas>] [--check=1] [--initPer=64]
 //        [--maxGB=12 (the process's RSS: past it the run stops, 'memory')] [--heapMB=4096 (a worker's old space)]
 //        [--rebalance=1.5 (re-root the fronts when the largest is past this factor of the mean; 0 off)]
 // Prints JSON lines: {ev 'check'} {ev 'start'} {ev 'layer', d, states, cut, merged, seen, minW, maxW, s, rssGB} {ev 'result',
@@ -32,13 +32,19 @@ const WPAR = require('./wholepar.js');
 // a slot = 2 int32: the hash's low word (0 = empty; a low word 0 is stored as 1) and its high word + 1 (0 = being written:
 // a reader that meets a matching low word with the high word not yet stored waits for it). A full probe run = no merge
 // (the state is kept: never unsound, at most searched twice).
+// THE SHARDS (last hour, 2026-10-01): --ttBits past 30 (a slot index past int32, a typed array past 2^31 int32s) = 2^(ttBits
+// - 30) tables of 2^30 slots (8.6 GB each), the shard picked by a mix of the hash's low word: one hash = one shard = the same
+// probe run, so the dedup is the one table's (an array of SharedArrayBuffers; one buffer = the old table byte for byte).
 const PROBE = 512;
-function seenTable(sab) {
-	const K = new Int32Array(sab), mask = (K.length >>> 1) - 1;
+function seenTable(sabs) {
+	const Ks = (Array.isArray(sabs) ? sabs : [sabs]).map((b) => new Int32Array(b));
+	const sm = Ks.length - 1, mask = (Ks[0].length >>> 1) - 1;
+	if (Ks.length & sm) throw new Error('seenTable: the shard count must be a power of 2');
 	return function insert(hs) {   // true = new (claimed now), false = seen before, null = the probe run is full
 		let lo = (hs % 4294967296) | 0;
 		const hv = (Math.floor(hs / 4294967296) | 0) + 1;
 		if (lo === 0) lo = 1;
+		const K = sm === 0 ? Ks[0] : Ks[(Math.imul(lo, 0x85ebca6b) >>> 13) & sm];
 		let i = ((lo >>> 0) ^ (hv * 0x9e3779b1)) & mask;
 		for (let p = 0; p < PROBE; p++) {
 			const b = i << 1;
@@ -259,9 +265,9 @@ async function main() {
 	if (+args.U > 0 && +args.U < U) { U = +args.U; best = 'given U'; }
 	const C = args.C !== undefined ? +args.C : U;
 	if (!Number.isFinite(C) || C < 1) { console.error('bfsprove: --C (or a route / --U) is needed'); process.exit(2); }
-	const threads = Math.max(1, +args.threads || 16), ttBits = Math.min(30, +args.ttBits || 28);
+	const threads = Math.max(1, +args.threads || 16), ttBits = Math.min(34, +args.ttBits || 28);
 	const deadline = t0 + 1000 * (+args.seconds || 1800);
-	const sab = new SharedArrayBuffer(8 * (2 ** ttBits));
+	const sab = Array.from({ length: 2 ** Math.max(0, ttBits - 30) }, () => new SharedArrayBuffer(8 * (2 ** Math.min(30, ttBits))));
 	const insert = seenTable(sab);
 	const sim = new E.EESim(L), inp = new E.EEInput();
 	let h0 = Infinity;
