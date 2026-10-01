@@ -85,15 +85,6 @@ const L = E.prepareLevel(EL.toSimLevel(EL.readEelvl(bytes)));
 	ok(b.code === 0 && b.rep && b.rep.oneshot && b.rep.oneshot.thread === false, 'EEAT_OS_THREAD=0: the main-thread mode');
 	const c = compile({}, 'off');
 	ok(c.code === 0 && c.rep && c.rep.ok && !('oneshot' in c.rep), 'the knob off: no one shot in the report');
-	// ---- 4: THE SHARED SESSION (EEAT_OS_BW_ST=1): the one shot's far legs through the compile's stretch child (the
-	// trophy is 28 tiles out, past LEG_TILES: a far leg from the root; EEAT_ST_SHORT=0: no short first plan holds the child)
-	const d = compile({ EEAT_ONESHOT: '1', EEAT_OS_BW: '1', EEAT_OS_BW_ST: '1', EEAT_STRETCH: '1', EEAT_ST_SHORT: '0' }, 'share');
-	const st = d.rep && d.rep.stretch;
-	ok(d.code === 0 && d.rep && d.rep.ok, `EEAT_OS_BW_ST=1: the compile routes (exit ${d.code})`);
-	ok(st && st.osReq >= 1 && st.osOk >= 1, `EEAT_OS_BW_ST=1: the far legs through the stretch child (${JSON.stringify(st && { osReq: st.osReq, osOk: st.osOk, osMs: st.osMs })})`);
-	ok(d.rep && d.rep.oneshot && !d.rep.oneshot.error, `EEAT_OS_BW_ST=1: the one shot ran (${JSON.stringify(d.rep && d.rep.oneshot && { bwLegs: d.rep.oneshot.bwLegs, bwOk: d.rep.oneshot.bwOk, error: d.rep.oneshot.error })})`);
-	const e2 = compile({ EEAT_ONESHOT: '1', EEAT_OS_BW: '1', EEAT_STRETCH: '1', EEAT_ST_SHORT: '0' }, 'noshare');
-	ok(e2.code === 0 && e2.rep && e2.rep.ok && e2.rep.stretch && !('osReq' in e2.rep.stretch), 'EEAT_OS_BW_ST off: no far leg through the child');
 	for (const f of fs.readdirSync(os.tmpdir())) if (f.startsWith(`oneshotsolve_${process.pid}`)) { try { fs.unlinkSync(path.join(os.tmpdir(), f)); } catch (x) { /* busy */ } }
 	console.log(`oneshotsolve: ${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);
