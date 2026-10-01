@@ -1356,6 +1356,33 @@ ways in.
   alone 5 / 5 this cycle (cycle 3's K 13, and the long run's 10 at 900 s): within the same code's spread, NO GAIN SHOWN by
   the funnel itself; not merged (no shared gate). Seen: the special mini 41's blue coin (75,254) took 561-700 worker-s in 3
   of 6 runs (closest (81,255) 6.4 tiles; the plans "switch 41 > blue coin > purple reset 41 > switch 41").
+- **Bad EE Level 9, cycle 5: 19 chain ids at 1,800 s, and THE LEADER'S LINEAGE** (B7 lane b9, 2026-10-01, branch
+  n5-b7-b9 = cycle 4 + origin/n5-plan 9bcf651 (CLAUDE.md only: the compiler is cycle 4's); strategy.js, OPT-IN
+  `EEAT_PLAN_DOM=1`, off = the anchor pick byte for byte; test/planstrategy.js 27/0 with it + the deep / place / jitter
+  knobs and with every knob off). THE RUNS (box 7, W3, load 150-170 beside the scoreboard's full compile, one run an arm,
+  side by side; chain ids of 54 held by one anchor; K = `EEAT_RUNG_DEEP=135000 EEAT_RUNG_PLACE=1 EEAT_START_JITTER=1`):
+  the current compiler (knobs off) at 900 s 6 (1-4, 41, 101; THE STOP purple switch 5 (227,264), mini 5's ladder maze: 73
+  steps, 0 found, 1,055 worker-s, closest (255,258) 37 tiles); K at 900 s 10 / 5 / 13 (c17K / c18K / c19K: waves 1-2, wave 3
+  entered at 752-871 s; c18K stopped at switch 5 again, 3 of 44); **K at 1,800 s (c17L) 19: 1-17, 19, 20, the best b9 run so
+  far** (wave 3's 11-15 by 1,414 s, wave 4's 16 / 17 / 19 / 20 by 1,800 s; THE STOP purple switch 18 (78,113), closest
+  (97,116) 21.8 tiles at rung 3, and switch 16 (126,191) from another lineage; the specials 41 / 42 / 202 / 303 never).
+  THE WASTE MEASURED (`tools/cmp/chainwaste.js`: a purple switch step judged at its start against the most chain ids any
+  anchor held then): cycle 4's 1,800-s c15L spent 1,671 worker-s (51 steps, 10 re-finds) and 470 s of the stretch child on
+  switches the leader already held (switch 12 found six times while the leader held 1-14; the leader's next switch 15
+  got 16 steps / 145 worker-s and never its 135-s rung); the 900-s runs 22-570 s. THE KNOB: before the first route an
+  anchor B is DOMINATED when another open anchor of higher gain holds every feature value B changed from the start (the
+  deaths count aside) and every coin B took; B's steps at rung `EEAT_DOM_RUNG` (2) or above wait while another job runs
+  (none in flight: they run as before, so no worker waits and no deepening comes of it) and the stretch child takes none
+  of B's stretches; the progress event's `dom` {n, skips, st}. MEASURED (the same box and rounds): K + DOM at 900 s 12 / 9
+  (c18D / c19D; c17DL 10 at 900 s) vs K 10 / 5 / 13; at 1,800 s 14 (c17DL: 1-13, 15) vs K's 19; the current compiler + DOM
+  9 (c19AD) vs 6: within the same code's spread (K alone 5-13 at 900 s this cycle), NO GAIN SHOWN, not merged. 77 of 89
+  anchors were dominated at c17DL's end, its executor skips 39: a dominated lineage's dear rungs were rare by then.
+  SEEN (the next wall): EVERY plan on this level is partial ('budget: the most gain': 100% of 178-505 plans a run), and
+  the stalled runs' leaders plan only an old mini's entrance checkpoint: c17DL from 1,513 s, its leader (1-13, 15) planned
+  'checkpoint (33,78)' / '(124,160)' / '(262,246)' (relaxation-only costs 1,000,556-1,000,903) and never its last wave-3
+  switch 14 (two components: (177,285) and (190,293) behind the special 303), 145 of its 505 plans a lone checkpoint (c17K
+  122 / 294) vs 34 / 427 in the 19-id c17L: the planner's budget cuts the 54-switch search and its partial pick takes a
+  checkpoint (a new cp makes a new anchor of the same switches, so the leader churns through hub legs).
 - **THE ENDGAME and THE AIRBORNE ARRIVAL** (C6 push 3 lane 5 block 3; `src/out/n5/lanes/c6_lane5_b3.md`). THE ENDGAME
   (strategy.js after JOINS, its own clock; OPT-IN `--endgame=<s>` / `EEAT_ENDGAME_S`, unset / 0 = the compile byte for byte;
   `EEAT_ENDGAME_K` the ladder's largest K, 64; `report.endgame`): the optimizer's exact endgame ladder (`src/endgame.js`
