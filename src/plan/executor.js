@@ -2432,6 +2432,121 @@ async function createExecutor(L, opts) {
 		S.runupMs = (S.runupMs || 0) + (Date.now() - tIn);
 		return null;
 	}
+	// ---- THE STRUCTURE RELAYS (C6 push 3 lane 4 block 4; OPT-IN EEAT_STRUCT=1, off = the executor byte for byte): the
+	// ONE-LEG levels (one plan step spanning the level: Infinity Pain's 'team 1' from 417 tiles, Endless Pain's 'team 5' from
+	// 704) stall at the skeleton's FIRST sub-level sets (405 / 411, 692: 451 ms - 4.1 s each, both tries 'budget'): the
+	// field's descent from the arrival is a false near the physics cannot follow, and the run-up relay sees only horizontal
+	// runs. From the level's structure, the places a way bends at: a RUN's ends (8+ tiles of floor or dots), a LEDGE's edge
+	// (a floor tile beside an open tile with no floor: the drop), a SHAFT's bottom (a floor under 4 open tiles walled both
+	// sides), a FIELD's entry (an arrow / dot tile beside a plain open tile); those within STRUCT_RAD tiles of the stuck
+	// arrival, outside the stuck sub-level set and at most STRUCT_UP tiles above the arrival's level by the sub-leg's own
+	// field (an energy detour goes up the field), 3+ tiles from it; round-robin over the four classes, the farthest first,
+	// STRUCT_K of them 6+ tiles apart: a relay leg to the place (its tile and open neighbours), then the stuck sub-level set
+	// from the relay's arrivals. Waypoints only: every leg is the finders' from real arrivals, replayed as before; no claim.
+	const STRUCT_ON = process.env.EEAT_STRUCT === '1';
+	const STRUCT_RAD = +process.env.EEAT_STRUCT_RAD > 0 ? +process.env.EEAT_STRUCT_RAD : 24;
+	const STRUCT_UP = /^\d+(\.\d+)?$/.test(process.env.EEAT_STRUCT_UP || '') ? +process.env.EEAT_STRUCT_UP : 48;
+	const STRUCT_K = +process.env.EEAT_STRUCT_K > 0 ? +process.env.EEAT_STRUCT_K | 0 : 4;
+	const STRUCT_SHARE = +process.env.EEAT_STRUCT_SHARE > 0 ? Math.min(0.95, +process.env.EEAT_STRUCT_SHARE) : 0.6;
+	let featsMemo = null;
+	function featsOf() {
+		if (featsMemo) return featsMemo;
+		const Wl = L.width, Hl = L.height, fl = L.flags, fg = L.fg, out = [];
+		const GRV = new Set([1, 2, 3, 4, 411, 412, 413, 414, 1518, 1519]);
+		const fO = (x, y) => (x < 0 || y < 0 || x >= Wl || y >= Hl) ? 1 : (fl[fg[y * Wl + x]] | 0);
+		const open = (x, y) => x >= 0 && y >= 0 && x < Wl && y < Hl && (fO(x, y) & (1 | 16)) === 0;
+		const solid = (x, y) => (fO(x, y) & 1) !== 0;
+		const stand = (x, y) => {
+			if (!open(x, y)) return false;
+			const id = fg[y * Wl + x];
+			if (id === 4 || id === 414) return true;
+			return (fO(x, y + 1) & (1 | 2 | 4 | 8)) !== 0;
+		};
+		for (let y = 0; y < Hl; y++) {
+			let x0 = -1;
+			for (let x = 0; x <= Wl; x++) {
+				const s = x < Wl && stand(x, y);
+				if (s && x0 < 0) x0 = x;
+				if (!s && x0 >= 0) {
+					if (x - x0 >= 8) { out.push({ t: y * Wl + x0, x: x0, y, cl: 0 }); out.push({ t: y * Wl + x - 1, x: x - 1, y, cl: 0 }); }
+					x0 = -1;
+				}
+			}
+		}
+		for (let y = 0; y < Hl; y++) for (let x = 0; x < Wl; x++) {
+			const t = y * Wl + x, id = fg[t];
+			if (GRV.has(id)) {
+				if ([[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dy]) => open(x + dx, y + dy) && !GRV.has(fg[(y + dy) * Wl + x + dx]))) out.push({ t, x, y, cl: 3 });
+				continue;
+			}
+			if (!stand(x, y)) continue;
+			if ((open(x - 1, y) && !stand(x - 1, y)) || (open(x + 1, y) && !stand(x + 1, y))) out.push({ t, x, y, cl: 1 });
+			let walled = 0, up = true;
+			for (let k = 1; k <= 4; k++) { if (!open(x, y - k)) { up = false; break; } if (solid(x - 1, y - k) && solid(x + 1, y - k)) walled++; }
+			if (up && walled >= 3) out.push({ t, x, y, cl: 2 });
+		}
+		featsMemo = out;
+		return out;
+	}
+	/** the stuck sub-level set `sub` again through a structure relay: the arrivals' mask strings, or null */
+	async function structRelay(cur, sub, fr, cCur, lim, budget, deadline) {
+		let e;
+		try { e = core.startOf(String(cur[0])); } catch (x) { return null; }
+		if (!e || e.dead || !fr || !fr.f) return null;
+		vsim.restore(e.snap);
+		const Wl = L.width, Hl = L.height, at = T.tileOf(vsim, Wl, Hl), ax = at % Wl, ay = (at / Wl) | 0;
+		const m = tileMin(fr.f), CUT = RF.CUT, hi = Math.round((cCur + STRUCT_UP) * 5), byCl = [[], [], [], []];
+		for (const F of featsOf()) {
+			const dx = Math.abs(F.x - ax), dy = Math.abs(F.y - ay);
+			if (dx > STRUCT_RAD || dy > STRUCT_RAD || Math.max(dx, dy) < 3) continue;
+			const v = m[F.t];
+			if (!(v < CUT) || v <= lim || v > hi) continue;
+			byCl[F.cl].push({ t: F.t, x: F.x, y: F.y, cl: F.cl, d: dx * dx + dy * dy });
+		}
+		for (const a of byCl) a.sort((p, q) => q.d - p.d);
+		const use = [], idx = [0, 0, 0, 0];
+		for (let more = true; more && use.length < STRUCT_K;) {
+			more = false;
+			for (let c = 0; c < 4 && use.length < STRUCT_K; c++) {
+				const a = byCl[c];
+				while (idx[c] < a.length) {
+					const F = a[idx[c]++];
+					if (use.some((u) => Math.max(Math.abs(u.x - F.x), Math.abs(u.y - F.y)) < 6)) continue;
+					use.push(F); more = true; break;
+				}
+				if (idx[c] < a.length) more = true;
+			}
+		}
+		if (!use.length) { S.structNone = (S.structNone || 0) + 1; return null; }
+		const tIn = Date.now(), total = STRUCT_SHARE * (deadline - tIn), CLS = ['run', 'ledge', 'shaft', 'entry'];
+		for (let i = 0; i < use.length; i++) {
+			const cd = use[i], now = Date.now(), share = Math.min(deadline - now - 50, total / use.length);
+			if (!(share >= 400)) break;
+			S.structs = (S.structs || 0) + 1;
+			const tiles = [cd.t];
+			for (const [dx, dy] of [[1, 0], [-1, 0], [0, -1]]) {
+				const x = cd.x + dx, y = cd.y + dy;
+				if (x >= 0 && y >= 0 && x < Wl && y < Hl && ((L.flags[L.fg[y * Wl + x]] | 0) & (1 | 16)) === 0) tiles.push(y * Wl + x);
+			}
+			const wp1 = { kind: 'region', tiles, expect: null, allowDeath: !!sub.allowDeath, label: `${sub.label || 'sub'} (${CLS[cd.cl]} ${cd.x},${cd.y})` };
+			const s1 = 0.4 * share;
+			const r1 = await reachLeg(cur, wp1, { ms: s1, level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline: Math.min(deadline, Date.now() + s1), stop: budget.stop }, true);
+			let ok2 = false, r2 = null;
+			if (r1.ok) {
+				const c1 = r1.arrivals.map((a) => T.strOf(a.masks));
+				const s2 = Math.min(deadline - Date.now() - 50, share - (Date.now() - now));
+				if (s2 >= 200) {
+					r2 = await reachLeg(c1, sub, { ms: s2, level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline: Math.min(deadline, Date.now() + s2), stop: budget.stop }, true);
+					ok2 = !!r2.ok;
+				}
+			}
+			if (emit) emit({ ev: 'exec.struct', label: sub.label || '', from: [ax, ay], to: [cd.x, cd.y], cl: CLS[cd.cl], ok1: !!r1.ok, ok2, ms: Date.now() - now });
+			if (ok2) { S.structOk = (S.structOk || 0) + 1; S.structMs = (S.structMs || 0) + (Date.now() - tIn); return r2.arrivals.map((a) => T.strOf(a.masks)); }
+			if ((r1.fail && r1.fail.why === 'stopped') || (r2 && r2.fail && r2.fail.why === 'stopped')) break;
+		}
+		S.structMs = (S.structMs || 0) + (Date.now() - tIn);
+		return null;
+	}
 	async function reach(starts, wp, budget) {
 		const r = await reachWp(starts, wp, budget);
 		stuckNote(wp, r);
@@ -2549,7 +2664,7 @@ async function createExecutor(L, opts) {
 		// (the step adapts: a sub-leg found in under a third of its share doubles it (fast motion: fewer legs, fewer goal
 		// fields to build), a failed one halves it for its retry)
 		let lastFail = null, sims = 0, retried = false, stuck = false, step = SKEL_STEP, firstExh = false, backs = 0, okRun = 2;
-		const runupTried = new Set();
+		const runupTried = new Set(), structTried = new Set();
 		while (Date.now() < deadline - 100) {
 			// (new counterexample walls from the last sub-leg: the level where the skeleton stands, on the new field)
 			if (wRefresh()) {
@@ -2620,6 +2735,20 @@ async function createExecutor(L, opts) {
 						levels.push({ c: Math.round(c), ok: true, runup: true });
 						retried = false; okRun = 1; step = SKEL_STEP;
 						cur = ru; cCur = c;
+						if (!skelMemo.has(key)) skelMemo.set(key, []);
+						skelMemo.get(key).push({ c: cCur, cur: cur.slice() });
+						skelBasePush(key, cur);
+						continue;
+					}
+				}
+				// (THE STRUCTURE RELAYS, OPT-IN EEAT_STRUCT=1: the stuck sub-level set through a place the way bends at, once a level)
+				if (STRUCT_ON && !structTried.has(Math.round(cCur)) && Date.now() < deadline - 600) {
+					structTried.add(Math.round(cCur));
+					const sr = await structRelay(cur, sub, fr, cCur, lim, budget, deadline);
+					if (sr && sr.length) {
+						levels.push({ c: Math.round(c), ok: true, struct: true });
+						retried = false; okRun = 1; step = SKEL_STEP;
+						cur = sr; cCur = c;
 						if (!skelMemo.has(key)) skelMemo.set(key, []);
 						skelMemo.get(key).push({ c: cCur, cur: cur.slice() });
 						skelBasePush(key, cur);
