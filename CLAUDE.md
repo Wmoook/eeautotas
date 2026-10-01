@@ -808,6 +808,49 @@ ways in.
   Frostbitten, Vignettes; main's f300: 0 of them); the v4 chain with every node imported at once 7 (+First Person Maze
   1,179, -Vignettes), its first routes later on 6 of 6 both-compiled (Christmas Town 278 vs 106 s: the imports took the
   executor's picks, as the one shot's arrivals did); THE SIDE-BY-SIDE A/B (box 5, one tree, 8 of them, 300 s, W3, one run an arm; every .eetas read back): compiled base 7 / frontier imports at once 7 / THE GATE 6 (Christmas Town lost once: the base's route at 142 s, neither the executor nor the chain that run; First Person Maze none of the three); THE CHAIN'S OWN ROUTES on 4 of 8 in both chain arms, far faster: Late christmas 5,086 / 6,137 vs the base's 8,851 (at 297.6 s; box 6's base run none; best known 7,487), Frostbitten 7,655 / 6,242 vs 8,212 (8,417), Vignettes 8,156 / 8,005 vs 11,303 (10,056), Christmas Town 4,210 (at once) vs 4,504 (6,340); on the 6 levels compiled by the base and the gate 41,703 -> 34,783 run ticks (-16.6%; at once 37,227); the imports at once slowed the executor's own routes (Tutorial 3 4,406 vs 2,197, Animaly 5,970 vs 5,022; with the gate 2,410 / 5,115). OPT-IN, NOT a default: the compile count is a tie within one run's spread (Christmas Town, Late christmas and Vignettes flip between runs of one code), and the chain's legs need 20-40 s of one piece on a loaded box. NEXT: its legs through the portfolio stretch solver (n5-s99-portfolio) and the compile's stuck anchors as chain roots (`o.starts`), more runs an arm.
+- **THE GATED LEVELS' ORDER: the known routes as the planner's test oracle, the nearest-first chain** (P4 gated, 2026-10-01,
+  branch n5-p4-gated; `tools/cmp/orderoracle.js`, `tools/cmp/ordercmp.js`, `src/plan/lab/bwchain.js`, `bwchain_child.js`,
+  strategy.js; `test/bwchain.js` 15/0). THE ORACLE (`orderoracle.js <level> <known route> [--rows]`: at the route's own state
+  after each of its trigger events (by the TOUCHED tile, types.js touchedTile: the centre tile missed 4 of Wine Quest I's
+  10 coins), the route's next trigger in the planner's terms ranked among the planner's choices; the 19 gated levels' known
+  routes, 409 anchors): the plans' first steps (what the compile and the chain try first) hold it first 34.5%, among the
+  first 3 56.7% (level-weighted 45.6 / 71.6%); the planner's own usable edges by est (the nearest first) 57.9 / 82.4%
+  (54.1 / 81.5%); gain first (below) 53.5 / 76.0%. By the plan's kind: a PARTIAL plan ('budget: the most gain', 131
+  anchors: Weird Perfection's coins 1,200-3,000 est ticks away while the route takes the one 60-200 away) 16.0% vs the
+  nearest 64.1%; plan 1 = the trophy (94 anchors: the relaxation's false near on Katwalk, Wine Quest I, Endeavor, First
+  Person Maze, Late christmas) 27.7% vs 51.1%; a trigger 51.1% vs 57.1%. `EEAT_PHYS_EST=1` no better. The level's
+  landmarks (src/landmarks.js) on these levels are coin thresholds and a few switches / keys / teams: the gain covers them
+  (Katwalk and First Person Maze have none: the trophy in the relaxation's round 0). THE CHAIN'S KNOBS (bwchain.js;
+  DEFAULT ON in the compiler's process with `src/plan/defaults.js` GATED_DEFAULTS, each =0 off, `EEAT_GATED_DEFAULTS=0`
+  none; they act only in the chain child, i.e. on a GATED level): `EEAT_BWC_RANK=est` (a node's candidates: its usable
+  edges, those that raise the model's gain first (the trophy too), then the gain-neutral ones (a checkpoint, a switch back:
+  `EEAT_BWC_GAINFIRST=0` off; nearest-first alone cycled among Frostbitten's three checkpoints and lost its route), then the
+  rest, each group by est; plan 1's first step second; no toggle back of the switch the node's own leg toggled; KEEP counts
+  a state's nodes over its checkpoints (the chain never dies: Summer Bee's 1-tick checkpoint legs made 30 of 181 legs)),
+  `EEAT_BWC_LEARN=1` (a leg lost at the full clock prices its edge x (1 + its losses) at every node until one reaches it; the
+  chain's planner learns its legs: planner `o.failEst` 400 ticks a lost rung), `EEAT_BWC_MORE=1` (THE ORDER BOUND: after the
+  first route the best-first goes on for faster orders, a node out once its tick + planner.lowerBound reaches the
+  incumbent's finish, a candidate once its tick + its edge's lb does; every faster route printed, the compile's routeOf keeps
+  the fastest; the chain alone: Late christmas 6,649 -> 5,985 in 6 routes, Summer Bee 5,766 -> 5,748, Vignettes 8,659 ->
+  8,620, none faster on Tutorial 3 / Christmas Town / Frostbitten), `EEAT_BWC_RELAY=1` (a full-clock leg lost 'budget' hands
+  back the backward solve's node of the least time to go (backward.js o.closest): replayed alive it is a RELAY node, its
+  target first at `EEAT_BWC_RELAYW` 0.1, not counted by KEEP, at most 2 a state and target, a relay of a relay only 30 ticks
+  nearer). OPT-IN, measured negative: `EEAT_BWC_LEAD=<gain>` (strategy.js: the chain's held frontier to the executor when it
+  leads by that gain and 2x: Tutorial 3 2,204 vs 4,194, Buuwuu 6,949 vs 8,049: the executor built its routes on the chain's
+  anchors), `EEAT_BWC_ROOTS=1` (strategy.js: every new executor anchor of more gain than the chain's frontier to the child
+  as a root, a roots file `bwchain_child.js --roots`: the executor's far 'most gain' anchors took the chain's best-first,
+  Weird Perfection's chain gain 87 alone -> 11). planner.js `EEAT_PLAN_NEAR_PARTIAL=K` (opt-in: before a partial plan the K
+  nearest gain-raising edges as one-step plans): the oracle's plans 34.5 -> 46.0% / 56.7 -> 71.4%, ONE pilot compile
+  (laptop, Weird Perfection, the chain off) the executor's gain 2 vs 7-8: no gain shown. THE CHAIN ALONE (boxes 5 + 6, all
+  78 gated levels, 290 s, base vs RANK=est + LEARN side by side): finished 5 vs 6 (+ WEIRD PERFECTION 24,122 at 171 s), the
+  chain's gain 428 -> 610, legs found 874 -> 1,246 (+43%), first routes Late christmas 153 -> 45 s, Tutorial 3 265 -> 78 s;
+  with the checkpoint KEEP (42 of them, box 6) 7 finish: + SUMMER BEE 5,757 (best known 6,835). The chain's routes vs the
+  best known (`ordercmp.js`: both replayed, the orders side by side, their LCS): Christmas Town 0.645-0.712, Late christmas
+  0.749-0.884, Vignettes 0.840-0.863, Frostbitten 0.967 / 1.135, Weird Perfection 1.164 (87 triggers vs 71: 20 coins only
+  ours); the orders mostly differ from the known ones (Christmas Town LCS 3 of 6, faster). WHY RELAY IN THE COMPILE: the
+  chain's legs run ~2x slower on a loaded box than on the laptop (Weird Perfection's first leg 13 s laptop, 23 s box 5 alone)
+  and past its 40-s clock under the compile's load (every try started over: 16-18 legs, 0 found, in S99's and this A/B's
+  compiles). THE COMPILE A/B (box 5, 300 s, W3, one tree, base vs RANK=est + LEARN + MORE + RELAY side by side, one pair at a time; every .eetas read back): WEIRD PERFECTION COMPILED (the chain's route 24,656 at 196.5 s, the order bound 24,554, the compile's polish + joins 21,878 = 1.055 of the best known 20,731; the base gain 8; never compiled before), Christmas Town 3,741 vs no route (the base's 300-s flip), Tutorial 3 1,861 vs 1,921, Animaly 4,945 vs 4,883, Hildren's Farm gain 31 vs 30 (running: the rest of the 16). Earlier runs: RANK + LEARN + MORE + ROOTS (18 pairs): 7 vs 8 compiled, Weird Perfection lost to ROOTS; RANK + LEARN + MORE without the relay: Weird Perfection gain 5, Tutorial 3 4,163 @70 s vs 6,307 @160 s (the chain's route first).
 - **STUCK-FIELD, block 2: the walk-off nodes, the stuck crumb, the portfolio on the field levels** (C6 push 3 lane 1;
   `src/out/n5/lanes/c6_lane1_b2.md`). THE WALK-OFF NODES (`EEAT_CHAIN_LIFT=1` / `o.lift`, msolve.js chain, OPT-IN, off =
   byte for byte): the chain's event fan-out (the 18 held masks to their first landing / class change / teleport) never

@@ -69,13 +69,31 @@ const DEFAULTS = [
 const S99_DEFAULTS = [
 	['EEAT_PORTFOLIO', '1'], ['EEAT_CORR_FIELDS', '1'], ['EEAT_STRETCH', '1'], ['EEAT_BW_CHAIN', '1'],
 ];
+// THE GATED ORDER DEFAULTS (P4 gated, 2026-10-01; CLAUDE.md section 11 "THE GATED LEVELS' ORDER"; each =0 off,
+// EEAT_GATED_DEFAULTS=0 none of them): the gated chain's own knobs (src/plan/lab/bwchain.js: they act only in the chain
+// child, i.e. on a GATED level; every other level's compile is byte for byte the same):
+//  - EEAT_BWC_RANK=est (the nearest usable edges, gain first, plan 1 second; KEEP over checkpoints): the order oracle on
+//    the 19 gated known routes holds the route's next trigger first at 57.9% (the plans' first steps 34.5%); the chain
+//    alone on the 78 gated levels 5 -> 6 finished (+ Weird Perfection), its legs found 874 -> 1,246; with the checkpoint
+//    KEEP 7 (+ Summer Bee).
+//  - EEAT_BWC_LEARN=1 (a leg lost at the full clock prices its edge at every node; the chain's planner learns its legs).
+//  - EEAT_BWC_MORE=1 (THE ORDER BOUND: faster orders after the first route; Late christmas 6,649 -> 5,985 alone).
+//  - EEAT_BWC_RELAY=1 (a lost full-clock leg's nearest node a relay node): under the compile's load Weird Perfection's
+//    first leg passed the 40-s clock in every try without it (18 legs, 0 found); with it the compile's route 21,878 (best
+//    known 20,731), never compiled before.
+// NOT defaults (measured negative): EEAT_BWC_LEAD (the executor built its routes on the chain's anchors: Tutorial 3 2,204 vs
+// 4,194), EEAT_BWC_ROOTS (the executor's far anchors took the chain's best-first: Weird Perfection's chain 87 -> 11 gain).
+const GATED_DEFAULTS = [
+	['EEAT_BWC_RANK', 'est'], ['EEAT_BWC_LEARN', '1'], ['EEAT_BWC_MORE', '1'], ['EEAT_BWC_RELAY', '1'],
+];
 /** set the defaults the environment does not name (EEAT_COMPILER_DEFAULTS=0: none of them; EEAT_S99_DEFAULTS=0: not the
- *  stretch defaults) */
+ *  stretch defaults; EEAT_GATED_DEFAULTS=0: not the gated order's) */
 function apply() {
 	if (process.env.EEAT_COMPILER_DEFAULTS === '0') return [];
 	const set = [];
 	for (const [k, v] of DEFAULTS) if (process.env[k] === undefined) { process.env[k] = v; set.push(k); }
 	if (process.env.EEAT_S99_DEFAULTS !== '0') for (const [k, v] of S99_DEFAULTS) if (process.env[k] === undefined) { process.env[k] = v; set.push(k); }
+	if (process.env.EEAT_GATED_DEFAULTS !== '0') for (const [k, v] of GATED_DEFAULTS) if (process.env[k] === undefined) { process.env[k] = v; set.push(k); }
 	return set;
 }
-module.exports = { DEFAULTS, S99_DEFAULTS, apply };
+module.exports = { DEFAULTS, S99_DEFAULTS, GATED_DEFAULTS, apply };
