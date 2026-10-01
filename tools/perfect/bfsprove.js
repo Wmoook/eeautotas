@@ -17,6 +17,7 @@
 //   node tools/perfect/bfsprove.js <level.eelvl> --C=<layer bound> [--route=<a.eetas>,..] [--U=] [--threads=16]
 //        [--seconds=1800] [--ttBits=28] [--tiers=kin,rel,gate] [--out=<faster.eetas>] [--check=1] [--initPer=64]
 //        [--maxGB=12 (the process's RSS: past it the run stops, 'memory')] [--heapMB=4096 (a worker's old space)]
+//        [--rebalance=1.5 (re-root the fronts when the largest is past this factor of the mean; 0 off)]
 // Prints JSON lines: {ev 'check'} {ev 'start'} {ev 'layer', d, states, cut, merged, seen, minW, maxW, s, rssGB} {ev 'result',
 // verdict 'PROVEN' | 'FASTER' | 'CLOSED' (lb = C, below U) | 'OPEN' (time / table) | 'violation', lb, opt, ...}.
 const path = require('path');
@@ -105,20 +106,48 @@ function workerMain() {
 	const insert = seenTable(sab);
 	const { sources } = LP.sourcesOf(L, 3000);
 	const sim = new E.EESim(L), inp = new E.EEInput();
-	let roots = [], front = null, base = null;
+	let roots = null, front = null, base = null;
 	const cur = new E.EESnapshot(), tmp = new E.EESnapshot();
-	const par = [], mk = [];   // per layer (from the roots on): the parent's index in the layer before, the input
+	let par = [], mk = [];   // per layer (from the roots on): the parent's index in the layer before, the input
 	parentPort.on('message', (m) => {
 		if (m.type === 'roots') {
-			roots = m.roots; front = makeStore();
-			for (const r of roots) {
-				sim.restore(sources[r.src]);
-				for (const x of r.path) { E.applyMask(inp, x); sim.tick(inp); }
-				const s = sim.snapshot();
-				if (base === null) base = s;
-				front.push(s, base, sim.stateHash());
+			// a root set (packed paths from the sources: the first layers, or a re-rooting's share of every worker's front),
+			// each state rebuilt by its own path and, where the hash came with it, checked against it
+			roots = m.rs; front = makeStore(); par = []; mk = [];
+			for (let i = 0; i < roots.src.length; i++) {
+				sim.restore(sources[roots.src[i]]);
+				for (let j = roots.off[i]; j < roots.off[i + 1]; j++) { E.applyMask(inp, roots.masks[j]); sim.tick(inp); }
+				const h = sim.stateHash();
+				if (roots.hs && roots.hs[i] !== h) throw new Error(`bfsprove: a re-rooted state rebuilt wrong (state ${i})`);
+				if (base === null) base = sim.snapshot();
+				front.push(sim.snapshot(tmp), base, h);
 			}
 			parentPort.postMessage({ type: 'ready', n: front.n });
+		} else if (m.type === 'dump') {
+			// the front as packed paths from the sources (its root's path + the inputs since), with the states' hashes
+			const n = front.n, k = par.length, src = new Int32Array(n), off = new Int32Array(n + 1), hs = new Float64Array(n);
+			let total = 0;
+			const rootOf = new Int32Array(n);
+			for (let i = 0; i < n; i++) {
+				let j = i;
+				for (let q = k - 1; q >= 0; q--) j = par[q][j];
+				rootOf[i] = j; total += roots.off[j + 1] - roots.off[j] + k;
+			}
+			const masks = new Uint8Array(total);
+			let at = 0;
+			for (let i = 0; i < n; i++) {
+				const j0 = rootOf[i];
+				src[i] = roots.src[j0]; off[i] = at;
+				masks.set(roots.masks.subarray(roots.off[j0], roots.off[j0 + 1]), at);
+				at += roots.off[j0 + 1] - roots.off[j0];
+				let j = i;
+				for (let q = k - 1; q >= 0; q--) { masks[at + q] = mk[q][j]; j = par[q][j]; }
+				at += k;
+				hs[i] = front.get(i, base, cur);
+			}
+			off[n] = at;
+			front = makeStore(); par = []; mk = [];
+			parentPort.postMessage({ type: 'dumped', rs: { src, off, masks, hs } }, [src.buffer, off.buffer, masks.buffer, hs.buffer]);
 		} else if (m.type === 'layer') {
 			const d = m.d;
 			const next = makeStore(), np = [], nm = [];
@@ -148,8 +177,7 @@ function workerMain() {
 				const back = [crown.x];
 				let j = crown.i;
 				for (let k = par.length - 1; k >= 0; k--) { back.push(mk[k][j]); j = par[k][j]; }
-				const r = roots[j];
-				route = { src: r.src, path: r.path.concat(back.reverse()) };
+				route = { src: roots.src[j], path: Array.from(roots.masks.subarray(roots.off[j], roots.off[j + 1])).concat(back.reverse()) };
 			}
 			const states = stopped ? 0 : next.n, bytes = next.bytes();
 			front = stopped || crown !== null ? makeStore() : next;
@@ -231,10 +259,45 @@ async function main() {
 		const maxBytes = (+args.maxGB || 12) * 1e9, heapMB = +args.heapMB || 4096;
 		for (let w = 0; w < threads; w++) wk.push(new Worker(__filename, { workerData: { file, tiers, C, sab, deadline, maxBytes }, resourceLimits: { maxOldGenerationSizeMb: heapMB } }));
 		const ask = (w, msg, type) => new Promise((res) => { const f = (m) => { if (m.type === type) { w.off('message', f); res(m); } }; w.on('message', f); w.postMessage(msg); });
-		const roots = Array.from({ length: threads }, () => []);
-		front.forEach((e, i) => roots[i % threads].push({ src: e.src, path: e.path }));
+		const packRs = (list) => {   // [{src, path}] -> a packed root set
+			const src = new Int32Array(list.length), off = new Int32Array(list.length + 1);
+			let total = 0;
+			for (const e of list) total += e.path.length;
+			const masks = new Uint8Array(total);
+			let at = 0;
+			list.forEach((e, i) => { src[i] = e.src; off[i] = at; masks.set(e.path, at); at += e.path.length; });
+			off[list.length] = at;
+			return { src, off, masks, hs: null };
+		};
+		const first = Array.from({ length: threads }, () => []);
+		front.forEach((e, i) => first[i % threads].push({ src: e.src, path: e.path }));
 		front = null;
-		await Promise.all(wk.map((w, i) => ask(w, { type: 'roots', roots: roots[i], d0: d }, 'ready')));
+		await Promise.all(wk.map((w, i) => ask(w, { type: 'roots', rs: packRs(first[i]) }, 'ready')));
+		// THE RE-ROOTING (--rebalance=1.5, 0 off): a child stays on its parent's worker, so the fronts drift apart (NC Naos:
+		// the largest 6.7x the least at layer 25); when the largest is past that factor of the mean, every front comes back
+		// as paths from the sources, is dealt out again round robin and rebuilt (each state checked against its hash)
+		const rebal = args.rebalance !== undefined ? +args.rebalance : 1.5, rebMin = args.rebalanceMin !== undefined ? +args.rebalanceMin : 2000;
+		let rebalances = 0, rebalMs = 0;
+		const reroot = async () => {
+			const t1 = Date.now();
+			const ds = await Promise.all(wk.map((w) => ask(w, { type: 'dump' }, 'dumped')));
+			const all = [];
+			for (const r of ds) for (let i = 0; i < r.rs.src.length; i++) all.push([r.rs, i]);
+			const shares = Array.from({ length: threads }, () => []);
+			all.forEach((e, i) => shares[i % threads].push(e));
+			const packs = shares.map((sh) => {
+				let total = 0;
+				for (const [rs, i] of sh) total += rs.off[i + 1] - rs.off[i];
+				const src = new Int32Array(sh.length), off = new Int32Array(sh.length + 1), hs = new Float64Array(sh.length), masks = new Uint8Array(total);
+				let at = 0;
+				sh.forEach(([rs, i], q) => { src[q] = rs.src[i]; hs[q] = rs.hs[i]; off[q] = at; masks.set(rs.masks.subarray(rs.off[i], rs.off[i + 1]), at); at += rs.off[i + 1] - rs.off[i]; });
+				off[sh.length] = at;
+				return { src, off, masks, hs };
+			});
+			await Promise.all(wk.map((w, i) => ask(w, { type: 'roots', rs: packs[i] }, 'ready')));
+			rebalances++; rebalMs += Date.now() - t1;
+			say({ ev: 'rebalance', d, states: all.length, ms: Date.now() - t1 });
+		};
 		for (;;) {
 			const rs = await Promise.all(wk.map((w) => ask(w, { type: 'layer', d }, 'done')));
 			d++;
@@ -250,7 +313,9 @@ async function main() {
 			if (stopped) { out.why = stopped; break; }
 			if (states === 0) break;
 			if (seen > 0.7 * 2 ** ttBits) { out.why = 'table'; break; }
+			if (rebal > 0 && threads > 1 && states > threads * rebMin && maxW > rebal * states / threads && C - d > 3) await reroot();
 		}
+		out.rebalances = rebalances; out.rebalanceS = rebalMs / 1000;
 		for (const w of wk) { try { w.postMessage({ type: 'quit' }); } catch (e) { /* gone */ } }
 	}
 	let lb = Math.max(0, h0 - 1);

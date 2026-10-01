@@ -62,6 +62,15 @@ for (const [name, rows] of Object.entries(ROOMS)) {
 		const r4 = run([...base, `--C=${ref}`]);
 		check(`${tag} C = the optimum, no route: CLOSED at lb = the optimum`, r4.verdict === 'CLOSED' && r4.lb === ref, `${r4.verdict} lb ${r4.lb}`);
 	}
+	// THE RE-ROOTING forced after every layer (the fronts dealt out again as paths, rebuilt and checked by their hashes):
+	// the same optimum, its route replayed, the same closed C
+	{
+		const forced = [file, '--threads=3', '--seconds=60', '--ttBits=22', '--initPer=1', '--rebalance=0.5', '--rebalanceMin=1'];
+		const r5 = run([...forced, `--C=${ref + 1}`]);
+		check(`${name} re-rooted every layer: the optimum = the exhaustive search's`, r5.verdict === 'PROVEN' && r5.opt === ref && r5.optReplay === ref && r5.rebalances > 0, `${r5.verdict} ${r5.opt} vs ${ref}, ${r5.rebalances} re-rootings`);
+		const r6 = run([...forced, `--C=${ref}`]);
+		check(`${name} re-rooted every layer: C = the optimum CLOSED`, r6.verdict === 'CLOSED' && r6.lb === ref && r6.rebalances > 0, `${r6.verdict} lb ${r6.lb}, ${r6.rebalances} re-rootings`);
+	}
 }
 {
 	const sab = new SharedArrayBuffer(8 * 256);
