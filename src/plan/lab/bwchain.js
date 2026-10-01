@@ -69,6 +69,13 @@ const FAIL_K = ENVN('EEAT_BWC_FAILK', 1), FAIL_EST_C = ENVN('EEAT_BWC_FAILEST', 
 // incumbent's finish tick, a candidate once t + its edge's lb does; every faster finish (C.evaluate'd) is the new incumbent
 // and reported through o.onRoute (the child prints it: the compile's routeOf takes it when faster)
 const MORE = process.env.EEAT_BWC_MORE === '1';
+// THE RELAY (P4 gated, OPT-IN EEAT_BWC_RELAY=1; off = byte for byte): the gated levels' known-route legs are long (the
+// longest 504-5,704 ticks; Machu Picchu's 1,874 / 1,982) and a 40-s backward leg that ends 'budget' threw its progress
+// away; with the knob the full-clock leg asks the solver for its node of the least time to go (backward.js o.closest), and
+// that state (replayed, alive) is a RELAY node: the same abstract state, its failed target its first candidate (RELAY_W),
+// not counted by KEEP, at most RELAY_MAX a state and target (a relay of a relay goes on: the leg in pieces)
+const RELAY = process.env.EEAT_BWC_RELAY === '1';
+const RELAY_W = ENVN('EEAT_BWC_RELAYW', 0.1), RELAY_MAX = ENVN('EEAT_BWC_RELAYMAX', 2), RELAY_DH = ENVN('EEAT_BWC_RELAYDH', 30);
 
 /** the masks' replay from a snapshot: the first tick the goal holds (the tail candidates tried) -> {masks, sim} | null */
 function hitOf(L, snap, legMasks, goal) {
@@ -111,19 +118,28 @@ function chainLevel(L, o = {}) {
 	const legs = [];
 	const stats = { plans: 0, legs: 0, legsOk: 0, nodes: 0, dropped: 0, bestDepth: 0, bestGain: 0, level: 0, cands: 0, ext: 0, extRounds: 0 };
 	const byKey = new Map();   // S.key -> [nodes]
+	const relayN = new Map();  // (EEAT_BWC_RELAY) S.key + target -> relay nodes made
 	const nodes = [];
 	let seq = 0;
 	const anchorArg = (n) => ({ arrival: n.a, arrivals: [n.a], S: n.S, key: String(n.S.key), tick: n.a.tick, run: n.a.run });
 	/** a node's class in the planner's facts (planner anchorOf: the abstract state + the arrival's speed class) */
 	const classOf = (n) => { if (n.cls === undefined) { try { const a = planner._anchorOf(anchorArg(n)); n.cls = a.S.key + '|' + a.cls; } catch (e) { n.cls = String(n.S.key) + '|*'; } } return n.cls; };
-	const addNode = (masks, sim, parent, label) => {
+	const addNode = (masks, sim, parent, label, relay) => {
 		const S = model.stateOf(sim);
 		const key = String(S.key);
 		const a = Object.assign(T.arrivalOf(L, sim, masks, null), { run: sim.run_ticks });
 		const same = byKey.get(key) || [];
 		if (same.some((x) => x.a.hash === a.hash)) { stats.dropped++; return null; }
-		if (same.length >= KEEP && same.every((x) => x.a.tick <= a.tick)) { stats.dropped++; return null; }
+		// (a RELAY node (EEAT_BWC_RELAY) is a failed leg's partial progress, not another arrival of the state: KEEP does not
+		// count it; at most RELAY_MAX a state and target)
+		if (relay) {
+			const rk = key + '\u0001' + relay.edge;
+			const nr = relayN.get(rk) || 0;
+			if (nr >= RELAY_MAX) { stats.dropped++; return null; }
+			relayN.set(rk, nr + 1);
+		} else if (same.filter((x) => !x.relay).length >= KEEP && same.every((x) => x.relay || x.a.tick <= a.tick)) { stats.dropped++; return null; }
 		const n = { id: ++seq, masks, snap: sim.snapshot(), S, a, depth: parent ? parent.depth + 1 : 0, parent, label, cands: null, h: Infinity, gain: Number.isFinite(+S.gain) ? +S.gain : (parent ? parent.gain + 1 : 0) };
+		if (relay) { n.relay = relay; n.depth = parent ? parent.depth : 0; n.via = parent ? parent.via : null; n.viaFeat = parent ? parent.viaFeat : null; stats.relays = (stats.relays || 0) + 1; }
 		same.push(n); byKey.set(key, same);
 		nodes.push(n); stats.nodes++;
 		if (n.depth > stats.bestDepth) stats.bestDepth = n.depth;
@@ -153,30 +169,36 @@ function chainLevel(L, o = {}) {
 				const a = planner._anchorOf(anchorArg(n));
 				cls = a.S.key + '|' + a.cls;
 				es = (planner._edgesOf(a.S, a.pos, a.base, 'plan', true, cls, a) || []).filter((e) => !e.relaxOnly && !e.viaDeath && (e.X ? e.X.kind !== 'die' && e.live && e.live.length : true));
+				// (no toggle back: the switch the node's own leg just toggled, at once again (the planner's UNTOGGLE rule))
+				if (n.viaFeat) es = es.filter((e) => !(e.X && String(e.X.feat) === n.viaFeat));
 				es.sort((x, y) => (x.est - y.est) || (x.lb - y.lb));
 			} catch (e) { es = []; }
 			const list = [];
+			// (a relay node: its failed target first, at RELAY_W)
+			if (n.relay) list.push({ edge: n.relay.edge, wp: n.relay.wp, step: n.relay.step, w: RELAY_W });
 			for (const e of es.slice(0, K + 2)) {
 				const X = e.X;
 				const wp = X ? { kind: 'trigger', tiles: e.live.slice(), trig: X.id, expect: e.expect, label: e.anyOf > 1 ? `${X.label} (any of ${e.anyOf})` : X.label } : { kind: 'trophy', label: 'trophy' };
 				list.push({ edge: String(e.edge), wp, step: { edge: String(e.edge), nodeClass: cls, rung: 0, waypoint: wp, lb: e.lb } });
 			}
 			firsts.forEach((s, i) => {
+				if (n.viaFeat && s.waypoint && s.waypoint.trig !== undefined && model.triggers[s.waypoint.trig] && String(model.triggers[s.waypoint.trig].feat) === n.viaFeat) return;
 				const j = list.findIndex((c) => c.edge === String(s.edge));
-				const at = i === 0 ? Math.min(PLAN_AT, list.length) : list.length;
+				const at = i === 0 ? Math.min(PLAN_AT + (n.relay ? 1 : 0), list.length) : list.length;
 				if (j >= 0) { if (i === 0 && j > at) { const [c] = list.splice(j, 1); list.splice(at, 0, c); } return; }
 				list.splice(at, 0, { edge: String(s.edge), wp: s.waypoint, step: s });
 			});
-			list.forEach((c, i) => push(c.edge, c.wp, W_EST0 + RANK_W * i, c.step));
+			list.forEach((c, i) => push(c.edge, c.wp, c.w !== undefined ? c.w : W_EST0 + RANK_W * i, c.step));
 			stats.cands += out.length;
 			n.cands = out;
 			n.seen = seen;
 			return out;
 		}
+		if (n.relay) push(n.relay.edge, n.relay.wp, RELAY_W, n.relay.step);
 		for (const p of (r && r.plans) || []) {
 			if (Number.isFinite(+p.cost)) est = Math.min(est, +p.cost);
 			const s = p.steps && p.steps.find((x) => !(x.waypoint && x.waypoint.allowDeath));
-			if (s && s === p.steps[0]) push(s.edge, s.waypoint, out.length ? W_PLAN2 : W_PLAN1, s);
+			if (s && s === p.steps[0]) push(s.edge, s.waypoint, out.length > (n.relay ? 1 : 0) ? W_PLAN2 : W_PLAN1, s);
 		}
 		n.h = est;
 		try {
@@ -309,7 +331,7 @@ function chainLevel(L, o = {}) {
 		const ms = Math.min(CL[lvl], left() - 200);
 		if (ms < 200) break;
 		let r;
-		try { r = B.solve(pick.snap, { tiles }, { ms }); } catch (e) { r = { ok: false, why: 'error: ' + e.message }; }
+		try { r = B.solve(pick.snap, { tiles }, RELAY && lvl >= CL.length - 1 ? { ms, closest: true } : { ms }); } catch (e) { r = { ok: false, why: 'error: ' + e.message }; }
 		if (!r.ok && /walk|target|bug|error/.test(r.why || '')) pc.tried = CL.length;   // (no clock helps)
 		stats.legs++;
 		const fullTry = lvl >= CL.length - 1 || pc.tried >= CL.length;
@@ -322,6 +344,22 @@ function chainLevel(L, o = {}) {
 			if (LEARN && fullTry) {
 				failN.set(pc.edge, (failN.get(pc.edge) || 0) + 1); stats.learnFail = (stats.learnFail || 0) + 1;
 				if (pc.step) { try { planner.learn(Object.assign({}, pc.step, { nodeClass: classOf(pick) }), { ok: false, fail: { why: /walk|target/.test(r.why || '') ? 'exhausted' : 'budget' } }, anchorArg(pick)); } catch (e) { /* the price only */ } }
+			}
+			// (THE RELAY: the failed leg's node of the least time to go, replayed, a node of its own with this target first)
+			// (a relay of a relay only with progress: its time to go RELAY_DH ticks under its parent's: a pinned relay (the
+			// solver's least time to go at a door it cannot pass, Machu Picchu's trophy: 427 ticks to go relay after relay) stops)
+			const prevH = pick.relay && pick.relay.edge === pc.edge && Number.isFinite(+pick.relay.h) ? +pick.relay.h : Infinity;
+			if (RELAY && fullTry && r && r.closest && r.closest.masks && r.closest.masks.length > 0 && +r.closest.h < prevH - RELAY_DH) {
+				const rs = new E.EESim(L), ri = new E.EEInput();
+				rs.reset(); rs.restore(pick.snap);
+				let dead = false;
+				for (let k = 0; k < r.closest.masks.length; k++) { E.applyMask(ri, r.closest.masks[k] & 31); rs.tick(ri); if (rs.is_dead) { dead = true; break; } }
+				if (!dead) {
+					const mm = new Uint8Array(pick.masks.length + r.closest.masks.length);
+					mm.set(pick.masks); mm.set(r.closest.masks, pick.masks.length);
+					const rn = addNode(mm, rs, pick, `${leg.label} (relay)`, { edge: pc.edge, wp: pc.wp, step: pc.step, h: +r.closest.h });
+					if (rn) log(`   relay for ${leg.label}: tick ${rn.a.tick}, ${r.closest.h} ticks to go`);
+				}
 			}
 			continue;
 		}
@@ -351,6 +389,8 @@ function chainLevel(L, o = {}) {
 			continue;
 		}
 		const n = addNode(masks, hit.sim, pick, leg.label);
+		// (the trigger that made the node, a switch's toggle: no toggle back at once: RANK_EST's candidates)
+		if (n) { n.via = pc.edge; const X = pc.wp && pc.wp.trig !== undefined ? model.triggers[pc.wp.trig] : null; n.viaFeat = X && /^(psw|osw):\d+$/.test(String(X.feat)) ? String(X.feat) : null; }
 		if (n && o.onAnchor) { try { o.onAnchor(masks, { depth: n.depth, gain: n.gain, label: leg.label, tick: n.a.tick }); } catch (e) { /* the caller's */ } }
 	}
 	if (!best && why === 'budget' && stop()) why = 'stopped';
