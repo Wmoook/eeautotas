@@ -982,9 +982,18 @@ const breakHolds = () => !!S && S.running && !S.halted && S.stage !== 'stopped' 
 const BREAK_GATES = 16;
 // a gate run's closest attempt at most this far (tiles, by the coin's leg field) is at the gate: 0 = on the coin's tile
 const GATE_AT = 0.2;
-/** the coin plan's next gate from the state after inputs: {x, y} (tiles) or null; the steer file read once a search */
-function breakGate(inputs) {
-	if (!cur || !cur.opts.breakGate || !S.steer || !S.steer.dp || !cur.files.steerCpu) return null;
+// The gate retries (n2 good-egg, 2026-09-27; `b.breakAlts` = how many gates a start tries, 1 = main's one gate): the coin
+// DP models no switch layers, so its first choice can be a coin the ball cannot reach yet: on Good Egg's known route it
+// missed the route's next coin at 5 of 17 coins; after coin 9 (gate ge#35, the from-scratch runs' wall) it names the
+// (77-93, 80-95) cluster (the route takes it at coins 13-17, behind the purple switches) and ranks the portal pocket's
+// (7, 190) 6th, below 5 cluster coins. So a start whose gate run ends without reaching its gate (its chain would end, or
+// it ran out of situations more than GATE_FAR tiles from the gate) aims next at the DP's next-ranked gate at least
+// GATE_SPREAD tiles (Chebyshev) from every gate tried from it (the pocket's is the second there), up to BREAK_ALTS gates
+const BREAK_ALTS = 3, GATE_SPREAD = 24, GATE_FAR = 8;
+/** the coin plan's gates from the state after inputs, best first: [{x, y, reach}] (tiles), [] for none; up to `alts` of
+ *  them, each GATE_SPREAD tiles from the ones before; the steer file read once a search */
+function breakGates(inputs, alts) {
+	if (!cur || !cur.opts.breakGate || !S.steer || !S.steer.dp || !cur.files.steerCpu) return [];
 	try {
 		if (cur.gateSteer === undefined) {
 			cur.gateSteer = null;
@@ -1001,20 +1010,26 @@ function breakGate(inputs) {
 		const sim = new E.EESim(cur.level), inp = new E.EEInput();
 		sim.reset();
 		for (let t = 0; t < inputs.length; t++) { E.applyMask(inp, (inputs.charCodeAt(t) - 48) & 31); sim.tick(inp); }
-		const g = SF.nextGate(G0.st, sim);
-		const t = g ? G0.tiles.get(g.bit) : undefined;
-		if (t === undefined) return null;
-		// the run's order: the coin's own leg field (RCH3, the coin its only goal: the file's body, written once), not the
-		// steer field, which on Forgotten Veil points the other way (the layer field) and cut the states heading for the coin
-		const b = G0.st.dp.leg[g.i];
-		let reach = G0.files.get(b);
-		if (!reach) {
-			reach = path.join(dir(), `gate_${b}.rch3`);
-			fs.writeFileSync(reach, G0.buf.subarray(G0.st.bodyOff[b], G0.st.bodyOff[b] + G0.st.bodySize[b]));
-			G0.files.set(b, reach);
+		const W = cur.level.width, out = [];
+		for (const g of SF.gateRank(G0.st, sim)) {
+			if (out.length >= Math.max(1, alts || 1)) break;
+			const t = G0.tiles.get(g.bit);
+			if (t === undefined) continue;
+			const x = t % W, y = Math.floor(t / W);
+			if (out.some((o) => Math.max(Math.abs(o.x - x), Math.abs(o.y - y)) < GATE_SPREAD)) continue;
+			// the run's order: the coin's own leg field (RCH3, the coin its only goal: the file's body, written once), not the
+			// steer field, which on Forgotten Veil points the other way (the layer field) and cut the states heading for the coin
+			const b = G0.st.dp.leg[g.i];
+			let reach = G0.files.get(b);
+			if (!reach) {
+				reach = path.join(dir(), `gate_${b}.rch3`);
+				fs.writeFileSync(reach, G0.buf.subarray(G0.st.bodyOff[b], G0.st.bodyOff[b] + G0.st.bodySize[b]));
+				G0.files.set(b, reach);
+			}
+			out.push({ x, y, reach });
 		}
-		return { x: t % cur.level.width, y: Math.floor(t / cur.level.width), reach };
-	} catch (e) { return null; }
+		return out;
+	} catch (e) { return []; }
 }
 /** the breaker's table (log2 cells) for a GPU of memMB: BREAK_MEM_F of it at 16 bytes a cell, 2^24 .. 2^31 */
 const breakCells = (memMB) => Math.max(24, Math.min(31, Math.floor(Math.log2((memMB > 0 ? memMB : 8192) * 1048576 * BREAK_MEM_F / 16))));
@@ -1108,7 +1123,7 @@ function breakLaunch(n) {
 	}
 	const reserve = Math.max(1024, Math.round(BREAK_RESERVE_F * (toolInfo && toolInfo.memMB > 0 ? toolInfo.memMB : 8192)));
 	// (the stall target: the coin plan's next gate from this start, once per chain step; none: the trophy)
-	if (ch.gate === undefined) ch.gate = breakGate(ch.inputs);
+	if (ch.gate === undefined) { ch.alts = breakGates(ch.inputs, cur.opts.breakAlts); ch.alt = 0; ch.gate = ch.alts.length ? ch.alts[0] : null; }
 	// (a gate run keeps --finish, ordered by the coin's leg field, and its closest attempt at the coin (cost 0) is the
 	// gate: closer(); explore --enter would report no closest attempt, so no chain)
 	V.brk = { file, keep: ch.inputs.length, cells: BREAK_GRAINS[ch.grain], cellLog, region, reserve, gateReach: ch.gate ? ch.gate.reach : '', gateHit: null, seconds: Math.max(1, Math.round(Math.min(cur.opts.breakStep, roundLeft, left))) };
@@ -1137,6 +1152,12 @@ function breakAfter(n, how) {
 		// its last gate), and the next round starts from its last gate first: breakStarts)
 		if (cur.opts.breakFront) { R.clock = Date.now(); brk.front = { inputs: hit, gates: (ch.gates || 0) + 1 }; }
 		R.chain = (ch.gates || 0) + 1 < BREAK_GATES ? { inputs: hit, step: ch.step, grain: 0, what: ch.what, gates: (ch.gates || 0) + 1 } : null;
+	} else if (ch.gate && ch.alts && ch.alt + 1 < ch.alts.length && (how === 'exhausted' ? !(b && b.dist <= GATE_FAR) : !(b && ch.step < BREAK_CHAIN && b.ticks - BREAK_RESTART >= ch.inputs.length + BREAK_RESTART))) {
+		// (the gate retries: its gate out of reach from this start (ran out of situations far from it, or no attempt that went
+		// on): the next-ranked gate elsewhere, from the same start)
+		if (b) seedCpu(b.inputs);
+		ch.alt++; ch.gate = ch.alts[ch.alt]; ch.grain = 0;
+		if (S.breaker) S.breaker.alts = (S.breaker.alts || 0) + 1;
 	} else if (how === 'exhausted' && ch.grain + 1 < BREAK_GRAINS.length) ch.grain++;   // (every situation tried at this grain: finer, the same start)
 	else if (b && ch.step < BREAK_CHAIN && b.ticks - BREAK_RESTART >= ch.inputs.length + BREAK_RESTART) {
 		// its nearest attempt went on: the next step from 60 ticks short of it (a fresh table)
@@ -1380,7 +1401,8 @@ function start(b, gpu, test) {
 		// (the wall breaker's clocks and table; tests: shorter, and a small table)
 		breakWait: test && Array.isArray(test.breakWait) ? test.breakWait : BREAK_WAIT_S, breakStep: test && test.breakStep ? test.breakStep : BREAK_STEP_S,
 		breakRound: test && test.breakRound ? test.breakRound : BREAK_ROUND_S, breakCells: test && test.breakCells ? test.breakCells : 0, breakFront: b.breakFront !== false,
-		breakFrom: test && test.breakFrom ? String(test.breakFrom) : '', breakGate: b.breakGate !== false && !(test && test.breakGate === false) },
+		breakFrom: test && test.breakFrom ? String(test.breakFrom) : '', breakGate: b.breakGate !== false && !(test && test.breakGate === false),
+		breakAlts: Number.isInteger(b.breakAlts) && b.breakAlts >= 1 ? b.breakAlts : +process.env.EEAT_BREAK_ALTS >= 1 ? Math.floor(+process.env.EEAT_BREAK_ALTS) : BREAK_ALTS },
 		cpuCmd: test && Array.isArray(test.cpu) ? test.cpu : [process.execPath, path.join(__dirname, 'goexplore.js')],
 		cpuNice: !(test && Array.isArray(test.cpu)),   // (goexplore.js takes --nice; a test's stand-in need not)
 		rollsCmd: test && Array.isArray(test.rollsCmd) ? test.rollsCmd : [process.execPath, path.join(__dirname, 'goexplore.js')],

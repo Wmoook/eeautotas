@@ -983,20 +983,30 @@ function dpFifths(st, sim, bound) {
  *  next coin on Forgotten Veil in 11 of 15 coins, Good Egg 12 of 17, where the lookup, the least of the DP and the layer's
  *  own field, took the layer field (the way that needs no more coins) on Forgotten Veil before its coins 1-4 */
 function nextGate(st, sim) {
+	const r = gateRank(st, sim, 1);
+	return r.length ? r[0] : null;
+}
+/** the coin plan's gates from a sim's state ranked by leg + rest of the tour (the first = nextGate), at most k of them
+ *  ([] as nextGate's null). The wall breaker's retries (editor.js breakAfter): a gate run that never reached the DP's
+ *  first choice tries the next. On Good Egg's known route the first choice missed the route's next coin at 5 of 17
+ *  coins (coins 1, 4, 10, 13, 14: the model has no switch layers), e.g. after coin 9 it names (91, 95), a coin the route
+ *  takes at 14, instead of the portal pocket's (7, 190) */
+function gateRank(st, sim, k) {
 	const D = st.dp;
-	if (!D || !(sim.coins < D.T)) return null;
+	if (!D || !(sim.coins < D.T)) return [];
 	let m = 0;
 	for (let i = 0; i < D.n; i++) { const b = D.bit[i]; if (b >= 0 && ((sim._coinBits[b >> 5] >>> (b & 31)) & 1) === 1) m |= 1 << i; }
-	let best = null;
+	const out = [];
 	for (let q = 0; q < D.n; q++) {
 		if (m & (1 << q)) continue;
 		const rest = D.h[(m | (1 << q)) * D.n + q];
 		if (!(rest < Infinity)) continue;
 		const c = bodyAt(st.bodies[D.leg[q]], sim, 0, 0);
 		if (c < 0 || c >= CUT - 1) continue;
-		if (!best || c + rest < best.v) best = { i: q, bit: D.bit[q], v: c + rest };
+		out.push({ i: q, bit: D.bit[q], v: c + rest });
 	}
-	return best;
+	out.sort((a, b) => a.v - b.v || a.i - b.i);
+	return out.slice(0, k === undefined ? out.length : k);
 }
 /** the steer cost of a sim's state in fifths of a tile (-1 = no value) */
 function steerFifths(st, sim) {
@@ -1111,6 +1121,6 @@ function readSteerFile(buf) {
 	return { version: ver, W, H, N, feats, team, S, layerBody, bodies, goals, dp, prioShift, levelFp: [buf.readUInt32LE(48), buf.readUInt32LE(52)], bodyOff: bOff, bodySize: bSize };
 }
 
-module.exports = { VERSION, STEER_MAX_BYTES, STEER_MAX_MS, buildSteer, steerFifths, steerAt, steerScore, layerIndex, nextGate, steerFileBytes, writeSteerFile, readSteerFile, readReachBytes,
+module.exports = { VERSION, STEER_MAX_BYTES, STEER_MAX_MS, buildSteer, steerFifths, steerAt, steerScore, layerIndex, nextGate, gateRank, steerFileBytes, writeSteerFile, readSteerFile, readReachBytes,
 	// (tests, tools)
 	analyze, makeModel, walkBuild, buildPhysics, counterexample, layeredPlan, coinPlan, coinLegsPhys, coinDP, arriveCost };
