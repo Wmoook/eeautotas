@@ -315,6 +315,12 @@ const ST_MIN_MS = 3000, ST_TRIES = 2;
 const ST_RELAY = process.env.EEAT_ST_RELAY !== '0', ST_CHAIN = process.env.EEAT_ST_CHAIN !== '0', ST_STALE_MS = 5000;
 // (EEAT_ST_N: the children a compile, each with a request of its own (default 1, at most 4))
 const ST_N = Math.max(1, Math.min(4, +process.env.EEAT_ST_N || 1));
+// (THE SHORT REQUEST'S SECOND CHILD, B8 speed cycle 4; OPT-IN EEAT_ST_N=short, off (unset or a number) = the compile byte
+// for byte: one child at the start as ST_N 1, and a second one only once the first takes the short first plan's request
+// (the whole level from the start, up to ST_SHORT_MAX_S on one clock): it takes the executor's failed stretches from then
+// on, which the first child never got before a first route on the one-leg levels the executor routes; a level whose first
+// plan is long keeps one child)
+const ST_SHORT2 = process.env.EEAT_ST_N === 'short';
 // (EEAT_ST_GENERAL=0: the short first plan's request alone, no failed stretches after it)
 const ST_GENERAL = process.env.EEAT_ST_GENERAL !== '0';
 const ST_NICE = process.env.EEAT_ST_NICE !== undefined && process.env.EEAT_ST_NICE !== '' ? +process.env.EEAT_ST_NICE : 10;
@@ -1171,7 +1177,12 @@ async function compile(L, opts = {}, emit = () => {}) {
 						stNote(A, legs[0].step, legs[0].wp, pl, false);
 						const c0 = stCands.get(`${A.id}|${edgeKey(legs[0].step)}`) || null;
 						if (c0) c0.n--;
-						if (stSend(slot, A, A.arrivals.reduce((m, x) => (x.tick < m.tick ? x : m), A.arrivals[0]), legs, ms, c0)) { slot.busy.short = true; continue; }
+						if (stSend(slot, A, A.arrivals.reduce((m, x) => (x.tick < m.tick ? x : m), A.arrivals[0]), legs, ms, c0)) {
+							slot.busy.short = true;
+							// (EEAT_ST_N=short: the failed stretches get a child of their own next to it: slot 1, taken by this loop)
+							if (ST_SHORT2 && !stSlots[1]) stSpawn(1);
+							continue;
+						}
 					}
 				}
 			}
