@@ -588,6 +588,28 @@ ways in.
   load's 1.7-5x is larger than this gain), with `--full=1` for the final routes; the 4 levels where the whole-level
   request runs its 270 s for nothing (a yield of the short request to the failed stretches and back, the child's memo
   kept).
+- **THE SECOND CHILD ON THE 50, AND THE SPARE WORKERS AGAIN** (B8 speed, cycle 5, 2026-10-01, branch n5-b8-speed-c5 =
+  n5-plan 5214e62 + n5-b8-speed-c4 + cycle 1's THE SPARE WORKERS rebased (strategy.js, OPT-IN `EEAT_SPARE=1`, off = byte
+  for byte; planstrategy 27 / 0 both ways); box 8 `~/b8_speed_c5`). THE 50 COMPILED LEVELS, base vs `EEAT_ST_N=short`
+  (`r1`: 300 s, W3, par 3 an arm side by side, each compile killed at its first verified route or at 150 s; box 8 at load
+  0 when it started, 180-212 from minute 3: the other B8 lanes): routed by 150 s **26 vs 31 of 50**, the median of the 50
+  (unrouted = 151) **~150 vs 105 s**, by 30 s 13 vs 12, **by 60 s 19 vs 20**, by 120 s 22 vs 29, the sum 4,800 vs 4,483 s;
+  every level the base routed the knob routed too; the knob's 5 more: Tutorial 3 110.7 s (2,219 run ticks, its route's
+  first link the second child's stretch), Animaly 75.3, Santa's Workshop 92.0, INFINITE 108.0, EE mountain world 147.9;
+  faster by 5+ s also Tutorial 2 123.9 -> 95.4, Slipslide Ride 132.5 -> 110.5, Crypts Of Anubis 149.6 -> 109.6 (the same
+  three as cycle 4's pairs: Tutorial 2 129.5 -> 105.4, Slipslide 134.7 -> 103.5); slower by 5+ s on 4 fast levels: K
+  Underground 75.3 -> 102.0, The Blank Page 22.7 -> 34.1, INVASION 38.6 -> 44.4, Accident Prone 25.9 -> 31.9 (the second
+  child is one more process at nice +10 on a box at load ~200); the 26 both routed geo 1.008 (faster 8 / slower 18): the
+  gain is on the slow end (the levels the executor routes while the first child holds the whole-level request), none
+  under 60 s. NC Naos d3c6 88.1 vs 22.7 s is the precision child's spread (its code path is the base's).
+  THE SPARE WORKERS on the 16 low-use levels (cycle 1's list: one-leg / child-solved levels whose workers sit idle;
+  `r2`, base vs `EEAT_SPARE=1`, par 2 an arm side by side, box 8 at load 160 falling to 45): routed 14 = 14, median
+  18.5 vs 19.5 s, by 60 s 12 = 12, geo 1.046 (faster 2 / slower 4); the spares fired on 10 of the 16 (2-8 each), none of
+  those faster by more than the spread (Gravity's Rainbow 41.7 vs 48.2, Bygone 5.2 vs 6.6, Fish Gods 18.5 vs 19.6, the
+  rest within 0.3 s): the first routes there are the children's (the stretch child, the exact landing), not the
+  executor's ladder: NO GAIN, stays opt-in. THE LOAD'S SHARE once more: the same base code on the same levels in r1
+  (load ~200) vs r2 (load 160 -> 45): The Blank Page 22.7 vs 10.8 s, INVASION 38.6 vs 14.9, Accident Prone 25.9 vs 10.8,
+  Fish Gods 58.6 vs 18.5, NC Naos d3c6 88.1 vs 19.5, Tutorial 1 39.1 vs 21.7: 2-4x.
 - **In the app**: the level editor's **Compile** button (POST / GET `/api/editor/compile`, section 9) runs the CLI in its own
   process in `<data>/editor/compile/`, shows its stage lines, replays the route once more, makes a job `<name> (compiled)`
   (watch it, optimize it like any run) and copies its `/loadtas` line. `src/plan.js` is the headless runner (JSON lines):
