@@ -22,7 +22,9 @@ const ratios = [];
 const t0 = Date.now();
 const levelCache = new Map();
 // (--reverse=1: the shard from its end: a second machine meets the first in the middle; the records carry ri)
-const order = [...routes.entries()];
+// (--idx=<list or @file>: only those route indices (a recheck))
+const idxSet = args.idx ? new Set((String(args.idx).startsWith('@') ? fs.readFileSync(String(args.idx).slice(1), 'utf8') : String(args.idx)).split(',').map((x) => +x).filter((x) => Number.isFinite(x))) : null;
+const order = [...routes.entries()].filter(([ri]) => !idxSet || idxSet.has(ri));
 if (args.reverse === '1') order.reverse();
 for (const [ri, e] of order) {
 	if (ri % shN !== shI) continue;

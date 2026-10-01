@@ -455,7 +455,26 @@ function createRouteLB(L, o = {}) {
 		}
 	}
 	// ---- the tile mask -> the node mask
-	/** nodeBlockedOf(m) -> Uint8Array(NL): node (i, j) blocked iff a tile in cols(i) x rows(j) has m[t] === 0 */
+	// THE HALF BLOCKS (eesim.js _ovSlow: an F_HALF tile of lookup rotation 0 / 1 / 2 / 3 is solid only in its right / lower /
+	// left / upper half; any other rotation the whole tile): the model's classes make rotations 2 / 3 walls (the centre is
+	// never in such a TILE) and 0 / 1 open, but a whole-tile obstacle blocks lattice nodes the ball's centre does reach (On
+	// And On And On: the centre at (2242.8, 1456) next to a left / upper half block, the bound Infinity). Here each one
+	// blocks exactly the nodes in its own obstacle: the half rect [rx, rx + w) x [ry, ry + h) seen by the centre is
+	// [rx - 7, rx + w + 8) x [ry - 7, ry + h + 8) (the engine's integer box test), ends at multiples of 8, so flooring
+	// still keeps a free point free; its tile is no whole-tile wall in the mask test below
+	const halfRot = new Int8Array(N).fill(-1);
+	const halfList = [];
+	{
+		let gfl = null;
+		try { gfl = require('../reach.js').guideFlags(L); } catch (e) { gfl = null; }
+		const lk = L.lookup0;
+		if (gfl && lk) for (let t = 0; t < N; t++) {
+			const id = L.fg[t];
+			if (id >= 0 && id < gfl.length && (gfl[id] & 8) !== 0) { const r = lk[t]; if (r >= 0 && r <= 3) { halfRot[t] = r; halfList.push(t); } }
+		}
+	}
+	/** nodeBlockedOf(m) -> Uint8Array(NL): node (i, j) blocked iff a tile in cols(i) x rows(j) has m[t] === 0 (not a half
+	 *  block), or (i, j) is in a half block's own obstacle */
 	const nbMemo = new Map();
 	function nodeBlockedOf(m, key) {
 		const had = key ? nbMemo.get(key) : null;
@@ -468,10 +487,17 @@ function createRouteLB(L, o = {}) {
 				let b = 0;
 				for (let ry = r0; ry <= r1 && !b; ry++) {
 					if (ry < 0 || ry >= H) continue;
-					for (let cx = c0; cx <= c1; cx++) { if (cx < 0 || cx >= W) continue; if (m[ry * W + cx] === 0) { b = 1; break; } }
+					for (let cx = c0; cx <= c1; cx++) { if (cx < 0 || cx >= W) continue; const t = ry * W + cx; if (m[t] === 0 && halfRot[t] < 0) { b = 1; break; } }
 				}
 				nb[j * LW + i] = b;
 			}
+		}
+		for (const t of halfList) {
+			const a = t % W, bb = (t - a) / W, r = halfRot[t];
+			// (x nodes: full [2a, 2a + 2], left half (2) [2a, 2a + 1], right half (0) [2a + 1, 2a + 2]; y likewise: upper (3), lower (1))
+			const i0 = r === 0 ? 2 * a + 1 : 2 * a, i1 = r === 2 ? 2 * a + 1 : 2 * a + 2;
+			const j0 = r === 1 ? 2 * bb + 1 : 2 * bb, j1 = r === 3 ? 2 * bb + 1 : 2 * bb + 2;
+			for (let j = j0; j <= j1; j++) { if (j < 0 || j >= LH) continue; for (let i = i0; i <= i1; i++) { if (i < 0 || i >= LW) continue; nb[j * LW + i] = 1; } }
 		}
 		if (key) { nbMemo.set(key, nb); if (nbMemo.size > 64) nbMemo.delete(nbMemo.keys().next().value); }
 		return nb;
