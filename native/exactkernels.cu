@@ -59,9 +59,7 @@ __device__ __forceinline__ void exactExpandParent(const ExactParams& p, const u3
 			if (fi < *(volatile u32*)p.nextF) atomicMin(p.nextF, fi);
 			continue;
 		}
-		const u64 a = (sim.hash(false) & 0x1fffffffffffffull) | (1ull << 62);
-		u64 b = sim.hash2(false);
-		if (b == 0) b = 1;
+		const u64 b = xsKeyB(sim.hash2(false)), a = xsKeyA(sim.hash(false), b);
 		u32 slot = 0;
 		const int r = xsInsert(p.table, p.tableMask, p.probeMax, a, b, &slot);
 		if (r == 0) { st[4]++; continue; }
@@ -182,9 +180,7 @@ __device__ void exactDfsBody(const DfsParams& p) {
 			// (the table only for states with lim >= ttMinLim: the deepest layers hold most states and their subtrees are
 			// a few ticks, so they are searched again rather than kept; no entry = no prune: sound)
 			if (lim >= p.ttMinLim) {
-				const u64 a = (sim.hash(false) & 0x1fffffffffffffull) | (1ull << 62);
-				u64 b = sim.hash2(false);
-				if (b == 0) b = 1;
+				const u64 b = xsKeyB(sim.hash2(false)), a = xsKeyA(sim.hash(false), b);
 				u32 slot = 0;
 				int r = xsInsert(p.table, p.tableMask, p.probeMax, a, b, &slot);
 				u32* lay = p.layerOf;

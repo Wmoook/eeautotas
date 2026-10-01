@@ -468,11 +468,18 @@ struct DfsParams {
 // meta word: bits 0-4 the next option, 5-9 the option 0 tick's used bits, 10-18 the jump bits, 19 a source (first moves)
 EE_HD u64 xdMeta(i32 o, u32 used, u32 jumpUsed, bool first) { return (u64)o | ((u64)(used & 31) << 5) | ((u64)(jumpUsed & 0x1ff) << 10) | ((u64)(first ? 1 : 0) << 19); }
 
+/** the visited set's key words of a state: a = the 53-bit stateHash, 9 more bits of hash2 and a flag bit (never 0); b =
+ *  hash2 (never 0). The first word alone is a 62-bit key: the insert's CAS claims a slot with it (see xsInsert). */
+EE_HD u64 xsKeyB(u64 h2) { return h2 == 0 ? 1ull : h2; }
+EE_HD u64 xsKeyA(u64 h, u64 b) { return (h & 0x1fffffffffffffull) | ((b & 0x1ffull) << 53) | (1ull << 62); }
+/** the first probe slot of a key (the host seeds the sources with it) */
+EE_HD u32 xsSlot0(u64 a, u64 b, u32 mask) { return (u32)(splitmix(a ^ (b * 0x9e3779b97f4a7c15ull)) & mask); }
+
 #if EE_GPU
 /** the visited set's insert: 1 new (inserted), 0 there already (merged), 2 the probes ran out (kept, counted: sound);
  *  *slotOut = the key's slot (not for 2) */
 __device__ __forceinline__ int xsInsert(u64* T, u32 mask, u32 probeMax, u64 a, u64 b, u32* slotOut) {
-	u32 i = (u32)(splitmix(a ^ (b * 0x9e3779b97f4a7c15ull)) & mask);
+	u32 i = xsSlot0(a, b, mask);
 	for (u32 p = 0; p < probeMax; p++) {
 		unsigned long long* slot = (unsigned long long*)(T + 2 * (size_t)i);
 		unsigned long long cur = *(volatile unsigned long long*)slot;
@@ -481,9 +488,12 @@ __device__ __forceinline__ int xsInsert(u64* T, u32 mask, u32 probeMax, u64 a, u
 			if (cur == 0) { atomicExch(slot + 1, (unsigned long long)b); *slotOut = i; return 1; }
 		}
 		if (cur == a) {
-			// (b not written yet reads 0: another key here, at most a state kept twice; a different b: a 53-bit collision)
+			// b not written yet (reads 0): the inserting thread is between its CAS and its write, often a thread of this
+			// very warp (two parents' equal children in one launch). The 62-bit first word matched: the same key
+			// (a 62-bit collision in that window only). Before (2026-10-01 LH gpuproof) it probed on and kept the state
+			// again: Switch Labyrinth's layers ~2x the CPU census's. A different b: a 62-bit collision, probed on.
 			const unsigned long long cb = *(volatile unsigned long long*)(slot + 1);
-			if (cb == b) { *slotOut = i; return 0; }
+			if (cb == b || cb == 0) { *slotOut = i; return 0; }
 		}
 		i = (i + 1) & mask;
 	}

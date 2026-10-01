@@ -438,6 +438,30 @@ static int runExact(int argc, char** argv, const LevelBlob& B) {
 		cur.clear(); nxt.clear();
 		cu::cuMemcpyHtoD_v2(dA.p, src.data(), SB * src.size());
 		cur.n = cur.nG = src.size();
+		// the sources into the visited set at layer 0 (tools/perfect/layercensus.js / wholepar.js: a child equal to an idle
+		// start is that start one tick later, its future the same: merged). Before (2026-10-01 LH gpuproof) they were not
+		// in the table: every input a first tick did not read kept the next idle start as a new layer-1 state.
+		{
+			const uint32_t mask = (uint32_t)(slots - 1);
+			for (S& s0 : src) {
+				S c = s0; Sim<TW> sm(L, c);
+				const uint64_t b = xsKeyB(sm.hash2(false)), a = xsKeyA(sm.hash(false), b);
+				uint32_t i = xsSlot0(a, b, mask);
+				for (uint32_t p = 0; p < 128; p++) {
+					uint64_t kv[2];
+					cu::cuMemcpyDtoH_v2(kv, dT.p + 16ull * i, 16);
+					if (kv[0] == a && kv[1] == b) break;
+					if (kv[0] == 0) {
+						kv[0] = a; kv[1] = b;
+						const uint32_t zero = 0;
+						cu::cuMemcpyHtoD_v2(dT.p + 16ull * i, kv, 16);
+						cu::cuMemcpyHtoD_v2(dLay.p + 4ull * i, &zero, 4);
+						break;
+					}
+					i = (i + 1) & mask;
+				}
+			}
+		}
 		cu::CUdeviceptr arCur = dA.p, arNxt = dB2.p;
 		uint64_t states = src.size(), nodes0 = tot[0];
 		std::string status = "closed", stage2 = "bfs";
