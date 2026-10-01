@@ -1332,6 +1332,44 @@ ways in.
   the spikes (90,203). THE COMPILE (1,000 s, W3, box 7 idle at the start, load ~145 from ~3 min): H1 (the cycle-1 knobs) and
   H2 (+ the cycle-2 reach knobs) 0 triggers, 198 / 200 steps all failed (purple switch 1's closest 144.8 tiles at
   (226,191): chapter 1 is not entered under load); the stretch child 22 requests, 0 legs.
+- **THE PHYSICS CRUMBS: the chapter's checkpoints as the plan's waypoints, and the chapter-2 blue coin reached** (B7 lane
+  cold, cycle 4, 2026-10-01; branch n5-b7-cold-c4 = n5-b7-cold + n5-plan 04ecf95 + n5-b7-b9 4fc5666; `src/out/b7cold4/` in
+  its worktree: pl.js (the planner's plans from a route prefix), trace.js, cps.js (the checkpoints a route passes), fld.js,
+  ids.js, summ.py, vanc.js). THE STOP UNDER LOAD: the plan has no waypoint between the spawn and the chapter-2 blue coin
+  (98,207): the b9cw known route (8,000 ticks) passes 14 checkpoints on the way ((279,5) 26, (141,225) 280, (135,215) 863,
+  (127,215) 932, (118,215) 992, (101,229) 1,557, (104,211) 3,047, (109,206) 3,891, (117-120,206) 3,925-3,935, (118,197)
+  4,564, (109,198) 5,327, (109,197) 6,031, (91,196) 6,911), while the executor finds the coin leg only from route tick
+  3,900 (974 ticks, cycle 3); the breadcrumbs (planner.js crumbStep, OPT-IN `EEAT_PLAN_CRUMBS=1`) pick by the gravity-free
+  est walk: (127,215) from the spawn and NONE from route tick 940 on (the walk reads the coin 60 steps away: D < CRUMB_MIN;
+  with `EEAT_CRUMB_MIN=20` the checkpoint UNDER the coin (98,208), reached only through it). **`EEAT_CRUMB_PHYS=1`** (OPT-IN,
+  inside the breadcrumbs; off = byte for byte, planplanner 55 / 55): planner.js `crumbPhys`: D = the root target's RCH3 goal
+  field (`reach.js reachField(levelOf(S), {goals})`: the env's reach knobs, side cap included; memo of 8) at the anchor's
+  state; a candidate's gc = the field's least rest cost over its live tiles, kept when gc <= D - CRUMB_NEAR and d1 + gc - D
+  <= max(3, `EEAT_CRUMB_PHYS_F` 0.03 x D), d1 = PHYS_EST's forward pass (physFwdOf) moves; from the known route's states
+  spawn -> (141,225), 940 -> (117-118,206), 1560 -> (109,206), 3050 / 3895 -> (130,203) (past the dip under the block),
+  4570 / 5330 -> (96,188), 6035 -> the coin itself: every crumb on the true way (the farthest within CRUMB_REACH 40 moves).
+  **`EEAT_CRUMB_RUNGS=<n>`** (physics crumbs only, default 2 = the walk crumbs' rule): a crumb leaves the pick after n failed
+  rungs from the class; the first crumb (141,225) (the selector portal's chamber, 206-236 ticks) fails rung 1 (5 s; closest
+  (284,12) under the portal) and is found at rung 2 (4.6 s, the portfolio) on the idle laptop, and under load every crumb
+  failed rungs 0-1, so with 2 the chain walked down the list without a find. **`EEAT_CRUMB_PICK=near`** (physics crumbs
+  only): the NEAREST qualifying crumb by d1 (d1 is the relaxed forward model's: "40 moves" can be 3,000 route ticks): from
+  the route's states spawn -> (141,225), 940 -> (118,215), 1560 -> (104,211), 3050 -> (109,206). `EEAT_CRUMB_DBG=1`: the
+  candidates on stderr. THE COMPILES (box 7, W3, the cycle-2/3 reach knobs on in every arm but L0: `EEAT_PHYS_EST=1
+  EEAT_CUT_PROG=1 EEAT_WP_DIEFIELD=1 EEAT_BOUNCE_TURN=1 EEAT_ICE_CAPS=1 EEAT_QMAX=47 EEAT_SIDE_CAP=4`, load 115-190 (the
+  scoreboard's full compile beside), one run an arm, side by side; `~/b7_cold_r4`): the defaults (L0) 0 triggers at 915 s
+  (191 steps, 1 anchor); the knobs alone (L2) 0 at 1,090 s (219 steps); + the walk crumbs (C1) 0 at 1,100 s (3 anchors);
+  + the physics crumbs (C2) 0 (11 anchors: the chapter's checkpoints to (127,215)); **+ CRUMB_RUNGS=4 (C3): THE CHAPTER-2
+  BLUE COIN (98,207) AT 360 s** (the first time in any compile; the crumbs (141,225) 28 s, (127,215) 43 s, (109,206) 223 s at
+  rung 3 (41 s), (130,203) 246 s, (97,193) 315 s at rung 3 (30 s), then the coin at rung 2 in 9 s) and chapter 1 by its own
+  crumbs ((218,158), (208,163), (191,168), (208,186), (228,217)) with teams 1 / 3 / 2 and the coin (182,226) by 515 s: gain 4,
+  32 anchors at 1,200 s; its blue-coin anchor replayed from the level start by the engine (vanc.js): tick 2,974, at
+  (98,207), 1 blue coin, 1 death, alive (the known route's coin at ~8,000); + PICK=near (C4): gain 4 (chapter 1), 39
+  anchors, the crumbs (104,211) at rung 3 (120 s), (109,206), (117,206), (130,203) by 190 s, no blue coin in 1,050 s. THE NEXT STOP: from the blue-coin anchor the planner's plans are 'crumb
+  (127,215) -> coin (132,251) -> trophy' (cost 2,351) and 'purple switch 11 (135,251) -> trophy': the gravity-free walk's way,
+  not the hub's blue door #1 (271 / 287, 11-12) -> chapters 3-8; and the field calls the true way's (101,229) (route 1,557:
+  the bottom corridor and the up-arrow column (96-97, 222-227), which the route climbs slowly) a step back (gc 146.8 > D
+  142.6 from (127,215)), so the chain from (118,215) to (104,211) is a 2,000-route-tick leg. NOT MERGED (opt-in, one run an
+  arm, no shared gate).
 - **Bad EE Level 9's mini walls: the deep rung and the warm rung** (B7 lane b9, cycle 2, 2026-09-30, branch n5-b7-b9;
   strategy.js, both OPT-IN, off = the compile byte for byte): `EEAT_RUNG_DEEP=<ms>` = one more rung of that many ms after
   the 45-s one (the facts block an (edge, node class) after 5 failures instead of 4; the executor runs it at its top tier,
