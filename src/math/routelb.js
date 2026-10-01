@@ -682,7 +682,7 @@ function createRouteLB(L, o = {}) {
 			const r = model.respawnOf(S, 'lb');
 			let best = Infinity;
 			for (const t of r.tiles) {
-				const v = boundFromNodes(S, regionNodes([t]), null, bo).lb;
+				const v = boundFromNodes(S, regionNodes([t]), null, Object.assign({}, bo, { walkTiles: [t] })).lb;
 				if (v < best) best = v;
 			}
 			return { lb: best === Infinity ? Infinity : best + left, complete: true, expanded: 0, order: [], ms: Date.now() - tq, dead: true };
@@ -692,7 +692,7 @@ function createRouteLB(L, o = {}) {
 		const c0 = Math.max(0, Math.min(W - 1, i0 >> 1)) + W * Math.max(0, Math.min(H - 1, j0 >> 1));
 		const startCorr = (lam) => lam * dx / caps.Wx[c0] + (1 - lam) * dy / caps.Wdn[c0];
 		const nodes = Int32Array.of(j0 * LW + i0);
-		const bo2 = Object.assign({}, bo, { startSim: sim });
+		const bo2 = Object.assign({}, bo, { startSim: sim, walkTiles: [T.tileOf(sim, W, H)] });
 		const r1 = boundFromNodes(S, nodes, startCorr, bo2);
 		if (pend) {
 			const r2 = boundFromNodes(pend, nodes, startCorr, bo2);
@@ -712,7 +712,7 @@ function createRouteLB(L, o = {}) {
 		const mkey = (S, pos) => S.dkey + '|c' + S.cp + '#' + pos;
 		const h0 = hOpen(startNodes, startCorr);
 		if (h0 === Infinity) return { lb: Infinity, complete: true, expanded: 0, order: [], why: 'no way to the trophy on the open level' };
-		hpush({ f: h0, g: 0, S: S0, pos: -1, nodes: startNodes, corr: startCorr, path: null, goal: false });
+		hpush({ f: h0, g: 0, S: S0, pos: -1, nodes: startNodes, corr: startCorr, path: null, goal: false, wpos: bo.walkTiles ? { id: 'rlw' + bo.walkTiles.join(','), tiles: bo.walkTiles } : null });
 		best.set(mkey(S0, -1), { g: 0, S: S0 });
 		let expanded = 0, goal = null, cut = false;
 		while (open.length) {
@@ -746,14 +746,17 @@ function createRouteLB(L, o = {}) {
 				}
 				return Math.max(fieldLeg, eg);
 			};
+			// (the planner's walk bound of the same leg: the 8-way tile walk at 16.25 px/tick, the death shortcut to the state's
+			// respawn (model.pairLb, 'lb' mode): a sound relaxation of its own; the leg is the larger)
+			const walk = (goalTiles) => { if (!n.wpos) return 0; try { const v = model.pairLb(n.S, n.wpos, goalTiles, 'lb', null); return Number.isFinite(v) || v === Infinity ? v : 0; } catch (e) { return 0; } };
 			// the trophy
-			const lt = kin(legCost(n.S, nbInfo, n.nodes, trophyNodes, 'trophy', n.corr), trophyTiles, 'trophy', trophyNodes);
+			const lt = Math.max(kin(legCost(n.S, nbInfo, n.nodes, trophyNodes, 'trophy', n.corr), trophyTiles, 'trophy', trophyNodes), walk(trophyTiles));
 			if (lt < Infinity) hpush({ f: n.g + lt + 1, g: n.g + lt + 1, S: n.S, pos: -2, nodes: null, path: { X: 'trophy', prev: n.path, g: n.g + lt + 1 }, goal: true });
 			for (const X of trig) {
 				const r = model.touch(n.S, X);
 				if (!r.changed) continue;
 				const tn = trigNodes.get(X.id);
-				const leg = kin(legCost(n.S, nbInfo, n.nodes, tn, 't' + X.id, n.corr), X.tiles, 't' + X.id, tn);
+				const leg = Math.max(kin(legCost(n.S, nbInfo, n.nodes, tn, 't' + X.id, n.corr), X.tiles, 't' + X.id, tn), walk(X.tiles));
 				if (leg === Infinity) continue;
 				const g2 = n.g + leg;
 				const k2 = mkey(r.S2, X.id);
@@ -769,7 +772,7 @@ function createRouteLB(L, o = {}) {
 				best.set(k2, { g: gm, S: S2 });
 				const h = hOpen(tn, null);
 				if (h === Infinity) continue;
-				hpush({ f: gm + h, g: gm, S: S2, pos: X.id, nodes: tn, corr: null, path: { X: X.label, prev: n.path, g: gm }, goal: false });
+				hpush({ f: gm + h, g: gm, S: S2, pos: X.id, nodes: tn, corr: null, path: { X: X.label, prev: n.path, g: gm }, goal: false, wpos: walkPosOf(X) });
 			}
 		}
 		st.expanded += expanded;
@@ -846,6 +849,8 @@ function createRouteLB(L, o = {}) {
 		st.fields++;
 		return out;
 	}
+	const walkPos = new Map();
+	function walkPosOf(X) { let p = walkPos.get(X.id); if (!p) { p = { id: 'rlx' + X.id, tiles: X.tiles }; walkPos.set(X.id, p); } return p; }
 	const togoMemo = new Map();
 	const vMemo = new Map();
 	const constS = model.feats.length === 0 && !model.coinTiles.length && !model.bcoinTiles.length && !model.cpTracked ? model.S0 : null;
@@ -853,7 +858,7 @@ function createRouteLB(L, o = {}) {
 	function vOf(S, X) {
 		const k = S.key + '#' + X.id;
 		let v = vMemo.get(k);
-		if (v === undefined) { v = boundFromNodes(S, trigNodes.get(X.id), null, { ms: 3000 }).lb; vMemo.set(k, v); }
+		if (v === undefined) { v = boundFromNodes(S, trigNodes.get(X.id), null, { ms: 3000, walkTiles: X.tiles }).lb; vMemo.set(k, v); }
 		return v;
 	}
 	/** the cost-to-go fields of an abstract state: per lam min(the trophy + 1, the next relevant trigger + its V) */
