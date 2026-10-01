@@ -1125,3 +1125,37 @@ ways in.
   (`src/out/b7cold/deathlv.txt`: the 16 levels with death steps in the scoreboard logs). A first pair (box 7 at load ~170,
   180 s, W3, off vs on side by side, one run each): Trail Blazer death steps 19 (8 ok, 81 s) vs 12 (10 ok, 23 s), triggers
   12 vs 15, ok steps 31 vs 41; Katwalk 5 (2 ok, 28 s) vs 1 (1 ok, 1 s), triggers 2 = 2; no route either way.
+- **THE BOUNCE'S TURN, THE CAPS' ICE, THE CAPS PAST 40, and where the chapter-2 blue coin leg breaks** (B7 lane cold, cycle 2,
+  2026-09-30; branch n5-b7-cold; `src/out/b7cold2/` in its worktree: bfs.js, coinexec.js, bcsrc2.js, gfwalk.js). Three
+  OPT-IN reach.js knobs (off = the field byte for byte: 7 levels x 3 option sets against the base reach.js), RCH3 and the
+  ordering fields alike: **`EEAT_BOUNCE_TURN=1`** (`opts.bounceTurn`): the up-arrow bounce at a tile returned
+  sqrt(v^2 + gain) >= v for the F level's whole speed, so a ball falling back into a short column pumped to 16 px/tick
+  (Cold World's (96, 226-227) column between two spikes: F7 -> C61 -> F16 -> C127 -> a 20-row rise to the blue coin; the
+  C127 pump at (234,223) into the trophy room); a ball turns in a tile only if it stops inside it (from a tick-start speed v
+  the centre moves sum v_n with the strongest deceleration the engine allows: the 2 queue ticks' most upward modifier with
+  BASE x NO_MOD drag, then the arrow's -2/MULT with BASE drag), so the bounce is the old formula's at min(v, VTURN 3.85
+  px/tick); faster balls leave the tile first (an F move below, a floor's rest, a killer). **`EEAT_ICE_CAPS=1`**
+  (`opts.iceCaps`): with ice anywhere every boost's and portal exit's cap took the ice drag's rise; now only where a
+  slippery ball can be (the ice reach with hops) or turn slippery on the rise (ice within RISE_TILES 77 Chebyshev of the
+  boost / the portal / one of its exits, no hop). **`EEAT_QMAX=<n>`** (`opts.qMax`): a portal exit next to an up arrow has
+  q 41, an ice boost 46: past Q 40 each was R(INF), a rise anywhere up forever (Cold World: 216 / 216 portal exits, 23 / 23
+  boosts); Q 47 holds them all (the engine's best over an ice boost 19.1 rows, the cap 23). SOUNDNESS: test/reach.js C
+  (111 jobs, every state of their runs) 224/0 with all three on; B 63/0 on and off (bounceTurnRooms: the trophy 8 rows over
+  a 2 / 3 / 5-row up-arrow column cut with the turn, finite without (the pump), the engine's best 1.7-2.6 rows; finite
+  wherever the engine reaches it; riseCaps (3) under `EEAT_QMAX` checks the 23-row cap). THE BLUE COIN LEG through the
+  executor (coinexec.js, rung 3 (45 s), box 7 at load ~190, from the spawn): knobs off closest 40.4 tiles at (108,231)
+  (150 s: 19.8 at the pump column (96,226), as every compile attempt in F1 below), knobs on 49.8 at (110,231) (150 s: 50.8
+  at (109,231)): the pump's pull gone, the next false near caught it. THE KNOWN-ROUTE TEST of the leg (the b9cw recorded
+  search's route, 8,028 ticks, 5 deaths; prefixes at its live states, knobs on, rung 3, 45 s): from route ticks 7928 /
+  7628 / 6428 (92,185) / 5628 (114,193) / 4965 (114,204) found in 3.2 / 3.8 / 8.1 / 40 / 43 s (42-608 ticks); from
+  4500 (127,197) and 3985 (134,210) not (closest 27.2 at (92,185): the climb found, the end not in 45 s); from 3500
+  (104,213), 3000 (100,215) and 3228 (107,209) not (closest 45.8 at (114,231)): THE BREAK is the goal field's second
+  false near, the bottom corridor (rows 227-231, x 105-117: 40-49 tiles where the start reads 71), whose RCH3 way is a
+  jump's R7 carried into the left-arrow row (107-111, 230) at C58, out at X58 -> R12 kept sideways along rows 228-229,
+  the column (96,226) and an up-staircase to (85,211), then R7 kept 12 tiles sideways along row 211 into the coin's shaft
+  from below: the SIDEWAYS-KEPT RISE (an R / C level that never decays with horizontal distance) is the next relaxation
+  to bound. THE COMPILE (900 s+): F1 / F2 (n5-plan 8ade568 + `EEAT_PHYS_EST=1 EEAT_CUT_PROG=1 EEAT_WP_DIEFIELD=1`, 1,500 s,
+  W3, seeds 1 / 2, box 7 idle at the start, load ~180 from ~5 min): F1 chapter 1 done (4 triggers, 310 s), its death steps
+  now found (9 of 18, the flag in the compile), 17 anchors, 384 steps, the chapter-2 blue coin 24 attempts from 9 anchors
+  (best 19.8 tiles at the pump column), the stretch child 30 requests / 1 leg; F2 0 triggers (the 3,700-tick chapter-1 leg
+  not found under load).
