@@ -602,12 +602,51 @@ function bypassUnit() {
 	}
 }
 
+/** THE LONG PLAN CALL (planner.js longPlan, EEAT_PLAN_LONG=<ms>): the trophy behind a red door past the spawn's red key; a
+ *  plan call cut to one expansion (maxExpand 1) returns a PARTIAL plan (the key alone); with the knob, once that plan's
+ *  first step is stuck (it failed LONG_R rungs; LONG_R 0: at once) one long search from the state goes first with the whole
+ *  plan, and a state on its path gets its REST; without the knob the partial plans as before */
+function longUnit() {
+	const { level } = require('./planmodel.js');
+	const L = level([
+		'##########',
+		'#S.k.d.T.#',
+		'##########',
+	], { k: [6], d: [23] });
+	const keys = ['EEAT_PLAN_LONG', 'EEAT_PLAN_LONG_R'];
+	const saved = keys.map((k) => process.env[k]);
+	const set = (ms, r) => { if (ms === null) delete process.env.EEAT_PLAN_LONG; else process.env.EEAT_PLAN_LONG = String(ms); if (r === null) delete process.env.EEAT_PLAN_LONG_R; else process.env.EEAT_PLAN_LONG_R = String(r); };
+	const str = (ps) => ps.map((p) => `${p.long ? 'LONG ' : ''}${p.partial ? 'PARTIAL ' : ''}${p.steps.map((s) => `${s.waypoint.label}[r${s.rung}]`).join(' -> ')}`).join(' | ');
+	const run = (ms, r, fails) => {
+		set(ms, r);
+		const m = M.compileModel(L), facts = F.createFacts({ rungs: 4 }), pl = P.createPlanner(m, facts, {});
+		pl.plan({}, { k: 1, maxExpand: 1 });   // (the first call's 2 s)
+		for (let i = 0; i < fails; i++) {
+			const s0 = pl.plan({}, { k: 1, maxExpand: 1 }).find((p) => !p.long).steps[0];
+			pl.learn(s0, { ok: false, arrivals: [], fail: { why: 'budget', closest: null, touched: [], blockedBy: [], level: 0 } }, {});
+		}
+		return { ps: pl.plan({}, { k: 1, maxExpand: 1 }), st: pl.stats() };
+	};
+	try {
+		const off = run(null, null, 0), on0 = run(2000, 0, 0), on1 = run(2000, null, 0), on1f = run(2000, null, 1);
+		check('P-LONG off: one expansion gives a partial plan (the key alone)', off.ps[0] && off.ps[0].partial && !off.ps.some((p) => p.long), str(off.ps));
+		check('P-LONG on, LONG_R 0: the long search\'s whole plan first (key -> trophy), not partial, the partial plans after it',
+			on0.ps[0] && on0.ps[0].long && !on0.ps[0].partial && on0.ps[0].steps.some((s) => s.waypoint.kind === 'trophy') && on0.st.longCalls === 1 && on0.st.longFound === 1 && on0.ps.slice(1).some((p) => p.partial), str(on0.ps));
+		check('P-LONG on, LONG_R 1: not stuck (no failure), no long call', !on1.ps.some((p) => p.long) && !on1.st.longCalls, str(on1.ps));
+		check('P-LONG on, LONG_R 1: after the first step failed a rung, the long plan first', on1f.ps[0] && on1f.ps[0].long && !on1f.ps[0].partial && on1f.st.longCalls === 1, str(on1f.ps));
+		check('P-LONG on: one long call a state (the second plan call takes the kept path\'s rest)', on0.st.longCalls === 1 && on0.st.longRest >= 1, JSON.stringify(on0.st));
+	} finally {
+		keys.forEach((k, i) => { if (saved[i] === undefined) delete process.env[k]; else process.env[k] = saved[i]; });
+	}
+}
+
 if (require.main === module) {
 	units();
 	cegar();
 	crumbsUnit();
 	nearFar();
 	bypassUnit();
+	longUnit();
 	if (process.argv.includes('--truth')) truth();
 	if (process.argv.includes('--scale')) scale();
 	console.log(`${pass}/${pass + fail}`);
