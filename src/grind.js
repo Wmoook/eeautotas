@@ -28,7 +28,7 @@
 // of every round (a partial improvement still helps).
 //
 // usage: node src/grind.js --job=src/jobs/<id> [--level=<level id>] [--until=HH:MM | --forever=1] [--workers=N]
-//        [--nocoins=auto|0|1] [--rot=N] [--skip=A,deep,beam] [--gpu=1] [--roundMin=10] [--deepS=<s>] [--anchored=1] [--tails=1]
+//        [--nocoins=auto|0|1] [--rot=N] [--seedBase=300] [--skip=A,deep,beam] [--gpu=1] [--roundMin=10] [--deepS=<s>] [--anchored=1] [--tails=1]
 //        [--hunt=1] [--endgame=1] [--skips=1] [--sweep=1] [--sweepLoops=lane|first]
 //        (--rot: rounds done, for a status.json without a cursor; --skip: stages skipped in this session's first
 //        round; --anchored=0 / --tails=0: without mutate's --anchor --dprune --fixpoint and explore's --tails)
@@ -82,6 +82,9 @@ function stageWorkers() {
 	} catch (e) { return W; }
 }
 const ROUND_MS = Math.max(1, +a.roundMin || 10) * 60e3;
+// --seedBase (300): the explore windows' seeds are this + the cursor's counter; the AutoTASer's second lane (src/autotas.js
+// lanes) passes another even base, so its windows draw other runs than the first lane's on the same stretch
+const SEED_BASE = Number.isInteger(+a.seedBase) && +a.seedBase >= 0 ? +a.seedBase : 300;
 const DEEP_S = Math.max(0, +a.deepS || 0);   // --deepS: seconds per deep window (default: 150-210, rotating)
 const MUT_HORIZON = 800;
 // the search tools' newer options (they ignore options they do not know): mutate's re-anchored continuation,
@@ -751,7 +754,7 @@ async function sweepStage(round) {
 			try { fs.unlinkSync(out); } catch (e) { /* none */ }
 			try { fs.unlinkSync(`${out}.edges.json`); } catch (e) { /* none */ }
 			const name = `sweep${round}_${id + 1}`;
-			const seed = 300 + (cur.seed = (cur.seed | 0) + 1);
+			const seed = SEED_BASE + (cur.seed = (cur.seed | 0) + 1);
 			log(`${name} (${win.loop ? 'loop' : 'hunt'} window ticks ${win.w0}-${win.w1} of ${bestTrace().tr.n}, ${win.why}, lane ${k + 1}/${lanes}, ${per} threads)...`);
 			const mode = win.loop ? ['--roll=100', ...EXP_EXTRA] : a.hunt !== '0' ? ['--hunt=1'] : [...EXP_EXTRA];   // (a copy: mode.push below)
 			// (time doors: rejoins by the clock-blind hash, as edges for phase.js; --hunt and --tails write them)
@@ -836,7 +839,7 @@ async function loopWindows(round, max = 5) {
 		const w0 = Math.max(0, l.a - 40), w1 = Math.min(n, l.b + 40), before = best.runTicks;
 		const lp = path.join(OUT, `grind_deep_${round}_loop${ran}.eetas`);
 		const res = await stage(`deep${round}_loop${ran + 1}`, 'explore.js', [TAS, `--out=${lp}`, `--from=${w0}`, `--join=${w0}`, `--until=${w1}`,
-			`--seconds=${DEEP_S || 120}`, `--workers=${W}`, '--exact=1', '--roll=100', `--seed=${300 + (cur.seed = (cur.seed | 0) + 1)}`, `--nocoins=${NC}`,
+			`--seconds=${DEEP_S || 120}`, `--workers=${W}`, '--exact=1', '--roll=100', `--seed=${SEED_BASE + (cur.seed = (cur.seed | 0) + 1)}`, `--nocoins=${NC}`,
 			'--maxEntries=1500000', ...EXP_EXTRA, LVL], lp, 600e3, `the run comes back to (${l.x}, ${l.y}) ${l.len} ticks later: ticks ${l.a}-${l.b}`);
 		if (!res) return ran;
 		addResult(lp);
@@ -877,7 +880,7 @@ async function deepStage(round, R) {
 		}
 		if (!mw.st.run) return;   // (every window rests)
 		const before = best.runTicks;
-		const seed = 300 + (cur.seed = (cur.seed | 0) + 1);
+		const seed = SEED_BASE + (cur.seed = (cur.seed | 0) + 1);
 		const dp = path.join(OUT, `grind_deep_${round}_${w.seg - 1}_${w.i}.eetas`);
 		const name = `deep${round}_seg${w.seg}${w.of > 1 ? '.' + (w.i + 1) : ''}`;
 		// every other window: guided skip hunting (explore --hunt: states ahead of the reference by a time-to-go field,

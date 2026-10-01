@@ -1300,11 +1300,18 @@ function halt(ch, why) {
 	try { ch.kill(); } catch (e) { /* gone */ }
 }
 
+/** a seed for a search whose request gives none: the clock and the process id (1 .. 2^31 - 2^16: the workers add their
+ *  index to it) */
+function freshSeed() {
+	return 1 + (((Date.now() % 1e9) * 7919 + process.pid * 104729 + Math.floor(Math.random() * 65536)) % 2147418112);
+}
+
 /**
  * Starts a route search. b: { eelvlB64 (the level as .eelvl bytes; or `level`, the editor's JSON), guide: [[x, y], ...]
  * (px, the ball's centre; optional), seconds (60), width (beam states per tick, 32768), depth (ticks; the beams 6000, the
  * CPU search 100000), name,
- * workers (the CPU search's threads; default cpuWorkers()), seed (the CPU search's first seed, 1) }.
+ * workers (the CPU search's threads; default cpuWorkers()), seed (the CPU search's first seed; default a fresh one per search,
+ * freshSeed(); 1 in tests) }.
  * gpu: the server's GPU processor record ({available, why}): without one (or without the native engine, or on a level
  * it cannot run) the CPU search runs alone, with a note. Throws with `problems` when the level is not ready.
  * test (test/editor.js; not from HTTP): { tool: [command, ...arguments] } runs that instead of the native engine;
@@ -1360,14 +1367,17 @@ function start(b, gpu, test) {
 		...(rolls ? ['gorolls'] : []),
 		...(cpu ? ['goexplore'] : [])];
 	const workers = cpuWorkers(b.workers);
-	const seed = Number.isInteger(+b.seed) && +b.seed >= 0 ? +b.seed : 1;
+	// the CPU search's first seed (and the GPU random runs'): the request's, else a fresh one per search (freshSeed: two
+	// searches of one level no longer find the byte-identical route, problem 10 of the 2026-09-27 handover: Egg Quest II's
+	// two machines both optimized the same 19,603 route); tests (test given) keep 1
+	const seed = b.seed !== undefined && b.seed !== null && b.seed !== '' && Number.isInteger(+b.seed) && +b.seed >= 0 ? +b.seed : test ? 1 : freshSeed();
 	// the most salt tries the exploration runs side by side (eegpu explore --lanes=auto --lanesMax): LANES by default
 	const lanes = Number.isInteger(+b.lanes) && +b.lanes >= 1 ? Math.min(64, +b.lanes) : LANES;
 	const name = String(b.name || ins.json.world_name || 'level').slice(0, 80);
 	const t0 = Date.now();
 	S = { running: true, stage: 'checking the physics', started: t0, searchStarted: 0, prepSec: 0, elapsed: 0, seconds, width, depth, guidePoints: guide.length, name,
 		size: [ins.level.width, ins.level.height], start: ins.start, trophies: ins.trophies.length, notes: ins.notes, reach: ins.reach, levelHash,
-		layer: 0, tick: 0, states: 0, ticksPerSec: 0, result: null, closest: null, message: '', log: [], workers: cpu ? workers : 0,
+		layer: 0, tick: 0, states: 0, ticksPerSec: 0, result: null, closest: null, message: '', log: [], workers: cpu ? workers : 0, seed,
 		cleanMode: cleanModeOf(b.clean),
 		physics: null, cpuOnly: noGpu ? cpuOnlyText(noGpu, workers, guide) : '',
 		strategies: which.map((k) => ({ key: k, label: k === 'goexplore' && one ? ONE_LABEL : STRATEGIES[k].label, cpu: !!STRATEGIES[k].cpu, rolls: !!STRATEGIES[k].rolls,
