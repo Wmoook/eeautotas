@@ -96,6 +96,18 @@ const FAIL_EST = process.env.EEAT_PLAN_FAILEST !== undefined ? Math.max(0, +proc
 // (66,86)", lb 0). Such an edge is skipped where it undoes the node's / anchor's own last toggle. Ordering only: a
 // toggle-back after any other trigger stays an edge (a plan may need a switch off later), the lb and the proofs untouched.
 const UNTOGGLE = process.env.EEAT_PLAN_UNTOGGLE === '1';
+// THE LANDMARK PARTIAL (B7 lane b9 cycle 6; OPT-IN EEAT_PLAN_LMPART=1, off = the plan search byte for byte): a plan search
+// whose budget ends before the trophy picks its partial plan by the fewest landmarks left, then the most gain, then the
+// least f (search(): `better`), but only among the nodes it EXPANDED; on a switch level an expansion is ~20 ms (Bad EE
+// Level 9: 2-11 nodes in a 100-ms search), so a child that achieves a landmark is generated at the root and never
+// expanded when its est is the PENALTY (a relaxation-only edge: the est walls of the failed steps accumulate over every
+// state until a deepening), and the cheap children (checkpoints, toggles back) are expanded and win. Box 7's c17DL
+// (1,800 s): the leader (ids 1-13, 15) tried its last wave-3 switch 14 twice (rungs 0-1 at 1,238 s) and from 1,244 s no
+// plan of any anchor held switch 14 again (20 of 505 plans), 94 of its 139 plans from 1,400 s a lone checkpoint; the same
+// anchor's plan call with fresh facts plans 'purple switch 14' first (tools/cmp/planat.js). With the knob the partial
+// pick reads every GENERATED node too (the same order), so a landmark one edge away is planned whatever its est.
+// Ordering only: no edge added or dropped, the lb and the proofs untouched.
+const LM_PART = process.env.EEAT_PLAN_LMPART === '1';
 const TOGGLE_FEAT = /^(psw|osw):\d+$/;
 // the floor probe's time (steer.js buildSteer on a level with count gates: the plan the steer's physics layers walk, run
 // again with the gates the model leaves open as floors; env EEAT_PLAN_FLOOR=0: off)
@@ -1139,12 +1151,14 @@ function createPlanner(model, facts, o = {}) {
 				const child = { S: e.S2, pos: e.pos2, g: g2, gl: gl2, f: fOf(g2, e.S2, e.pos2) - (protBoost && e.X.kind === 'prot' && e.X.param === 1 ? LM_W : 0), parent: n, e, depth: n.depth + 1, seq: seq++, goal: false };
 				open.push(child);
 				if (isRoot && (!bestRootChild || child.f < bestRootChild.f)) bestRootChild = child;
+				if (LM_PART && better(child, bestPartial)) { bestPartial = child; child.lmGen = true; }
 			}
 		}
 		ST.expands += expanded;
 		if (!found && inc) { found = inc; ST.incumbents = (ST.incumbents || 0) + 1; }
 		// (the budget out before any child was expanded: the root's best child, a one-step partial plan)
 		if (bestPartial === root && bestRootChild) bestPartial = bestRootChild;
+		if (LM_PART && !found && bestPartial && bestPartial.lmGen) ST.lmPart = (ST.lmPart || 0) + 1;
 		return { found, bestPartial: bestPartial === root ? null : bestPartial, expanded, ms: Date.now() - t0, pruned, rootEdges, exhausted: !open.size && !found };
 	}
 	/** a death step's ORDERING field: the tiles a death starts from (model.dieSrc), not its goal tiles (the respawn, where
@@ -1957,7 +1971,7 @@ function createPlanner(model, facts, o = {}) {
 	const stats = () => Object.assign({}, ST, { pace: pace(), model: model.stats() });
 	/** the floors' version: bumps when an async floor probe adds floors (plans made before it priced the trophy edge without) */
 	const floorVersion = () => floorVer;
-	return { plan, learn, lowerBound, costOf, explain, stats, floorVersion, _edgesOf: edgesOf, _hLb: hLb, _anchorOf: anchorOf, _zoneNeed: zoneNeed };
+	return { plan, learn, lowerBound, costOf, explain, stats, floorVersion, _edgesOf: edgesOf, _hLb: hLb, _anchorOf: anchorOf, _zoneNeed: zoneNeed, _hLM: hLM, _hSteps: hSteps };
 }
 
 module.exports = { createPlanner, PACE0 };
