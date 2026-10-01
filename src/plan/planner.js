@@ -210,6 +210,7 @@ function createPlanner(model, facts, o = {}) {
 	// rungs 0-1 and the chain walked down the list to (130,203) without one find)
 	const CRUMB_RUNGS = +process.env.EEAT_CRUMB_RUNGS > 0 ? +process.env.EEAT_CRUMB_RUNGS | 0 : 2;
 	const crumbGoalMemo = new Map();
+	const CRUMB_DBG = process.env.EEAT_CRUMB_DBG === '1';
 	const crumbCands = CRUMBS ?model.triggers.filter((X) => !X.relevant && (X.kind === 'coin' || X.kind === 'bcoin' || X.kind === 'cp') && X.tiles && X.tiles.length) : [];
 	const trophyTiles = model.trophyTiles;
 	const openS = { key: '__open__', dkey: '__open__', vals: [], feats: {} };
@@ -1174,6 +1175,7 @@ function createPlanner(model, facts, o = {}) {
 				const c = RFm.costAt(g, (t % W) * 16, ((t / W) | 0) * 16, 0, true);
 				if (c >= 0 && c < gc) gc = c;
 			}
+			if (CRUMB_DBG && gc < Infinity) console.error('crumbPhys', X.label, 'd1', d1, 'gc', gc.toFixed(1), 'D', D.toFixed(1), 'detour', (d1 + gc - D).toFixed(1), 'slack', slack.toFixed(1));
 			if (!(d1 >= CRUMB_NEAR) || d1 >= INF || !(gc <= D - CRUMB_NEAR) || d1 + gc - D > slack) continue;
 			const c = { X, live, d1, edge };
 			if (d1 <= CRUMB_REACH) { if (!far || d1 > far.d1) far = c; } else if (!near || d1 < near.d1) near = c;
