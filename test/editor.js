@@ -1107,6 +1107,9 @@ async function cpuSection() {
 		!!kBest && !!ow && ow.leadPicks > 0 && ow.leadShare === 0.3 && orr.events.some((e) => e.ev === 'route' && e.ticks === kBest.inputs.length) &&
 		!(orr.done.gpu && orr.done.gpu.relayBursts) && !orr.events.some((e) => e.ev === 'warning'),
 		`${JSON.stringify(ow && { leadPicks: ow.leadPicks, leadShare: ow.leadShare, picks: ow.picks })}; ${orr.events.filter((e) => e.ev === 'warning').map((e) => e.text).join(' | ').slice(0, 300)}`);
+	// head W (--pW 0.3 of the picks head L leaves): cells off the route's (room, tile) schedule by their key-blind lead
+	check('after a route given on stdin: head W picks cells off the route\'s schedule (the other rooms) too, fewer than head L',
+		!!ow && ow.wayPicks > 0 && ow.wayPicks < ow.leadPicks, `${JSON.stringify(ow && { wayPicks: ow.wayPicks, leadPicks: ow.leadPicks, picks: ow.picks })}`);
 	// the GPU random runs as an operator of the one search (the editor's feed, goexplore.js stdin "import <inputs>"): a run
 	// into the key's room given on stdin goes into the archive of every worker (2 workers, nothing shared otherwise)
 	const of = await goexplore(kdFile, ['--workers=2', '--seed=3', '--seconds=4', '--mem=300', '--bursts=1', `--tool=${standin}`, `--work=${path.join(HOME, 'bursts2')}`, '--stdin=1'],
