@@ -54,6 +54,7 @@ const ORDER_LEVEL = process.env.EEAT_BWC_ORDER === 'level';
 // knob a node's candidates are its usable edges by est (the nearest first, K + 2 of them), plan 1's first step put at
 // place PLAN_AT (1) unless nearer, the other plans' first steps after them; a candidate's weight W_EST0 + RANK_W x its place
 const RANK_EST = process.env.EEAT_BWC_RANK === 'est';
+const GAIN_FIRST = process.env.EEAT_BWC_GAINFIRST !== '0';
 const W_EST0 = ENVN('EEAT_BWC_WEST0', 0.25), PLAN_AT = ENVN('EEAT_BWC_PLANAT', 1);
 // THE CHAIN'S MEMORY OF FAILED LEGS (P4 gated, OPT-IN EEAT_BWC_LEARN=1; off = byte for byte): a leg the chain tried at its
 // full clock and lost from one node comes back as the first candidate of the next node (the planner's plan from there is
@@ -171,7 +172,12 @@ function chainLevel(L, o = {}) {
 				es = (planner._edgesOf(a.S, a.pos, a.base, 'plan', true, cls, a) || []).filter((e) => !e.relaxOnly && !e.viaDeath && (e.X ? e.X.kind !== 'die' && e.live && e.live.length : true));
 				// (no toggle back: the switch the node's own leg just toggled, at once again (the planner's UNTOGGLE rule))
 				if (n.viaFeat) es = es.filter((e) => !(e.X && String(e.X.feat) === n.viaFeat));
-				es.sort((x, y) => (x.est - y.est) || (x.lb - y.lb));
+				// (GAIN FIRST: the edges whose touch raises the model's gain (the trophy too) by est, then the gain-neutral ones (a
+				// checkpoint, a switch back), then the ones that lower it: nearest-first alone cycled among Frostbitten's three
+				// checkpoints (54,136) / (62,137) / (65,137), 62 nodes, gain 16 vs the plans' 17 and their route; EEAT_BWC_GAINFIRST=0 off)
+				const g0 = Number.isFinite(+a.S.gain) ? +a.S.gain : 0;
+				const grp = (e) => { if (!GAIN_FIRST) return 0; if (!e.X) return 0; const d = e.S2 && Number.isFinite(+e.S2.gain) ? +e.S2.gain - g0 : 0; return d > 0 ? 0 : d === 0 ? 1 : 2; };
+				es.sort((x, y) => (grp(x) - grp(y)) || (x.est - y.est) || (x.lb - y.lb));
 			} catch (e) { es = []; }
 			const list = [];
 			// (a relay node: its failed target first, at RELAY_W)

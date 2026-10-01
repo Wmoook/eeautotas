@@ -137,6 +137,11 @@ async function oracle(file, rfile, o = {}) {
 			row.estRank = rank('est');
 			row.lbRank = rank('lb');
 			row.stepsRank = rank('steps');
+			// (the gain-first order: the edges whose touch raises the model's gain (S2.gain > S.gain) by est, then the rest by est)
+			const g0 = Number.isFinite(+S.gain) ? +S.gain : 0;
+			const dg = (e) => (e.X === null ? 1 : e.S2 && Number.isFinite(+e.S2.gain) ? +e.S2.gain - g0 : 0);
+			{ const s = usable.slice().sort((x, y) => ((dg(y) > 0) - (dg(x) > 0)) || x.est - y.est || x.lb - y.lb); row.gainRank = s.findIndex((e) => matches(e, nxt)) + 1; }
+			{ const ne2 = usable.find((e) => matches(e, nxt)); row.nextDg = ne2 ? dg(ne2) : null; row.posDg = usable.filter((e) => dg(e) > 0).length; }
 			// (the chain's candidate order: bwchain.js candsOf)
 			const cand = firsts.slice();
 			const byEst = usable.slice().sort((x, y) => (x.est - y.est) || (x.lb - y.lb));
