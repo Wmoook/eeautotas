@@ -718,6 +718,30 @@ ways in.
   30 / 49, one continuous 30-s backward clock 34 / 49, either 36 / 49; every start kind 89 / 129 -> 105 / 129 (69% -> 81%).
   The child runs at nice +10 over the compile (`EEAT_ST_NICE`; 0: the same priority); `EEAT_ST_GENERAL=0`: the short plan's
   request alone. OPT-IN (it has lost single runs; its gains are the one-leg levels' whole-level routes).
+- **THE RATE CLASS** (C6 push 3 lane 2 block 2, 2026-09-30, box 5; `src/out/n5/lanes/c6_lane2_b2.md`, its scripts in
+  `c6_lane2_b2/`): WHERE THE TIME GOES (the chief's 300-s full compile, box 5's 122 levels, the step events): 84,793 of
+  ~110,000 worker-s in failed steps; 93% on (anchor, edge) pairs never solved, 73% (61,498 s, 1,065 pairs) on never-solved
+  pairs that climbed to the 45-s rung; a search resumed across the rungs could keep at most the failed time before a later
+  success of the same pair: 7% (6,201 s); one waypoint climbing to rung 3 from 2+ anchors and never solved: 25%; on the
+  18 RATE levels the trophy steps took 25% of the failed time with no success at any rung (their est walks 1,000-13,000
+  ticks, or 1,000,000+ through a cut). A successful step ends in the second fifth of its window (the exact search bounded
+  by the leg settles) or the last (the tightening, leg polish and exact-ub run to the window's end after a find: what
+  `EEAT_RATE` cuts). CPU-TIME WINDOWS: not built: on box 5 at load 132-168 a step's thread gets 0.956-0.973 of the wall in
+  CPU time; the load's cost is the work per CPU-second (the leg finders' engine ticks 0.16-0.23 M a CPU-s on the box vs
+  0.40-0.70 on the laptop, a pure engine loop 1.26x), unchanged by `--max-semi-space-size=64` or a NUMA-node pin: the
+  finders are memory-bound. THE CORRIDOR'S SECOND PAIRED SAMPLE (`EEAT_CORRIDOR=1` vs off, n5-plan aa4d121, the 18
+  levels, 300 s, W3, 2 runs an arm side by side): routed 0 in every arm, triggers 656 vs 582 (-11%; better on 5, worse on
+  11: EX Crew Ice 101 vs 58, its 45-s steps 3 vs 15); with lane 1's +9% sample no gain: not a default. Egg Quest II's
+  8 -> 4 there: the base's fifth coin came 13 ms past its 45-s window's end (skel+leg), a knife-edge any tier's share flips.
+  THE FAR TROPHY (`EEAT_FAR_TROPHY=<est ticks>`, OPT-IN, strategy.js `windowRung`: a trophy step whose est walk is longer
+  runs its window at most at rung `EEAT_FAR_TROPHY_RUNG` (1) whatever rung its facts reached; off = byte for byte; the
+  step event's `est` / `farTrophy` with it) and THE STRETCH SOLVER on this class (the 18 levels, 300 s, one run an arm side
+  by side, n5-plan aa4d121 + both): compiled base 2 (Perilous Endeavor 11,998 at 295 s, Vignettes 12,928 at 232 s) /
+  `EEAT_STRETCH=1` 0 / `EEAT_FAR_TROPHY=1000` 1 (Perilous Endeavor 10,575 at 213 s), triggers 459 / 369 / 477, every
+  route replayed; the stretch solver -20% (Terminal 6 vs 37: its child's whole-level request ran 270 s on the trophy while
+  the executor made 63 steps vs 135); the far trophy on the 14 levels where it acted 253 vs 242 triggers (better 5 / worse
+  4), and on the 4 where it never acted the same code gave The Tunnels 65 vs 40 and Vignettes no route vs 12,928: one run
+  a level spreads +-40%, no gain shown: both stay opt-in.
 - **Checks**: unit tests `test/plantypes.js`, `planmodel.js`, `planplanner.js`, `planbounds.js`, `planprims.js`,
   `planexec.js --only=unit,fail`, `planstrategy.js`, `plancompile.js` (the CLI and the Compile API with the mock parts
   `test/planmock.js`), `plantruth.js`, `msolve.js --quick`, `kin.js --quick`, `mathsep.js`. The truth checkers on the known routes
