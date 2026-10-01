@@ -184,7 +184,7 @@ function createPlanner(model, facts, o = {}) {
 	// plans through a relaxation-only edge (The Memory Game 1,008,291 / Fall of Zeal 1,003,176 from the start class, where
 	// the same search with fresh facts finds 4,260 / 1,344: a 6-coin plan, the trophy): with the knob a long search that finds
 	// nothing below the PENALTY runs once more with the walls lifted (the rungs, blocks and proofs as they are), its plan's
-	// first step not one that failed LONG_R rungs from the class; its rest the same way)
+	// first step at its next rung (not one at its last rung from the class); its rest the same way)
 	const LONG_NOWALL = process.env.EEAT_PLAN_LONG_NOWALL === '1';
 	const L = model.L, W = model.W, H = model.H;
 	const bounds = o.bounds && typeof o.bounds.pair === 'function' ? o.bounds : null;
@@ -1653,7 +1653,7 @@ function createPlanner(model, facts, o = {}) {
 					if (process.env.EEAT_LONG_DBG === '1') console.error(`[long nowall] ${sk.slice(0, 40)} ms ${Date.now() - t1} expanded ${res2.expanded} found ${n2 ? Math.round(n2.g) : '-'}`);
 					if (!n2 || !(n2.g < PENALTY)) return null;
 					const p = mk(n2, `long: a trophy plan with the est walls lifted (${res2.expanded} nodes)`);
-					if (!p || (facts && facts.rungOf(p.steps[0].edge, cls) >= Math.max(1, LONG_R))) return null;
+					if (!p || (facts && facts.rungOf(p.steps[0].edge, cls) >= 3)) return null;   // (its step at its next rung: the ladder; not at the last one)
 					const path2 = [];
 					for (let n = n2; n && n.e; n = n.parent) path2.push(n);
 					path2.reverse();
