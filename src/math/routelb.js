@@ -571,7 +571,11 @@ function createRouteLB(L, o = {}) {
 	 *  nodes reachable through blocked ones of the moves' cost + the field there (a local Dijkstra, <= 4096 nodes; past
 	 *  that 0: no claim) */
 	const escHeap = new Heap(256);
+	let openNbRef = null;   // (the nodes the static walls block: set below with the open level's mask)
 	function escape(dist, nb, start, lam) {
+		// (a node a STATIC wall blocks holds no ball: no value; the escape goes only through nodes a gate blocks: the
+		// ball overlapping a gate its touch shut, which the engine keeps open until it has left it)
+		if (openNbRef[start]) return Infinity;
 		st.escapes++;
 		const lx = lam, ly = 1 - lam;
 		const seen = new Map();
@@ -584,6 +588,7 @@ function createRouteLB(L, o = {}) {
 			if (d > seen.get(n)) continue;
 			if (++pops > 4096) return 0;
 			if (!nb[n]) { const v = d + dist[n]; if (v < best) best = v; continue; }
+			if (openNbRef[n]) continue;
 			const i = n % LW, j = (n - i) / LW;
 			const step = (m, w) => { const v = d + w; const s = seen.get(m); if (s === undefined || v < s) { seen.set(m, v); escHeap.push(v, m); } };
 			if (i + 1 < LW) step(n + 1, lx * hx[n]);
@@ -620,6 +625,7 @@ function createRouteLB(L, o = {}) {
 	// the open level (every gate open: static walls only): the A* heuristic to the trophy
 	const openMask = (() => { const m = new Uint8Array(N); for (let i = 0; i < N; i++) m[i] = model.A.cls[i] === 0 ? 0 : 1; return m; })();
 	const openNb = nodeBlockedOf(openMask, 'open');
+	openNbRef = openNb;
 	// (the open level's respawns: every respawn tile, the relaxation's)
 	const respAll = (() => { const t = model.respawn || []; const nodes = regionNodes(t); return { nodes, set: new Set(nodes), key: 'rall' }; })();
 	function hOpen(nodes, startCorr) {
@@ -783,11 +789,13 @@ function createRouteLB(L, o = {}) {
 		const idleMax = bo.idleMax || 3000;
 		const sim = new E.EESim(L), inp = new E.EEInput();
 		sim.reset(); E.applyMask(inp, 0);
-		let h = sim.stateHash(), rests = -1;
+		// (the clock-blind hash: the time doors' phase and the key timers left out, which this bound does not read (time
+		// doors open; a key that runs out only shuts doors: a later idle start's bound is no lower))
+		let h = sim.stateHashClockBlind(), rests = -1;
 		for (let k = 0; k <= idleMax; k++) {
 			if (sim.has_silver_crown) return { lb: 0, why: 'the idle ball finishes', idle: k };
 			sim.tick(inp);
-			const h2 = sim.stateHash();
+			const h2 = sim.stateHashClockBlind();
 			if (h2 === h && !sim.is_dead) { rests = k; break; }
 			h = h2;
 		}
