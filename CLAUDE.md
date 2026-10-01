@@ -1489,6 +1489,32 @@ ways in.
   switch 14 (two components: (177,285) and (190,293) behind the special 303), 145 of its 505 plans a lone checkpoint (c17K
   122 / 294) vs 34 / 427 in the 19-id c17L: the planner's budget cuts the 54-switch search and its partial pick takes a
   checkpoint (a new cp makes a new anchor of the same switches, so the leader churns through hub legs).
+- **Bad EE Level 9, cycle 6: THE LANDMARK PARTIAL, 24 chain ids at 900 s** (B7 lane b9, 2026-10-01, branch n5-b7-b9-c6 =
+  cycle 5 + origin/n5-plan 5214e62; planner.js OPT-IN `EEAT_PLAN_LMPART=1`, off = the plan search byte for byte; planner
+  stats `lmPart`; tools/cmp/planat.js (the plan call from a dumped anchor's exact state, the run's failed steps as facts),
+  tools/cmp/chaintime.js (the leader's chain-id timeline, the steps and plans since its last gain)). THE STALL'S CAUSE
+  (cycle 5's c17DL): the leader (ids 1-13, 15) tried its last wave-3 switch 14 twice and from 1,244 s no plan of any anchor
+  held it; the plan search expands ~20 ms a node there (2-11 nodes a 100-ms search) and picked its PARTIAL plan only among
+  the nodes it EXPANDED: switch 14's child, generated at the root at the PENALTY (est 1,001,828: the failed steps' est walls,
+  relaxation-only), was never expanded, the cheap checkpoints / toggles back were, and won (planat from that anchor: with the
+  run's facts 'checkpoint (33,78)', the compile's plan; with fresh facts 'purple switch 14'). THE KNOB: the partial pick
+  (the fewest landmarks left, then the most gain, then the least f) reads every GENERATED node too; ordering only (no edge
+  added or dropped, the lb and the proofs untouched). MEASURED (box 7, Bad EE Level 9, W3, one run an arm, side by side; chain
+  ids of 54 held by one anchor; K = `EEAT_RUNG_DEEP=135000 EEAT_RUNG_PLACE=1 EEAT_START_JITTER=1`): the lone-checkpoint plans
+  fall from 127 of 502 (K, 1,800 s) / 175 of 394 (K, 600 s) to 3-10 of 213-431 in every LMPART run; the worker time on steps
+  that are neither switches nor the leader's (chainwaste.js 'other') 2,252 -> 838 worker-s at 1,800 s, the frontier
+  switches' 2,206 -> 3,550. Round 1 (load 140-165, beside the scoreboard): the current compiler 6 (c21A: the switch-5 wall),
+  K 10, K + LMPART 13; round 2: K 10, K + LMPART 9, the current compiler + LMPART 12; at 1,800 s K 14 (c21L: stalled from
+  1,041 s, its plans lone checkpoints) vs **K + LMPART 20 (c22LP: 1-19, 404; wave 4 to switch 19)**; round 3 (load 45-110):
+  **the current compiler + LMPART alone 24 at 900 s (c25AP: 1-20, 22, 24, 25, 101: WAVE 5 ENTERED; switch 5 at 157 s, wave 2
+  by 356 s, wave 3 by 495 s, wave 4 by 633 s)**, K + LMPART 20 (c25KP: 1-17, 19, 20, 202; the stop switch 18 (78,113) at the
+  135-s rung, closest (97,116) 21.8: cycle 5's c17L stop). THE STOPS NOW: wave 5's switch 21 (58,291) (closest 37-43 tiles)
+  and 23 (270,290) (78-84), the special mini 41's blue coin (75,254) (closest 10 tiles; the leader's plan 'blue coin ->
+  switch 41 -> switch 21'); mini 20 (71,207) re-solved per lineage (c22LP: found at 1,540 s from anchor 71 at rung 3, then
+  climbed rungs 0-4 again from each later anchor, 13-25 tiles short: the funnel's case). CHECKS: test/planplanner.js 60/60
+  and test/planstrategy.js 27/0 with LMPART (+ K) and without; T-PLAN-ORACLE with and without it 2 / 0 (LM 0 of 429 complete
+  plans, ORD 0 of 619; it changes the start plans of 66 of the 230 levels); T-MODEL-EXACT 219 routes 0 unsound (no model file
+  changed); msolve --quick 50 / 0.
 - **THE ENDGAME and THE AIRBORNE ARRIVAL** (C6 push 3 lane 5 block 3; `src/out/n5/lanes/c6_lane5_b3.md`). THE ENDGAME
   (strategy.js after JOINS, its own clock; **DEFAULT ON since lane 5 block 4** (`src/out/n5/lanes/c6_lane5_b4.md`): compile.js
   gives it a fifth of the budget, at most 60 s (`ENDGAME_F`, `ENDGAME_MAX_S`); `--endgame=<s>` / `EEAT_ENDGAME_S=<s>` its
