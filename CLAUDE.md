@@ -549,6 +549,44 @@ ways in.
   failures of that child were the load). The load's share: at load 230 the first routes took 1.7-5x their calm box-8
   times (load 25-60, the base: the pair 17-19 s vs 91-96, Animaly 56 vs 104, Gingerbread House 38 vs 64): a loaded
   box's median is not the compiler's.
+- **THE STRETCH CHILD'S QUEUE** (B8 speed, cycle 4, 2026-10-01, branch n5-b8-speed-c4; box 8 `~/b8_speed_c4`;
+  `tools/cmp/firstsplit.js`: a firstab.js run's first routes with the stretch children's requests and verified arrivals
+  before them; firstab.js `--cap=<s>`: no route by s seconds = unrouted, the compile's budget unchanged). THE PROFILE
+  (cycle 1's box-8 logs, the 50 compiled levels, load 230): the stages before the moves 0.2-5.4 s; the stretch child's
+  FIRST request was the short first plan's whole-level request (the start's plan of <= 3 steps, one 270-s clock) on 35 of
+  50: it routed 10 of them itself (Rosa dei Venti 2.5 s, My level fef0 7.7, Accident Prone 21, INVASION 26, Endless Space
+  28, The Blank Page 31, Gravity's Rainbow 46.5, EE mountain world 184, Stone Ruin 244 s, My level 730c), ran its 270 s for
+  nothing on 4 never routed (Tutorial 4, Just One More Time, Ice Cream Expedition, EX Crew Ice), and STILL HELD IT when the
+  executor routed 16 others (Level 1 Overworld 184 s, Santa's Workshop 176, Crypts 159, Slipslide Ride 162, TPs 241, Trick
+  Or Treat 171, K Underground 72, Pinball Bloom 65, INFINITE 42, ...; On And On 272 of its 276 s): there no failed
+  stretch of the executor ever got a child before the first route. `EEAT_ST_N=2` (the existing knob, never measured: a
+  second child at nice +10, 1.0-1.7 GB; slot 0 the short request, slot 1 the executor's failed stretches from the start;
+  after the first route no new request and slot 1's is killed as stale) and **`EEAT_ST_N=short`** (strategy.js
+  `ST_SHORT2`, OPT-IN, unset or a number = the compile byte for byte: the second child only once the first takes the
+  short request, so a level whose first plan is long keeps one child; smoke on box 8: K Underground slot 0 the whole level
+  at 1.6 s, slot 1 a failed trophy stretch at 13.3 s; Desolate Caverns (6 steps) routed at 13 s with one child).
+  THE A/B (box 8 `~/b8_speed_c4/abN`, base vs `EEAT_ST_N=2`, the 24 compiled levels whose first route sets the median
+  (25-250 s in cycles 1-3), 300 s, W3, par 2 an arm side by side, each compile killed at its first verified route or at
+  150 s (= unrouted, 151 in the medians), ONE run a level, box 8 at load 200-219 and 1-6 GB of RAM free for minutes (a
+  foreign 85-GB GPU process)): routed 16 vs 15 of 24, median 129.5 vs 123.1 s, p90 151 both, by 60 s 6 = 6, by 30 s 0 vs
+  1, the sum 2,617 vs 2,518 s, geo-mean 0.941 (faster by 5%+ 6, slower 1); the 15 both routed: first routes 53,874 vs
+  59,271 run ticks. On the 16 SHORT-PLAN levels (the base's first request the whole level) geo 0.930: Tutorial 2 129.5 ->
+  105.4 s, Slipslide Ride 134.7 -> 103.5 (its route's first link slot 1's coin (30,79) at 25 s), K Underground 116.8 ->
+  67.7, Tree Decorating 34.8 -> 21.3; slower INFINITE 118.7 -> 148.1 (its spread before 42-152 s); the rest within 5%
+  (Overworld, Santa's, Just One More Time, Tutorial 3 unrouted by 150 s in both). On the 8 long-plan levels (where
+  `short` keeps one child: the base's code path) geo 0.964, MIHB's Dream 144.7 -> unrouted at 150 (CPU taken by the
+  second child at load 215). `EEAT_ST_N=short` estimated from the same runs (stn2's time on the short-plan levels, the
+  base's elsewhere): routed 16, median 123.1 s, by 60 s 6, by 30 s 1, the sum 2,537 s, geo 0.953. THE SHARED GATE with
+  `EEAT_ST_N=short` on (box 8 at load ~200, gate20, 60 s, par 2-3, vs gate_c6b2.json): exit 1, compiled 13 vs 14, better 5
+  (+ Tutorial 1 2,012, First Person Maze progress 4 -> 33, The Ten Commandments 723 vs 831), worse 3 (Fish Gods lost, NC
+  Naos d3c6 lost, Level 1 Overworld progress 45 -> 37: the three known 60-s flips), 13 / 13 replayed; the three again side
+  by side (60 s, `--full=1`): Fish Gods base none vs short 4,083 (at 31.8 s), NC Naos none in both, Overworld 32 = 32
+  triggers: none of the knob's. T-MODEL-EXACT 0 unsound (218 routes, 1 stale), T-PLAN-ORACLE 2 / 0, msolve --quick 50 /
+  0, s99stretch 7 / 0 both ways. NOT A DEFAULT (one run a level on a box at load 200+, a 5-7% geo gain, none by 60 s
+  more): opt-in. NEXT: `EEAT_ST_N=short` vs base, 2 runs an arm, on the 35 short-plan compiled levels at a calm share (the
+  load's 1.7-5x is larger than this gain), with `--full=1` for the final routes; the 4 levels where the whole-level
+  request runs its 270 s for nothing (a yield of the short request to the failed stretches and back, the child's memo
+  kept).
 - **In the app**: the level editor's **Compile** button (POST / GET `/api/editor/compile`, section 9) runs the CLI in its own
   process in `<data>/editor/compile/`, shows its stage lines, replays the route once more, makes a job `<name> (compiled)`
   (watch it, optimize it like any run) and copies its `/loadtas` line. `src/plan.js` is the headless runner (JSON lines):
