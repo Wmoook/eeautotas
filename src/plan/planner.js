@@ -209,6 +209,15 @@ function createPlanner(model, facts, o = {}) {
 	// rung 3 in 4.9 s by the portfolio (laptop, idle); in the compile on box 7 at load ~180 every crumb on the way failed
 	// rungs 0-1 and the chain walked down the list to (130,203) without one find)
 	const CRUMB_RUNGS = +process.env.EEAT_CRUMB_RUNGS > 0 ? +process.env.EEAT_CRUMB_RUNGS | 0 : 2;
+	// (EEAT_CRUMB_XA=1, physics crumbs only, OPT-IN; off = the crumbs' field as before, byte for byte: the target's goal
+	// field with reach.js's field transit tables (opts.exitApex: the engine-measured speed a field row passes on, ordering
+	// only, like PHYS_EST's forward pass that measures d1): the plain RCH3 field keeps a field entry's speed row after row
+	// (a jump into a pool rises through it at the jump's speed), so its cheapest way can be a rise the ball cannot make.
+	// Cold World from the chapter-2 blue coin's state: the trophy field's way (158.8 tiles) is the hub, chapter 1 and a
+	// jump from (217,151) carried as C61 through 6 water tiles of row 151 and 4 rows up into the portal (224,138) (the
+	// real way needs the 33333 portal at speed); with the tables 297.6 tiles through the selector portal (261,10) past the
+	// hub's open blue door, and the crumbs follow that way)
+	const CRUMB_XA = process.env.EEAT_CRUMB_XA === '1';
 	const crumbGoalMemo = new Map();
 	const CRUMB_DBG = process.env.EEAT_CRUMB_DBG === '1';
 	// (EEAT_CRUMB_PICK=near, physics crumbs only: the NEAREST qualifying crumb by d1 instead of the farthest within
@@ -596,6 +605,15 @@ function createPlanner(model, facts, o = {}) {
 	// relaxation's speedless states cannot do), the rest as without the knob. Don't Stop Jumping: the 64-tick trophy plan
 	// (RCH3 2,515 tiles: the priced passage) took ~290 of 300 s; priced, the switch plans go first)
 	const PHYS_SA = o.physPrice === undefined && process.env.EEAT_PHYS_PRICE === 'sa', SA_TILES = 2500;
+	// (EEAT_PHYS_PRICE=xa, OPT-IN, B7 cold cycle 5: the price for the TROPHY edges only, by the RCH3 field with reach.js's
+	// field transit tables (opts.exitApex: ordering only, the engine-measured speeds a field row passes on) instead of the
+	// sound field, which keeps a field entry's speed row after row; the field's -1 prices the edge PHYS_CUT_TILES. Cold
+	// World from the chapter-2 blue coin: every plan is 'a chapter-1 trigger -> trophy' because the gravity-free walk and
+	// the sound field both reach the trophy by a jump into the chapter-1 pool carried up as C61 (158.8 tiles; the real way
+	// needs the 33333 portal at speed); with the tables that way is gone (297.6 tiles, through the selector portal (261,10)
+	// past the hub's open blue door). One field per door state (memo XA_MEMO); off = the planner byte for byte)
+	const PHYS_XA = o.physPrice === undefined && (process.env.EEAT_PHYS_PRICE === 'xa' || process.env.EEAT_PHYS_PRICE === 'xaall'), XA_ALL = process.env.EEAT_PHYS_PRICE === 'xaall', XA_MEMO = 12;
+	const xaMemo = new Map();
 	const PHYS_R = +process.env.EEAT_PHYS_R || 2, PHYS_ADD = process.env.EEAT_PHYS_ADD !== undefined ? +process.env.EEAT_PHYS_ADD : 24;
 	const rchPrice = new Map();   // (rchKey -> the RCH3 cost in tiles, where it prices the edge)
 	// THE STEPPING STONES (n5 doctor 4): a ONE-LEG level's plan is one leg of thousands of ticks (13_3 Stone Ruin
@@ -797,13 +815,13 @@ function createPlanner(model, facts, o = {}) {
 					const ok = facts.okTicks(edge, cls);
 					if (ok !== undefined) { g.est = Math.max(g.lb, ok); g.pen = ''; }
 					else {
-						if (PHYS_PRICE || PHYS_SA) { const pr = rchPrice.get(rchKey(S, pos, edge)); if (pr !== undefined) g.est = Math.max(g.est, pr * P + extra); }
+						if (PHYS_PRICE || PHYS_SA || PHYS_XA) { const pr = rchPrice.get(rchKey(S, pos, edge)); if (pr !== undefined) g.est = Math.max(g.est, pr * P + extra); }
 						if (FAIL_EST > 0 && typeof facts.failsAny === 'function') {
 							const fa = facts.failsAny(edge);
 							if (fa > 0 && !facts.okAnyOf(edge)) { g.est += FAIL_EST * fa; ST.failEst = (ST.failEst || 0) + 1; }
 						}
 					}
-				} else if (PHYS_PRICE || PHYS_SA) { const pr = rchPrice.get(rchKey(S, pos, edge)); if (pr !== undefined) g.est = Math.max(g.est, pr * P + extra); }
+				} else if (PHYS_PRICE || PHYS_SA || PHYS_XA) { const pr = rchPrice.get(rchKey(S, pos, edge)); if (pr !== undefined) g.est = Math.max(g.est, pr * P + extra); }
 				if (X === null) { for (const n of floorNeeds) if (!((S.feats[n.feat] || 0) >= n.min)) { g.est += PENALTY; g.pen = (g.pen ? g.pen + '+' : '') + 'floor'; break; } }
 				else if (floorNeeds.length && zoneNeed(S, tiles)) { g.est += PENALTY; g.pen = (g.pen ? g.pen + '+' : '') + 'zone'; }
 				const bad = rchBad.get(rchKey(S, pos, edge));
@@ -943,6 +961,28 @@ function createPlanner(model, facts, o = {}) {
 		if (useBounds && Number.isFinite(lb)) { try { const bb = bounds.pair(pos.tiles, tiles, model.levelOf(S)); if (Number.isFinite(bb)) lb = Math.max(lb, bb + (pos.extra || 0)); } catch (e) { /* tier-0 */ } }
 		return lb;
 	}
+	/** PHYS_XA: the transit-table field's cost (tiles) from a real state or the best of a position's tiles (at rest, rising
+	 *  at the most) to the tiles, -1 cut, null no field */
+	function xaCost(S, from, tiles) {
+		let f;
+		try {
+			if (!RFm) RFm = require('../reach.js');
+			const key = S.pkey + '|' + (tiles.length > 8 ? tiles.length + ':' + tiles[0] + ':' + tiles[tiles.length - 1] : Array.from(tiles).join(','));
+			f = xaMemo.get(key);
+			if (f === undefined) {
+				const t0 = Date.now();
+				f = RFm.reachField(model.levelOf(S), { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: false, exitApex: true });
+				ST.physXaMs = (ST.physXaMs || 0) + (Date.now() - t0);
+				xaMemo.set(key, f);
+				if (xaMemo.size > XA_MEMO) xaMemo.delete(xaMemo.keys().next().value);
+			} else { xaMemo.delete(key); xaMemo.set(key, f); }
+		} catch (err) { return null; }
+		if (!f) return null;
+		if (from && typeof from === 'object' && !Array.isArray(from) && from.px !== undefined) return RFm.costAt(f, from);
+		let cost = -1;
+		for (const t of (Array.isArray(from) ? from : [from])) for (const vy of [0, -16]) { const c = RFm.costAt(f, (t % W) * 16, ((t / W) | 0) * 16, vy); if (c >= 0 && (cost < 0 || c < cost)) cost = c; }
+		return cost;
+	}
 	/** the RCH3 check of the edges on a plan's path; returns the number of edges newly found bad */
 	function verifyPath(a, node, deadline) {
 		let newBad = 0;
@@ -966,6 +1006,11 @@ function createPlanner(model, facts, o = {}) {
 			// (the physics price: RCH3's cost well above the est walk's steps of this edge)
 			else if ((PHYS_PRICE || (PHYS_SA && r.cost >= SA_TILES)) && r.cost > 0 && Number.isFinite(e.steps) && e.steps < INF && !e.relaxOnly && r.cost > PHYS_R * e.steps + PHYS_ADD) {
 				rchPrice.set(k, r.cost); ST.physPriced = (ST.physPriced || 0) + 1; newBad++;
+			}
+			else if (PHYS_XA && (e.X === null || XA_ALL) && Number.isFinite(e.steps) && e.steps < INF && !e.relaxOnly) {
+				const c = xaCost(from.S, isRoot && a.sim ? a.sim : from.pos.tiles, e.live);
+				const pr = c === null ? 0 : c < 0 ? PHYS_CUT_TILES : c;
+				if (pr > PHYS_R * e.steps + PHYS_ADD) { rchPrice.set(k, pr); ST.physXa = (ST.physXa || 0) + 1; newBad++; }
 			}
 		}
 		return newBad;
@@ -1154,7 +1199,7 @@ function createPlanner(model, facts, o = {}) {
 			g = crumbGoalMemo.get(tkey);
 			if (g === undefined) {
 				const t0 = Date.now();
-				g = RFm.reachField(model.levelOf(S), { goals: Array.from(tgt, (t) => ({ tile: t, cost: 0 })), deaths: false });
+				g = RFm.reachField(model.levelOf(S), CRUMB_XA ? { goals: Array.from(tgt, (t) => ({ tile: t, cost: 0 })), deaths: false, exitApex: true } : { goals: Array.from(tgt, (t) => ({ tile: t, cost: 0 })), deaths: false });
 				ST.crumbPhysMs = (ST.crumbPhysMs || 0) + (Date.now() - t0);
 				crumbGoalMemo.set(tkey, g);
 				if (crumbGoalMemo.size > 8) crumbGoalMemo.delete(crumbGoalMemo.keys().next().value);
