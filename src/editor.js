@@ -924,7 +924,19 @@ const GPU_RETRY_S = [5, 20, 60], BREAK_MEM_WAITS = 3;
 // kernels loaded and its table allocated: eegpu's pause file holds it from then on) to its end; while it starts, and for
 // BREAK_SLICE_F of each run's search time (at most BREAK_SLICE_S) before the round's next run, the others have their
 // turns (schedule). `b.breakSlice === false`: the round holds the GPU from its start to its end (as before).
-const BREAK_SLICE_F = 0.25, BREAK_SLICE_S = 5;
+// The share (night 2, cycle 2: "breaker-starves-bursts"): the others get as long as the run searched (at most 20 s), so a
+// round has at most half of the GPU. Cycle 1's test (main c3910bf, the A100, 7 workers; src/out/night/cycles.md): while
+// a round ran the one search made +0 bursts a minute (11-28 while the breaker waited) and the new rooms that led to the
+// routes came between rounds: Octorage 4 new rooms in 10 breaker minutes vs 39 in 8 waiting ones, Infinity Pain 0 in 8 vs
+// 52 in 12, Forgotten Veil 19 in 39 vs 1 in 4 (there the breaker's gate chain earned its time); a quarter (at most 5 s)
+// was cycle 1's first version.
+const BREAK_SLICE_F = 1, BREAK_SLICE_S = 20;
+// A dry round ends early (breakDryRun; `b.breakDry === false`: off): BREAK_DRY_RUNS runs in a row that brought no progress
+// (no attempt nearer by BREAK_TILES and no new room with territory gain from any strategy: breakProgress; no gate into a
+// room no attempt had been in; a run that failed counts as dry) end the round. 7 of cycle 1's 11 rounds ended "nothing
+// nearer, no new room" after 19-22 runs each (Octorage round 2, Infinity Pain's two, 4 of Good Egg's 5), and FV's round 2
+// held the GPU 865 s with nothing.
+const BREAK_DRY_RUNS = 5;
 /** the others' slice (ms) after a breaker run that searched runMs */
 const breakSliceMs = (runMs) => Math.round(Math.min(BREAK_SLICE_S * 1000, BREAK_SLICE_F * Math.max(0, runMs || 0)));
 /** a GPU tool's error that another process's memory explains (and that passes when it frees it) */
@@ -1171,9 +1183,10 @@ function breakLaunch(n) {
 function breakAfter(n, how) {
 	const V = S.strategies[n], R = brk && brk.round;
 	if (!R) return breakEnd(n);
-	if (!R.chain) return breakLaunch(n);   // (its run failed: the next starting point)
+	if (!R.chain) { breakDryRun(R, false); return breakLaunch(n); }   // (its run failed: the next starting point)
 	const ch = R.chain, b = V.bestTry;
 	const hit = V.brk && V.brk.gateHit;
+	let fresh = false;
 	if (hit) {
 		// the coin plan's next gate entered: the attempt goes to the other strategies (the CPU search's archive: a new
 		// room where a door reads the coins; a new room with territory gain is the stall clock's progress there) and the
@@ -1184,7 +1197,7 @@ function breakAfter(n, how) {
 		// last gate first: breakStarts; the round's gates and new-room gates are counted for the state)
 		if (cur.opts.breakFront) {
 			brk.front = { inputs: hit, gates: (ch.gates || 0) + 1 };
-			const fresh = gateRestarts(gateRoom(hit), brk.seen, brk.gateRooms, true);
+			fresh = gateRestarts(gateRoom(hit), brk.seen, brk.gateRooms, true);
 			if (fresh || !cur.opts.breakFrontNew) R.clock = Date.now();
 			if (S.breaker && S.breaker.round) Object.assign(S.breaker.round, { gates: (S.breaker.round.gates || 0) + 1, newGates: (S.breaker.round.newGates || 0) + (fresh ? 1 : 0) });
 		}
@@ -1198,7 +1211,18 @@ function breakAfter(n, how) {
 		if (b) seedCpu(b.inputs);
 		R.chain = null;
 	}
+	breakDryRun(R, fresh);
 	return breakNext(n);
+}
+/** a breaker run of round R ended (fresh: it entered a gate into a new room): R.dry = its runs in a row without progress
+ *  (R.progress: breakProgress, from any strategy, since the last check); BREAK_DRY_RUNS of them end the round (no chain,
+ *  no starting point left: breakLaunch ends it); true then */
+function breakDryRun(R, fresh) {
+	const p = R.progress.length;
+	if (fresh || p > (R.progSeen || 0)) { R.progSeen = p; R.dry = 0; } else R.dry = (R.dry || 0) + 1;
+	if (!cur || !cur.opts.breakDry || R.dry < BREAK_DRY_RUNS) return false;
+	R.chain = null; R.i = R.starts.length; R.dryEnd = true;
+	return true;
 }
 /** the round's next run: after the others' slice of the GPU (breakSlice: breakSliceMs of the run that ended, from its
  *  ready event), or at once; false when the round is over */
@@ -1229,7 +1253,7 @@ function breakEnd(n) {
 		if (R && cur) {
 			brk.level = R.progress.length ? 0 : Math.min(brk.level + 1, cur.opts.breakWait.length - 1);
 			const sec = Math.round((Date.now() - R.t0) / 1000), held = Math.round((R.heldMs || 0) / 1000);
-			note(`${V.label}: round ${brk.rounds} over (${R.runs} run${R.runs === 1 ? '' : 's'}, ${sec} s, the GPU its own ${held} s of them): ` +
+			note(`${V.label}: round ${brk.rounds} over (${R.runs} run${R.runs === 1 ? '' : 's'}, ${sec} s, the GPU its own ${held} s of them${R.dryEnd ? `; ended after ${BREAK_DRY_RUNS} runs in a row without progress` : ''}): ` +
 				`${R.progress.length ? `the search got on (${[...new Set(R.progress)].join(', ')})` : 'nothing nearer, no new room'}; the next after ${cur.opts.breakWait[brk.level]} s without progress`);
 			if (S.breaker) {
 				// (the rounds so far: their length, runs, the seconds its runs searched, gates (into a new room))
