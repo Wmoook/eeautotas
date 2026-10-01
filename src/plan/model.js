@@ -326,7 +326,7 @@ function compileModel(L, o = {}) {
 	});
 	const deathIdx = process.env.EEAT_GAIN_DEATHS === '1' ? -1 : (fIdx.has('deaths') ? fIdx.get('deaths') : -1);
 	// (the crumbs' part of the gain, only with EEAT_CRUMB_RANK (strategy.js; unset: the states as before, byte for byte))
-	const crumbIdx = /^[12]$/.test(process.env.EEAT_CRUMB_RANK || '') ? feats.map((f, n) => (crumbFeats.has(f) ? n : -1)).filter((n) => n >= 0) : [];
+	const crumbIdx = /^[123]$/.test(process.env.EEAT_CRUMB_RANK || '') ? feats.map((f, n) => (crumbFeats.has(f) ? n : -1)).filter((n) => n >= 0) : [];
 	const crumbCoins = crumbFeats.has('coins'), crumbBcoins = crumbFeats.has('bcoins');
 	function mkState(vals, taken, btaken, cp = -1) {
 		const dkey = vals.join(',');

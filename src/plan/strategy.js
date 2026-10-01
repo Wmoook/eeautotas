@@ -116,8 +116,15 @@ const TIMER_PICK = process.env.EEAT_PLAN_TIMER === '1';
 // the compile follows the crumb path to the end (Tutorial 2: a blue coin 101 walk steps off its way taken from the level
 // start, every later anchor past it; the first route 5,022-6,069 run ticks vs 2,901-3,266 with the crumbs off, the direct
 // checkpoint leg found at rung 2). EEAT_CRUMB_RANK=1: once a route is known, the pick's gain leaves the crumbs out (the
-// crumb plans already stop there, planner.js); =2: always (the crumbs' own anchors by the score alone).
-const CRUMB_RANK = process.env.EEAT_CRUMB_RANK === '1' ? 1 : process.env.EEAT_CRUMB_RANK === '2' ? 2 : 0;
+// crumb plans already stop there, planner.js); =2: always (the crumbs' own anchors by the score alone). =2 slowed a level
+// whose only relevant trigger is the trophy and whose crumbs ARE its way (On And On And On: the deepest crumb (118,64) at
+// 272 s vs 169 s, the workers on the lower anchors' 45-s trophy legs; 1 route in 2 runs); =3 THE F GATE: an anchor keeps
+// its crumbs' gain while its f (its arrival tick + its plan's cost) is within CR_F_SLACK x (+ CR_F_ABS ticks) of the least
+// f among the live anchors of its real gain: a crumb ON the route's way keeps the trail depth first (On And On's crumbs:
+// detours of at most 0.114 of a leg, a few % of the route), one off it (Tutorial 2's blue coin (30,10): ~600 ticks on a
+// ~1,600-tick estimate) counts nothing.
+const CRUMB_RANK = process.env.EEAT_CRUMB_RANK === '1' ? 1 : process.env.EEAT_CRUMB_RANK === '2' ? 2 : process.env.EEAT_CRUMB_RANK === '3' ? 3 : 0;
+const CR_F_SLACK = +process.env.EEAT_CR_F_SLACK || 0.1, CR_F_ABS = +process.env.EEAT_CR_F_ABS || 60;
 const ARRIVALS_K = 4, MAX_DEEPEN = 4, STEER_MISS = 6000;
 // the polish's share of the budget once a route is known: min(POLISH_MS, POLISH_F x the budget)
 const POLISH_MS = 15000, POLISH_F = 0.25;
@@ -598,7 +605,16 @@ async function compile(L, opts = {}, emit = () => {}) {
 	let best = null;   // {masks, ticks, runTicks, deaths, chance, legs, how}
 	const runBound = () => Math.min(best ? best.runTicks : Infinity, extBound);
 	// (the anchor pick's gain: EEAT_CRUMB_RANK leaves the crumbs' part out (1: once a route is known, 2: always))
-	const pickGain = CRUMB_RANK ? (A) => (A.S && A.S.cgain > 0 && (CRUMB_RANK === 2 || best) ? A.gain - A.S.cgain : A.gain) : (A) => A.gain;
+	const pickGain = CRUMB_RANK === 3 ? (A) => (A.S && A.S.cgain > 0 && !A.crumbOnWay ? A.gain - A.S.cgain : A.gain)
+		: CRUMB_RANK ? (A) => (A.S && A.S.cgain > 0 && (CRUMB_RANK === 2 || best) ? A.gain - A.S.cgain : A.gain) : (A) => A.gain;
+	/** (=3, THE F GATE) each live anchor's crumbOnWay: its f within the slack of the least f of its real gain */
+	const crumbGate = (list) => {
+		const fOf = (A) => A.firstTick + (Number.isFinite(A.costEst) ? A.costEst : Infinity);
+		const realOf = (A) => A.gain - (A.S && A.S.cgain > 0 ? A.S.cgain : 0);
+		const fMin = new Map();
+		for (const A of list) { const g = realOf(A), f = fOf(A); if (!(fMin.get(g) <= f)) fMin.set(g, f); }
+		for (const A of list) { const m = fMin.get(realOf(A)); A.crumbOnWay = Number.isFinite(m) && fOf(A) <= m * (1 + CR_F_SLACK) + CR_F_ABS; }
+	};
 	const gapOf = (rt) => (Number.isFinite(rt) ? Math.max(0, rt - LB) : null);
 	/** a route (masks that finish): C.evaluate'd; the best when faster (run ticks, then ticks) -> {ev, better} | null */
 	const routeOf = (masks, how, legId) => {
@@ -921,6 +937,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		// (the most progress first, then the lowest plan cost + the arrival tick; THE TIMER (planner.js, EEAT_PLAN_TIMER=1): an
 		// anchor with no plan in its timed killer's time and no remover in time (a LATE anchor) after the others, whatever its gain)
 		const lateOf = (A) => (TIMER_PICK && A.plans && A.plans.late ? 1 : 0);
+		if (CRUMB_RANK === 3) crumbGate(live);
 		const list = live.filter((A) => !A.exhausted).sort((a, b) => (lateOf(a) - lateOf(b)) || (pickGain(b) - pickGain(a)) || (scoreOf(a, N) - scoreOf(b, N)));
 		for (const A of list) {
 			if (left() < 200 || stopped) return null;
@@ -1244,7 +1261,9 @@ async function compile(L, opts = {}, emit = () => {}) {
 	const fallbackJob = () => {
 		if (anchors.size !== fallbackAnchors) { fallbackAnchors = anchors.size; fallbacks = 0; }
 		if (fallbacks >= FALLBACK_MAX || stopped || left() < 1000) return null;
-		const list = [...anchors.values()].filter((A) => A.arrivals.length && !uselessA(A)).sort((a, b) => pickGain(b) - pickGain(a) || a.firstTick - b.firstTick);
+		const fbList = [...anchors.values()].filter((A) => A.arrivals.length && !uselessA(A));
+		if (CRUMB_RANK === 3) crumbGate(fbList);
+		const list = fbList.sort((a, b) => pickGain(b) - pickGain(a) || a.firstTick - b.firstTick);
 		for (const A of list) {
 			for (let r = 0; r < rungMs.length; r++) {
 				const step = { n: 0, edge: `fallback:trophy:${A.key}`, nodeClass: `f${A.key}`, rung: r, synthetic: true, fallback: true, estTicks: 0, waypoint: { kind: 'trophy', label: 'trophy (fallback: no plan left)' } };
