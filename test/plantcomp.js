@@ -57,6 +57,12 @@ if (process.argv.includes('--child')) {
 	for (let r = 0; r < 2; r++) f1.add({ kind: 'fail', edge: t1.edge, nodeClass: t1.nodeClass, rung: r, why: 'budget' });
 	out.one = p1.learn(t1, { ok: false, fail: { why: 'budget', closest: { tile: 1 * L1.width + 4, dist: 1 }, blockedBy: [] } }, {}).map((f) => f.kind);
 	out.at = { decoy: at(3, 2), far: at(21, 2) };
+	// (the facts' global drop: per state, the count of states, '*' for every state)
+	const fg = F.createFacts();
+	fg.add({ kind: 'tdrop', sKey: 'A', comp: 0 }); fg.add({ kind: 'tdrop', sKey: 'B', comp: 0 }); fg.add({ kind: 'tdrop', sKey: 'B', comp: 1 });
+	out.keys0 = fg.tdropKeys(0); out.keys1 = fg.tdropKeys(1); out.c0 = fg.tdropOf('C').length;
+	fg.add({ kind: 'tdrop', sKey: '*', comp: 0 });
+	out.c1 = fg.tdropOf('C'); out.b1 = fg.tdropOf('B').sort(); out.keysG = fg.tdropKeys(0);
 	console.log(JSON.stringify(out));
 	process.exit(0);
 }
@@ -81,5 +87,7 @@ check('P-TCOMP a near miss 5 tiles off drops nothing', !on.far.includes('tdrop')
 check('P-TCOMP one trophy component: no drop', !on.one.includes('tdrop'), `${on.one}`);
 check('P-TCOMP knob off: no drop; the union, blocked after its 3 failures as before',
 	!off.r2.includes('tdrop') && off.r2.includes('block') && off.e0 === 'trophy' && off.e3 === null && off.goalTiles.length === 2 && off.afterReset === 'trophy', `${off.r2} ${off.e3} ${off.afterReset}`);
+check('P-TCOMP facts: the states a component was dropped from, the global drop for every state',
+	on.keys0 === 2 && on.keys1 === 1 && on.c0 === 0 && on.c1.length === 1 && on.c1[0] === 0 && on.b1.join(',') === '0,1' && on.keysG === 2, JSON.stringify([on.keys0, on.keys1, on.c0, on.c1, on.b1, on.keysG]));
 console.log(`plantcomp: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

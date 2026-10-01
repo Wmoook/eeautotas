@@ -161,6 +161,7 @@ const NEEDS_DEATHS = process.env.EEAT_NEEDS_DEATHS === '1';   // (THE DEATH DOOR
 const TCOMP = process.env.EEAT_TROPHY_COMP === '1';
 const TCOMP_RUNG = Math.max(0, +(process.env.EEAT_TROPHY_COMP_RUNG || 2) | 0);
 const TCOMP_NEAR = Math.max(0, +(process.env.EEAT_TROPHY_COMP_NEAR || 2));
+const TCOMP_GLOBAL = process.env.EEAT_TROPHY_COMP_GLOBAL !== undefined ? Math.max(0, +process.env.EEAT_TROPHY_COMP_GLOBAL | 0) : 2;
 /** {left, id}: the ticks a ball has before its soonest running timed killer kills it (Infinity: none running; eesim.js's
  *  rule, Player.as:399-404: it dies on the first tick t with t - start > duration) and that killer's effect block (421
  *  curse, 422 zombie, 1584 poison, 0 fire: no remover block) */
@@ -1896,7 +1897,13 @@ function createPlanner(model, facts, o = {}) {
 				const cx = fail.closest.tile % W, cy = (fail.closest.tile / W) | 0;
 				let bi = -1, bd = Infinity;
 				for (const i of live) for (const t of model.trophies[i].tiles) { const d = Math.max(Math.abs(t % W - cx), Math.abs(((t / W) | 0) - cy)); if (d < bd) { bd = d; bi = i; } }
-				if (bi >= 0 && bd <= TCOMP_NEAR) { out.push(facts.add({ kind: 'tdrop', sKey: a.S.key, comp: bi })); ST.tdrops = (ST.tdrops || 0) + 1; }
+				if (bi >= 0 && bd <= TCOMP_NEAR) {
+					out.push(facts.add({ kind: 'tdrop', sKey: a.S.key, comp: bi })); ST.tdrops = (ST.tdrops || 0) + 1;
+					// (a component dropped from TCOMP_GLOBAL abstract states is dropped from every state: a decoy's seal does not
+					// depend on the coins held; Ice Cream Expedition's (5,177) near-missed again at rungs 1-2 from every new coin
+					// state, 5 drops in 300 s, each state's own; 0 = per state only)
+					if (TCOMP_GLOBAL > 0 && facts.tdropKeys(bi) >= TCOMP_GLOBAL && !facts.tdropOf('*').includes(bi)) out.push(facts.add({ kind: 'tdrop', sKey: '*', comp: bi }));
+				}
 			}
 		}
 		if (rung + 1 >= facts.RUNG_MAX || (isStone && rung + 1 >= STONE_RUNGS)) out.push(facts.add({ kind: 'block', edge, nodeClass: cls }));

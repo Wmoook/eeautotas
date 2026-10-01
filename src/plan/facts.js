@@ -13,7 +13,8 @@
 //   {kind: 'block', edge, nodeClass}                RUNG_MAX failures: the edge is out for that node class
 //   {kind: 'tdrop', sKey, comp}                     a DECOY TROPHY (planner.js EEAT_TROPHY_COMP): the trophy component
 //                                                   `comp` (model.trophies index) is out of the trophy edge from abstract
-//                                                   state sKey (a near miss at rung >= 2 beside it); kept by reset's keepProofs
+//                                                   state sKey (a near miss at rung >= 2 beside it; sKey '*': from every
+//                                                   state); kept by reset's keepProofs
 // o.rungMax (or o.rungs, the strategy's budget rungs; default 3). The version counts every add (and every reset).
 const RUNG_MAX = 3;
 const KINDS = new Set(['ok', 'fail', 'needs', 'proof', 'block', 'tdrop']);
@@ -71,7 +72,9 @@ function createFacts(o = {}) {
 		/** [{feat, value}] the edge needs first (from 'needs' facts) */
 		needsOf: (edge, cls) => needs.get(ek(edge, cls)) || [],
 		/** the trophy components out of the trophy edge from abstract state sKey ('tdrop' facts; [] none) */
-		tdropOf: (sKey) => tdrops.get(String(sKey)) || [],
+		tdropOf: (sKey) => { const a = tdrops.get(String(sKey)), g = tdrops.get('*'); return a && g ? [...new Set(a.concat(g))] : a || g || []; },
+		/** the abstract states (not '*', the global one) a trophy component was dropped from */
+		tdropKeys: (comp) => { let n = 0; for (const [k, l] of tdrops) if (k !== '*' && l.includes(comp | 0)) n++; return n; },
 		list: () => facts.slice(),
 		/** reset({keepProofs}): forget the rungs, blocks, needs and estimates (the strategy's deepening); proofs stay on
 		 *  request; the version still bumps */
