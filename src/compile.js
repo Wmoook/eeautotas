@@ -148,25 +148,16 @@ async function main() {
 		verified = { runTicks: back.runTicks, ticks: back.complete, deaths: back.deaths, chance: back.chance };
 	}
 	const proven = (r.legs || []).filter((g) => g.proven).length;
-	// (the math tier's share of the route's legs, the proofs by what proved them (the math's plain certificate / event-graph
-	// bound, the exact search), the executor's math numbers and the PATTERNS: the legs the search tiers found)
-	const legsR = r.legs || [];
-	const provenBy = {};
-	for (const g of legsR) if (g.proven) { const b = g.provenBy || (String(g.tool || '').includes('exact') ? 'exact' : 'search'); provenBy[b] = (provenBy[b] || 0) + 1; }
-	const mathLegs = legsR.filter((g) => String(g.tool || '').startsWith('math')).length;
-	const ex = r.exec || null;
-	const math = { on: ex && ex.math ? !!ex.math.on : process.env.EEAT_MATH !== '0', legs: mathLegs, provenBy, exec: ex ? ex.math || null : null, byTool: ex ? ex.byTool || null : null,
-		patternsN: ex ? ex.patternsN || 0 : 0 };
 	const ratio = r.ok && r.known && r.known.runTicks > 0 ? Math.round((r.runTicks / r.known.runTicks) * 1000) / 1000 : null;
 	const report = { level: lv.name, file: lv.file, job: lv.job, md5: lv.md5, ok: !!r.ok, end: r.end, sec: Math.round((Date.now() - t0) / 100) / 10, seconds, workers,
 		runTicks: r.runTicks, time: r.ok ? C.fmt(r.runTicks) : null, ticks: r.ticks, deaths: r.deaths, chance: r.chance, lb: r.lb, lbComplete: !!r.lbComplete, lbProof: r.lbProof || '', gap: r.gap,
 		gapPct: r.ok && r.runTicks > 0 ? Math.round((r.gap / r.runTicks) * 1000) / 10 : null, legs: r.legs || [], provenLegs: proven, stages: Object.assign({}, r.stages, { parse: parseMs }),
 		known: r.known || null, ratio, why: r.why || '', steps: r.steps, anchors: r.anchors, bugs: r.bugs, deepenings: r.deepenings, stalls: r.stalls, relayRuns: r.relayRuns, relaySet: r.relaySet, relayDrop: r.relayDrop, out: wrote || null, verified,
-		loadtas: wrote ? `/loadtas ${wrote}` : null, inputs: r.ok ? T.strOf(r.masks) : null, math, patterns: ex && Array.isArray(ex.patterns) ? ex.patterns : [] };
+		loadtas: wrote ? `/loadtas ${wrote}` : null, inputs: r.ok ? T.strOf(r.masks) : null };
 	if (a.report) { fs.mkdirSync(path.dirname(path.resolve(a.report)), { recursive: true }); fs.writeFileSync(path.resolve(a.report), JSON.stringify(report, null, 1)); }
 	if (json) emitJ(Object.assign({ ev: 'report' }, report));
 	else if (r.ok) {
-		row('result', null, `${num(r.runTicks)} run ticks (${C.fmt(r.runTicks)}); lower bound ${num(r.lb)} (gap ${num(r.gap)} = ${report.gapPct}%${r.lbProof ? `: PROVEN OPTIMAL, ${r.lbProof}` : ''}); proven legs ${proven} of ${(r.legs || []).length}${Object.keys(provenBy).length ? ` (${Object.entries(provenBy).map(([k, v]) => `${k} ${v}`).join(', ')})` : ''}; math legs ${mathLegs}` +
+		row('result', null, `${num(r.runTicks)} run ticks (${C.fmt(r.runTicks)}); lower bound ${num(r.lb)} (gap ${num(r.gap)} = ${report.gapPct}%${r.lbProof ? `: PROVEN OPTIMAL, ${r.lbProof}` : ''}); proven legs ${proven} of ${(r.legs || []).length}` +
 			(r.known ? `; best known ${num(r.known.runTicks)} (${r.known.source}; ratio ${ratio})` : '; best known: none'));
 		row('wrote', null, `${wrote}  (eeo-tas: /loadtas ${wrote}, /reset, /playtas)`);
 	} else row('result', null, r.why || `no route (end ${r.end})`);
