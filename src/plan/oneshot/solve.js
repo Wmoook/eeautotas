@@ -100,6 +100,12 @@ const BW_X = env('EEAT_OS_BW_X', 2);
 // (farDone: the leg's masks from the level start to the waypoint) comes in as an injected node of kind 'bw', chased at once.
 // No o.farLeg: the far legs as before (bwSolver here).
 const BW_OUT_MS = env('EEAT_OS_BW_OUTMS', 30000);   // an unanswered request is dropped after 4 x its clock + this
+// THE SHARED SESSION'S LONG CLOCK (lane 6, push 3 block 4; OPT-IN EEAT_OS_BW_STMAX=<ms>, 0 = BW_MSMAX as before): with the far
+// legs in the stretch child (o.farLeg) the one shot does not wait for them, so their clock may go past BW_MSMAX (x BW_X a try,
+// up to this): the backward solver's meet needs 16-30 s past a closure of 400 K cells (Gravity's Rainbow's trophy leg from the
+// spawn: 1 + 2 + ... + 16 s none, the 32-s call 2,319 ticks); with EEAT_BW_RESUME=1 in the child the closure's work adds up
+// across the requests (src/plan/lab/backward.js THE RESUMABLE CLOSURE)
+const BW_ST_MSMAX = env('EEAT_OS_BW_STMAX', 0);
 const CHASE_MAX = env('EEAT_OS_CHASE_MAX', 48);
 const LEG_NOGAIN = env('EEAT_OS_LEG_NOGAIN', 12);   // a step's legs that changed nothing before it gets no more legs        // landings fan-outs per (abstract state, support tile, speed class)   // the landings fan-out from airborne nodes too
 const CLASS_MODE = String(process.env.EEAT_OS_CLASS || 'fine');   // the support class: 'fine' | 'coarse'
@@ -491,7 +497,8 @@ function createOneShot(L, o = {}) {
 				(BW_RETRY && c <= wp.bwC && Date.now() - wp.bwAt >= wp.bwMsLast)))) &&
 				(farLeg ? !farOut : ST.bwMs <= BW_SHARE * (runMs + Date.now() - tRun0))) {
 				wp.bwC = Math.min(c, wp.bwC === undefined ? c : wp.bwC); wp.bwN = (wp.bwN || 0) + 1;
-				const bms = BW_X === 2 ? Math.min(BW_MSMAX, BW_MS0 * (1 << Math.min(5, wp.bwN - 1))) : Math.min(BW_MSMAX, BW_MS0 * Math.pow(BW_X, Math.min(8, wp.bwN - 1)));
+				const bms = farLeg && BW_ST_MSMAX > 0 ? Math.min(BW_ST_MSMAX, BW_MS0 * Math.pow(BW_X, Math.min(10, wp.bwN - 1))) :
+					BW_X === 2 ? Math.min(BW_MSMAX, BW_MS0 * (1 << Math.min(5, wp.bwN - 1))) : Math.min(BW_MSMAX, BW_MS0 * Math.pow(BW_X, Math.min(8, wp.bwN - 1)));
 				wp.bwAt = Date.now(); wp.bwMsLast = bms;
 				if (farLeg) {
 					// (THE SHARED SESSION: the request out; its answer comes in through farDone)
