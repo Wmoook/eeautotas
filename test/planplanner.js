@@ -234,6 +234,23 @@ function units() {
 			};
 			const q0 = run(false), q1 = run(true);
 			check('P-UNIT walled price: off = the penalty past a severing cut, on = a finite 3x price', !!q0 && q0.cost >= 1e6 && !!q1 && q1.cost < 1e6 && q1.cost >= 3 * 50 && q1.lb === q0.lb, `${q0 && q0.cost} vs ${q1 && q1.cost}`);
+			// (THE SCOPED WALL, EEAT_PLAN_WALL_SCOPE: the same severing walls, learned by the trophy step itself ('self') or by
+			// another edge's step ('other'); 'lift': the trophy edge then reached from another node class)
+			const runS = (scope, how) => {
+				const pl2 = P.createPlanner(m2, F.createFacts(), { wallScope: scope });
+				const st = pl2.plan({}, { k: 1 })[0].steps[0];
+				const s0 = how === 'other' ? Object.assign({}, st, { edge: 'x:other' }) : st;
+				const fl = { ok: false, fail: { why: 'budget', closest: { tile: 1 * 62 + 20, dist: 30 } } };
+				pl2.learn(Object.assign({}, s0, { rung: 0 }), fl, {}); pl2.learn(Object.assign({}, s0, { rung: 1 }), fl, {});
+				if (how === 'lift') pl2.learn(Object.assign({}, s0, { nodeClass: 'elsewhere|0,1' }), { ok: true, arrivals: [{ tick: 300 }] }, {});
+				return { p: pl2.plan({}, { k: 1 })[0], st: pl2.stats ? pl2.stats() : null };
+			};
+			const big = (r) => !!r.p && r.p.cost >= 1e6, fin = (r) => !!r.p && r.p.cost < 1e6;
+			const s0 = runS('', 'self'), s1 = runS('', 'other'), sL0 = runS('', 'lift'), sL = runS('lift', 'lift'), sC = runS('class', 'self'), sE = runS('edge', 'other'), sEs = runS('edge', 'self'), sA = runS('lift,class,edge', 'other');
+			check('P-SCOPE off: the walls of the trophy step or of another edge sever the trophy (the penalty), and a success elsewhere lifts nothing', big(s0) && big(s1) && big(sL0), [s0, s1, sL0].map((r) => r.p && r.p.cost).join(' / '));
+			check('P-SCOPE lift: the trophy edge reached from another class lifts its walls (a finite price)', fin(sL), sL.p && sL.p.cost);
+			check('P-SCOPE class: the walls hold in the failing anchor\'s own state', big(sC), sC.p && sC.p.cost);
+			check('P-SCOPE edge: another edge\'s walls leave the trophy\'s est walk alone; its own walls hold', fin(sE) && big(sEs) && fin(sA), [sE, sEs, sA].map((r) => r.p && r.p.cost).join(' / '));
 		}
 		// (THE STONES' WAY, EEAT_PLAN_STONE_WAY=1: the spawn at x 40, a coin behind it at x 5, 7 coins on the way at x 50-110:
 		// with the way only the 4 nearest of those on the way and the farthest are root edges, never the one behind; the plan goes through the

@@ -579,7 +579,12 @@ function compileModel(L, o = {}) {
 	/** the est walk's learned walls (the planner's CEGAR: tiles past which a failed step's closest approach did not get;
 	 *  est only: the lb and the proofs never read them) */
 	let estWalls = null, estWallVer = 0;
-	function setEstWalls(mask) { estWalls = mask; estWallVer++; }
+	// (THE SCOPED WALL, planner.js EEAT_PLAN_WALL_SCOPE class: byKey = a Map S.key -> the walls of that abstract state
+	// (the global mask merged in); a state not in it reads the global mask. sqWalls: the mask KILL_SQUEEZE reads in the
+	// walk being built (the global one but inside an est walk of a keyed state). Without byKey: byte for byte as before)
+	let estWallsBy = null, sqWalls = null;
+	function setEstWalls(mask, byKey) { estWalls = mask; estWallsBy = byKey && byKey.size ? byKey : null; sqWalls = mask; estWallVer++; }
+	const wallsOf = (S) => (estWallsBy && S && estWallsBy.has(S.key) ? estWallsBy.get(S.key) : estWalls);
 	/** the key of the gate pattern under S (the memo key of the geometry) */
 	const hasDeathGate = (() => { for (let i = 0; i < N; i++) if (fg[i] === 1012) return true; return false; })();
 	const hasTime = (() => { for (let i = 0; i < N; i++) if (A.gateFeat[i] === 'time') return true; return false; })();
@@ -595,7 +600,10 @@ function compileModel(L, o = {}) {
 		// ('estNW': the est walk without the planner's CEGAR walls (planner.js WALL_PRICE); the key of the unwalled est)
 		if (mode === 'estNW') return 'e:' + S.pkey + showKey(S, 'est', base);
 		if (mode === 'now') return 'n:' + S.pkey + showKey(S, 'est', base) + (hasTime ? '|t' + (S.td ? 1 : 0) : '') + (hasZombieDoor ? '|z' + (S.zombie ? 1 : 0) : '');
-		if (mode !== 'lb') return (estWalls ? 'w' + estWallVer : 'e') + ':' + S.pkey + showKey(S, 'est', base);
+		if (mode !== 'lb') {
+			if (estWallsBy) { const wk = estWallsBy.has(S.key); return (wk || estWalls ? 'w' + estWallVer + (wk ? 'k' + S.key : '') : 'e') + ':' + S.pkey + showKey(S, 'est', base); }
+			return (estWalls ? 'w' + estWallVer : 'e') + ':' + S.pkey + showKey(S, 'est', base);
+		}
 		if (!killers && !estWalls && !hasCoinGate.coins && !hasCoinGate.bcoins && !hasDeathGate) return 'e:' + S.pkey;
 		// (lb: killers passable; the gates' part is the least of the base, the copy and the count)
 		return 'l:' + S.pkey + showKey(S, 'lb', base);
@@ -614,7 +622,7 @@ function compileModel(L, o = {}) {
 			const c = A.cls[i];
 			m[i] = c === 0 ? 0 : c === 3 ? (gateOpen(i, S, gm, base) ? 1 : 0) : c === 1 ? kill : 1;
 		}
-		if (mode === 'est' && estWalls) for (let i = 0; i < N; i++) if (estWalls[i]) m[i] = 0;
+		if (mode === 'est') { const wm = estWallsBy ? wallsOf(S) : estWalls; if (wm) for (let i = 0; i < N; i++) if (wm[i]) m[i] = 0; }
 		passMemo.set(key, m);
 		if (passMemo.size > 64) passMemo.delete(passMemo.keys().next().value);
 		return m;
@@ -662,7 +670,7 @@ function compileModel(L, o = {}) {
 			// ROLLERCOASTER's way out of its start region, spikes (46,25) and (45,26), where the est walk read a wall and every
 			// plan carried the 1e6 penalty. A solid on one side stays shut: the box's sub-steps collide with it)
 			const a = y * W + nx, b = ny * W + x;
-			if (!m[a] && !m[b] && !(KILL_SQUEEZE && A.cls[a] === 1 && A.cls[b] === 1 && !(estWalls && (estWalls[a] || estWalls[b])))) return -1;
+			if (!m[a] && !m[b] && !(KILL_SQUEEZE && A.cls[a] === 1 && A.cls[b] === 1 && !(sqWalls && (sqWalls[a] || sqWalls[b])))) return -1;
 		}
 		return j;
 	}
@@ -779,7 +787,9 @@ function compileModel(L, o = {}) {
 		// (a position's grace gates: shut by the touch that made it, still passable for the ball that overlaps them)
 		if (pos.grace && pos.grace.length) { msk = Uint8Array.from(msk); for (const t of pos.grace) msk[t] = 1; }
 		// (the lb's sources: a position's deferral region, where a deferred change's event can happen)
-		const d = bfs(msk, mode === 'lb' && pos.lbTiles ? pos.lbTiles : pos.tiles, bcut ? boostOf : null);
+		let d;
+		if (estWallsBy && mode === 'est') { sqWalls = wallsOf(S); try { d = bfs(msk, pos.tiles, bcut ? boostOf : null); } finally { sqWalls = estWalls; } }
+		else d = bfs(msk, mode === 'lb' && pos.lbTiles ? pos.lbTiles : pos.tiles, bcut ? boostOf : null);
 		distBuilds++; distMs += Date.now() - t1;
 		distMemo.set(key, d);
 		if (distMemo.size > DIST_CAP) distMemo.delete(distMemo.keys().next().value);

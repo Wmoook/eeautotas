@@ -668,6 +668,17 @@ function createPlanner(model, facts, o = {}) {
 	// (the walls still price their way 3x; a proof or an lb-only way keeps the penalty). EEAT_WALL_PRICE=1 (OPT-IN: o.wallPrice
 	// overrides), EEAT_WALL_F.
 	const WALL_PRICE = o.wallPrice !== undefined ? !!o.wallPrice : process.env.EEAT_WALL_PRICE === '1';
+	// THE SCOPED WALL (C6 lane 1 block 5; OPT-IN EEAT_PLAN_WALL_SCOPE=<lift,class,edge>, o.wallScope overrides; unset =
+	// the walls byte for byte as before): the CEGAR walls (syncWalls) wall every failed step's closest approach for EVERY
+	// state and every edge and are never taken back, and on the stuck levels the est walk reaches no trophy within
+	// seconds (C6 lane 1 block 4: The Memory Game's walls-lifted plan at 13 s; every long search from its start class out of
+	// nodes in 3-7 ms with only PENALTY plans; B7 b9: the open switch's child generated at the penalty, never expanded).
+	// 'lift': a fact's walls go once its edge succeeds from any node class (the wall was no obstacle to that leg);
+	// 'class': a fact's walls act only in the est walks of the abstract state its anchor was in; 'edge': an edge with no
+	// wall of its own is priced by the unwalled est walk (a failure walls its own leg, not every other target's).
+	const WALL_SCOPE = String(o.wallScope !== undefined ? o.wallScope : process.env.EEAT_PLAN_WALL_SCOPE || '');
+	const SC_LIFT = /\blift\b/.test(WALL_SCOPE), SC_CLASS = /\bclass\b/.test(WALL_SCOPE), SC_EDGE = /\bedge\b/.test(WALL_SCOPE);
+	const SC_ANY = SC_LIFT || SC_CLASS || SC_EDGE;
 	const WALL_F = +process.env.EEAT_WALL_F || 3;
 	// (a PROOF is keyed by the abstract state AND the position it was proven from: the executor's proof is "the goal field
 	// of the level as the doors stand is -1 at every START", a fact about where the ball is (a one-way drop, a portal, a
@@ -753,11 +764,18 @@ function createPlanner(model, facts, o = {}) {
 		const dL = model.dist(S, pos, 'lb', base), dvL = model.deathVia(S, pos, 'lb', base);
 		const wantEst = mode === 'plan';
 		const dE = wantEst ? model.dist(S, pos, 'est', base) : null, dvE = wantEst ? model.deathVia(S, pos, 'est', base) : null;
+		const dE0 = dE, dvE0 = dvE;
 		const cls = root ? rootCls : S.key + '|*';
 		let dNW = null;
 		const nwDist = () => dNW || (dNW = model.dist(S, pos, 'estNW', base));
-		const leg = (tiles, forceDeath) => {
+		let dvNW;
+		const leg = (tiles, forceDeath, edgeId) => {
 			let sL = INF, rL = INF, sE = INF, rE = INF;
+			// (THE SCOPED WALL 'edge': an edge that owns no wall walks the unwalled est)
+			let dE = dE0, dvE = dvE0;
+			if (SC_EDGE && dE && ST.estWalls > 0 && edgeId !== undefined && !walledEdges.has(String(edgeId).replace(/~w$/, ''))) {
+				dE = nwDist(); if (dvNW === undefined) dvNW = model.deathVia(S, pos, 'estNW', base); dvE = dvNW; ST.edgeUnwalled = (ST.edgeUnwalled || 0) + 1;
+			}
 			const drL = dvL ? dvL.dr : null, drE = dvE ? dvE.dr : null;
 			for (const t of tiles) {
 				if (dL[t] < sL) sL = dL[t];
@@ -811,11 +829,11 @@ function createPlanner(model, facts, o = {}) {
 			// exists: a level that can kill and a respawn the death way reaches the target from)
 			let g = null;
 			if (TR_EXH && wantEst && exhausted.has(edge + '\u0001' + cls)) {
-				const gd = leg(tiles, true);
+				const gd = leg(tiles, true, edge);
 				if (TR_DBG) { let rE = INF, sE = INF; const drE = dvE ? dvE.dr : null; for (const t of tiles) { if (drE && drE[t] < rE) rE = drE[t]; if (dE && dE[t] < sE) sE = dE[t]; } process.stderr.write(`[tricks exh] ${edge} viaDeath ${gd ? gd.viaDeath : null} relax ${gd ? gd.relaxOnly : null} dk ${dvE ? dvE.dk : null} sE ${sE} rE ${rE} cp ${S.cp} rsp ${model.respawnOf(S, 'est').id} cls ${String(cls).slice(-28)}\n`); }
 				if (gd && gd.viaDeath) { g = gd; edge += '~w'; }
 			}
-			if (!g) g = leg(tiles);
+			if (!g) g = leg(tiles, false, edge);
 			if (!g) return;
 			if (wantEst) {
 				if (facts) {
@@ -1314,6 +1332,7 @@ function createPlanner(model, facts, o = {}) {
 	function syncWalls() {
 		if (!facts || facts.version() === wallsVer) return;
 		wallsVer = facts.version();
+		if (SC_ANY) return syncWallsScoped();
 		let mask = null, n = 0;
 		for (const fct of facts.list()) {
 			if (fct.kind === 'fail' && fct.cut) for (const j of fct.cut) { if (!mask) mask = new Uint8Array(model.N); if (!mask[j]) { mask[j] = 1; n++; } }
@@ -1332,6 +1351,44 @@ function createPlanner(model, facts, o = {}) {
 		}
 		model.setEstWalls(mask);
 		ST.estWalls = n;
+	}
+	/** THE SCOPED WALL (EEAT_PLAN_WALL_SCOPE): the same walls (a fact's cut, the 3 x 3 of its closest approach at rung >= 1
+	 *  or exhausted), but 'lift': none from a fact whose edge has since succeeded from any node class (facts.okAnyOf);
+	 *  'class': a fact's walls only in the est walks of its anchor's abstract state (fct.sk, learn() records it; a fact
+	 *  without one walls every state as before); 'edge': walledEdges = the edges that own a wall, and edgesOf prices every
+	 *  other edge by the unwalled est walk */
+	const walledEdges = new Set();
+	function syncWallsScoped() {
+		let mask = null, n = 0, lifted = 0;
+		const byKey = SC_CLASS ? new Map() : null;
+		walledEdges.clear();
+		const put = (fct, j) => {
+			let m;
+			if (byKey && fct.sk !== undefined) { m = byKey.get(fct.sk); if (!m) byKey.set(fct.sk, (m = new Uint8Array(model.N))); }
+			else { if (!mask) mask = new Uint8Array(model.N); m = mask; }
+			if (!m[j]) { m[j] = 1; n++; }
+			walledEdges.add(String(fct.edge).replace(/~w$/, ''));
+		};
+		for (const fct of facts.list()) {
+			if (fct.kind !== 'fail') continue;
+			if (SC_LIFT && facts.okAnyOf(fct.edge)) { if (fct.cut || fct.closest) lifted++; continue; }
+			if (fct.cut) for (const j of fct.cut) put(fct, j);
+			if (!fct.closest || fct.closest.tile === undefined || fct.closest.tile === null) continue;
+			if (fct.noWall) continue;
+			if (!((fct.rung | 0) >= 1 || fct.why === 'exhausted')) continue;
+			const t = fct.closest.tile, x = t % W, y = (t / W) | 0;
+			for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+				const nx = x + dx, ny = y + dy;
+				if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+				const j = ny * W + nx;
+				if (model.trigOf[j] >= 0) continue;
+				put(fct, j);
+			}
+		}
+		// (a keyed state's walls carry the global ones too)
+		if (byKey && mask) for (const m of byKey.values()) for (let i = 0; i < m.length; i++) if (mask[i]) m[i] = 1;
+		model.setEstWalls(mask, byKey);
+		ST.estWalls = n; ST.wallsLifted = lifted; ST.wallKeys = byKey ? byKey.size : 0; ST.walledEdges = walledEdges.size;
 	}
 	/** THE TIMER: a remover of the anchor's running killer (its block with the number 0) within the ticks left by the est
 	 *  walk in the anchor's state */
@@ -1912,7 +1969,7 @@ function createPlanner(model, facts, o = {}) {
 			const tiles = step.waypoint && (step.waypoint.kind !== 'trophy' || TCOMP) && step.waypoint.tiles && step.waypoint.tiles.length ? step.waypoint.tiles : trophyTiles;
 			cut = cutPast(a.S, a.pos, tiles, a.base, fail.closest.tile);
 		}
-		out.push(facts.add(Object.assign({ kind: 'fail', edge, nodeClass: cls, rung, why: fail.why || 'budget', closest: fail.closest ? { tile: fail.closest.tile, dist: fail.closest.dist } : null, blockedBy: fail.blockedBy || [], cut }, noWall ? { noWall: true } : {})));
+		out.push(facts.add(Object.assign({ kind: 'fail', edge, nodeClass: cls, rung, why: fail.why || 'budget', closest: fail.closest ? { tile: fail.closest.tile, dist: fail.closest.dist } : null, blockedBy: fail.blockedBy || [], cut }, noWall ? { noWall: true } : {}, SC_CLASS && a ? { sk: a.S.key } : {})));
 		// (THE TROPHY'S COMPONENTS, TCOMP: a near miss beside one trophy component at rung >= TCOMP_RUNG rules it out from
 		// this abstract state while another component is still a target)
 		if (TCOMP && a && model.trophies.length > 1 && step.waypoint && step.waypoint.kind === 'trophy' && rung >= TCOMP_RUNG && fail.why !== 'stopped'
