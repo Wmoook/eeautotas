@@ -541,6 +541,11 @@ function createBackward(L, opts = {}) {
 		// (THE RELAY: a meet from a committed root: its snapshot and the masks from the start to it; lastBest: the expanded node
 		// with the least time to go of the last meet, with its snapshot, the relay's next root)
 		let lastBest = null, lastBests = [];
+		// (o.closest, opt-in (n5-s99-budget, the stretch solver): the node of the least time to go over every meet of the call,
+		// with its masks from the start, returned when no leg is found: the call's partial progress, a start for the next
+		// rung of the compile's executor; off: the solve as before)
+		let bestC = null;
+		const pathTo = (id) => { const parts = []; for (let q = id; q >= 0 && nodes[q].masks; q = nodes[q].par) parts.push(nodes[q].masks); parts.reverse(); let n = 0; for (const a of parts) n += a.length; const m = new Uint8Array(n); let off = 0; for (const a of parts) { m.set(a, off); off += a.length; } return m; };
 		const root0 = { snap: snap0, prefix: new Uint8Array(0), key: startKey };
 		const meet = (cap, until, res = 0, root = root0) => {
 			const keep = P.keep + res;
@@ -615,6 +620,11 @@ function createBackward(L, opts = {}) {
 				}
 			}
 			stats.exhausted = !found && heap.size === 0;
+			if (o.closest && !found && lastBest && (!bestC || lastBest.h < bestC.h)) {
+				const pm = pathTo(lastBest.id), pre = root.prefix || new Uint8Array(0);
+				const mm = new Uint8Array(pre.length + pm.length); mm.set(pre, 0); mm.set(pm, pre.length);
+				bestC = { h: Math.round(lastBest.h), masks: mm };
+			}
 			stats.meetCapped = !found && heap.size > 0 && (ex >= cap || nodes.length >= P.maxNodes);   // (stopped by its node caps, not its clock)
 			return found;
 		};
@@ -677,7 +687,7 @@ function createBackward(L, opts = {}) {
 			stats.probe = out;
 		}
 		stats.nodes = nodes.length;
-		if (!found) return { ok: false, why: stats.exhausted ? 'exhausted' : 'budget', stats };
+		if (!found) return o.closest ? { ok: false, why: stats.exhausted ? 'exhausted' : 'budget', stats, closest: bestC } : { ok: false, why: stats.exhausted ? 'exhausted' : 'budget', stats };
 		// the masks: the chain of moves, replayed from the start (the engine's own goal)
 		const parts = [found.masks];
 		for (let q = found.par; q >= 0 && nodes[q].masks; q = nodes[q].par) parts.push(nodes[q].masks);

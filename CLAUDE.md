@@ -638,6 +638,47 @@ ways in.
   run replicated beside that compile A/B (its finds 1.8x slower) gave 94.2% (the 480+ bucket 66.7 vs 76.8%). Not a default:
   the compile count is a tie. `node test/portfolio.js` (20: the run-up room, each arm replayed, the session's long piece,
   class targets, the executor's tier).
+- **The stretch solver in its own process** (n5-s99-budget, 2026-09-30; `EEAT_STRETCH=1`, OPT-IN, off = the compile byte for
+  byte; `src/plan/lab/stretch_child.js`, strategy.js `st*`; `test/s99stretch.js`): the executor's rung ladder (1.5 / 5 / 15 /
+  45 s windows) restarts every solver of a stretch at every rung, and the lab's backward solver (`src/plan/lab/backward.js`)
+  needs 30-40 s IN ONE PIECE on a long leg (inside the rung windows it never finished one). ONE child process a compile
+  (`EEAT_ST_N` children, default 1) keeps that solver (and its closed closures' memo) across requests and gets ONE stretch at a
+  time on ONE continuous clock, next to the executor, whose rungs go on: (1) at the moves' start a SHORT first plan (at most
+  `EEAT_ST_SHORT` 3 steps: the ONE-LEG levels' trophy) from the level start, its legs in order (shares by the plan's est
+  ticks), on `EEAT_ST_SHORT_F` 0.9 of the budget (at most 270 s; before a route the moves have the whole time, the polish /
+  proof reserves are a route's); (2) then, before the first route, the stretch (anchor, plan step) the executor failed at rung
+  >= 1 from the anchor of the most progress, from its earliest arrival, `EEAT_ST_MS` 40 s (80 s on a retry after 'budget'),
+  with THE REST OF A SHORT PLAN (its anchor's plan through it has at most 3 steps: its later legs too, 40 s a leg;
+  `EEAT_ST_CHAIN=0` off); (3) a leg the child did not finish hands back the backward solve's node of the least time to go
+  (backward.js `o.closest`, opt-in there), replayed here and made that stretch's RELAY start for the executor's next rung
+  when it has none (`EEAT_ST_RELAY=0` off: "keep partial progress as the next rung's start"); (4) a request made stale (its
+  stretch done by the executor before the child's first leg, or a route known and it is no whole-level request) is stopped
+  and the child started again. Every child answer is replayed there (the waypoint's goal test, `T.goalOf`) and again here
+  (`verified`: the engine from the level start) before it is an anchor (`addArrival`) or a route (`routeOf`); the loop that
+  would end 'exhausted' waits while a child works (`stHold`). `report.stretch` {requests, ok, anchors, routes, legs, ms,
+  relays, stale, children, short}. MEASURED (the lab's 48-level A/B set, W3, par 3 an arm side by side, one tree, joins and
+  loops off in both arms): 120 s, box 5, two A/Bs (6f04001 without the relay / chain; bdd076a with them): compiled 20 vs 22
+  and 23 vs 23, pooled 43 vs 45 of 96; The Blank Page (2,942 / 2,024) and INVASION (4,093; the child's whole-level route at
+  ~40 s) 2 of 2 vs 0 of 2; lost once each Tutorial 3, INFINITE, Crypts Of Anubis, Presto Penguins (the base 1 of 2 on each:
+  the moves' spread); the executor's own work the same with the child (the levels failing in both arms: 1,460 / 1,465 steps
+  vs 1,451 / 1,472, simulated ticks -3% / +4%). 300 s, two A/Bs (box 6 6f04001; box 5 767e305 = + the stale kill): 38 vs
+  39 and 31 vs 33 (the loaded box 5), pooled 69 vs 72 of 96; Stone Ruin Speedrun (3,707) and Gravity's Rainbow (2,022, under
+  the best known 2,197) 2 of 2 vs 0 of 2 (the child's whole-level routes); lost Tutorial 3, Buuwuu, Christmas Town, Late
+  christmas once each (the base 2 / 2 / 2 / 1 of 2); both compiled run ticks geo-mean 0.979 / 0.960. A fifth A/B (120 s,
+  box 5, c98d21c = + nice, three arms): base 27, the solver 28, the short plan's request alone (`EEAT_ST_GENERAL=0`) 28 (both:
+  + Stone Ruin, + The Blank Page, + Gravity's Rainbow). ALL FIVE POOLED (240 level runs): base 139 vs 145; by level Stone
+  Ruin 0 -> 3 / 5, Gravity's Rainbow 0 -> 3 / 5, The Blank Page 1 -> 5 / 5, INVASION 3 -> 5 / 5, Accident Prone 4 -> 5, Tutorial
+  2 3 -> 4, Snow Jumping 1 -> 2; WATCH Tutorial 3 3 -> 1 / 5 and Buuwuu's Stronghold 3 -> 1 / 5 (the executor's own work the
+  same in both arms there: steps and simulated ticks), INFINITE, Crypts, Presto, K Underground, the precision puzzle 1 run
+  fewer each. The 41 ONE-LEG levels n5-plan 3d52987's 300-s full compile (44 / 230) failed, the solver on (box 6, 300 s): the
+  child's own routes Just One More Time 2,899, Stone Ruin 3,707, Gravity's Rainbow 2,022; the 36 left again with THE REST OF
+  THE CLOCK (the child's variants in the time a solve leaves: a longer relay, finer x speeds; `EEAT_ST_VARIANTS=0` off): the
+  child's clock used to the end (240-270 s), no further route of the child's (1 of the 36 compiled, EX Crew Fall of Zeal 11,851, by
+  the executor). Per
+  stretch (the lab's krt data, box 5): from the known route's previous trigger the executor's rungs 1-2 (5 + 15-s windows)
+  30 / 49, one continuous 30-s backward clock 34 / 49, either 36 / 49; every start kind 89 / 129 -> 105 / 129 (69% -> 81%).
+  The child runs at nice +10 over the compile (`EEAT_ST_NICE`; 0: the same priority); `EEAT_ST_GENERAL=0`: the short plan's
+  request alone. OPT-IN (it has lost single runs; its gains are the one-leg levels' whole-level routes).
 - **Checks**: unit tests `test/plantypes.js`, `planmodel.js`, `planplanner.js`, `planbounds.js`, `planprims.js`,
   `planexec.js --only=unit,fail`, `planstrategy.js`, `plancompile.js` (the CLI and the Compile API with the mock parts
   `test/planmock.js`), `plantruth.js`, `msolve.js --quick`, `kin.js --quick`, `mathsep.js`. The truth checkers on the known routes
