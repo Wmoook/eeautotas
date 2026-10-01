@@ -65,6 +65,19 @@ const SHIFT0 = process.env.EEAT_JOINS_SHIFT !== undefined ? Math.max(0, +process
 const BRIDGE = process.env.EEAT_JOINS_BRIDGE !== '0';
 const BR_SPAN = 16, BR_MS = +(process.env.EEAT_JOINS_BRIDGE_MS || 300), BR_CAP = 4000, BR_NODES = 2;
 const BR_SHIFTS = [1, -1, 2, -2, 3, -3, 4, -4, 6, -6, 8, -8, 12, -12, 16, -16];
+// THE DETOUR SKIPS (P4, OPT-IN EEAT_JOINS_LOOP=1, off = the DP of before byte for byte): a leg from a kept state at
+// waypoint k to a LATER waypoint j past the span (j.t - k.t > span) whose tile is within LOOP_R tiles of k's (Chebyshev)
+// and whose trigger state (the blind key) is k's: the route left that place and came back with nothing a later door,
+// gate or respawn reads (the slow routes' crumb detours: Tutorial 2's blue coin (29,10), +1,971 ticks between two
+// visits of the coin-2 area; Trick Or Treat's coin (146,100); Tutorial 4's three blue coins); at most LOOP_J such j a
+// state, the farthest first, LOOP_MS a leg; every arrival replayed and put like any leg's (the arrival test: the tile,
+// the class, the trigger state, alive), the whole chain replayed and judged at the end as ever
+const LOOP = process.env.EEAT_JOINS_LOOP === '1';
+const LOOP_R = +process.env.EEAT_JOINS_LOOP_R > 0 ? +process.env.EEAT_JOINS_LOOP_R : 6;
+const LOOP_J = +process.env.EEAT_JOINS_LOOP_J > 0 ? +process.env.EEAT_JOINS_LOOP_J : 3;
+const LOOP_MS = +process.env.EEAT_JOINS_LOOP_MS > 0 ? +process.env.EEAT_JOINS_LOOP_MS : 500;
+const LOOP_FMS = +process.env.EEAT_JOINS_LOOP_FMS > 0 ? +process.env.EEAT_JOINS_LOOP_FMS : 200;
+const LOOP_SHARE = +process.env.EEAT_JOINS_LOOP_SHARE > 0 ? +process.env.EEAT_JOINS_LOOP_SHARE : 0.3;
 
 /**
  * THE BLIND KEY (VERSUS, default on; EEAT_JOINS_BLIND=0 off): what no later door, gate or respawn of this level / route can
@@ -255,7 +268,8 @@ function joinOnce(L, ev0, o, deadline, S) {
 			if (t < WP.finish) { E.applyMask(inp, masks[t]); sim.tick(inp); }
 		}
 	}
-	const stats = { legs: 0, legOk: 0, cands: 0, arrivals: 0, follow: 0, skips: 0, nodes: 0, pruned: 0, legMs: 0, ex: 0, exFound: 0, exGoals: 0, exBest: 0, exMs: 0, shift: 0, bridge: 0, brShift: 0, brLeg: 0, brExact: 0 };
+	const stats = { legs: 0, legOk: 0, cands: 0, arrivals: 0, follow: 0, skips: 0, nodes: 0, pruned: 0, legMs: 0, ex: 0, exFound: 0, exGoals: 0, exBest: 0, exMs: 0, shift: 0, bridge: 0, brShift: 0, brLeg: 0, brExact: 0, loops: 0, loopMs: 0, pads: 0 };
+	let loopReach = 0, padPhase = false;
 	const useExact = o.exact === undefined ? EXACT : !!o.exact;
 	const EXF = o.exShare >= 0 ? o.exShare : 0.4, EXM = o.exM > 0 ? o.exM : 2, EXSPAN = o.exSpan > 0 ? o.exSpan : 64;
 	const EXCAP = o.exCap > 0 ? o.exCap : 30000, EXDIV = o.exDiv >= 0 ? o.exDiv : 2;
@@ -317,7 +331,7 @@ function joinOnce(L, ev0, o, deadline, S) {
 	}
 	let timeUp = false;
 	/** a leg from node nd to waypoint j (msolve, its hop and alts), each arrival replayed and put */
-	const legTo = (nd, k, j, wEnd, legMs) => {
+	const legTo = (nd, k, j, wEnd, legMs, fMs) => {
 		const w = wps[j];
 		const span = w.t - wps[k].t;
 		// (worth it only when it can arrive before the best arrival there + the diversity slack)
@@ -326,7 +340,7 @@ function joinOnce(L, ev0, o, deadline, S) {
 		const lt = Date.now();
 		let r = null;
 		try {
-			r = S.leg(nd.snap, targets[j], { Tmax, chain: CHAIN, chainMs: CHAIN ? Math.max(100, legMs) : undefined, prove: false, alts: A, altSlack: 4, fieldMs: Math.min(40, legMs), coupledTicks: 150000, nodes: 60000, deadline: Math.min(wEnd, lt + legMs) });
+			r = S.leg(nd.snap, targets[j], { Tmax, chain: CHAIN, chainMs: CHAIN ? Math.max(100, legMs) : undefined, prove: false, alts: A, altSlack: 4, fieldMs: fMs > 0 ? fMs : Math.min(40, legMs), coupledTicks: 150000, nodes: 60000, deadline: Math.min(wEnd, lt + legMs) });
 		} catch (e) { r = null; }
 		stats.legs++; stats.legMs += Date.now() - lt;
 		if (!r || !r.ok) return false;
@@ -344,6 +358,25 @@ function joinOnce(L, ev0, o, deadline, S) {
 			for (let t = 0; t < h; t++) ms_[t] = t < c.length ? c[t] : (c[c.length - 1] & 30);
 			put(j, child(j, nd, ms_, j > k + 1 ? `leg skip ${j - k}` : 'leg', r.tool));
 			any = true;
+			// (THE PHASE PAD, a detour skip on a time-door level: the skip moves the doors' phase (the level clock mod
+			// TIMEDOOR_PERIOD) by its gain, and the route's later stretches meet shut doors; the same arrival padded with idle
+			// ticks to the route's phase at j (the gain less its remainder mod the period) is a candidate too, when the ball
+			// still holds the waypoint after them)
+			if (padPhase && !w.finish) {
+				const d = ((w.t - (nd.g + h)) % E.TIMEDOOR_PERIOD + E.TIMEDOOR_PERIOD) % E.TIMEDOOR_PERIOD;
+				if (d > 0 && nd.g + h + d < w.t) {
+					sim.restore(nd.snap);
+					for (let t = 0; t < h; t++) { E.applyMask(inp, ms_[t]); sim.tick(inp); }
+					let px = sim.px, py = sim.py, ok = true;
+					for (let t = 0; t < d && ok; t++) { px = sim.px; py = sim.py; E.applyMask(inp, 0); sim.tick(inp); if (sim.is_dead) ok = false; }
+					if (ok && arrives(j, sim, px, py)) {
+						const ms2 = new Uint8Array(h + d);
+						ms2.set(ms_, 0);
+						put(j, child(j, nd, ms2, `leg skip ${j - k} +${d} idle`, r.tool));
+						stats.pads++;
+					}
+				}
+			}
 		}
 		return any;
 	};
@@ -496,6 +529,33 @@ function joinOnce(L, ev0, o, deadline, S) {
 					legTo(nd, k, j, wEnd, LEG_MS);
 				}
 			}
+			// THE DETOUR SKIPS (EEAT_JOINS_LOOP=1): the later waypoints near k's tile in k's trigger state, past the span
+			// (not inside a detour a skip already crossed, and at most LOOP_SHARE of the pass's clock in all)
+			if (LOOP && live.length && k >= loopReach && stats.loopMs < LOOP_SHARE * Math.max(1, deadline - t0)) {
+				const tL0 = Date.now();
+				const wk = wps[k], kx = wk.tile % W, ky = (wk.tile / W) | 0;
+				const cand = [];
+				for (let j = k + 1; j <= m; j++) {
+					const w = wps[j];
+					if (w.fixed) break;   // (never across a death / respawn)
+					if (w.tele || w.finish || w.t - wk.t <= SPAN || w.prog !== wk.prog) continue;
+					const jx = w.tile % W, jy = (w.tile / W) | 0;
+					if (Math.max(Math.abs(jx - kx), Math.abs(jy - ky)) <= LOOP_R) cand.push(j);
+				}
+				cand.sort((a, b) => wps[b].t - wps[a].t);
+				const lEnd = Math.max(wEnd, Date.now() + LOOP_MS * LOOP_J);
+				for (const nd of live.slice(0, 2)) {
+					for (const j of cand.slice(0, LOOP_J)) {
+						if (Date.now() > lEnd) break;
+						padPhase = !!L.hasTimeDoors;
+						const ok = legTo(nd, k, j, lEnd, LOOP_MS, LOOP_FMS);
+						padPhase = false;
+						if (log) log(`loop k ${k} t ${wk.t} g ${nd.g} -> j ${j} t ${wps[j].t}: ${ok ? 'best ' + best[j] : 'none'}`);
+						if (ok) { stats.loops++; if (j > loopReach) loopReach = j; break; }
+					}
+				}
+				stats.loopMs += Date.now() - tL0;
+			}
 		}
 		// THE BRIDGE: the gain in hand at k (the route's tick less the earliest arrival) that reaches k + 1 .. k + M less by
 		// more than 2 ticks is carried by bridgeTo from the earliest carriers (a switch toggled on and off, a ladder, a portal:
@@ -512,7 +572,7 @@ function joinOnce(L, ev0, o, deadline, S) {
 		}
 		// (the frontier of k is done: its snapshots are no longer needed (the parents keep their inputs))
 		for (const nd of front[k].values()) nd.snap = null;
-		if (log && (k % 50 === 0)) log(`wp ${k}/${m} t ${wps[k].t} best ${best[k]} front ${front[k].size} legs ${stats.legs} ok ${stats.legOk}`);
+		if (log && (k % 50 === 0 || process.env.EEAT_JOINS_LOGALL === "1")) log(`wp ${k}/${m} t ${wps[k].t} best ${best[k]} front ${front[k].size} legs ${stats.legs} ok ${stats.legOk}`);
 	}
 	// the finish: the earliest node
 	let fin = null;
@@ -638,7 +698,7 @@ function joinRoute(L, masks0, o) {
 	const dEnd = deadline - proveShare;
 	let cur = ev0;
 	const passes = [];
-	const stats = { legs: 0, legOk: 0, cands: 0, arrivals: 0, follow: 0, skips: 0, nodes: 0, pruned: 0, legMs: 0, ex: 0, exFound: 0, exGoals: 0, exBest: 0, exMs: 0, shift: 0, bridge: 0, brShift: 0, brLeg: 0, brExact: 0 };
+	const stats = { legs: 0, legOk: 0, cands: 0, arrivals: 0, follow: 0, skips: 0, nodes: 0, pruned: 0, legMs: 0, ex: 0, exFound: 0, exGoals: 0, exBest: 0, exMs: 0, shift: 0, bridge: 0, brShift: 0, brLeg: 0, brExact: 0, loops: 0, loopMs: 0, pads: 0 };
 	let gainless = 0;
 	for (let p = 0; p < (o.passes > 0 ? o.passes : 8) && Date.now() < dEnd - 500; p++) {
 		// (the pass kinds in turn: tile-entry waypoints every 24 ticks, the supports alone, and with LONG (EEAT_JOINS_LONG=1 /
