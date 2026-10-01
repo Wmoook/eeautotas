@@ -327,10 +327,24 @@ function solveExact(L, starts, goal, o) {
 	const trophy = goal.kind === 'trophy';
 	const useBound = !o.noBound && !o.allowDeath;
 	const B = useBound ? (o.B || boundFor(L, goal)) : null;
+	// (THE SUB-LEG BOUND, OPT-IN EEAT_SUBLEG_BOUND=1, n5-b8-big: a skeleton sub-leg (goal.fieldTiles: the waypoint's tiles,
+	// goal.tiles the sub-level set: up to the whole level less a sliver) took its start bound from bounds.leg on the SUB-LEVEL
+	// SET's tiles: a new bounds field (a Dijkstra with thousands of sources, a key string of every tile) per sub-leg, never
+	// reused (the set moves by SKEL_STEP each sub-leg), 1-3.5 s on 300x300 / 400x200 levels in a 300-ms share: the exact tier
+	// ran 3-3.5 s with 0 states (MegaMan Dash 166 of 168 failed skeleton sub-legs had 0 sims; 1,099 of 2,734 over 20 big
+	// levels). With the knob the waypoint's own field on the doors at the start (the same tiles / touch / Lc key as
+	// boundFields' 'now' field and boundFor's context: memoized per waypoint and door state): the per-state cut already
+	// reads the waypoint's bounds for a sub-leg. Off: as before, byte for byte)
+	const subB = process.env.EEAT_SUBLEG_BOUND === '1' && useBound && !!goal.fieldTiles && o.bounds && typeof o.bounds.field === 'function' && typeof o.bounds.at === 'function';
 	for (const s of order) {
 		sim.restore(starts[s].snap);
 		let h = useBound ? EG.lowerBound(B, sim, 4096) : 0;
-		if (useBound && o.bounds && typeof o.bounds.leg === 'function') { const h2 = o.bounds.leg(sim, goal); if (h2 > h) h = h2; }
+		if (subB) {
+			const TY = require('./types.js');
+			let h2 = 0;
+			try { h2 = o.bounds.at(o.bounds.field(goal.fieldTiles, TY.levelNow(L, sim), { touch: TY.fieldTouchOf(goal) }), sim); } catch (e) { h2 = 0; }
+			if (h2 > h) h = h2;
+		} else if (useBound && o.bounds && typeof o.bounds.leg === 'function') { const h2 = o.bounds.leg(sim, goal); if (h2 > h) h = h2; }
 		h += (trophy ? 1 : 0) + (starts[s].tick - t0);
 		if (h < h0) h0 = h;
 	}
