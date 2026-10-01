@@ -2038,6 +2038,19 @@ async function createExecutor(L, opts) {
 	const SKEL_DIRECT = process.env.EEAT_SKEL_DIRECT !== undefined ? Math.max(0, Math.min(0.9, +process.env.EEAT_SKEL_DIRECT || 0)) : 0.35;
 	const DEATH_LEG = process.env.EEAT_DEATH_LEG !== '0';
 	const canDieL = !!(opts.model && opts.model.canDie);
+	// ---- THE DEATH WAY FIRST (n5-b8-big cycle 5, OPT-IN EEAT_NOFIELD_DEATH=1; unset = byte for byte): a waypoint whose goal
+	// field (no deaths, the doors as they stand) is cut at EVERY start got no skeleton (no finite c0) and its direct leg ran
+	// the whole window blind (every finder's distance -1: no closest, the step's 'closest -1 tiles'), so THE DEATH LEG below
+	// never fired (it waits for fail.closedAll, which a blind search on a big level never reaches): on the protection
+	// levels the unprotected ball's field (types.js PROT_LAYER's fU, a walk on an effect level) is -1 at the start while
+	// the death-enabled field is finite (die, respawn, walk on: Infinity Pain's protection (97,94) 1,673 tiles = DEATH_COST
+	// + 35, Endless Pain's 1,646, Nirthophia's 1,705): box 8, cycle 3's 300-s logs, Infinity Pain 487 of its 855 step
+	// worker-s, Endless Pain 368 of 853, Nirthophia 199 of 847 on such waypoints (trophy, protection-on, coins,
+	// checkpoints), none found. With the knob, when the death-enabled field is finite at some start, the direct leg gets
+	// NOFIELD_SHARE of the window and the death leg the rest (the same deathLeg: allowDeath, the arrivals replayed through
+	// their deaths by the strategy). Time use only, no claim.
+	const NOFIELD_DEATH = process.env.EEAT_NOFIELD_DEATH === '1';
+	const NOFIELD_SHARE = +process.env.EEAT_NOFIELD_SHARE > 0 ? Math.min(0.9, +process.env.EEAT_NOFIELD_SHARE) : 0.2;
 	const skelKey = (goal, wp, startStrs, wn) => `${goal.kind}|${Array.from(goal.tiles).slice(0, 64).join(',')}|${goal.tiles.length}|${wp.expect ? wp.expect.feat + '=' + wp.expect.value : ''}|${startStrs[0].length}:${startStrs[0].slice(-64)}|w${wn | 0}`;
 	const skelMemo = new Map();   // key (goal, first start, walls) -> [{c, cur: [mask strings]}] (the levels reached, deepest last)
 	// (THE FAR WAYPOINT'S WHOLE-LEG SHARES, B8 big cycle 3, OPT-IN EEAT_SKEL_FAR=<tiles>, unset / 0 = off, byte for byte:
@@ -2658,6 +2671,22 @@ async function createExecutor(L, opts) {
 			if (wArr && !f0) { wallDropLast(wk, wp.label); wN = -1; wRefresh(); measure(); }
 		};
 		measure();
+		// (THE DEATH WAY FIRST, EEAT_NOFIELD_DEATH=1 above: no start with a finite field, a finite death-enabled field at one)
+		if (NOFIELD_DEATH && !f0 && DEATH_LEG && canDieL && !wp.allowDeath && !wp.dieField && !(wp.beforeTick >= 0 || wp.beforeRel !== undefined)) {
+			let fdc = NaN;
+			try { for (const s of startStrs) { const r = fieldAt(s, goal, true, wArr); if (r.f && r.c >= 0) { fdc = r.c; break; } } } catch (e) { fdc = NaN; }
+			if (fdc >= 0 && Number.isFinite(fdc) && deadline - Date.now() >= 600) {
+				S.nofieldDeath = (S.nofieldDeath || 0) + 1;
+				const dMs = NOFIELD_SHARE * (deadline - Date.now());
+				const r0 = await reachLeg(starts, wp, { ms: dMs, level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline: Math.min(deadline, Date.now() + dMs), stop: budget.stop, next: budget.next || null });
+				if (r0.ok || (r0.fail && (r0.fail.why === 'proof' || r0.fail.why === 'stopped' || r0.fail.why === 'dies'))) return r0;
+				const rF = r0.fail ? Object.assign({}, r0, { fail: Object.assign({}, r0.fail, { closedAll: true }) }) : Object.assign({}, r0, { fail: { why: 'budget', closedAll: true } });
+				const rD = await deathLeg(starts, wp, budget, rF, deadline);
+				if (rD) { S.nofieldDeathOk = (S.nofieldDeathOk || 0) + 1; return rD; }
+				if (emit) emit({ ev: 'exec.nofield', label: wp.label || '', c: Math.round(fdc), ms: Date.now() - tIn });
+				return r0;
+			}
+		}
 		// (the goal basin, OPT-IN: a trigger / trophy waypoint at least BASIN_MIN tiles out by its field)
 		const basinOn = BASIN_ON && !wp.allowDeath && !wp.dieField && goal.kind !== 'region' && !!f0 && Number.isFinite(c0) && c0 >= BASIN_MIN;
 		if (!f0 || !(c0 >= SKEL_MIN) || !Number.isFinite(c0)) {
