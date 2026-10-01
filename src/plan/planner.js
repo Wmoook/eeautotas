@@ -1864,6 +1864,20 @@ function createPlanner(model, facts, o = {}) {
 			if (!f || v === null || v === undefined || a.S.feats[f] === v) continue;
 			out.push(facts.add({ kind: 'needs', edge, nodeClass: cls, feat: f, value: v }));
 		}
+		// (THE DEATH DOOR'S NEED, EEAT_NEEDS_DEATHS=1, planner side: a shut death door within 2 tiles of the closest tile
+		// in the anchor's state; the executor's blockedBy needs the all-open field, which a step whose window is used up
+		// does not build (blockedBy [] in the compiles: Tutorial 2's switch 0 from deaths-0 anchors, closest 61.2 at the door))
+		if (NEEDS_DEATHS && a && a.S.feats && a.S.feats.deaths !== undefined && fail.closest && fail.closest.tile !== undefined && fail.closest.tile !== null && fail.closest.tile >= 0) {
+			const cx = fail.closest.tile % W, cy = (fail.closest.tile / W) | 0, d0 = a.S.feats.deaths | 0, had = facts.needsOf(edge, cls);
+			let need = 0;
+			for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+				const x = cx + dx, y = cy + dy;
+				if (x < 0 || y < 0 || x >= W || y >= H) continue;
+				const t = y * W + x;
+				if (model.L.fg[t] === 1011 && model.L.lookup0[t] > d0 && (need === 0 || model.L.lookup0[t] < need)) need = model.L.lookup0[t];
+			}
+			if (need > 0 && !had.some((n) => n.feat === 'deaths' && n.value === need)) out.push(facts.add({ kind: 'needs', edge, nodeClass: cls, feat: 'deaths', value: need }));
+		}
 		const rung = facts.rungOf(edge, cls);
 		// (the est walk's path to the waypoint, cut just past the point nearest the closest approach: the next plans'
 		// est walk goes another way there, CEGAR's generalization over every edge through that corridor)
