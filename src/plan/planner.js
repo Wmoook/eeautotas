@@ -190,7 +190,21 @@ function createPlanner(model, facts, o = {}) {
 	const CRUMBS = o.crumbs !== undefined ? !!o.crumbs : process.env.EEAT_PLAN_CRUMBS === '1';
 	const CRUMB_MIN = +process.env.EEAT_CRUMB_MIN || 60, CRUMB_REACH = +process.env.EEAT_CRUMB_REACH || 40, CRUMB_NEAR = 6;
 	const CRUMB_SLACK = 3, CRUMB_SLACK_F = 0.03;
-	const crumbCands = CRUMBS ? model.triggers.filter((X) => !X.relevant && (X.kind === 'coin' || X.kind === 'bcoin' || X.kind === 'cp') && X.tiles && X.tiles.length) : [];
+	// THE PHYSICS CRUMBS (B7 cold, cycle 4; OPT-IN EEAT_CRUMB_PHYS=1, inside the breadcrumbs (EEAT_PLAN_CRUMBS=1); off = the
+	// crumbs as before, byte for byte): the crumb's geometry by RCH3 instead of the gravity-free est walk. The walk's D (the
+	// root leg's length) and detour are the walk's, so a long PHYSICAL leg whose walk is short gets no crumb, and the crumbs
+	// it gets lie on the walk's way, not the ball's: Cold World from the chapter-2 checkpoint (127,215) (the b9cw known
+	// route's tick 932) the blue coin (98,207) walk reads 60 steps (the route: 7,000 ticks up, east under a block, up two
+	// spike-flanked up-arrow gaps, west and down the coin's shaft) and with EEAT_CRUMB_MIN=20 the crumb is the checkpoint
+	// UNDER the coin (98,208) (reached only through it). With the knob: D = the target's RCH3 goal field (the executor's
+	// ordering field: the env's reach knobs, deaths off) at the anchor's state; a candidate's cost gc = the field's least at
+	// rest over its live tiles, kept when gc <= D - CRUMB_NEAR (progress) and d1 + gc - D <= max(CRUMB_SLACK,
+	// CRUMB_PHYS_F x D), d1 = the physics forward pass's moves from the anchor (PHYS_EST's physFwdOf; the walk where it
+	// has none); the pick as before (the farthest d1 within CRUMB_REACH, else the nearest beyond). Ordering only.
+	const CRUMB_PHYS = process.env.EEAT_CRUMB_PHYS === '1';
+	const CRUMB_PHYS_F = +process.env.EEAT_CRUMB_PHYS_F >= 0 && process.env.EEAT_CRUMB_PHYS_F !== undefined ? +process.env.EEAT_CRUMB_PHYS_F : 0.03;
+	const crumbGoalMemo = new Map();
+	const crumbCands = CRUMBS ?model.triggers.filter((X) => !X.relevant && (X.kind === 'coin' || X.kind === 'bcoin' || X.kind === 'cp') && X.tiles && X.tiles.length) : [];
 	const trophyTiles = model.trophyTiles;
 	const openS = { key: '__open__', dkey: '__open__', vals: [], feats: {} };
 	// ---------------------------------------------------------------- floors (a count gate the way STANDS on)
@@ -1118,12 +1132,59 @@ function createPlanner(model, facts, o = {}) {
 	 *  those coins leg by leg (src/out/doc3/chain.js). The crumb's edge is 'trig:<id>', so its arrival is an anchor of
 	 *  its own (strategy addArrival's re-entry rule: the same model state, another trigger) that the next plan starts
 	 *  from (receding horizon: one crumb a plan). Ordering only: the crumb is a waypoint, never a gate. */
+	/** THE PHYSICS CRUMBS (EEAT_CRUMB_PHYS=1, see CRUMB_PHYS): the crumb step by the target's RCH3 goal field; null = no
+	 *  crumb, undefined = no field (the walk's crumbs then) */
+	function crumbPhys(a, e, cls, S, tgt) {
+		let g;
+		try {
+			if (!RFm) RFm = require('../reach.js');
+			const tkey = S.pkey + '|' + (tgt.length > 8 ? tgt.length + ':' + tgt[0] + ':' + tgt[tgt.length - 1] : Array.from(tgt).join(','));
+			g = crumbGoalMemo.get(tkey);
+			if (g === undefined) {
+				const t0 = Date.now();
+				g = RFm.reachField(model.levelOf(S), { goals: Array.from(tgt, (t) => ({ tile: t, cost: 0 })), deaths: false });
+				ST.crumbPhysMs = (ST.crumbPhysMs || 0) + (Date.now() - t0);
+				crumbGoalMemo.set(tkey, g);
+				if (crumbGoalMemo.size > 8) crumbGoalMemo.delete(crumbGoalMemo.keys().next().value);
+			}
+		} catch (err) { return undefined; }
+		if (!g) return undefined;
+		const s = a.sim;
+		const D = RFm.costAt(g, s.px, s.py, s.speed_y, !!s.on_ground);
+		if (!(D >= CRUMB_MIN)) return null;
+		const fwd = physFwdOf(a);
+		const dA = fwd ? null : model.dist(S, a.pos, 'now', a.base);
+		const slack = Math.max(CRUMB_SLACK, CRUMB_PHYS_F * D);
+		let near = null, far = null;
+		for (const X of crumbCands) {
+			const edge = 'trig:' + X.id;
+			if (facts && facts.rungOf(edge, cls) >= 2) continue;
+			const live = model.liveTiles(S, X);
+			if (!live.length) continue;
+			let d1 = INF, gc = Infinity;
+			for (const t of live) {
+				const dd = fwd ? fwd[t] : dA[t];
+				if (dd < d1) d1 = dd;
+				const c = RFm.costAt(g, (t % W) * 16, ((t / W) | 0) * 16, 0, true);
+				if (c >= 0 && c < gc) gc = c;
+			}
+			if (!(d1 >= CRUMB_NEAR) || d1 >= INF || !(gc <= D - CRUMB_NEAR) || d1 + gc - D > slack) continue;
+			const c = { X, live, d1, edge };
+			if (d1 <= CRUMB_REACH) { if (!far || d1 > far.d1) far = c; } else if (!near || d1 < near.d1) near = c;
+		}
+		const c = far || near;
+		if (!c) return null;
+		ST.crumbPhys = (ST.crumbPhys || 0) + 1;
+		return { edge: c.edge, nodeClass: cls, rung: facts ? facts.rungOf(c.edge, cls) : 0, estTicks: Math.round(c.d1 * pace()), lb: 0, crumb: true,
+			waypoint: { kind: 'trigger', tiles: c.live.slice(), trig: c.X.id, expect: null, label: `crumb ${c.X.label}` } };
+	}
 	function crumbStep(a, e, cls) {
 		if (!CRUMBS || e.viaDeath) return null;
 		// (the geometry by the 'now' walk: est's walls (killers unless protected) WITHOUT the CEGAR's cuts: a failed long
 		// leg's cuts made its est walk relaxation-only (EX Crew Ice with the first version: 4 crumbs, then the trophy edge
 		// at the 1e6 penalty and no crumb from there))
 		const S = a.S, tgt = e.live || trophyTiles;
+		if (CRUMB_PHYS && a.sim) { const r = crumbPhys(a, e, cls, S, tgt); if (r !== undefined) return r; }
 		const dA = model.dist(S, a.pos, 'now', a.base);
 		let D = INF;
 		for (const t of tgt) if (dA[t] < D) D = dA[t];
