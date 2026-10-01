@@ -64,4 +64,37 @@ const check = (name, ok, detail) => console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}
 	let e2 = Infinity; const d2 = m2.dist(S2, { id: 'st', tiles: [m2.startTile], extra: 0 }, 'est', null);
 	for (const t of m2.trophyTiles) e2 = Math.min(e2, d2[t]);
 	check('a boost of the walk\'s own way is taken', e2 === 15, `est ${e2}`);
+	// (3) the corner: the trophy left of a right boost, a solid under the trophy, an open tile under the boost: the walk's
+	// diagonal from under the boost up-left to the trophy passes the boost's side tile against its push (Daybreak's switch)
+	const L3 = level([
+		'############',
+		'#..........#',
+		'############',
+		'#...T>S....#',
+		'#...#......#',
+		'############',
+	], { '>': [115] });
+	const m3 = await compileModel(L3, {});
+	const s3 = new E.EESim(L3); s3.reset();
+	const S3 = m3.stateOf(s3);
+	const p3 = { id: 'st', tiles: [m3.startTile], extra: 0 };
+	const minT = (mm, d) => { let b = Infinity; for (const t of mm.trophyTiles) b = Math.min(b, d[t]); return b; };
+	const e3 = minT(m3, m3.dist(S3, p3, 'est', null)), l3 = minT(m3, m3.dist(S3, p3, 'lb', null));
+	check('the corner: the lb walk finite', fin(l3), `lb ${l3}`);
+	if (knob) check('the corner: the est walk has no diagonal past the boost', !fin(e3), `est ${e3}`);
+	else check('the corner: the est walk as before (the diagonal)', fin(e3), `est ${e3}`);
+	// the engine: 300 seeded random input runs of 300 ticks (an input held 1-20 ticks) never reach the trophy
+	let seed = 12345; const rnd = () => (seed = (seed * 1103515245 + 12345) >>> 0) / 4294967296;
+	let won = 0, tried = 0;
+	for (let r = 0; r < 300; r++) {
+		const sm = new E.EESim(L3); sm.reset(); const ip = new E.EEInput();
+		let k = 0, mask = 0, hold = 0;
+		while (k < 300) {
+			if (hold-- <= 0) { mask = (rnd() * 32) | 0; hold = 1 + ((rnd() * 20) | 0); }
+			E.applyMask(ip, mask); sm.tick(ip); k++;
+			if (((sm.px + 8) >> 4) === 4 && ((sm.py + 8) >> 4) === 3) { won++; break; }
+		}
+		tried++;
+	}
+	check('the corner: the engine never reaches the trophy (300 random runs)', won === 0, `${won} of ${tried}`);
 })();

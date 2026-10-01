@@ -647,6 +647,21 @@ function compileModel(L, o = {}) {
 	 * bfs(m, src) -> Int32Array(N) of walk steps from the source tiles (INF: none): 0-1 BFS, a step 1, the step into a
 	 * portal tile with exits followed by its hop 0 (the hop lands on each exit), a start on a portal: its exits at 0.
 	 */
+	/** THE BOOST'S WAY: a step out of a boost tile with a component against its push is no step; a diagonal is the two
+	 *  orthogonal legs through its side tiles (x then y, or y then x), at least one open and neither leg against a boost
+	 *  it leaves (a diagonal round a solid corner through a boost's side tile was the way back into Daybreak's switch) */
+	const againstB = (bc, i, dx, dy) => { const k = bc[i]; return (k === 1 && dx > 0) || (k === 2 && dx < 0) || (k === 3 && dy > 0) || (k === 4 && dy < 0); };
+	function boostStepOK(m, bc, t, bt, d) {
+		const dx = DX8[d], dy = DY8[d];
+		if (dx === 0 || dy === 0) return !(bt && againstB(bc, t, dx, dy));
+		const x = t % W, y = (t / W) | 0, nx = x + dx, ny = y + dy;
+		if (nx < 0 || ny < 0 || nx >= W || ny >= H) return true;
+		const a = y * W + nx, b = ny * W + x;
+		if (!bt && !bc[a] && !bc[b]) return true;
+		const viaA = m[a] && !againstB(bc, t, dx, 0) && !againstB(bc, a, 0, dy);
+		const viaB = m[b] && !againstB(bc, t, 0, dy) && !againstB(bc, b, dx, 0);
+		return !!(viaA || viaB);
+	}
 	function bfs(m, src, bc = null) {
 		const dist = new Int32Array(N).fill(INF);
 		let cur = new Int32Array(N), nxt = new Int32Array(N), nc = 0, nn = 0;
@@ -663,7 +678,7 @@ function compileModel(L, o = {}) {
 				if (dist[t] !== level) continue;
 				const bt = bc ? bc[t] : 0;
 				for (let d = 0; d < 8; d++) {
-					if (bt && ((bt === 1 && DX8[d] > 0) || (bt === 2 && DX8[d] < 0) || (bt === 3 && DY8[d] > 0) || (bt === 4 && DY8[d] < 0))) continue;
+					if (bc && !boostStepOK(m, bc, t, bt, d)) continue;
 					const j = moveOK(m, t, d);
 					if (j < 0) continue;
 					if (dist[j] > level + 1) { dist[j] = level + 1; nxt[nn++] = j; }
