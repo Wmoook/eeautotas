@@ -209,7 +209,7 @@ function capsOf(L, copt = {}) {
 	};
 	// the fixpoint over (cell, phase) (a worklist, values rise from below; the tick's movement speed U = drag x (V + push))
 	const aMax = (2 * gmax + SM) / MULT + 0.01;
-	const PH2 = (16 + aMax) / 2 + 0.01;
+	const PH2 = (16 + 0.4 + aMax) / 2 + 0.01;   // (+ 0.4: the auto-align moves up to 0.2 px a tick below 1 px/tick)
 	const solve = (U, a2, own, jSrc, boost) => {
 		const a1 = r1max(own);
 		const V = new Float32Array(3 * N), Uq = new Float32Array(3 * N);
@@ -311,7 +311,8 @@ function capsOf(L, copt = {}) {
 					}
 				}
 				cap[i] = Math.max(mx, out);
-				sin = out;
+				// (a run that starts in this line (a jump, a teleport) may start at its far edge: the next line gets that speed)
+				sin = Math.max(out, startAt(i));
 			}
 			return cap;
 		};
@@ -382,7 +383,8 @@ function capsOf(L, copt = {}) {
 					}
 				}
 				cap[y] = Math.max(mx, out);
-				sin = out;
+				// (a jump or a teleport in this row may start at its top edge: the row above gets that speed)
+				sin = Math.max(out, jRow[y], exitRow[y]);
 			}
 			for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const c = y * W + x; if (cap[y] < Uup[c]) Uup[c] = cap[y]; }
 		}
