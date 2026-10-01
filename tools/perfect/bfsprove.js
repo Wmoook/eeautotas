@@ -16,6 +16,7 @@
 // ~C n / 2^53, 1e-6 at n = 1e8).
 //   node tools/perfect/bfsprove.js <level.eelvl> --C=<layer bound> [--route=<a.eetas>,..] [--U=] [--threads=16]
 //        [--seconds=1800] [--ttBits=28] [--tiers=kin,rel,gate] [--out=<faster.eetas>] [--check=1] [--initPer=64]
+//        [--maxGB=12 (the process's RSS: past it the run stops, 'memory')] [--heapMB=4096 (a worker's old space)]
 // Prints JSON lines: {ev 'check'} {ev 'start'} {ev 'layer', d, states, cut, merged, seen, minW, maxW, s, rssGB} {ev 'result',
 // verdict 'PROVEN' | 'FASTER' | 'CLOSED' (lb = C, below U) | 'OPEN' (time / table) | 'violation', lb, opt, ...}.
 const path = require('path');
@@ -59,7 +60,7 @@ function seenTable(sab) {
 
 // ---------------------------------------------------------------- a worker: its own front, every layer on the barrier
 function workerMain() {
-	const { file, tiers, C, sab, deadline } = workerData;
+	const { file, tiers, C, sab, deadline, maxBytes } = workerData;
 	const L = T.loadLevelFile(file);
 	const ctx = WPAR.makeCtx(L, new Set(tiers));
 	const insert = seenTable(sab);
@@ -95,7 +96,7 @@ function workerMain() {
 					if (r === null) full++;
 					next.push(sim.snapshot()); np.push(i); nm.push(x);
 				}
-				if ((i & 1023) === 0 && Date.now() > deadline) { stopped = true; break; }
+				if ((i & 1023) === 0 && (Date.now() > deadline || process.memoryUsage.rss() > maxBytes)) { stopped = Date.now() > deadline ? 'time' : 'memory'; break; }
 			}
 			let route = null;
 			if (crown !== null) {
@@ -182,7 +183,8 @@ async function main() {
 	const Cs = [];
 	if (found === null && front.length > 0) {
 		const wk = [];
-		for (let w = 0; w < threads; w++) wk.push(new Worker(__filename, { workerData: { file, tiers, C, sab, deadline } }));
+		const maxBytes = (+args.maxGB || 12) * 1e9, heapMB = +args.heapMB || 4096;
+		for (let w = 0; w < threads; w++) wk.push(new Worker(__filename, { workerData: { file, tiers, C, sab, deadline, maxBytes }, resourceLimits: { maxOldGenerationSizeMb: heapMB } }));
 		const ask = (w, msg, type) => new Promise((res) => { const f = (m) => { if (m.type === type) { w.off('message', f); res(m); } }; w.on('message', f); w.postMessage(msg); });
 		const roots = Array.from({ length: threads }, () => []);
 		front.forEach((e, i) => roots[i % threads].push({ src: e.src, path: e.path }));
@@ -200,7 +202,7 @@ async function main() {
 			seen += states;
 			say({ ev: 'layer', d, states, cut, merged, full, seen, minW, maxW, s: Math.round((Date.now() - t0) / 100) / 10, rssGB: Math.round(process.memoryUsage().rss / 1e8) / 10 });
 			if (found !== null) break;
-			if (stopped) { out.why = 'time'; break; }
+			if (stopped) { out.why = stopped; break; }
 			if (states === 0) break;
 			if (seen > 0.7 * 2 ** ttBits) { out.why = 'table'; break; }
 		}
