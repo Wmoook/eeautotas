@@ -661,6 +661,22 @@ ways in.
   some field levels (Need for Steed 409 of 774 worker-s, 280 s of it failing at rungs 2-3; Stone Ruin 676 of 894, 402 s),
   but crumbs also succeed at rung 3 (Need for Steed 1, Stone Ruin 3, Flight Path 1); the A/B (box 5, 300 s, those 3 levels, R 2, one run an arm side by side): compiled 0 = 0, progress Need for Steed 3 vs 2, Stone Ruin 10 = 10 (ok steps 13 vs 9), Flight Path 5 vs 7 (6 crumb plans in either arm: the spread): no gain shown. THE PORTFOLIO on the 21
   STUCK-FIELD levels (300 s, W3, one run an arm side by side, box 5 at load 130-140): compiled 2 vs 1 of 21 (Snow Jumping 4,454 run ticks only with it, 1.21 of the best known; Endless Space 2,143 vs 2,493, 1.20 of the best known; both by the backward meet arm, `pfBy_bw`), the unrouted levels' progress better 1 (The Memory Game 10 vs 8), worse 4 (Ring Of Chaos 13 vs 22: 127 portfolio calls took 253 worker-s for 2 legs, 21 anchors vs 40; EXCrew Trolled Minis 24 vs 26, The 7 Depths of Hell 2 vs 4, Forgotten Veil b7be 10 vs 12), the same 14 (+-1); peak RSS mean 2.9 vs 2.8 GB; every .eetas replayed. One run an arm: not a default.
+- **The whole level as one leg, and the ONE-LEG walls** (C6 push 3 lane 4; `src/out/n5/lanes/c6_lane4_b2.md`): strategy.js
+  `wholeLevel` (OPT-IN `EEAT_BW_LEVEL=1`: the lab's backward solver on the whole level in a child process next to the
+  moves, `src/plan/lab/bwlevel_child.js`; with a gated trophy the plan's triggers as its legs, `EEAT_BW_LEGS`) now behind
+  THE ONE SHOT'S GATE (`EEAT_BW_GATE=0`: at once, as before): its legs' arrivals are held until the executor's watchdog
+  stall or its end with no route, its routes taken at once (the imported anchors had slowed Ruins, 1,510 vs 1,302 run
+  ticks; with the gate 1,279 vs the base's 1,270). THE A/B: box 6, 300 s, W3, one run an arm side by side, 25 of the 45 levels in the block: compiled 14 vs 13 (+ Gravity's Rainbow 2,018 run ticks, the child's route at 27 s; none lost), the 13 both compiled faster 5 / slower 8, run ticks geo-mean 0.897 (median 1.006; Tutorial 2 8,942 -> 5,139 and Tutorial 3 7,131 -> 2,583 carry the mean, Tutorial 4 5,447 -> 6,122 and On And On 3,049 -> 3,539 the other way), the 11 unrouted progress better 1 / worse 1 / same 9; the shared gate (gate20, 60 s) exit 0, 14 vs 13; the gate opened only at the loop's end (Happy Spookaween's leg arrival at 54 s stayed held: no watchdog stall in 300 s); NOT a default (one run an arm, half the list). THE WALLS, measured from the known routes' own states
+  (`tools/cmp/legtrace.js`, `tools/cmp/uphill.js`): Sentinel Ravines' first wall is a run-up detour the goal field cannot
+  see (the route goes 26 tiles left and up and back along an upper corridor: the field +24.4 tiles above its running
+  min): the skeleton's sub-leg from the route's state before it fails at 45 s with every finder knob (`EEAT_EXEC_LEG`
+  best / beam / mix, `EEAT_REGION_M` 24 / 36 / 48, `EEAT_BEST_W` 5 / 2 / 1, `EEAT_BEST_ENERGY=1`), from the state past it
+  prims solve it in 3.5 s; My level de42's 140-tick route pumps twice in an up-arrow shaft with a sideways jump in a
+  left-arrow tile: nothing from ticks 0-40 (45 s, 18 M sims; the one shot 471 k expansions), the math tier's coupled
+  family from tick 60 in 1.7 s; Don't Stop Jumping is an ORDER wall (the relaxation's 64-tick trophy plan, a false near
+  the side-arrow-priced RCH3 field reads 2,515 tiles, took ~290 of 300 s; the switch leg it needs first is found from the
+  route's states at rung 3; `EEAT_PHYS_PRICE=1` ranks the switch plans first: 300 s, box 6, one run: switch 0 taken at tick 8,419 (gain 1; the chief's run 0), no route (switch 1 left at 300 tiles); `EEAT_WALL_PRICE=1` the same, 8,497); Tutorial 4's 1.55-2x is crumbs (4
+  blue coins the known route never takes).
 - **Checks**: unit tests `test/plantypes.js`, `planmodel.js`, `planplanner.js`, `planbounds.js`, `planprims.js`,
   `planexec.js --only=unit,fail`, `planstrategy.js`, `plancompile.js` (the CLI and the Compile API with the mock parts
   `test/planmock.js`), `plantruth.js`, `msolve.js --quick`, `kin.js --quick`, `mathsep.js`. The truth checkers on the known routes
