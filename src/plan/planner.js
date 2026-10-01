@@ -130,6 +130,9 @@ const COLOURS = ['red', 'green', 'blue', 'cyan', 'magenta', 'yellow'];
 // untouched, no claim.
 const TIMER = process.env.EEAT_PLAN_TIMER === '1';
 const TIMER_START = TIMER && process.env.EEAT_PLAN_TIMER_START !== '0';
+// (the late rule alone: EEAT_PLAN_TIMER_LATE=0 = no anchor marked late, the deadline plans kept; the 36 timed levels' A/B, block 2:
+// the knob on lost progress on 12 of 21 unrouted levels, gained on 2, and every one of 3 both-routed routes was slower)
+const TIMER_LATE = TIMER && process.env.EEAT_PLAN_TIMER_LATE !== '0';
 /** {left, id}: the ticks a ball has before its soonest running timed killer kills it (Infinity: none running; eesim.js's
  *  rule, Player.as:399-404: it dies on the first tick t with t - start > duration) and that killer's effect block (421
  *  curse, 422 zombie, 1584 poison, 0 fire: no remover block) */
@@ -1405,7 +1408,7 @@ function createPlanner(model, facts, o = {}) {
 				if (tp) { plans.unshift(tp); timerCost = tp.cost; ST.timerPlans = (ST.timerPlans || 0) + 1; }
 				// (late: no plan in time AND no remover of the killer (its block with the number 0) within the ticks left by
 				// the est walk in the anchor's state: a remover on the way clears it, the plan search does not model that)
-				else if (!removerInTime(a, tm)) { late = true; ST.timerLate = (ST.timerLate || 0) + 1; }
+				else if (TIMER_LATE && !removerInTime(a, tm)) { late = true; ST.timerLate = (ST.timerLate || 0) + 1; }
 			}
 		}
 		if (plans.length && NEAR_K > 0 && facts) {
