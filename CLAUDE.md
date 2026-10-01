@@ -509,7 +509,13 @@ ways in.
   3,122 vs 3,318; Tutorial 1 and The Blank Page compile (the baseline: neither). T-MODEL-EXACT 219 routes 0 unsound, T-PLAN-ORACLE 2 / 0, msolve --quick 50 / 0; unit
   tests portfolio 20/20, labcorridor 18/18, labbackward 16/0, labprofile 12/0, s99stretch 7/0, bwchain 9/0, planstrategy 27/0,
   planexec 14/14, joins 22/0, precision 12/0, plancompile 31/0 (its failing-executor mock case with EEAT_S99_DEFAULTS=0: the
-  children are real solvers and route the toy).
+  children are real solvers and route the toy). Merged with n5-plan 45d5b52's defaults (EEAT_CRUMB_RANK=3, EEAT_BW_LEVEL=last:
+  with EEAT_BW_CHAIN on the whole-level child is the chain child, and with the stretch solver on the one-leg levels' whole
+  level is the stretch child's) the gate again: exit 0, 15 vs 13, better 9 / worse 1 (Booty Return 46 -> 40), 15 / 15
+  replayed. PER STRETCH as shipped (box 6, every answer replayed, 0 rejected): THE 1,123 REAL 4-MOVE CHAINS in ONE 40-s
+  budget **97.2%** (1,092; the portfolio before the fields pass 95.4%, msolve.chain 47.2% at 5 s), found in 384 ms median
+  (p90 1.8 s), 99.7 / 100 / 97.9 / 90.6 / 85.5% by route ticks 0-60 / 60-120 / 120-240 / 240-480 / 480+ (76.8% before),
+  FIELD chains **95.9%** (plain 98.6%, teleports 95.1%); the legs by arm: backward 1,026, corridor 36, profile 25, leg finder 5.
 - **In the app**: the level editor's **Compile** button (POST / GET `/api/editor/compile`, section 9) runs the CLI in its own
   process in `<data>/editor/compile/`, shows its stage lines, replays the route once more, makes a job `<name> (compiled)`
   (watch it, optimize it like any run) and copies its `/loadtas` line. `src/plan.js` is the headless runner (JSON lines):
