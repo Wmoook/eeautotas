@@ -1217,3 +1217,34 @@ ways in.
   idle tick moves nothing), x == X at the engine's landing tick (`airTimeOf`), the braked rests first: its landings are
   real (the exact local search finishes 19 ticks on), but from the attempts' rests 167 vs the ground pass's 153: no gain
   yet (the rest must come early: the known's at tick 77).
+- **THE BIG LEVELS: where their moves time goes, the shared fields and the sub-leg bound** (box 8 lane 'big', 2026-09-30;
+  156 of the failing levels are 200 x 200 or larger; tools: `tools/cmp/bigprof.js`, `cpuprof.js`, `fieldcost.js`,
+  `fieldprof.js`, `bigab.js` (an A/B of two fullc.js --json=1 runs with `EEAT_EXEC_PROF=1`: triggers, ok steps, the
+  skeleton's sub-legs ok / failed / failed with 0 sims, the exact tier's seconds on sub-legs, the deepest fraction of a
+  skeleton's way, the stages before the moves, peak RSS)). The stages before the moves do not scale badly (parse + model +
+  bounds + plan median 3.1 s, max 5.3, on 20 big levels that reach no trigger); the moves stage has the clock, and a big
+  level's first waypoint is far (the skeleton's c0 700-4,600 tiles: TEZ 699, Phina and the Rose 4,181, MegaMan Dash 3,958).
+  THE SHARED FIELDS (`EEAT_FIELD_SHARE=1`, OPT-IN, off = byte for byte; types.js shareIn / shareOut / setFieldShare,
+  SharedArrayBuffer-backed, `test/fieldshare.js`): a goal field built in one thread of a compile is published once and taken
+  by the others on their memo miss (8 big levels, 120 s: worker field builds 733 -> 383, field time 349 -> 218 worker-s; no
+  compile gain shown). THE SUB-LEG BOUND (exact.js solveExact, OPT-IN `EEAT_SUBLEG_BOUND=1`, off = byte for byte): a
+  skeleton sub-leg's start bound came from bounds.leg on the SUB-LEVEL SET's tiles (up to the whole level less a sliver): a
+  new bounds Dijkstra with thousands of sources and a key string of every tile per sub-leg, never reused (the set moves by
+  SKEL_STEP each sub-leg), 1-3.5 s on a 300 x 300 / 400 x 200 level inside a 300-ms share: the exact tier ran 3-3.5 s with
+  0 states, the watchdog answered 'budget', and the skeleton counted the setup as a failed try (two = stuck): MegaMan Dash
+  166 of 168 failed sub-legs had 0 sims (EXEC_PROF's bf did not see it: leg() calls the closure's field). With the knob the
+  waypoint's own bounds field on the doors at the start (boundFields' 'now' key: memoized per waypoint and door state; the
+  per-state cut already reads the waypoint's bounds for a sub-leg). THE A/B (box 8, the 20 big failing levels that reach no
+  trigger (full_c6_b1 gEnd 0, 200 x 200+, minus the Cold Worlds), 300 s, W3, par 3 an arm side by side, both
+  `EEAT_EXEC_PROF=1`, the box at load 160-225): the exact tier's SETUP on sub-legs 1,233 -> 93 worker-s (calls with > 0.5 s
+  of setup 819 -> 64), its search 388 -> 738 s, legBest's time on sub-legs 2,384 -> 2,946 s; sub-legs 6,769 -> 7,983, ok
+  4,132 -> 5,636, failed with 0 sims 1,118 -> 688; the skeleton deeper on MegaMan Dash (its least c / c0 0.67 -> 0.23) and
+  Nirthophia (0.36 -> 0.08), shallower on Dreamland (0.29 -> 0.72) and Endless Pain (0.68 -> 0.86), the sum 8.94 vs 8.86;
+  peak RSS median 5.29 -> 5.15 GB, max 7.33 -> 6.28; compiled 0 = 0, triggers 8 vs 10 (Happy Spookaween 2 vs 4); ok steps
+  67 vs 49 (TTL Spike 36 vs 15). Planexec 32/32 and planstrategy 27/0 with it on. NOT a default yet (no compile gain shown).
+  Not kept: THE SKELETON ACROSS WAYPOINTS (a call with no memo seeded from another waypoint's deepest level from the same
+  start): on Phina the waypoints' skeletons diverge early (blue coin (145,7)'s level at 53 tiles is 4,267 of 4,375 on blue
+  coin (35,234)'s field), on TEZ none gets below half its c0. WHAT IS LEFT on these levels: the skeleton STUCK at one hard
+  sub-level set (Phina's labels all stop at c 240-460 of 4,100-4,600, the last 20-40 tiles to blue coin (145,7) fail at
+  rung 3 with 800 k sims; TEZ at 529-541 of 699), the failed-with-0-sims sub-legs left are the proof tier's first goal-field
+  builds per thread and door state (rf; `EEAT_FIELD_SHARE=1` aims at them).
