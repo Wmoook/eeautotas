@@ -1406,6 +1406,51 @@ ways in.
   the bottom corridor and the up-arrow column (96-97, 222-227), which the route climbs slowly) a step back (gc 146.8 > D
   142.6 from (127,215)), so the chain from (118,215) to (104,211) is a 2,000-route-tick leg. NOT MERGED (opt-in, one run an
   arm, no shared gate).
+- **THE PENDING GATE COUNTS: why nothing left the chapter-2 blue coin** (B7 lane cold, cycle 5, 2026-10-01; branch
+  n5-b7-cold-c5 = n5-b7-cold + n5-plan 9bcf651; `src/out/b7cold5/` in its worktree; box 7 `~/b7_cold_r5`). THE EXACT STOP:
+  the executor's level copy (types.js `levelNow`) reads a coin gate (165) / blue coin gate (214) by its SHOWN count, which
+  PlayState.tick's start copies from the count (each kind's copy refused while the box then overlaps a solid): on the tick
+  a coin is taken (an arrival at a coin = an anchor) the gates of the new count still read open. Cold World's blue-coin
+  anchor (cycle 4's C3 anchor 17, tick 2,974) holds 1 blue coin with the shown count 0, so its shaft's gate (98,205) and the
+  gate column (112, 217-222) (blue coin gates at 1) read open, and every goal field from it ran east through (112,218): the
+  executor's closest (111,219) at every rung (`tools/cmp/nearkrt.js` from that anchor, rungs 2-3: checkpoint (271,195)
+  165.8, coin (246,166) 203.4, checkpoint (279,5) 76 -> 62 tiles, all there; cycle 4's C3: the crumb (127,215) from it
+  failed rungs 0-3 at 28.8); a tick later those gates are solid. **`EEAT_GATE_PENDING=1`** (OPT-IN, off = byte for byte;
+  plantypes 11/0 on and off): such a gate stands as the next tick's start leaves it (by the count, unless the box overlaps
+  a gate tile of that kind the copy would shut: the engine refuses the copy then). EXACT (`tools/cmp/gatepend.js`: along a
+  route the knob's copy = the next tick's gates wherever the counts hold): Cold World's anchor prefix 43 gates / 2,919 ticks
+  / 1 pending tick / 0 mismatches, Good Egg's two base routes 21 gates / 10,998 and 16,114 ticks / 2 pending / 0, Octorage's
+  1 / 9,006 / 1 / 0. With it the crumb (127,215) field from the anchor reads 226.6 tiles (40.4) by the real exit: up chapter
+  2 ((105,211) -> (110,206) -> (133,205) -> (126-106,197) -> (98,193) -> (82,194)) to a portal into the hub's top (250,2);
+  from the anchor at rung 3 (45 s) the leg to the hub checkpoint (279,5) is not found either way (with it closest 142.2 at
+  (106,210): the start of that climb, the reverse of the chapter's hard way in), nor the climb's own checkpoints (109,206) /
+  (120,206) at rungs 1-3 (closest (106,209-210), 7-20 tiles, with and without it: their fields never took the gate column):
+  THE NEXT WALL is that climb out (rows 211 -> 206 by (104-110, 206-211); the known route took it in ~850 ticks going in). **`tools/cmp/fieldway.js`** (`--unprot=1`:
+  the unprotected ball's way as the protection layer prices it; `--opts=<json>`: reachField options): the goal field's
+  cheapest way by RCH3's own edges (edgesOf / costOf greedy descent, hops marked): the trophy field from the anchor (158.8
+  tiles) is chapter 2 -> (158,228) -> the hub -> the chapter-1 selector (273,10) -> (233,141) -> (217,151) R8 -> a jump into
+  the pool carried as C61 through 6 water tiles of row 151 and 4 rows up -> R14 -> the portal (224,138) -> 101 (the
+  field-carry relaxation: the real way needs the 33333 portal at speed); with the field transit tables (`exitApex`) and the
+  unprotected layer 335.2 tiles: past the open blue door #1 to the selector (261,10) -> (266,213) -> a climb of up arrows,
+  climbables and water (269-294, 155-220; R20 at (280,183)) -> the up arrows (243,134-139) into the chapter-1 room's top:
+  the doctor's "XR / C chains up (272-281, 160-191)", the next relaxation to test with the engine (every plan from the
+  anchor ends 'trophy': D2's 25 plans after its blue coin were 'a chapter-1 trigger / the trophy room's blue coin (280,82)
+  -> trophy'). Two more OPT-IN knobs, no gain shown (planner.js; off = byte for byte, planplanner 55/55):
+  `EEAT_CRUMB_XA=1` (the physics crumbs' goal field with the transit tables), `EEAT_PHYS_PRICE=xa` / `xaall` (the trophy /
+  every plan edge priced by the tables' field): from the anchor the same plan family (the planner prices the trophy room's
+  blue coin before the trophy instead). COMPILES (box 7, W3, load 130-170 beside the scoreboard, one run an arm, side by
+  side; the C3 stack = the cycle-2/3 reach knobs + `EEAT_PLAN_CRUMBS=1 EEAT_CRUMB_PHYS=1 EEAT_CRUMB_RUNGS=4`): D1 / D2 (the
+  stack on the merged base, 1,400 s): D2 THE CHAPTER-2 BLUE COIN at 229 s (rung 3; cycle 4's C3 at 360 s), then chapter 1
+  (purple switch 1, teams 3 / 2 / 1, the coin (182,226)), 36 anchors, no route; D1 chapter 1 only (gain 4, 27 anchors; its
+  last failures the pool's protection (211,138) and coin (221,131): the walk's false passage); D3 (+ CRUMB_XA +
+  PHYS_PRICE=xaall, 900 s): the blue coin at 344 s (rung 3), then from that anchor 18 failures (the crumbs (127,215) /
+  (120,206) / (117,206) / (118,215), closest 27.8-28.8: the pending gates' false near again), 18 anchors, a crumb (91,196)
+  on the real exit from the anchor before the coin; D4 (+ `EEAT_GATE_PENDING=1`, 1,150 s): chapter 1 only (gain 4, 33
+  anchors; the blue coin from its anchor 14 failed rungs 0-3 at 225-309 s): the knob's compile effect is unmeasured (it acts
+  only from a blue-coin anchor: 2 of the 4 runs reached one). NEXT: replicates of D4 to a blue-coin anchor (or the anchor
+  dump's blue-coin state as the compile's start), the climb out of chapter 2 at (104-110, 206-211) as crumbs (the true
+  exit's checkpoints (109,206) -> (118,197) -> (91,196) -> the portal by (82,194)), then the hub's blue door #1; the field's
+  XR / C chain (269-294, 155-220) to test with the engine. NOT MERGED (opt-in, no shared gate).
 - **Bad EE Level 9's mini walls: the deep rung and the warm rung** (B7 lane b9, cycle 2, 2026-09-30, branch n5-b7-b9;
   strategy.js, both OPT-IN, off = the compile byte for byte): `EEAT_RUNG_DEEP=<ms>` = one more rung of that many ms after
   the 45-s one (the facts block an (edge, node class) after 5 failures instead of 4; the executor runs it at its top tier,
