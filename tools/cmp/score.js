@@ -7,6 +7,8 @@
 //   node tools/cmp/score.js <dir> [--best=<FINAL.jsonl>] [--verify=<verify.js output>] [--cls=<classes.js json>]
 //        [--base=<name>:<file>]... (a JSON array or jsonl of {rel, ok, runTicks}: the first one is the main line)
 //        [--json=<out jsonl>] [--md=<out md>] [--title=<text>]
+//        [--lb=<jsonl of {rel, lb, src}>] (proven lower bounds from another tool, e.g. tools/perfect/wholeproof.js's PASS
+//        lines: a level's bound is the larger of the compile's and this one; its source is shown)
 const fs = require('fs'), path = require('path');
 const dir = process.argv[2];
 const args = process.argv.slice(3);
@@ -18,6 +20,8 @@ const readRows = (f) => {
 };
 const bestOf = new Map();
 if (arg('best')) for (const r of readRows(arg('best'))) bestOf.set(r.rel, r);
+const extLb = new Map();
+if (arg('lb')) for (const r of readRows(arg('lb'))) if (r.lb > 0 && !(extLb.has(r.rel) && extLb.get(r.rel).lb >= r.lb)) extLb.set(r.rel, r);
 const clsOf = new Map();
 if (arg('cls')) for (const r of readRows(arg('cls'))) clsOf.set(r.rel, r);
 const verified = new Map();   // rel -> true (replayed at the report's ticks) / false
@@ -47,10 +51,11 @@ for (const ix of [...seen.values()].sort((a, b) => a.rel.localeCompare(b.rel))) 
 	const ok = repOk && ver !== false;
 	const kb = bestOf.get(ix.rel), C = clsOf.get(ix.rel);
 	const legs = rep && Array.isArray(rep.legs) ? rep.legs : [];
-	const lb = rep && rep.lb > 0 ? rep.lb : null;
+	const cLb = rep && rep.lb > 0 ? rep.lb : null, xLb = extLb.get(ix.rel);
+	const lb = xLb && xLb.lb > (cLb || 0) ? xLb.lb : cLb, lbSrc = lb === null ? '' : xLb && xLb.lb > (cLb || 0) ? xLb.src || 'ext' : 'compile';
 	const row = {
 		rel: ix.rel, set: ix.rel.split('/')[0], W: C ? C.W : null, H: C ? C.H : null, ok, verified: ver, runTicks: ok ? rep.runTicks : null,
-		best: kb && kb.best ? kb.best : null, bestSource: kb ? kb.bestSource || '' : '', ratio: null, lb, lbComplete: !!(rep && rep.lbComplete),
+		best: kb && kb.best ? kb.best : null, bestSource: kb ? kb.bestSource || '' : '', ratio: null, lb, lbSrc, compileLb: cLb, lbComplete: !!(rep && rep.lbComplete),
 		proven: !!(ok && ((rep.lbProof && rep.lbProof !== '') || (lb && rep.runTicks <= lb))), lbProof: rep && rep.lbProof ? rep.lbProof : '',
 		overLb: null, legs: legs.length, provenLegs: legs.filter((g) => g.proven).length,
 		first: res.length ? res[0].t : null, firstTicks: res.length ? res[0].runTicks : null, at60: bestAt(60), at180: bestAt(180),
@@ -100,7 +105,7 @@ L.push('## Per level', '');
 L.push('| level | compiled | run ticks | best known | ticks / best | lower bound | proven | legs proven | 60 s | 180 s | first s |' + bases.map((b) => ` ${b.name} |`).join('') + ' class / failure | peak MB |');
 L.push('|---|---|---|---|---|---|---|---|---|---|---|' + bases.map(() => '---|').join('') + '---|---|');
 for (const r of rows) {
-	L.push(`| ${r.rel.replace(/\.eelvl$/, '')} | ${r.ok ? 'yes' : 'no'} | ${r.ok ? `**${r.runTicks}**` : '-'} | ${r.best ?? '-'} | ${r.ratio ?? '-'} | ${r.lb ?? '-'} | ${r.proven ? '**PROVEN**' : r.ok ? 'no' : '-'} | ${r.ok ? `${r.provenLegs} / ${r.legs}` : '-'} | ${r.at60 ?? '-'} | ${r.at180 ?? '-'} | ${r.first ?? '-'} |` +
+	L.push(`| ${r.rel.replace(/\.eelvl$/, '')} | ${r.ok ? 'yes' : 'no'} | ${r.ok ? `**${r.runTicks}**` : '-'} | ${r.best ?? '-'} | ${r.ratio ?? '-'} | ${r.lb ?? '-'}${r.lbSrc && r.lbSrc !== 'compile' ? ' (' + r.lbSrc + ')' : ''} | ${r.proven ? '**PROVEN**' : r.ok ? 'no' : '-'} | ${r.ok ? `${r.provenLegs} / ${r.legs}` : '-'} | ${r.at60 ?? '-'} | ${r.at180 ?? '-'} | ${r.first ?? '-'} |` +
 		bases.map((b) => ` ${r[b.name] ?? '-'} |`).join('') + ` ${r.ok ? '' : `${r.cls}${r.gEnd !== null ? ' g' + r.gEnd : ''}${r.failLabel ? ': ' + r.failLabel : ''}`} | ${r.peakRssMB ?? '-'} |`);
 }
 const md = L.join('\n') + '\n';
