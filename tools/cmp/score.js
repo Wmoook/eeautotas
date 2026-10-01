@@ -87,6 +87,8 @@ for (const b of bases) {
 	const f = both.filter((r) => r.runTicks < r[b.name]), s = both.filter((r) => r.runTicks > r[b.name]);
 	const tn = both.reduce((a, r) => a + r.runTicks, 0), to = both.reduce((a, r) => a + r[b.name], 0);
 	L.push(`## vs ${b.name}: ${ok.length} vs ${rows.filter((r) => r[b.name] !== null).length}`, '');
+	const bRat = rows.filter((r) => r[b.name] !== null && r.best).map((r) => r[b.name] / r.best);
+	L.push(`- ${b.name}'s TAS quality (the same best known): ticks / best known median ${r3(med(bRat))} (${bRat.length}), at or under ${bRat.filter((x) => x <= 1).length}`);
 	L.push(`- NEW (${nw.length}): ${nw.map((r) => `${nm(r.rel)} ${r.runTicks}`).join('; ') || 'none'}`);
 	L.push(`- LOST (${lost.length}): ${lost.map((r) => `${nm(r.rel)} (was ${r[b.name]}; now ${r.cls}${r.gEnd !== null ? ' g' + r.gEnd : ''})`).join('; ') || 'none'}`);
 	if (both.length) L.push(`- both compiled ${both.length}: run ticks ${tn} vs ${to} (${((tn / to - 1) * 100).toFixed(1)}%), faster ${f.length} / slower ${s.length} / same ${both.length - f.length - s.length}; median ratio ${r3(med(both.map((r) => r.runTicks / r[b.name])))}`);
