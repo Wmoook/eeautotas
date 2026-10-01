@@ -64,11 +64,8 @@ function masksOf(node) {
  * astar(ctx) -> {ok, goals: [node], expanded, sims, why, closest: node, proven, lbStart}
  * ctx: {sim (this level's EESim), starts: [{snap, masks, tick}], h(sim) -> ticks (admissible; Infinity: no way),
  *       isGoal(sim) -> bool, expand(node, sim) -> [{edge (masks), ticks, event, snap, hash, key, tile, px, py, vx, vy,
- *       onGround, jumps, dead, finished, near}], budget, classDedup, k, beforeTick, stepAll (the STEP family in every
- *       expansion: proven possible), keyOf(sim) (the class key or null), maxNodes, near(sim) (the start's nearness)}
- * closest: the node of the least `near` (an UNWEIGHTED distance to the goal: a child's c.near, else its h; a start's
- *       ctx.near(sim), else its h): never the weighted h of a greedy pass (a start's unweighted h beat every child's
- *       w x h, so the closest was the start in every greedy pass: the planner walled the start's tiles from it)
+ *       onGround, jumps, dead, finished}], budget, classDedup, k, beforeTick, stepAll (the STEP family in every
+ *       expansion: proven possible), keyOf(sim) (the class key or null), maxNodes}
  */
 function astar(ctx) {
 	const sim = ctx.sim, budget = ctx.budget || {};
@@ -93,8 +90,7 @@ function astar(ctx) {
 		const had = best.get(node.hash);
 		if (had !== undefined && had <= node.tick) continue;
 		best.set(node.hash, node.tick);
-		node.near = ctx.near ? ctx.near(sim) : h;
-		if (!closest || node.near < closest.near) closest = node;
+		if (!closest || h < closest.h) closest = node;
 		if (ctx.isGoal(sim)) { node.goal = true; node.f = node.tick; }
 		heap.push(node); nodes++;
 	}
@@ -140,8 +136,8 @@ function astar(ctx) {
 			if (ctx.bound !== undefined && !c.goal && tick + (c.h0 !== undefined ? c.h0 : h) >= ctx.bound) { pruned++; continue; }
 			if (ctx.bound !== undefined && c.goal && tick >= ctx.bound) { pruned++; continue; }
 			const node = { snap: c.snap, tick, parent: n, edge: c.edge, f: tick + h, h, sp: Math.abs(c.vx) + Math.abs(c.vy), hash: c.hash, tile: c.tile, vx: c.vx, vy: c.vy,
-				px: c.px, py: c.py, event: c.event, macro: c.macro, goal: !!c.goal, near: c.goal ? 0 : c.near !== undefined ? c.near : h };
-			if (!closest || node.near < closest.near || (node.near === closest.near && tick < closest.tick)) closest = node;
+				px: c.px, py: c.py, event: c.event, macro: c.macro, goal: !!c.goal };
+			if (!closest || h < closest.h || (h === closest.h && tick < closest.tick)) closest = node;
 			if (node.goal && ctx.greedy) { goals.push(node); if (goals.length === 1) goalF = node.f; continue; }
 			heap.push(node); nodes++;
 		}

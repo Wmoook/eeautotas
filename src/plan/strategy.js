@@ -46,7 +46,6 @@ const T = require('./types.js');
 const E = require('../eesim.js');
 
 const RUNG_MS = [1500, 5000, 15000, 45000];
-const REPLAN_FIRST = process.env.EEAT_REPLAN_FIRST === '1';
 const PROGRESS_MS = 2000, WATCH_MS = 2000, SAVE_MS = 60000;
 // the watchdog's window: STALL_F of the budget, at least STALL_MIN_S, at most STALL_S
 const STALL_S = 60, STALL_MIN_S = 5, STALL_F = 1 / 6;
@@ -59,9 +58,6 @@ const POLISH_MS = 15000, POLISH_F = 0.25;
 // the proof's share once a route is known (a static level start only): min(PROVE_MS, PROVE_F x the budget) kept for the
 // PROVE stage (one exact search from the level start bounded by the route's own arrival), and all the time the moves leave
 const PROVE_MS = 30000, PROVE_F = 0.2;
-// the exact landing (precision.js): a trophy leg's nearest state within PREC_NEAR tiles (the goal field's), at most
-// PREC_RUNS runs a compile of at most PREC_S s (at least PREC_MIN_S left), its PREC_ATTEMPTS nearest attempts
-const PREC_NEAR = 8, PREC_RUNS = 3, PREC_S = 40, PREC_MIN_S = 6, PREC_ATTEMPTS = 8;
 // the proof's starts: the level start after k = 0..R idle ticks, R = the idle ticks until the state rests (the timer starts
 // at the first input: waiting is free); at most PROVE_IDLE_MAX (one exact search each)
 const PROVE_IDLE_MAX = 64;
@@ -71,14 +67,10 @@ const PROVE_ROUNDS = 12;
 const FRONTIER_STEPS = 60, FRONTIER_MAX = 400;
 // the fallbacks when the planner has nothing left (fallbackJob): at most this many without a new anchor
 const FALLBACK_MAX = 6;
-const ANCHOR_QUAL = process.env.EEAT_ANCHOR_QUAL !== '0';   // (re-entry by another trigger: an anchor of its own, addArrival)
 // the arrivals' own bounds for the branch and bound (the planner's lowerBound from one arrival: a short search); the start's
 // bound gets LB_MS; a lowerBound call that took LB_SLOW_MS or more is not made again that compile (a synchronous part that
 // overruns its budget cannot be cut: Moving Ice Puzzle's took 90 s with 1.5 s asked)
 const ARR_LB_MS = 25, ARR_LB_EXPAND = 20000, LB_MS = 1500, LB_SLOW_MS = 5000;
-// (the start's bound in the bounds stage gets LB0_MS: it only reports (the report's lb, the polish's stop) until the end,
-// where the refresh takes the whole LB_MS again and keeps the larger; the stage's clock goes to the moves instead)
-const LB0_MS = +process.env.EEAT_LB0_MS || 500;
 /** a relative deadline (a step's or a waypoint's beforeTickFrom): a number, or 'prev+N' (N ticks after the previous
  *  step's arrival, i.e. this anchor's arrival: a key's KEY_TICKS) -> ticks | NaN */
 function relOf(x) {
@@ -144,21 +136,6 @@ const lbTicks = (r) => {
 const IDLE_MAX = 3000;
 function idleRunLB(L, bounds, goal) {
 	const sim = new E.EESim(L), inp = new E.EEInput();
-	// (first the idle trajectory alone: a ball that does not rest within IDLE_MAX ticks gets 0 (no claim) either way, so its
-	// IDLE_MAX + 1 bounds.leg calls (1.2-3.7 s on 8 of the 15 STAGE-TIME levels: a clock in the state never repeats) are
-	// not made)
-	{
-		sim.reset(); E.applyMask(inp, 0);
-		let h = sim.stateHash(), rests = false;
-		for (let i = 0; i <= IDLE_MAX && !rests; i++) {
-			if (sim.has_silver_crown) return 0;
-			sim.tick(inp);
-			const h2 = sim.stateHash();
-			if (h2 === h && !sim.is_dead) rests = true;
-			h = h2;
-		}
-		if (!rests) return 0;
-	}
 	sim.reset();
 	E.applyMask(inp, 0);
 	let lb = Infinity, h = sim.stateHash();
@@ -264,9 +241,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		try { bounds = await parts.createBounds(L, { model }); } catch (e) { bounds = null; say({ ev: 'warning', text: `the bounds could not be built (${e.message}): no admissible bound but the planner's` }); }
 	}
 	const facts = parts.createFacts({ rungs: 4, model });
-	// (the planner's floor probe runs in a worker thread off the bounds stage: EEAT_PLAN_FLOOR_ASYNC=0 in line, as before)
-	const planner = parts.createPlanner(model, facts, { bounds, seed: opts.seed, file: opts.file, floorAsync: process.env.EEAT_PLAN_FLOOR_ASYNC !== '0' });
-	const floorVerOf = () => { try { return typeof planner.floorVersion === 'function' ? planner.floorVersion() : 0; } catch (e) { return 0; } };
+	const planner = parts.createPlanner(model, facts, { bounds, seed: opts.seed });
 	// (the arrivals' room: goexplore.js roomOf, a pure function of the level: the contract's RM, no search)
 	const GX = opts.RM ? null : require('../goexplore.js');
 	const RM = opts.RM || GX.roomOf(L);
@@ -321,7 +296,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	// (a part that overruns its own budget cannot be cut here (a synchronous call): the call is timed, and one that took
 	// LB_SLOW_MS or more is not made again this compile (the arrivals' bounds, the refresh at the end))
 	let lbSlow = false, planSlowSaid = false;
-	try { const tq = Date.now(); const r = planner.lowerBound ? planner.lowerBound(startAnchorArg, { ms: LB0_MS }) : null; lbPlanner = lbTicks(r); lbComplete = !!(r && r.complete); if (Date.now() - tq >= LB_SLOW_MS) { lbSlow = true; say({ ev: 'warning', text: `the planner's lowerBound took ${((Date.now() - tq) / 1000).toFixed(1)} s (asked ${LB0_MS / 1000} s): not called again this compile` }); } } catch (e) { say({ ev: 'bug', what: 'lowerBound', error: e.message }); }
+	try { const tq = Date.now(); const r = planner.lowerBound ? planner.lowerBound(startAnchorArg, { ms: LB_MS }) : null; lbPlanner = lbTicks(r); lbComplete = !!(r && r.complete); if (Date.now() - tq >= LB_SLOW_MS) { lbSlow = true; say({ ev: 'warning', text: `the planner's lowerBound took ${((Date.now() - tq) / 1000).toFixed(1)} s (asked ${LB_MS / 1000} s): not called again this compile` }); } } catch (e) { say({ ev: 'bug', what: 'lowerBound', error: e.message }); }
 	if (lbPlanner === Infinity) { lbInf = true; lbPlanner = 0; say({ ev: 'warning', text: 'the planner\'s lower bound from the start is infinite: no way to the trophy in its relaxation (a proof there, if the model is sound); the moves try anyway' }); }
 	if (bounds && typeof bounds.leg === 'function') {
 		try { lbBounds = idleRunLB(L, bounds, T.goalOf(L, { kind: 'trophy', label: 'trophy' })); } catch (e) { say({ ev: 'warning', text: `bounds.leg: ${e.message}` }); }
@@ -353,17 +328,12 @@ async function compile(L, opts = {}, emit = () => {}) {
 	const chainOf = (id) => {
 		const list = [];
 		for (let k = id, n = 0; k && n < 10000; n++) { const g = legs.get(k); if (!g) break; list.push(g); k = g.prev; }
-		return list.reverse().map((g) => ({ label: g.label, fromTick: g.fromTick, ticks: g.ticks, lb: Number.isFinite(g.lb) ? g.lb : null, proven: !!g.proven, provenBy: g.provenBy || null, lbMath: Number.isFinite(g.lbMath) ? g.lbMath : null, tool: g.tool || null }));
+		return list.reverse().map((g) => ({ label: g.label, fromTick: g.fromTick, ticks: g.ticks, lb: Number.isFinite(g.lb) ? g.lb : null, proven: !!g.proven, tool: g.tool || null }));
 	};
 
 	// ---- anchors
 	const anchors = new Map();   // S.key -> anchor
 	let anchorSeq = 0, lastProgress = Date.now(), progressVer = factsVer(facts), steps = 0, okSteps = 0, failSteps = 0, picksN = 0, bnbPlans = 0, bnbArrivals = 0, lateArrivals = 0;
-	// (the relay starts: per (anchor id, edge) the nearest state its failed rungs reached, a start of its next rung;
-	// EEAT_RELAY=0: off)
-	const RELAY = process.env.EEAT_RELAY !== '0', RELAY_GAIN = 1;
-	const relays = new Map(), relayFloor = new Map();
-	let relayRuns = 0, relaySet = 0, relayDrop = 0;
 	const runMinOf = (A) => A.arrivals.reduce((m, a) => Math.min(m, a.run > 0 ? a.run : 0), Infinity);
 	const startedOf = (A) => A.arrivals.every((a) => a.run > 0);
 	const gainOf = (S, parent) => {
@@ -371,27 +341,13 @@ async function compile(L, opts = {}, emit = () => {}) {
 		if (S && S.triggers && (Array.isArray(S.triggers) || S.triggers instanceof Set)) return Array.isArray(S.triggers) ? S.triggers.length : S.triggers.size;
 		return parent ? parent.gain + 1 : 0;
 	};
-	/** a verified arrival a (its model state S): a new anchor, or one more diverse arrival of a known one -> {anchor, isNew, changed}.
-	 *  RE-ENTRY BY ANOTHER TRIGGER (EEAT_ANCHOR_QUAL=0: off): an arrival whose state class is known already but that came
-	 *  by touching ANOTHER trigger than the one that made that class's anchor (a switch toggled back from another switch
-	 *  tile, the same switch id at another place) is an anchor of its own, keyed by the class and that edge: the planner
-	 *  plans from an anchor's first arrival (its tile), so such an arrival, merged into the old anchor, was never planned
-	 *  from, and a plan through it ("purple switch 0 (197,15) -> purple switch 0 (239,15) -> trophy") came back to its
-	 *  first step from the old anchor's place forever: Fish Gods' 25 steps toggled psw 0 between two anchors, then 'end
-	 *  exhausted' with 5 s of its 60 left. The facts' node class carries the edge too (planner anchorOf `qual`) */
-	const addArrival = (a, S, parent, why, step) => {
-		let key = String(S.key);
+	/** a verified arrival a (its model state S): a new anchor, or one more diverse arrival of a known one -> {anchor, isNew, changed} */
+	const addArrival = (a, S, parent, why) => {
+		const key = String(S.key);
 		let A = anchors.get(key);
-		let qual = null;
-		if (A && ANCHOR_QUAL && step && !step.synthetic && /^trig:/.test(String(step.edge)) && A.edgeVia !== step.edge) {
-			qual = String(step.edge);
-			key = `${key}@${qual}`;
-			A = anchors.get(key);
-		}
 		if (!A) {
 			A = { id: ++anchorSeq, key, S, arrivals: [a], firstTick: a.tick, picks: 0, fails: 0, exhausted: false, why: '', gain: gainOf(S, parent), parent: parent ? parent.key : null,
-				depth: parent ? parent.depth + 1 : 0, costEst: parent && Number.isFinite(parent.nextCost) ? parent.nextCost : Infinity, costVer: -1, plans: null, via: why,
-				edgeVia: step && !step.synthetic ? String(step.edge) : null, qual };
+				depth: parent ? parent.depth + 1 : 0, costEst: parent && Number.isFinite(parent.nextCost) ? parent.nextCost : Infinity, costVer: -1, plans: null, via: why };
 			anchors.set(key, A);
 			lastProgress = Date.now();
 			return { anchor: A, isNew: true };
@@ -422,68 +378,6 @@ async function compile(L, opts = {}, emit = () => {}) {
 		if (out) { try { C.writeEetas(path.join(out, 'route.eetas'), ev.ms); } catch (e) { /* read-only */ } }
 		lastProgress = Date.now();
 		return { ev, better: true };
-	};
-
-	// ---- THE EXACT LANDING (src/precision.js as a child process: it never blocks this thread): a trophy leg whose nearest
-	// state is within PREC_NEAR tiles of the trophy and that no tier reached is the signature of a ZERO-WIDTH window: a way
-	// that needs ONE exact sub-pixel x (a spike's centre rule on one side, a half block's solid half on the other: the box
-	// must drop at px == 5720.0 exactly, one double on a grid of 2^-40 px). Every static x constraint of the engine sits on
-	// a multiple of 8 px, so the target x is COMPUTED (the nudge test), and the inputs that reach it exactly are COMPUTED
-	// too (a meet in the middle of the engine's own rest-to-rest moves: exact pieces that sum to the target). No search of
-	// the old paradigm; every route it prints is C.evaluate'd there and again here (routeOf). The attempts: the trophy
-	// legs' nearest states (fail.closest), nearest first.
-	const precOn = opts.precision !== false && process.env.EEAT_PLAN_PREC !== '0' && !!opts.file;
-	const precAtt = new Map();   // masks string -> dist
-	let precRuns = 0, precBusy = false, precChild = null;
-	const precision = async (closest) => {
-		if (!precOn || !closest || !closest.masks || !(closest.dist >= 0) || closest.dist > PREC_NEAR) return null;
-		const str = typeof closest.masks === 'string' ? closest.masks : T.strOf(closest.masks);
-		if (!/^[0-O]+$/.test(str)) return null;
-		const had = precAtt.size;
-		if (!precAtt.has(str)) precAtt.set(str, +closest.dist);
-		if (precBusy || precRuns >= PREC_RUNS || precAtt.size === had || stopped) return null;
-		const secs = Math.floor(Math.min(PREC_S * 1000, left() - endReserve - 2000) / 1000);
-		if (secs < PREC_MIN_S) return null;
-		precBusy = true; precRuns++;
-		const os = require('os'), cp = require('child_process');
-		const att = [...precAtt].sort((a, b) => a[1] - b[1]).slice(0, PREC_ATTEMPTS).map((e) => e[0]);
-		const file = path.join(os.tmpdir(), `eeat_prec_${process.pid}_${precRuns}.txt`);
-		const t1 = Date.now();
-		let found = null, done = null;
-		try {
-			fs.writeFileSync(file, att.join('\n') + '\n');
-			say({ ev: 'precision', run: precRuns, attempts: att.length, nearest: Math.round(+precAtt.get(att[0]) * 10) / 10, seconds: secs });
-			await new Promise((resolve) => {
-				const pw = Math.max(1, Math.min(workers, 4));
-				const ch = cp.spawn(process.execPath, [path.join(__dirname, '..', 'precision.js'), String(opts.file), `--attempts=${file}`, `--workers=${pw}`, `--seconds=${secs}`, '--first=1'], { stdio: ['ignore', 'pipe', 'ignore'] });
-				precChild = ch;
-				const onExit = () => { try { ch.kill('SIGKILL'); } catch (e) { /* gone */ } };
-				process.once('exit', onExit);
-				ch.on('close', () => process.removeListener('exit', onExit));
-				let buf = '';
-				const kill = setTimeout(() => { try { ch.kill('SIGKILL'); } catch (e) { /* gone */ } }, (secs + 10) * 1000);
-				const poll = setInterval(() => { if (stopped || left() <= 0) { try { ch.kill('SIGKILL'); } catch (e) { /* gone */ } } }, 500);
-				ch.stdout.on('data', (d) => {
-					buf += d;
-					let k;
-					while ((k = buf.indexOf('\n')) >= 0) {
-						const line = buf.slice(0, k); buf = buf.slice(k + 1);
-						let ev = null;
-						try { ev = JSON.parse(line); } catch (e) { continue; }
-						if (ev.ev === 'result' && ev.kind === 'finish' && typeof ev.inputs === 'string' && !found) found = ev.inputs;
-						else if (ev.ev === 'done') done = ev.end;
-					}
-				});
-				ch.on('error', () => { clearTimeout(kill); clearInterval(poll); resolve(); });
-				ch.on('close', () => { clearTimeout(kill); clearInterval(poll); precChild = null; resolve(); });
-			});
-		} catch (e) { say({ ev: 'warning', text: `precision: ${e.message}` }); }
-		try { fs.unlinkSync(file); } catch (e) { /* gone */ }
-		precBusy = false;
-		say({ ev: 'precision', run: precRuns, end: found ? 'finish' : done || 'ended', ms: Date.now() - t1 });
-		if (!found) return null;
-		const x = routeOf(T.masksOf(found.replace(/[^0-O]/g, '')), 'the exact landing (precision)', null);
-		return x && x.better ? x.ev : null;
 	};
 
 	// ---- control: stdin lines
@@ -523,7 +417,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	const inflight = new Map();   // edgeKey -> {promise, job, started, budgetMs}
 	let cur = null;   // the last plan (the page's line)
 	const bug = (what, o) => { bugs++; say(Object.assign({ ev: 'bug', what }, o || {})); };
-	const anchorArg = (A) => ({ arrival: A.arrivals[0], arrivals: A.arrivals, S: A.S, key: A.key, tick: A.firstTick, run: runMinOf(A), qual: A.qual || null });
+	const anchorArg = (A) => ({ arrival: A.arrivals[0], arrivals: A.arrivals, S: A.S, key: A.key, tick: A.firstTick, run: runMinOf(A) });
 	/** an anchor that cannot lead to a route that beats the bounds: every arrival's run ticks already at the B&B bound, or
 	 *  its ticks at the depth bound (proofs: a route through it is at least that long) */
 	const uselessA = (A) => {
@@ -565,8 +459,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		return Math.min(d, Number.isFinite(tickBound) ? tickBound + 1 : Infinity);
 	};
 	const planOfAnchor = (A) => {
-		// (the plan memo's version: the facts', and the planner's floors (an async floor probe's answer re-plans))
-		const v = factsVer(facts) + floorVerOf() * 1e9;
+		const v = factsVer(facts);
 		if (A.plans && A.planVer === v && A.planEpoch === epoch && A.planBound === runBound()) return A.plans;
 		const rb = runBound();
 		pruneArrivals(A);
@@ -576,14 +469,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		// (the plan's own budget: the planner's default (2 s first, 0.3 s after) within a quarter of the time left; a call that
 		// overran it by far is said once (a synchronous call cannot be cut here: the CLI's watchdog is the backstop))
 		// (a plan cut by its budget ('budget': no proof of anything) doubles the anchor's next budget, up to 16x)
-		// (the first plan's 2 s is the anchor's FIRST plan's: every step sets A.plans = null (the receding horizon), and a level
-		// that has only its start anchor re-planned with the first plan's 2 s after every step, synchronously, in the thread
-		// that dispatches the workers' steps and takes their answers: the moves stage's workers were idle 12-67% of their time
-		// on big levels (Moving Ice Puzzle 67%, Unforgiving Climb 34%, The Glitch 34%: every re-plan a 2.0-s gap in the event
-		// log, the workers' answers waiting in it). EEAT_REPLAN_FIRST=1: the rule before)
-		const firstPlan = REPLAN_FIRST ? !A.plans : !A.planned;
-		const planMs = Math.max(100, Math.min((firstPlan && anchors.size <= 1 ? 2000 : 300) * (1 << Math.min(4, A.budgetCuts || 0)), (left() - (best ? endReserve : 0)) / 4));
-		A.planned = true;
+		const planMs = Math.max(100, Math.min((!A.plans && anchors.size <= 1 ? 2000 : 300) * (1 << Math.min(4, A.budgetCuts || 0)), (left() - (best ? endReserve : 0)) / 4));
 		const tp = Date.now();
 		try { r = planner.plan(anchorArg(A), { k: 3, depth: depthOf(A), runBound: rb, tickBound, epoch, ms: planMs }); } catch (e) { bug('plan', { error: e.message, anchor: A.id }); r = { plans: [], why: `error: ${e.message}` }; }
 		const tpMs = Date.now() - tp;
@@ -680,7 +566,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 			const masks = a.masks instanceof Uint8Array ? a.masks : T.masksOf(a.masks);
 			const { s, lg } = startOf(starts, masks, i, res);
 			const leg = addLeg({ label: labelOf(step), fromTick: s ? s.tick : 0, ticks: masks.length - (s ? s.tick : 0), lb: lg && Number.isFinite(+lg.lb) ? +lg.lb : Number.isFinite(+res.lb) ? +res.lb : null,
-				proven: !!(lg && lg.proven), provenBy: (lg && lg.provenBy) || null, lbMath: lg && Number.isFinite(+lg.lbMath) && lg.lbMath !== null ? +lg.lbMath : null, tool: (lg && lg.tool) || res.tool || null, prev: s && s.leg ? s.leg : null });
+				proven: !!(lg && lg.proven), tool: (lg && lg.tool) || res.tool || null, prev: s && s.leg ? s.leg : null });
 			const r = replay(masks, goal, !!(goal && goal.allowDeath));
 			if (r.finished > 0) { routes.push({ masks: masks.subarray(0, r.finished), leg }); return; }
 			if (trophy) { bug('arrival', { label: labelOf(step), tick: masks.length, why: 'a trophy arrival that does not finish on its replay' }); return; }
@@ -712,12 +598,6 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const budget = budgetOf(step.rung);
 		const wp = waypointOf(step, A);
 		const starts = A.arrivals.slice();
-		// (the relay start: this (anchor, edge)'s nearest state from its failed rungs, a start too: the next rung goes on from
-		// the frontier the last one reached instead of only from the anchor; before a route only: no bound to keep)
-		const rk = `${A.id}|${ek}`;
-		const rl = RELAY ? relays.get(rk) : null;
-		let rlUsed = false;
-		if (rl && !Number.isFinite(runBound()) && rl.arrival.masks.length < tickBound && !starts.some((s) => s.hash === rl.arrival.hash)) { starts.push(rl.arrival); relayRuns++; rlUsed = true; }
 		const t1 = Date.now();
 		steps++;
 		const verBefore = factsVer(facts), anchorsBefore = anchors.size;
@@ -738,7 +618,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 				let S2;
 				try { S2 = model.stateOf(sim); } catch (e) { bug('stateOf', { error: e.message }); continue; }
 				A.nextCost = Number.isFinite(+plan.cost) && Number.isFinite(+step.estTicks) ? Math.max(0, plan.cost - step.estTicks) : undefined;
-				const { anchor: B, isNew, changed } = addArrival(a, S2, A, labelOf(step), step);
+				const { anchor: B, isNew, changed } = addArrival(a, S2, A, labelOf(step));
 				if (isNew) {
 					news++;
 					const d = distOf(sim);
@@ -750,53 +630,14 @@ async function compile(L, opts = {}, emit = () => {}) {
 		learnFrom(step, res, A);
 		const ms = Date.now() - t1;
 		const fail = res.ok ? null : res.fail || null;
-		// (a relay that got its rung no nearer by RELAY_GAIN tiles is dropped (a false near: the next rung from the anchor
-		// alone), and a new one must beat it by as much)
-		// (the executor's closest is in the unit of the goal field with the counterexample walls it had (fail.wallsN): a relay
-		// and a floor of another unit are no measure of this one: replaced, not compared)
-		const unitN = fail && fail.wallsN > 0 ? fail.wallsN | 0 : 0;
-		if (RELAY && rlUsed && !res.ok) {
-			const nd = fail && fail.closest && fail.closest.dist >= 0 ? fail.closest.dist : Infinity;
-			if ((rl.wallsN | 0) === unitN && !(nd < rl.dist - RELAY_GAIN)) { relays.delete(rk); relayFloor.set(rk, { d: rl.dist - RELAY_GAIN, n: unitN }); relayDrop++; }
-		}
-		if (RELAY && fail && fail.closest && fail.closest.masks && !fail.closest.dead && fail.closest.dist >= 0 && !Number.isFinite(runBound())) {
-			const prev0 = relays.get(rk);
-			const prev = prev0 && (prev0.wallsN | 0) === unitN ? prev0 : null;
-			const fl = relayFloor.get(rk);
-			const floor = fl && fl.n === unitN ? fl.d : Infinity;
-			if ((!prev || fail.closest.dist < prev.dist) && fail.closest.dist < floor) {
-				const m = fail.closest.masks instanceof Uint8Array ? fail.closest.masks : T.masksOf(fail.closest.masks);
-				const r = replay(m, null, false);
-				const h = r.sim.stateHash();
-				if (r.dead < 0 && r.finished < 0 && !starts.some((s) => s.hash === h)) {
-					const { s } = startOf(starts, m, -1, {});
-					const leg = addLeg({ label: `relay ${labelOf(step)}`, fromTick: s ? s.tick : 0, ticks: m.length - (s ? s.tick : 0), lb: null, proven: false, tool: 'relay', prev: s && s.leg ? s.leg : null });
-					relays.set(rk, { arrival: Object.assign(T.arrivalOf(L, r.sim, m, RM), { run: r.run, leg, relay: true }), dist: fail.closest.dist, wallsN: unitN });
-					relaySet++;
-				}
-			}
-		}
 		const rec = { ev: 'step', n: steps, anchor: A.id, label: labelOf(step), edge: step.edge, nodeClass: step.nodeClass, rung: step.rung, epoch, tool: res.tool || null, ok: !!res.ok, ms, budgetMs: Math.round(budget.ms),
 			why: res.ok ? '' : (fail && fail.why) || '', arrivals: arr.length, news, routes: routes.length };
 		if (fail && fail.closest) rec.closest = { tile: fail.closest.tile, dist: fail.closest.dist };
-		// (the executor's exact end search from a near start, when it ran: tier 0b)
-		const nearT = Array.isArray(res.tiers) ? res.tiers.find((x) => x && x.tier === 'near') : null;
-		if (nearT) rec.near = { ok: nearT.ok, runs: nearT.runs, ms: nearT.ms, nearest: nearT.nearest };
-		// (the move solver's tier, when it ran: EEAT_MSOLVE=1)
-		const msT = Array.isArray(res.tiers) ? res.tiers.find((x) => x && x.tier === 'msolve') : null;
-		if (msT) rec.msolve = { found: msT.found, legs: msT.legs, chains: msT.chains, expanded: msT.expanded, rejected: msT.rejected, ms: msT.ms, error: msT.error || undefined };
-		// (EEAT_STEP_CLOSEST=1: the closest state's inputs too, for the near-miss diagnoses)
-		if (fail && fail.closest && fail.closest.masks && process.env.EEAT_STEP_CLOSEST === '1') rec.closest.inputs = typeof fail.closest.masks === 'string' ? fail.closest.masks : T.strOf(fail.closest.masks);
 		if (fail && Array.isArray(fail.blockedBy) && fail.blockedBy.length) rec.blockedBy = fail.blockedBy.slice(0, 4);
 		say(rec);
 		lastSteps.push({ n: steps, label: rec.label, rung: step.rung, ok: rec.ok, why: rec.why, ms, anchor: A.id });
 		if (lastSteps.length > 8) lastSteps.shift();
 		if (fail) { lastFails.push({ n: steps, label: rec.label, rung: step.rung, why: fail.why, closest: fail.closest ? { tile: fail.closest.tile, dist: fail.closest.dist } : null, blockedBy: fail.blockedBy || [], touched: (fail.touched || []).length }); if (lastFails.length > 6) lastFails.shift(); }
-		// (a trophy leg that ended within PREC_NEAR tiles of the trophy: the exact landing, above)
-		if (fail && wp.kind === 'trophy' && fail.closest && !route) {
-			const pr = await precision(fail.closest);
-			if (pr) route = pr;
-		}
 		const verAfter = factsVer(facts);
 		if (verAfter !== verBefore) lastProgress = Date.now();
 		// (the invariant: every step adds an anchor or changes a fact; else the planner would propose it again: blocked here)
@@ -995,10 +836,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 				if (left() < 250 || (best && left() <= endReserve)) { end = 'time'; break; }
 				if (nothingSince >= 0 && nothingSince === steps) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } end = 'exhausted'; break; }
 				nothingSince = steps;
-				// (a deepening refused for the clock alone (its doubled first rung past the time left) is no exhaustion: the
-				// end is the time's, not a claim that no plan is left (The Flighty Slighty, The Tunnels, Fish Gods, OCTOS:
-				// "end exhausted" 1-5 s before the 60-s budget; every level is possible))
-				if (!deepen('exhausted')) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } end = deepenings < maxDeepen ? 'time' : 'exhausted'; break; }
+				if (!deepen('exhausted')) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } end = 'exhausted'; break; }
 				continue;
 			}
 			const tick = new Promise((res) => { const tt = setTimeout(res, 250); if (tt.unref) tt.unref(); });
@@ -1111,9 +949,9 @@ async function compile(L, opts = {}, emit = () => {}) {
 					const lg0 = (faster.r.legs || [])[0] || {};
 					if (ev && ev.runTicks < best.runTicks && (!noDeath || ev.deaths === 0) && ev.chance >= best.chance - 1e-9) {
 						const saved = best.runTicks - ev.runTicks;
-						const proven = !!lg0.proven && (lg0.tool === 'exact' || String(lg0.tool || '').startsWith('math'));   // (a math leg's proof: its certified bound = its ticks)
+						const proven = !!lg0.proven && lg0.tool === 'exact';
 						best = { masks: ev.ms, ticks: ev.complete, runTicks: ev.runTicks, deaths: ev.deaths, chance: ev.chance,
-							legs: [{ label: 'trophy', fromTick: faster.k, ticks: ev.complete - faster.k, lb: proven ? ev.complete - faster.k : null, proven, provenBy: proven ? lg0.provenBy || 'exact' : null, tool: lg0.tool || faster.r.tool || null }], how: 'the proof search' };
+							legs: [{ label: 'trophy', fromTick: faster.k, ticks: ev.complete - faster.k, lb: proven ? ev.complete - faster.k : null, proven, tool: lg0.tool || faster.r.tool || null }], how: 'the proof search' };
 						say({ ev: 'result', kind: 'finish', ticks: ev.complete, runTicks: ev.runTicks, deaths: ev.deaths, chance: ev.chance, how: best.how, lb: LB, gap: gapOf(ev.runTicks), inputs: T.strOf(ev.ms) });
 						if (out) { try { C.writeEetas(path.join(out, 'route.eetas'), ev.ms); } catch (e) { /* read-only */ } }
 						notes.push(`-${num(saved)} (${lg0.tool || faster.r.tool || '?'}, +${faster.k} idle)`);
@@ -1147,8 +985,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 	if (proveProof && best && best.runTicks > LB) { LB = best.runTicks; lbComplete = true; }
 	// (the exact search drops dying runs: only where nothing kills (goexplore.js deathsOf: no killing tile, no timed killer)
 	// is its minimum every route's; a death back to the one spawn keeps the keys and coins taken: a move)
-	if (!lbProof && best && startStatic && noDeath && best.legs.length === 1 && best.legs[0].fromTick === 0 && best.legs[0].proven && (best.legs[0].tool === 'exact' || String(best.legs[0].tool || '').startsWith('math')) && !String(best.how || '').includes('polish')) {
-		if (best.runTicks > LB) { LB = best.runTicks; lbComplete = true; lbProof = `one ${best.legs[0].tool === 'exact' ? 'exact' : 'math'} leg from the static level start, proven the fewest ticks${best.legs[0].provenBy ? ` (${best.legs[0].provenBy})` : ''}`; }
+	if (!lbProof && best && startStatic && noDeath && best.legs.length === 1 && best.legs[0].fromTick === 0 && best.legs[0].proven && best.legs[0].tool === 'exact' && !String(best.how || '').includes('polish')) {
+		if (best.runTicks > LB) { LB = best.runTicks; lbComplete = true; lbProof = 'one exact leg from the static level start, proven the fewest ticks'; }
 	}
 	if (!lbSlow && !lbProof && planner.lowerBound) {
 		try {
@@ -1159,8 +997,6 @@ async function compile(L, opts = {}, emit = () => {}) {
 		} catch (e) { /* the first one stands */ }
 	}
 	if (best && LB > best.runTicks) { bug('bound', { why: `the lower bound ${LB} is above the route's ${best.runTicks} run ticks: inadmissible`, lb: LB, planner: lbPlanner, bounds: lbBounds }); LB = Math.max(0, ...[lbPlanner, lbBounds].filter((x) => Number.isFinite(x) && x <= best.runTicks)); }
-	let execStats = null;
-	try { execStats = exec && exec.stats ? exec.stats() : null; } catch (e) { execStats = null; }
 	try { if (exec && exec.close) await exec.close(); } catch (e) { /* closed */ }
 	try { if (prims && prims.close) await prims.close(); } catch (e) { /* closed */ }
 	let known = null;
@@ -1172,7 +1008,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		bugs, deepenings, stalls, bnbPlans, bnbArrivals, layers: Math.max(0, ...[...anchors.values()].map((A) => A.firstTick)), ...(why ? { why } : {}) });
 	saveFiles();
 	return { ok: !!best, masks: best ? best.masks : null, route: best ? best.masks : null, runTicks: best ? best.runTicks : null, ticks: best ? best.ticks : null, deaths: best ? best.deaths : null, chance: best ? best.chance : null,
-		lb: LB, lbComplete, lbProof, gap: best ? gapOf(best.runTicks) : null, legs: best ? best.legs : [], stages, known, why, end, anchors: anchors.size, steps, okSteps, bugs, deepenings, stalls, bnbPlans, bnbArrivals, relayRuns, relaySet, relayDrop, exec: execStats };
+		lb: LB, lbComplete, lbProof, gap: best ? gapOf(best.runTicks) : null, legs: best ? best.legs : [], stages, known, why, end, anchors: anchors.size, steps, okSteps, bugs, deepenings, stalls, bnbPlans, bnbArrivals };
 }
 
 /** run(L, opts, emit): the compile loop as a Find a route strategy (src/plan.js): 300 s by default, the source events'
@@ -1182,4 +1018,4 @@ function run(L, opts = {}, emit = () => {}) {
 	return compile(L, Object.assign({ seconds: 300, sourceDist: true }, opts), emit);
 }
 
-module.exports = { compile, run, knownOf, md5Of, partsOf, plansOf, idleRunLB, RUNG_MS, STALL_S, POLISH_MS, POLISH_F };
+module.exports = { compile, run, knownOf, md5Of, partsOf, plansOf, RUNG_MS, STALL_S, POLISH_MS, POLISH_F };

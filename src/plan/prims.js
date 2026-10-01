@@ -13,8 +13,7 @@
 //           route found), bound (ticks: only routes faster), beforeTick, allowDeath, guide (false: no reach-field order)}
 //   NavResult {ok, arrivals (T.pickDiverse of the goal nodes, each replayed from the level start by T.playTo), best
 //           {masks, ticks} | null, lb (the bound at the best start), proven, expanded, sims, why ('found' | 'budget' |
-//           'exhausted' | 'stopped'), closest {masks, tile, dist (the reach field's tiles there; GUIDE_FAR + the bound's
-//           ticks where the field has no way), vx, vy}}
+//           'exhausted' | 'stopped'), closest {masks, tile, dist (the bound's ticks there), vx, vy}}
 //
 // THE MACRO FAMILY (<= 160 ticks, each stopping at its first EVENT: a landing, a change of a relevant feature, a
 // teleport (|dpos| > 20 px in a tick), a death (dropped unless allowDeath), the goal test, the macro's end):
@@ -40,14 +39,8 @@ const JUMP2 = [4, 8, 12, 16];
 const HOLD_N = [2, 6, 16];
 const TELEPORT_PX = 20;
 const DEATH_WAIT = 80;
-const DEAD_WAIT_ALL = process.env.EEAT_PRIMS_DEADWAIT !== '0';   // (the WAIT edge through every dead tick; 0: a tick an edge, as before)
 const GUIDE_K = 2;          // ticks per reach-field tile in the greedy passes' order
 const GUIDE_FAR = 1e5;
-// the closest approach by an unweighted nearness (the reach field's tiles) instead of the pass's weighted h (1, the
-// default; EEAT_CLOSEST_NEAR=0: the weighted h as before, whose start always won a greedy pass: navgraph.js astar)
-const CLOSEST_NEAR = process.env.EEAT_CLOSEST_NEAR !== '0';
-const GREEDY_W = +process.env.EEAT_PRIMS_GREEDY_W || 0;   // OPT-IN (0 = off): a far leg's first pass's weight (100: the reach field's order almost alone)
-const GREEDY_TILES = +process.env.EEAT_PRIMS_GREEDY_TILES || 24;   // a leg is far from this many reach-field tiles at every start
 
 // ---------------------------------------------------------------- the macros: mask(k, sim) -> mask | -1 (end)
 function mkMacros() {
@@ -108,36 +101,8 @@ async function createPrims(L, o = {}) {
 	const sim = new E.EESim(L), inp = new E.EEInput(), sim2 = new E.EESim(L);
 	const model = o.model || null;
 	const feats = model && model.feats ? model.feats.slice() : null;
-	// (the features' getters, each key parsed once: fsig runs on every simulated tick, and T.featValue's string parsing
-	// was 12.5% of a leg's time; model.keyOf = model.stateOf(s).key without the state object: the same key)
-	const fget = feats ? feats.map((f) => T.featGetter(f)) : null;
-	const fsig = fget ? (s) => { let h = 0x811c9dc5; for (let i = 0; i < fget.length; i++) { h ^= (fget[i](s) | 0); h = Math.imul(h, 0x01000193); } return h >>> 0; } : featSig;
-	const featKey0 = model && model.keyOf ? (s) => model.keyOf(s) : model && model.stateOf ? (s) => model.stateOf(s).key : (s) => fsig(s).toString(36);
-	// the parent's key for its children (an expansion's): a child with the parent's feature values, coin counts and
-	// checkpoint has the parent's key (the key = the values, the taken coins' bitmaps and the checkpoint; within one edge a
-	// coin is only ever taken, which raises its count, so equal counts = the same coins taken). keyOf was 12.9% of a coin
-	// level's leg (Booty Return: the taken bitmaps over its coin tiles, hashed per child). EEAT_PRIMS_KEYCACHE=0: off.
-	const KEYCACHE = process.env.EEAT_PRIMS_KEYCACHE !== '0' && fget !== null;
-	let kc = null;   // {vals, coins, bcoins, cpx, cpy, key} of the parent being expanded, or null
-	const KEYCHECK = process.env.EEAT_PRIMS_KEYCHECK === '1';   // (tests: every cached key checked against keyOf)
-	let kcChecks = 0;
-	// (every key string interned to a small number: the class keys carry the number, a bijection with the string, so the
-	// same equalities; a class key's Map lookup hashes a short string instead of the feature values and coin hashes)
-	const internMap = new Map();
-	const intern = (k) => { let v = internMap.get(k); if (v === undefined) { v = internMap.size; internMap.set(k, v); } return v; };
-	const kcOf = (s) => { const key = featKey0(s); return { vals: fget.map((g) => g(s)), coins: s.coins, bcoins: s.blue_coins, cpx: s.checkpoint.x, cpy: s.checkpoint.y, key, id: intern(key) }; };
-	const featKey = !KEYCACHE ? (s) => intern(featKey0(s)) : (s) => {
-		const c = kc;
-		if (c !== null && c.coins === s.coins && c.bcoins === s.blue_coins && c.cpx === s.checkpoint.x && c.cpy === s.checkpoint.y) {
-			let same = true;
-			for (let i = 0; i < fget.length; i++) if (fget[i](s) !== c.vals[i]) { same = false; break; }
-			if (same) {
-				if (KEYCHECK) { const k0 = featKey0(s); if (k0 !== c.key) throw new Error(`prims key cache: ${c.key} vs ${k0}`); kcChecks++; }
-				return c.id;
-			}
-		}
-		return intern(featKey0(s));
-	};
+	const fsig = feats ? (s) => { let h = 0x811c9dc5; for (const f of feats) { h ^= (T.featValue(s, f) | 0); h = Math.imul(h, 0x01000193); } return h >>> 0; } : featSig;
+	const featKey = model && model.stateOf ? (s) => model.stateOf(s).key : (s) => fsig(s).toString(36);
 	let bounds = o.bounds || null;
 	if (!bounds) { const BO = require('./bounds.js'); bounds = BO.createBounds(L, { model }); }
 	let tables = null;
@@ -201,9 +166,7 @@ async function createPrims(L, o = {}) {
 			E.applyMask(inp, m);
 			s.tick(inp);
 			buf[n++] = m;
-			// (the dead ball's WAIT plays on through its dead ticks to the respawn in ONE edge: before, every dead tick was a
-			// node of its own (54 expansions a death), and a death step's search spent its budget there)
-			if (s.is_dead && !macro.dead) { event = 'dead'; break; }
+			if (s.is_dead) { event = 'dead'; break; }
 			if (ctx.goal && ctx.goal.test(s)) { event = 'goal'; goal = true; break; }
 			if (macro.whole) continue;   // a learned leg plays whole (only a death or the goal ends it early)
 			if (Math.abs(s.px - px) > TELEPORT_PX || Math.abs(s.py - py) > TELEPORT_PX) { event = 'portal'; break; }
@@ -266,7 +229,7 @@ async function createPrims(L, o = {}) {
 	/** the macros for the state in `s` (restored from snap): the family by its support, STEP last */
 	function familyOf(s, snap, fo) {
 		const list = [];
-		if (s.is_dead) { list.push({ name: 'WAIT', fam: 'WAIT', max: DEATH_WAIT, dead: DEAD_WAIT_ALL, mask: (k, x) => (x.is_dead ? 0 : -1) }); return { list, steps: null }; }
+		if (s.is_dead) { list.push({ name: 'WAIT', fam: 'WAIT', max: DEATH_WAIT, mask: (k, x) => (x.is_dead ? 0 : -1) }); return { list, steps: null }; }
 		const ground = !!s.on_ground && s.flip_gravity === 0 && s.moy > 0 && s.mox === 0;
 		const chains = [];
 		if (ground && plainFx(s) && fo.family !== 'step') {
@@ -286,14 +249,6 @@ async function createPrims(L, o = {}) {
 
 	/** the children of a node (the navgraph's expand): learned edges first, the family, STEP */
 	function expandNode(node, s, ctx, fo) {
-		try {
-			kc = null;
-			s.restore(node.snap);
-			if (KEYCACHE) kc = kcOf(s);   // (the parent's key for its children: featKey)
-			return expandNode0(node, s, ctx, fo);
-		} finally { kc = null; }
-	}
-	function expandNode0(node, s, ctx, fo) {
 		st.expands++;
 		const snap = node.snap;
 		s.restore(snap);
@@ -353,12 +308,9 @@ async function createPrims(L, o = {}) {
 	function route(starts, goal, budget = {}, ro = {}) {
 		const t0 = Date.now();
 		st.routes++;
-		const fieldR = bounds.field(T.fieldTilesOf(goal), null, { touch: T.fieldTouchOf(goal) });
+		const fieldR = bounds.field(goal.tiles, null, { touch: goal.kind === 'trophy' });
 		const trophy = goal.kind === 'trophy';
-		// (a dead ball of a death step 0: it respawns by itself; the killer's tile has no value on the field, and h
-		// Infinity dropped every dying child: a death step was never found by the primitives)
-		const deadOK = !!goal.allowDeath || !!ro.allowDeath;
-		const h = (s) => { if (deadOK && s.is_dead) return 0; const v = bounds.at(fieldR, s); return v === Infinity ? Infinity : (trophy ? v + 1 : v); };
+		const h = (s) => { const v = bounds.at(fieldR, s); return v === Infinity ? Infinity : (trophy ? v + 1 : v); };
 		const sts = [];
 		for (const a of starts) {
 			const snap = snapOf(a);
@@ -372,27 +324,14 @@ async function createPrims(L, o = {}) {
 		let guide = null;
 		if (ro.guide !== false && classDedup) {
 			try {
-				const gf = T.goalField(goal.wallLc || L, T.fieldTilesOf(goal), { deaths: false });   // (the executor's counterexample walls: goal.wallLc)
-				guide = (s) => { if (deadOK && s.is_dead) return 0; const c = RF.costAt(gf, s); return c < 0 ? GUIDE_FAR : c * GUIDE_K; };
+				const gf = T.goalField(L, goal.tiles, { deaths: false });
+				guide = (s) => { const c = RF.costAt(gf, s); return c < 0 ? GUIDE_FAR : c * GUIDE_K; };
 			} catch (e) { guide = null; }
 		}
-		// (the closest approach's measure, the same in every pass: the reach field's tiles where it has the state (guide / GUIDE_K),
-		// else the admissible bound's ticks + GUIDE_FAR: a state the field reaches is nearer than one it does not)
-		const nearOf = (x, h0) => { if (guide) { const g = guide(x); if (g < GUIDE_FAR) return g / GUIDE_K; } return GUIDE_FAR + (h0 === Infinity ? GUIDE_FAR : h0); };
 		const fo = { family: ro.family || 'all', step: ro.step !== undefined ? !!ro.step : (ro.family === 'step' || ro.classDedup === false) };
 		// anytime: weighted A* first (a route soon), then w = 1 bounded by the best so far (every prune by the admissible
-		// bound: a node whose tick + h reaches the best cannot beat it). OPT-IN (EEAT_PRIMS_GREEDY_W=100): a FAR leg (the
-		// reach field GREEDY_TILES or more from every start) takes a GREEDY pass first (w = GREEDY_W: the reach field's
-		// order, a route soon), then w = 3 and 1. (lane 2, box 3, 10 s a leg, prims alone, the first legs of 8 failing
-		// levels, all far: w 3 found 0, w 10 2, w 30 3, w 100 4 (Tutorial 2's checkpoint 234 tiles away, Bygone Tutorial, A
-		// Dreary Day, Golden Nightingale); in the 60-s compile its first legs came but no level compiled, and I Wanna be the
-		// Guy lost its progress (gain 15 -> 1 / 9 / 1, 3 runs; with it off 15 / 15): off by default)
-		let far = false;
-		if (guide && GREEDY_W > 0) {
-			far = sts.length > 0;
-			for (const x of sts) { sim.restore(x.snap); if (guide(sim) / GUIDE_K < GREEDY_TILES) { far = false; break; } }
-		}
-		const ws = ro.w > 0 ? [ro.w] : ro.quick ? [3] : (classDedup ? (far ? [GREEDY_W, 3, 1] : [3, 1.5, 1]) : [1]);
+		// bound: a node whose tick + h reaches the best cannot beat it)
+		const ws = ro.w > 0 ? [ro.w] : ro.quick ? [3] : (classDedup ? [3, 1.5, 1] : [1]);
 		const tEnd = Math.min(budget.deadline || Infinity, t0 + (budget.ms > 0 ? budget.ms : 1000));
 		const goalsAll = [];
 		let R = null, incumbent = ro.bound !== undefined ? ro.bound : Infinity, expanded = 0, sims = 0, nodes = 0, closestN = null, lbStart = Infinity, proven = false, whyLast = 'exhausted';
@@ -405,7 +344,7 @@ async function createPrims(L, o = {}) {
 			R = NG.astar({
 				sim, starts: sts, h, isGoal: (s) => goal.test(s), budget: { ms: share, deadline: tEnd, stop: budget.stop, k: budget.k || 1 }, classDedup,
 				allowDeath: !!goal.allowDeath || !!ro.allowDeath, beforeTick: ro.beforeTick !== undefined ? ro.beforeTick : goal.beforeTick,
-				k: budget.k || 1, slack: ro.slack || 0, stepAll: fo.step && w === 1, bound: incumbent === Infinity ? undefined : incumbent, greedy: w > 1, near: CLOSEST_NEAR ? (x) => nearOf(x, h(x)) : null,
+				k: budget.k || 1, slack: ro.slack || 0, stepAll: fo.step && w === 1, bound: incumbent === Infinity ? undefined : incumbent, greedy: w > 1,
 				expand: (n, s, best, cls) => {
 					ctx.onChild = (x, c) => {
 						st.macroUse[c.fam] = (st.macroUse[c.fam] || 0) + 1;
@@ -415,7 +354,6 @@ async function createPrims(L, o = {}) {
 						c.key = classDedup && !c.goal ? (support(x) || airKey(x)) : null;
 						if (cls && c.key !== null) { const ck = cls.get(c.key); if (ck !== undefined && ck <= tick) return false; }
 						c.h0 = c.goal ? 0 : h(x);
-						if (CLOSEST_NEAR) c.near = c.goal ? 0 : nearOf(x, c.h0);
 						c.h = c.goal ? 0 : (w > 1 && guide ? Math.max(c.h0, guide(x)) : c.h0) * w;
 						return true;
 					};
@@ -426,7 +364,7 @@ async function createPrims(L, o = {}) {
 			});
 			expanded += R.expanded; sims += R.sims; nodes += R.nodes;
 			if (R.lbStart < lbStart) lbStart = R.lbStart;
-			if (R.closest && (!closestN || R.closest.near < closestN.near)) closestN = R.closest;
+			if (R.closest && (!closestN || R.closest.h < closestN.h)) closestN = R.closest;
 			for (const g of R.goals) { goalsAll.push(g); if (g.tick < incumbent) incumbent = g.tick; }
 			whyLast = R.why;
 			if (w === 1 && R.proven) proven = true;
@@ -447,7 +385,7 @@ async function createPrims(L, o = {}) {
 		let closest = null;
 		if (R.closest) {
 			const cm = NG.masksOf(R.closest);
-			closest = { masks: cm, tile: R.closest.tile, dist: R.closest.near, vx: R.closest.vx, vy: R.closest.vy, tick: R.closest.tick };
+			closest = { masks: cm, tile: R.closest.tile, dist: R.closest.h, vx: R.closest.vx, vy: R.closest.vy, tick: R.closest.tick };
 		}
 		const ms = Date.now() - t0;
 		st.ms += ms;
@@ -488,7 +426,7 @@ async function createPrims(L, o = {}) {
 
 	return {
 		L, bounds, support, expand, route, routeAsync, learn,
-		stats: () => Object.assign({}, st, { learned: learned.size, tables: !!tables, keyChecks: kcChecks }),
+		stats: () => Object.assign({}, st, { learned: learned.size, tables: !!tables }),
 		close: () => { if (pool) { pool.close(); pool = null; } },
 	};
 }
