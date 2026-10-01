@@ -959,6 +959,38 @@ ways in.
   Overworld 47 / 44 (the 60-s flips). Past switch 0 DSJ's walls are LONG legs, not the order: from the god route's own
   state right after switch 0 the 1,398-tick leg to switch 1 fails at rung 3 (found from 718 ticks out), the 2,484-tick leg
   to switch 2 from after switch 1 fails too.
+- **The structure relays and the side entry** (C6 push 3 lane 4 block 4; `src/out/n5/lanes/c6_lane4_b4.md`). THE PROBE
+  (box 6, 120 s, W3): the chief's 'closest -1 tiles' on Endless Pain and both Infinity Pains is legs.js's "no closest
+  measured" (the step's direct leg ran out before any skeleton sub-leg), not a field bug; the ONE-LEG skeleton stalls at its
+  FIRST sub-level sets (Infinity Pain 'team 1 (any of 19)' 417 -> 405 / 411 failed at 0.45-1.5 s every call, Endless Pain
+  'team 5' 704 -> 698 ok, 692 failed). THE STRUCTURE RELAYS (executor.js `structRelay` / `featsOf`, OPT-IN `EEAT_STRUCT=1`,
+  off = the executor byte for byte): a skeleton sub-level set that failed twice is tried once more (once a level a call)
+  through a place the way bends at, from the level's structure: a RUN's ends (8+ tiles of floor or dots), a LEDGE's edge (a
+  floor tile beside an open tile with no floor), a SHAFT's bottom (a floor under 4 open tiles walled both sides), a FIELD's
+  entry (an arrow / dot tile beside a plain open tile), within `EEAT_STRUCT_RAD` 24 tiles of the stuck arrival, outside the
+  stuck set, at most `EEAT_STRUCT_UP` 48 tiles above it by the sub-leg's own field, round-robin over the classes, the
+  farthest first, `EEAT_STRUCT_K` 4 of them 6+ tiles apart, `EEAT_STRUCT_SHARE` 0.6 of what is left: a region leg to the
+  place, then the stuck set from its arrivals; waypoints only. MEASURED (box 6, 300 s, W3, par 3; Hold Jump, OCTOS, Revenge
+  of Syssba, Endless Pain, Sentinel Ravines, Infinity Pain): 0 / 6 compiled, the same gains as every earlier run (Syssba 2,
+  the rest 0); 159 relays, 32 reached their place (run ends 23, field entries 9), **0 reached the stuck set from there**:
+  NO GAIN (the bends near the stall are not what these legs lack: the walls are the energy / long legs blocks 2-3 found).
+  The shared gate with it ON (gate20, 60 s, par 2, vs gate_c6b2.json): exit 0, 15 vs 14, worse 1 (Level 1 Overworld
+  progress 45 -> 42: its known 60-s flip, 39-47), better 9, 15 / 15 replayed. THE SIDE ENTRY (reach.js `sideArrowPrices`,
+  OPT-IN `EEAT_SA_ENTRY=1` / `opts.saEntry`, off = the prices byte for byte; ordering only, the -1 set untouched): a hard
+  side-arrow run (5+ opposing tiles, not fed) with an open tile above or below one of its last `SA_KRUN` 4 tiles toward its
+  exit is no hard run (a ball that drops or rises in there crosses at most 4 opposing tiles, which a running ball does): the
+  stateless exit price's known misprice. The planner's first plans with `EEAT_PHYS_PRICE=sa` (tools/perf/plans.js): Trick
+  Or Treat's = the base's again (the trophy first, est 1,580; sa alone: coin (11,87) first), Don't Stop Jumping's stay sa's
+  (purple switch 1 -> trophy 5,784 first, the 64-tick trophy plan last at 10,066). THE CENSUS (box 6, reachField with /
+  without, 228 levels): exempted runs on 92 of the 107 levels with side-arrow runs, the start value changed on 12: Trick
+  Or Treat 2,975.2 -> 475.2 tiles (the misprice gone), YMCK 2,131.2 -> 2,094.4, the rest by 0.6-6.2 tiles (Don't Stop
+  Jumping 1,568 -> 1,567.4, Sentinel 938, Hold Jump 2,804, CDB Inc 1,054.2: their prices kept).
+  THE A/B (box 6, 300 s, W3, one tree, base (knobs unset) vs `EEAT_PHYS_PRICE=sa EEAT_SA_ENTRY=1`, 2 runs an arm, all side
+  by side): **Trick Or Treat 2,914 / 2,914 vs the base's 2,974 / 2,974** (sa alone in block 3: 3,372 / 4,041, slower 2 of 2),
+  **Don't Stop Jumping gain 2 / 2 vs 0 / 0** (the stretch child solved the planner's first short plan's leg, purple switch
+  1 (50,66) at tick 6,855, at 113-116 s; then switch 2 fails at rung 3, closest 86-96 tiles; base: the trophy plan's
+  false near, closest 2,515.4); every .eetas replayed. OPT-IN: two levels; the census's 92 levels with exempted runs (their
+  ordering fields change inside) not compiled with it.
 - **The stretch solver in its own process** (n5-s99-budget, 2026-09-30; `EEAT_STRETCH=1`, OPT-IN, off = the compile byte for
   byte; `src/plan/lab/stretch_child.js`, strategy.js `st*`; `test/s99stretch.js`): the executor's rung ladder (1.5 / 5 / 15 /
   45 s windows) restarts every solver of a stretch at every rung, and the lab's backward solver (`src/plan/lab/backward.js`)
