@@ -344,6 +344,59 @@ const fxSuffix = (p) => (!p ? '' : typeof p === 'object' ? `|f${p.mj}.${p.jb}` :
 const FIELDS_MB = process.env.EEAT_FIELDS_MB !== undefined ? +process.env.EEAT_FIELDS_MB : 256;
 let FIELDS_MAX = FIELDS_MIN;
 const fieldBytes = (f) => { let b = 0; for (const k in f) { const a = f[k]; if (ArrayBuffer.isView(a)) b += a.byteLength; } return b; };
+// THE SHARED FIELDS (B8 big, 2026-09-30; OPT-IN EEAT_FIELD_SHARE=1, off = the memo above byte for byte): a compile's threads
+// (the main thread's skeleton measure, every executor worker's tiers) each built the same goal fields for the same waypoint
+// and door state: on the big levels the first reach of a waypoint in each thread spent its window building them (box 8,
+// Nirthophia 400 x 200, 60 s, 3 workers: 84 of 124 worker-s in reach.js reachField, 125 builds, a first touch 4-9 builds
+// (the effect-state field's next-state seeds, the protection layer's two fields) of 4-6 s, the same set again in each
+// worker; the main thread 26 of 63 s). With the knob a field built in any thread is published once (its typed arrays moved
+// to SharedArrayBuffers: one copy in memory for every thread) and every other thread takes it from SHARED on its memo miss
+// before building: the same bytes by the same key (the level copy's foreground hash, the goal tiles, the deaths flag, the
+// effect state), so a shared field is the field that thread would have built. The publisher (setFieldShare) is the
+// thread's channel: execworker.js posts to the main thread, the executor's pool forwards to the other workers. SHARED is
+// bounded by bytes (EEAT_FIELD_SHARE_MB, default 384: the least recently used dropped; its memory goes when no thread's
+// memo holds the field either).
+const SHARE_ON = process.env.EEAT_FIELD_SHARE === '1';
+const SHARE_MB = +process.env.EEAT_FIELD_SHARE_MB > 0 ? +process.env.EEAT_FIELD_SHARE_MB : 384;
+const SHARED = new Map();
+let sharedBytes = 0, sharePub = null;
+const shareSt = { put: 0, got: 0, hits: 0, bytes: 0 };
+/** the thread's publisher of the fields it builds (fn(key, field)); null: none (EEAT_FIELD_SHARE off: never called) */
+function setFieldShare(pub) { sharePub = typeof pub === 'function' ? pub : null; }
+/** a field another thread built (its arrays SharedArrayBuffer-backed), kept by key within SHARE_MB */
+function shareIn(key, f) {
+	if (!SHARE_ON || !key || !f || SHARED.has(key)) return;
+	const b = fieldBytes(f);
+	SHARED.set(key, f); sharedBytes += b; shareSt.got++;
+	while (sharedBytes > SHARE_MB * 1048576 && SHARED.size > 1) { const k0 = SHARED.keys().next().value; sharedBytes -= fieldBytes(SHARED.get(k0)); SHARED.delete(k0); }
+}
+/** a shared field for this key (its use moves it to the end of SHARED's order), else undefined */
+function shareGet(key) {
+	if (!SHARE_ON || !SHARED.size) return undefined;
+	const f = SHARED.get(key);
+	if (f === undefined) return undefined;
+	SHARED.delete(key); SHARED.set(key, f); shareSt.hits++;
+	return f;
+}
+/** publish a field this thread built: its typed arrays copied into SharedArrayBuffers in place (the field object keeps
+ *  working), then handed to the publisher; it is in SHARED here too */
+function shareOut(key, f) {
+	if (!SHARE_ON || !sharePub || !f || SHARED.has(key)) return;
+	if (typeof SharedArrayBuffer === 'undefined') return;
+	for (const k of Object.keys(f)) {
+		const a = f[k];
+		if (!ArrayBuffer.isView(a) || a.buffer instanceof SharedArrayBuffer) continue;
+		const s = new a.constructor(new SharedArrayBuffer(a.byteLength));
+		s.set(a);
+		f[k] = s;
+	}
+	const b = fieldBytes(f);
+	SHARED.set(key, f); sharedBytes += b; shareSt.put++; shareSt.bytes += b;
+	while (sharedBytes > SHARE_MB * 1048576 && SHARED.size > 1) { const k0 = SHARED.keys().next().value; sharedBytes -= fieldBytes(SHARED.get(k0)); SHARED.delete(k0); }
+	try { sharePub(key, f); } catch (e) { /* the channel closed: the field stays this thread's */ }
+}
+/** the shared fields' numbers of this thread (put: published, got: received, hits: memo misses served by them) */
+const shareStats = () => Object.assign({ on: SHARE_ON, fields: SHARED.size, MB: Math.round(sharedBytes / 1048576) }, shareSt);
 /**
  * goalField(Lc, tiles, o) -> the RCH3 field (src/reach.js reachField) of level copy Lc (levelNow) seeded from the goal
  * tiles at cost 0 (the trophy is no goal), memoized (8 fields, LRU). RF.costAt(field, sim) -> tiles to the goal (-1 = a
@@ -361,6 +414,9 @@ function goalField(Lc, tiles, o = {}) {
 		const keyU = `${fgHash(Lc.fg)}|${Array.from(tiles).sort((a, b) => a - b).join(',')}|${o.deaths === true ? 1 : 0}|u`;
 		const hadU = FIELDS.get(keyU);
 		if (hadU) { FIELDS.delete(keyU); FIELDS.set(keyU, hadU); return hadU; }
+		// (EEAT_FIELD_SHARE: another thread's field of this key, as built here)
+		const shU = SHARE_ON ? shareGet(keyU) : undefined;
+		if (shU) { FIELDS.set(keyU, shU); while (FIELDS.size > FIELDS_MAX) FIELDS.delete(FIELDS.keys().next().value); return shU; }
 		if (o.cachedOnly === true) return null;   // (the memo only: executor.js FIELD_MEMO)
 		const fP = goalField(plain, tiles, o);
 		const fgU = Int32Array.from(Lc.fg);
@@ -371,6 +427,7 @@ function goalField(Lc, tiles, o = {}) {
 		const fU = RF.reachField(Object.assign({}, plain, { fg: fgU }), { goals, deaths: o.deaths === true });
 		FIELDS.set(keyU, fU);
 		while (FIELDS.size > FIELDS_MAX) FIELDS.delete(FIELDS.keys().next().value);
+		if (SHARE_ON) shareOut(keyU, fU);
 		return fU;
 	}
 	// (EEAT_FX_STATE: o.plainFx is the ball's effect state, an object: the effect-state field)
@@ -379,6 +436,15 @@ function goalField(Lc, tiles, o = {}) {
 	const key = `${fgHash(Lc.fg)}|${Array.from(tiles).sort((a, b) => a - b).join(',')}|${o.deaths === true ? 1 : 0}${fs ? fxSuffix(fs) + (o.fxDepth ? '|d1' : '') : pfx ? '|p' : ''}`;
 	const had = FIELDS.get(key);
 	if (had) { FIELDS.delete(key); FIELDS.set(key, had); return had; }
+	// (EEAT_FIELD_SHARE: another thread's field of this key; its fxOf is this thread's, as a build here would make it)
+	const sh = SHARE_ON ? shareGet(key) : undefined;
+	if (sh) {
+		if (fs && !Object.prototype.hasOwnProperty.call(sh, 'fxOf')) Object.defineProperty(sh, 'fxOf', { value: (s2) => goalField(Lc, tiles, { deaths: o.deaths === true, plainFx: s2 }), enumerable: false });
+		if (FIELDS.size === 0 && FIELDS_MB > 0) FIELDS_MAX = Math.max(FIELDS_MIN, Math.min(FIELDS_CAP, Math.floor(FIELDS_MB * 1048576 / Math.max(1, fieldBytes(sh)))));
+		FIELDS.set(key, sh);
+		while (FIELDS.size > FIELDS_MAX) FIELDS.delete(FIELDS.keys().next().value);
+		return sh;
+	}
 	if (o.cachedOnly === true) return null;   // (the memo only: executor.js FIELD_MEMO)
 	// (FX_STATE: an exit tile seeded at the NEXT state's field there, one unit along the state change (reach.js
 	// opts.fxSeedCost); that field's own exits at their walk cost: one layer deep)
@@ -395,6 +461,7 @@ function goalField(Lc, tiles, o = {}) {
 	if (FIELDS.size === 0 && FIELDS_MB > 0) FIELDS_MAX = Math.max(FIELDS_MIN, Math.min(FIELDS_CAP, Math.floor(FIELDS_MB * 1048576 / Math.max(1, fieldBytes(f)))));
 	FIELDS.set(key, f);
 	while (FIELDS.size > FIELDS_MAX) FIELDS.delete(FIELDS.keys().next().value);
+	if (SHARE_ON) shareOut(key, f);
 	return f;
 }
 
@@ -405,4 +472,4 @@ const emitter = (stream = process.stdout) => (ev) => { try { stream.write(JSON.s
 /** the tiles a goal's ordering fields are built to, and their touch rule (the trophy's) */
 const fieldTilesOf = (goal) => (goal.fieldTiles ? goal.fieldTiles : goal.tiles);
 const fieldTouchOf = (goal) => (goal.fieldTiles ? !!goal.fieldTouch : goal.kind === 'trophy');
-module.exports = { VERSION, fieldTilesOf, fieldTouchOf, strOf, masksOf, concat, loadLevelFile, tileOf, touchedTile, playTo, featValue, featGetter, goalOf, arrivalOf, classOf, pickDiverse, levelNow, goalField, plainOf, fxSuffix, wildOf, fgHash, emitter, CLOCK_DOORS };
+module.exports = { VERSION, fieldTilesOf, fieldTouchOf, strOf, masksOf, concat, loadLevelFile, tileOf, touchedTile, playTo, featValue, featGetter, goalOf, arrivalOf, classOf, pickDiverse, levelNow, goalField, setFieldShare, shareIn, shareStats, plainOf, fxSuffix, wildOf, fgHash, emitter, CLOCK_DOORS };

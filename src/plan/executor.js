@@ -169,6 +169,9 @@ const CLOSEST_UNIT = () => process.env.EEAT_CLOSEST_UNIT === '1';
 // whatever the window, a skeleton sub-leg's field is built even past its window (the next sub-legs read it from the memo),
 // and a call left without a field reports no closest (not a false 0). Off = the executor byte for byte as before.
 const FIELD_MEMO = () => process.env.EEAT_FIELD_MEMO === '1';
+// (EEAT_FIELD_SHARE=1, OPT-IN: the goal fields shared between the compile's threads, types.js THE SHARED FIELDS; the pool
+// forwards a worker's fields to the main thread and the other workers; off = the executor byte for byte)
+const FIELD_SHARE = process.env.EEAT_FIELD_SHARE === '1';
 // (EEAT_FIELD_FIT: fieldFits' share of the window a build may take, 0.4; a measurement / test knob)
 const FIELD_FIT = () => (process.env.EEAT_FIELD_FIT !== undefined ? +process.env.EEAT_FIELD_FIT : 0.4);
 const COARSE_SHARE = process.env.EEAT_COARSE_SHARE !== undefined ? +process.env.EEAT_COARSE_SHARE : 0.5;
@@ -1902,6 +1905,13 @@ async function createExecutor(L, opts) {
 		const w = new Worker(path.join(__dirname, 'execworker.js'), { workerData: { file: path.resolve(String(opts.file)), usePrims: !!opts.prims, useBounds: !!opts.bounds, seed: opts.seed | 0 } });
 		const slot = { w, busy: null, i, dead: false };
 		w.on('message', (msg) => {
+			// (EEAT_FIELD_SHARE=1: a goal field this worker built: kept here (the skeleton's measure reads it) and handed to the
+			// other workers; types.js THE SHARED FIELDS)
+			if (FIELD_SHARE && msg && msg.type === 'field') {
+				T.shareIn(msg.key, msg.f);
+				for (const s of pool) if (s !== slot && !s.dead) { try { s.w.postMessage(msg); } catch (e) { /* gone */ } }
+				return;
+			}
 			const job = slot.busy;
 			if (!job || msg.id !== job.id) return;
 			if (PROF && emit && msg.result && msg.result.prof) { const p = msg.result.prof; emit({ ev: 'exec.prof', w: i, label: job.label || '', late: !!job.late, ok: !!msg.result.ok, sims: msg.result.sims || 0, tiers: msg.result.tiers || null, queue: job.tDisp ? p.post - job.tDisp : 0, lat: p.recv - p.post, ret: Date.now() - p.end, wait: p.wait, run: p.run, init: p.init, rf: p.rf, rfN: p.rfN, bf: p.bf, bfN: p.bfN, ms: p.ms }); }
@@ -1925,6 +1935,8 @@ async function createExecutor(L, opts) {
 	if (nW > 0) {
 		Worker = require('worker_threads').Worker;
 		for (let i = 0; i < nW; i++) pool.push(spawn(i));
+		// (EEAT_FIELD_SHARE=1: the fields this thread builds (the skeleton's measure, the planner's checks) go to every worker)
+		if (FIELD_SHARE) T.setFieldShare((key, f) => { for (const s of pool) if (!s.dead) { try { s.w.postMessage({ type: 'field', key, f }); } catch (e) { /* gone */ } } });
 		// the workers' level must be this one: the same state hashes after a fixed input sequence
 		const fp = fingerprint(L);
 		const res = await Promise.all(pool.map((slot) => call(slot, { type: 'fp' }, Date.now() + 60000)));
@@ -2747,7 +2759,7 @@ async function createExecutor(L, opts) {
 		if (!ev1 || (ev0 && (ev1.runTicks > ev0.runTicks))) return { masks: ev0 ? ev0.ms : m0, runTicks: ev0 ? ev0.runTicks : -1, saved: 0, legs: r.legs || [] };
 		return { masks: ev1.ms, runTicks: ev1.runTicks, saved: ev0 ? ev0.runTicks - ev1.runTicks : 0, legs: r.legs || [], steps: r.steps };
 	}
-	function stats() { return Object.assign({ workers: nW, notes: note.slice(), core: nW === 0 ? core.stats() : null }, S); }
+	function stats() { return Object.assign({ workers: nW, notes: note.slice(), core: nW === 0 ? core.stats() : null }, S, FIELD_SHARE ? { fieldShare: T.shareStats() } : {}); }
 	async function close() {
 		if (PROF && emit) { emit({ ev: 'exec.prof.main', rf: accM.rf, rfN: accM.rfN, eld: eld ? { mean: eld.mean / 1e6, max: eld.max / 1e6, p99: eld.percentile(99) / 1e6 } : null }); if (eld) eld.disable(); }
 		if (PROF && rfMain0) { RF.reachField = rfMain0; rfMain0 = null; }

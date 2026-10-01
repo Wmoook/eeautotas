@@ -43,8 +43,13 @@ async function init() {
 	initMs = Date.now() - tI;
 }
 ready = init();
+// (EEAT_FIELD_SHARE=1, types.js THE SHARED FIELDS: the goal fields this thread builds go to the main thread, which hands
+// them to the other workers; {type 'field', key, f} from it: another thread's field)
+const FIELD_SHARE = process.env.EEAT_FIELD_SHARE === '1';
+if (FIELD_SHARE) T.setFieldShare((key, f) => parentPort.postMessage({ type: 'field', key, f }));
 
 parentPort.on('message', async (msg) => {
+	if (FIELD_SHARE && msg && msg.type === 'field') { T.shareIn(msg.key, msg.f); return; }
 	const tRecv = Date.now();
 	await ready;
 	const tReady = Date.now();
