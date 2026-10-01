@@ -1625,6 +1625,9 @@ function createPlanner(model, facts, o = {}) {
 		const t0 = Date.now();
 		const res = search(a, Object.assign({}, so, { ms, maxExpand: LONG_EXPAND, noGain: !LONG_GAIN }), new Set(), null);
 		ST.longMs = (ST.longMs || 0) + (Date.now() - t0);
+		// (a search that ran out of nodes in under a second is no long call: it does not count to LONG_MAX (The Memory Game:
+		// 4 such searches, 3-7 ms each, every trophy plan through a relaxation-only edge, used the compile's 4 calls))
+		if (Date.now() - t0 < 1000) { longCalls--; ST.longShort = (ST.longShort || 0) + 1; }
 		const node = res.found;
 		if (process.env.EEAT_LONG_DBG === '1') console.error(`[long] ${sk.slice(0, 40)} ms ${Date.now() - t0} expanded ${res.expanded} found ${node ? Math.round(node.g) : '-'}`);
 		if (!node || !(node.g < PENALTY)) { ST.longNone = (ST.longNone || 0) + 1; return null; }
