@@ -169,6 +169,15 @@ const windowRung = (step) => (FAR_TROPHY > 0 && step && !step.synthetic && (!ste
 // rung a spare runs waits for it (no repeat block); EEAT_SPARE_MAX: spares at once (default P - 1).
 const SPARE = process.env.EEAT_SPARE === '1';
 const SPARE_MAX = process.env.EEAT_SPARE_MAX !== undefined ? +process.env.EEAT_SPARE_MAX : -1;
+// THE FAST LANE (B8 speed cycle 5; OPT-IN EEAT_FAST_LANE=<n>, unset / 0: off, the compile byte for byte as before): before
+// the first route at most P - n of the steps in flight run a deep window (window rung >= EEAT_FAST_RUNG, 2: 15 s and up);
+// while that many are in flight a free worker takes the first planner step whose window is shallower (rung 0-1: 1.5 / 5 s),
+// and a deep one only when the planner offers no shallow step (no worker idles for it). Why: cycle 3's lineage of the first
+// routes (tools/cmp/lineage.js): 33% of the executor links' time was WAIT (the anchor born, its edge not yet running) while
+// the cost order ran the failed edges' 15-45-s windows on every worker (Tutorial 2: coin (134,8) rung 1 at 33.9 s behind
+// blue coin (52,22) / checkpoint rung 2 from 27.5 / 29.8 s); the ladder's deep rungs keep P - n workers.
+const FAST_LANE = Math.max(0, +process.env.EEAT_FAST_LANE || 0);
+const FAST_RUNG = process.env.EEAT_FAST_RUNG !== undefined ? +process.env.EEAT_FAST_RUNG : 2;
 const ARRIVALS_K = 4, MAX_DEEPEN = 4, STEER_MISS = 6000;
 // the polish's share of the budget once a route is known: min(POLISH_MS, POLISH_F x the budget)
 const POLISH_MS = 15000, POLISH_F = 0.25;
@@ -1342,7 +1351,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 	};
 	const scoreOf = (A, N) => (Number.isFinite(A.costEst) ? A.costEst : 1e7) + A.firstTick + FAIL_TICKS * A.fails - UCB_C * Math.sqrt(Math.log(N + 1) / (1 + A.picks));
 	/** the next job: {anchor, plan, step} not in flight, or null (none: every anchor exhausted or busy) */
-	const nextJob = () => {
+	const nextJob = (maxRung) => {
+		const shallowOnly = maxRung !== undefined;
 		const N = picksN + 1;
 		const open = [...anchors.values()].filter((A) => !A.exhausted);
 		for (const A of open) if (uselessA(A)) { A.exhausted = true; A.why = 'bound'; }
@@ -1364,6 +1374,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 				const step = plan.steps[0];
 				const ek = edgeKey(step);
 				if (inflight.has(ek) || localBlock.has(`${A.key}|${ek}`)) continue;
+				// (THE FAST LANE: the deep windows' slots full: a shallow step only)
+				if (shallowOnly && (windowRung(step) | 0) > maxRung) continue;
 				const tk = `${ek}|${step.rung}|${epoch}`;
 				// (THE SPARE WORKERS: this rung of the edge runs as a spare: wait for it, no repeat block)
 				if (SPARE && tried.has(tk) && tried.get(tk).spare && !tried.get(tk).done) continue;
@@ -1640,6 +1652,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	// ---- THE SPARE WORKERS (EEAT_SPARE=1, above): the oldest in-flight planner edges again at their next rung not tried and
 	// not running, while workers are free and no route is known
 	let spareRuns = 0;
+	let fastPicks = 0;   // (THE FAST LANE: the shallow steps it put first)
 	const spareFill = () => {
 		const cap = SPARE_MAX >= 0 ? SPARE_MAX : P - 1;
 		let running = 0;
@@ -1956,7 +1969,14 @@ async function compile(L, opts = {}, emit = () => {}) {
 			if (bwlWant && !bwlOpen && !best) bwlRelease(bwlWant);   // (the child's gate: the watchdog saw a stall with no route)
 			if (ST_ON) { stHarvest(); stSchedule(); }   // (the stretch solver: its arrivals, then its next stretch while it is idle)
 			while (inflight.size < P && !(best && left() <= endRes())) {
-				const job = exploreQ.length ? exploreQ.shift() : nextJob();
+				// (THE FAST LANE, EEAT_FAST_LANE=n: P - n deep windows in flight before the first route: a shallow step first)
+				let job = null;
+				if (exploreQ.length) job = exploreQ.shift();
+				else if (FAST_LANE > 0 && P >= 2 && !best && [...inflight.values()].filter((g) => g.job && g.job.step && !g.job.step.synthetic && (windowRung(g.job.step) | 0) >= FAST_RUNG).length >= Math.max(1, P - FAST_LANE)) {
+					job = nextJob(FAST_RUNG - 1);
+					if (job) { fastPicks++; say({ ev: 'fastlane', anchor: job.anchor.id, label: labelOf(job.step), rung: job.step.rung }); }
+					else job = nextJob();
+				} else job = nextJob();
 				if (!job) break;
 				const ek = edgeKey(job.step);
 				if (inflight.has(ek)) continue;
@@ -2372,7 +2392,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		bugs, deepenings, stalls, bnbPlans, bnbArrivals, layers: Math.max(0, ...[...anchors.values()].map((A) => A.firstTick)), ...(why ? { why } : {}) });
 	saveFiles();
 	return { ok: !!best, masks: best ? best.masks : null, route: best ? best.masks : null, runTicks: best ? best.runTicks : null, ticks: best ? best.ticks : null, deaths: best ? best.deaths : null, chance: best ? best.chance : null,
-		lb: LB, lbComplete, lbProof, gap: best ? gapOf(best.runTicks) : null, legs: best ? best.legs : [], stages, known, why, end, anchors: anchors.size, steps, okSteps, bugs, deepenings, stalls, bnbPlans, bnbArrivals, relayRuns, relaySet, relayDrop, ...(ST_ON ? { stretch: stStats } : {}), ...(SPARE ? { spares: spareRuns } : {}), exec: execStats, perfect: perfectInfo, joins: joinsInfo, ...(endgameInfo ? { endgame: endgameInfo } : {}),
+		lb: LB, lbComplete, lbProof, gap: best ? gapOf(best.runTicks) : null, legs: best ? best.legs : [], stages, known, why, end, anchors: anchors.size, steps, okSteps, bugs, deepenings, stalls, bnbPlans, bnbArrivals, relayRuns, relaySet, relayDrop, ...(ST_ON ? { stretch: stStats } : {}), ...(SPARE ? { spares: spareRuns } : {}), ...(FAST_LANE > 0 ? { fastLane: fastPicks } : {}), exec: execStats, perfect: perfectInfo, joins: joinsInfo, ...(endgameInfo ? { endgame: endgameInfo } : {}),
 		...(OS_ON ? { oneshot: os || osw ? Object.assign(os ? os.stats() : Object.assign({}, osStats || {}), { thread: !!osw, readyMs: osReady ? osReady.ms : null, error: osErr || null, gate: osw && OS_GATE ? (osOpen ? 'open' : 'shut') : null, released: osReleased, held: osPending.size, anchorsGiven: osAnchors, injected: osInjected, routeTicks: Number.isFinite(osBestT) ? osBestT : null, how: best ? best.how : null }) : null } : {}) };
 }
 
