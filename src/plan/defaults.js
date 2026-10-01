@@ -66,13 +66,24 @@ const DEFAULTS = [
 const S99_DEFAULTS = [
 	['EEAT_PORTFOLIO', '1'], ['EEAT_CORR_FIELDS', '1'], ['EEAT_STRETCH', '1'], ['EEAT_BW_CHAIN', '1'],
 ];
+// THE MEMORY DEFAULTS (P4, 2026-09-30, with the stretch defaults; EEAT_MEM_DEFAULTS=0: none, each named in the environment
+// wins): a compile with the S99 children peaked 5.1 GB median (3.3 without them); the children's V8 heaps (the stretch child
+// --max-old-space-size 3000, the chain child 2000) and the executor workers' (V8's own 4 GB a thread) lower: V8 collects
+// sooner, a backward solve keeps ~50 MB of its ~1 GB transient. The same answers standalone (the stretch child at 1200 MB:
+// Relics' whole level, Trick Or Treat's route 3,167, Gravity's Rainbow's 2,320; the chain child at 1200: EX Crew Odyssey's
+// anchors); box 5, 10 big / child-route levels, 300 s, side by side: peak RSS -9.5% summed (EX Crew Odyssey 8,236 -> 6,917
+// MB), compiled 4 vs 3, the both-compiled the same routes (Gravity's Rainbow 2,019 vs 2,018).
+const MEM_DEFAULTS = [
+	['EEAT_ST_HEAP_MB', '1536'], ['EEAT_BWC_HEAP_MB', '1536'], ['EEAT_EXEC_HEAP_MB', '2048'],
+];
 /** set the defaults the environment does not name (EEAT_COMPILER_DEFAULTS=0: none of them; EEAT_S99_DEFAULTS=0: not the
- *  stretch defaults) */
+ *  stretch defaults; EEAT_MEM_DEFAULTS=0: not the memory defaults) */
 function apply() {
 	if (process.env.EEAT_COMPILER_DEFAULTS === '0') return [];
 	const set = [];
 	for (const [k, v] of DEFAULTS) if (process.env[k] === undefined) { process.env[k] = v; set.push(k); }
 	if (process.env.EEAT_S99_DEFAULTS !== '0') for (const [k, v] of S99_DEFAULTS) if (process.env[k] === undefined) { process.env[k] = v; set.push(k); }
+	if (process.env.EEAT_S99_DEFAULTS !== '0' && process.env.EEAT_MEM_DEFAULTS !== '0') for (const [k, v] of MEM_DEFAULTS) if (process.env[k] === undefined) { process.env[k] = v; set.push(k); }
 	return set;
 }
-module.exports = { DEFAULTS, S99_DEFAULTS, apply };
+module.exports = { DEFAULTS, S99_DEFAULTS, MEM_DEFAULTS, apply };

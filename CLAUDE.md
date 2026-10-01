@@ -856,6 +856,51 @@ ways in.
   the executor made 63 steps vs 135); the far trophy on the 14 levels where it acted 253 vs 242 triggers (better 5 / worse
   4), and on the 4 where it never acted the same code gave The Tunnels 65 vs 40 and Vignettes no route vs 12,928: one run
   a level spreads +-40%, no gain shown: both stay opt-in.
+- **P4: the S99 regressions, the slow routes, the memory** (COMPILER-PUSH-4, 2026-09-30, branch n5-p4-fix; every knob
+  below OPT-IN, off = the compiler byte for byte; records `src/out/p4/` in its worktree, the A/Bs box 5 / 6
+  `~/p4_fix_ab/`). THE REGRESSIONS (Presto Penguins, YMCK Puzzle Parade, Relics Of Athena: compiled by both base runs, not
+  by the S99 full compile) are the 300-s edge, no single cause: their routes land at 130-294 s in every arm. Relics over
+  every run (the same tree side by side, the S99 full compile, the chief's b2 and his merge A/B) S99-on 3 / 8 vs off 7 / 10;
+  on box 6 at load off 1 / 4, the portfolio alone (`EEAT_STRETCH=0 EEAT_BW_CHAIN=0`) 1 / 4, `EEAT_PORTFOLIO=0` 1 / 3,
+  `EEAT_STRETCH=0` 1 / 3, S99 2 / 3: no component to switch off. Presto 3 / 3 = 3 / 3 paired (S99's first routes later:
+  187-243 vs 129-187 s), YMCK 2 / 3 vs 1 / 3. What S99 changes on Relics (its step logs): the portfolio tier's 0.6 of a
+  45-s rung-3 window runs to the end (4-5 such steps, 135-151 worker-s in 60-150 s) where the base's rung-3 steps end early
+  (1-2 steps, 42-59 worker-s) and its workers go on with 16-28 cheap rung-0 steps (S99 8-10); `EEAT_PF_YIELD=<calls>`
+  (executor.js, THE PORTFOLIO'S YIELD: from that many calls the PF tier's share follows its yield on the level like the
+  math's, x 4 x its rate of calls with a leg, between `EEAT_PF_YIELD_FLOOR` 0.25 and 1) is the candidate. THE SLOW ROUTES
+  leg by leg (`tools/cmp/versus.js`, the S99 full compile's route vs the best known): Tutorial 2 4,792 vs 2,947 = a crumb
+  (blue coin (29,10): 473 ticks to it + the checkpoint leg 2,258 vs 760) + the first two coins +255; Tutorial 4 5,231 vs
+  3,515 = the purple switch (239,34) leg 995 vs 137, 3 blue coins +426, orange switches toggled back +431; Trick Or Treat
+  2,943 vs 2,235 = a crumb coin (146,100) +368 and the first leg +340; Tutorial 3 6,066 vs block 1's 3,783 = 4 blue coins
+  and effect toggles in place of the coin (285,10) leg (+2,430); EX Crew Ice 12,916 vs 4,579 = 48 coins + 2 keys vs the
+  known's 17 coins (the C6 chief: a real regression from `EEAT_CRUMB_RANK=3`, out of the defaults since 8ade568); A Dreary
+  Day 4,070 vs 3,207 = the same order, every leg 10-60% slower (its first route at 164 s). Tutorial 2's log: the stretch
+  child's checkpoint (245,28) at tick 1,730 (the known's 1,628) was never picked (0 steps in 300 s: the gain-first pick
+  took the crumb anchors). THE GENERAL FIXES MEASURED: `EEAT_REFINE_PICK=f|mix` (strategy.js: after the first route the
+  anchor pick by f = arrival + plan cost first) + `EEAT_ST_REFINE=1` (the stretch child goes on after the first route with
+  the stretches of the anchors under the route's f) NEGATIVE (12 compiled levels, 300 s, side by side: compiled 12 vs 11,
+  the 11 both slower 6 / faster 3, geo 1.076: the base's B&B with gain first already re-explores the early anchors after a
+  route: Tutorial 2 base 6,455 -> 3,062 at 210 s through that checkpoint); `EEAT_JOINS_LOOP=1` (joins.js THE DETOUR SKIPS:
+  a leg from waypoint k to a later waypoint within `EEAT_JOINS_LOOP_R` 6 tiles in k's blind trigger state, past the span;
+  on a time-door level also the arrival padded to the route's door phase) no gain: Tutorial 2's skips land (983 -> 2,123
+  in 78 ticks: the earliest arrival there 1,140 vs the route's 2,191) and die at the time doors (the skip moves the 1,000-
+  tick phase; the idle pad leaves the tile): 4,732 = 4,732 without; `EEAT_PRE_PICK=mix|f` (the f-first pick before the
+  first route too). THE MEMORY (EX Crew Odyssey, S99 on, per process (src/out/p4 memprobe.js) and per worker isolate
+  (`EEAT_EXEC_PROF=1`: its heap and external memory, a0da1b0)): the tree 7.9 GB = the compile 4.7 GB (3 workers' external
+  memory 330 -> 690 MB each over 300 s: the goal / bounds / reach field caches, one copy a thread (types.js FIELDS 256 MB,
+  bounds.js memo 256 MB); their V8 heaps 0.2-0.8 GB; the main thread's 30-50 MB) + the stretch child 1.9 GB + the chain
+  child 1.4 GB; the portfolio alone in the compile 4.7 vs S99 off 4.2 GB. The children at a lower V8 heap give the same
+  answers (a backward solve's transient ~1 GB, ~50 MB of it kept: most of a child's RSS is the lazy collection): the
+  stretch child at 1200 MB vs 3000 on Relics' whole level 913 vs 1,635 MB, on Trick Or Treat 929 vs 1,321 MB (the same
+  route 3,167 at 154 vs 150 s), Gravity's Rainbow 693 vs 832 MB (1000 MB); the chain child 1200 vs 2000 on EX Crew Odyssey
+  1,187 vs 1,404 MB (the same anchors). `EEAT_ST_HEAP_MB` / `EEAT_BWC_HEAP_MB` (the children's --max-old-space-size,
+  default 3000 / 2000) and `EEAT_EXEC_HEAP_MB` (the executor workers' resourceLimits; a worker past it errors and the pool
+  replaces it): 1536 / 1536 / 2048 vs the defaults (box 5, 10 big / child-route levels, 300 s, side by side): peak RSS
+  54,442 -> 49,283 MB summed (-9.5%; EX Crew Odyssey 8,236 -> 6,917, Stone Ruin 3,197 -> 2,461), compiled 4 vs 3 (+ Stone
+  Ruin 5,283), the 3 both the same routes (Gravity's Rainbow 2,019 vs 2,018, Vignettes 8,369 vs 8,490, Just One More Time
+  3,050 vs 2,909). TOOLS: fullc.js after a RAM-guard kill waited forever (the same fix as push 3's 6e15c0a), and with none
+  of its own running restarted a killed compile at once below the guard's line (84 kills of 3 levels in 20 min on box 6):
+  0ee5caf.
 - **Checks**: unit tests `test/plantypes.js`, `planmodel.js`, `planplanner.js`, `planbounds.js`, `planprims.js`,
   `planexec.js --only=unit,fail`, `planstrategy.js`, `plancompile.js` (the CLI and the Compile API with the mock parts
   `test/planmock.js`), `plantruth.js`, `msolve.js --quick`, `kin.js --quick`, `mathsep.js`, `joins.js`, `precision.js`. The truth checkers on
