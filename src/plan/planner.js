@@ -228,6 +228,9 @@ function createPlanner(model, facts, o = {}) {
 	const L = model.L, W = model.W, H = model.H;
 	const bounds = o.bounds && typeof o.bounds.pair === 'function' ? o.bounds : null;
 	const ST = { rchChecks: 0, plans: 0, planMs: 0, expands: 0, lbCalls: 0, lbMs: 0, lbExpands: 0, learned: 0, costOf: 0 };
+	// (EEAT_NEEDS_NEAR_EDGE: the feature values of the states each edge was done from; the edges bound from every class)
+	const okFeats = new Map();
+	const edgeNeeds = new Map();
 	const paceSamples = [];
 	let lastPlans = [], lastWhy = '';
 	// (EEAT_TRICKS exh: the (edge, node class) pairs whose leg the exact search exhausted: learn())
@@ -833,7 +836,7 @@ function createPlanner(model, facts, o = {}) {
 				if (facts) {
 					if (facts.blocked(edge, cls, proofKey(S, pos))) return;
 					if (facts.needsOf(edge, cls).some((n) => S.feats[n.feat] !== n.value)) return;
-					if (NEEDS_NEAR_EDGE && facts.needsOf(edge, '*').some((n) => S.feats[n.feat] !== n.value)) return;
+					if (NEEDS_NEAR_EDGE && edgeNeeds.has(edge) && edgeNeeds.get(edge).some((n) => S.feats[n.feat] !== n.value) && facts.needsOf(edge, '*').some((n) => S.feats[n.feat] !== n.value)) return;
 					const ok = facts.okTicks(edge, cls);
 					if (ok !== undefined) { g.est = Math.max(g.lb, ok); g.pen = ''; }
 					else {
@@ -1578,6 +1581,17 @@ function createPlanner(model, facts, o = {}) {
 	 * add gain: the root's cheapest trigger X whose touch sets the value (not a relaxation-only or death edge), then E from
 	 * X's state: a two-step plan in front (at most NEEDS_OPEN_K, the cheapest est first). Ordering only.
 	 */
+	// (the step's own trigger sets feature f to v: its touch from S)
+	function ownSets(step, edge, S, f, v) {
+		try {
+			let id = step.waypoint && step.waypoint.trig;
+			if (id === undefined || id === null) { const m = /^trig:(\d+)$/.exec(String(edge)); if (m) id = +m[1]; }
+			const X = id !== undefined && id !== null ? model.triggers[id] : null;
+			if (!X) return false;
+			const r = model.touch(S, X);
+			return !!(r && r.S2 && r.S2.feats[f] === v);
+		} catch (e) { return false; }
+	}
 	function openerPlans(a, plans) {
 		const cls = a.S.key + '|' + a.cls;
 		const out = [];
@@ -1906,9 +1920,6 @@ function createPlanner(model, facts, o = {}) {
 	/**
 	 * learn(step, result, anchor) -> Fact[]: at least one whenever !result.ok (the facts' version bumps with each).
 	 */
-	// (EEAT_NEEDS_NEAR_EDGE: the feature values of the states each edge was done from; the edges bound from every class)
-	const okFeats = new Map();
-	const edgeNeeds = new Map();
 	function learn(step, result, anchor) {
 		ST.learned++;
 		const out = [];
@@ -1919,7 +1930,16 @@ function createPlanner(model, facts, o = {}) {
 			const arr = result.arrivals && result.arrivals[0];
 			const ticks = arr && a ? Math.max(0, arr.tick - a.tick) : (result.ticks || 0);
 			out.push(facts.add({ kind: 'ok', edge, nodeClass: cls, ticks, lb: step.lb || 0 }));
-			if (NEEDS_NEAR_EDGE && a && a.S && a.S.feats) { if (!okFeats.has(edge)) okFeats.set(edge, []); const l = okFeats.get(edge); if (l.length < 16) l.push(a.S.feats); }
+			if (NEEDS_NEAR_EDGE && a && a.S && a.S.feats) {
+				if (!okFeats.has(edge)) okFeats.set(edge, []);
+				const l = okFeats.get(edge); if (l.length < 16) l.push(a.S.feats);
+				// (done without the value: that need was wrong; the edge is free again from every class)
+				if (edgeNeeds.has(edge)) {
+					const keep = edgeNeeds.get(edge).filter((n) => a.S.feats[n.feat] === n.value);
+					if (keep.length) edgeNeeds.set(edge, keep); else edgeNeeds.delete(edge);
+					ST.needsFreed = (ST.needsFreed || 0) + 1;
+				}
+			}
 			if (a && step.waypoint && step.waypoint.tiles) {
 				const d = model.pairSteps(a.S, a.pos, step.waypoint.tiles, 'est', a.base);
 				if (d > 0 && d < INF && ticks > 0) paceSamples.push(ticks / d);
@@ -1970,6 +1990,10 @@ function createPlanner(model, facts, o = {}) {
 				// near the closest that only a reset opens is, on a chain level, another wave's: box 6's first run read
 				// 'purple switch 5 needs psw:4=0' at 39 s)
 				if (model.S0 && model.S0.feats && model.S0.feats[f] === v) continue;
+				// (no need of the value the step's own trigger sets: the team-6 tile's leg failing by the team-6 door would
+				// bind that leg to team 6, which only the leg itself gives)
+				if (step.waypoint && step.waypoint.expect && step.waypoint.expect.feat === f && step.waypoint.expect.value === v) continue;
+				if (ownSets(step, edge, a.S, f, v)) continue;
 				const d = Math.max(Math.abs(dx), Math.abs(dy));
 				if (d < bd) { bd = d; bf = f; bv = v; }
 			}
