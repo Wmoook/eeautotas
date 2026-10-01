@@ -203,6 +203,12 @@ function createPlanner(model, facts, o = {}) {
 	// has none); the pick as before (the farthest d1 within CRUMB_REACH, else the nearest beyond). Ordering only.
 	const CRUMB_PHYS = process.env.EEAT_CRUMB_PHYS === '1';
 	const CRUMB_PHYS_F = +process.env.EEAT_CRUMB_PHYS_F >= 0 && process.env.EEAT_CRUMB_PHYS_F !== undefined ? +process.env.EEAT_CRUMB_PHYS_F : 0.03;
+	// (EEAT_CRUMB_RUNGS=<n>, physics crumbs only: a crumb whose leg failed n rungs from the class is left for the next one
+	// on the way; default 2 = the walk crumbs' rule. Cold World's first physics crumb (141,225) from the spawn (the selector
+	// portal's chamber, 206-236 ticks): rung 1 (5 s) not found (closest (284,12), under the portal), rung 2 in 4.6 s and
+	// rung 3 in 4.9 s by the portfolio (laptop, idle); in the compile on box 7 at load ~180 every crumb on the way failed
+	// rungs 0-1 and the chain walked down the list to (130,203) without one find)
+	const CRUMB_RUNGS = +process.env.EEAT_CRUMB_RUNGS > 0 ? +process.env.EEAT_CRUMB_RUNGS | 0 : 2;
 	const crumbGoalMemo = new Map();
 	const crumbCands = CRUMBS ?model.triggers.filter((X) => !X.relevant && (X.kind === 'coin' || X.kind === 'bcoin' || X.kind === 'cp') && X.tiles && X.tiles.length) : [];
 	const trophyTiles = model.trophyTiles;
@@ -1158,7 +1164,7 @@ function createPlanner(model, facts, o = {}) {
 		let near = null, far = null;
 		for (const X of crumbCands) {
 			const edge = 'trig:' + X.id;
-			if (facts && facts.rungOf(edge, cls) >= 2) continue;
+			if (facts && facts.rungOf(edge, cls) >= CRUMB_RUNGS) continue;
 			const live = model.liveTiles(S, X);
 			if (!live.length) continue;
 			let d1 = INF, gc = Infinity;
