@@ -524,6 +524,70 @@ function legBest(L, starts, goal, o) {
 	// dive's apex is lost the same way within the default grain's quanta). Ordering / pruning only: no claim.)
 	const ENERGY = process.env.EEAT_BEST_ENERGY === '1' || !!o.energy;
 	const EDV = process.env.EEAT_BEST_EDV !== undefined ? +process.env.EEAT_BEST_EDV : 0;
+	// (THE SPEED CLASSES, OPT-IN EEAT_SPEED_Q=1 or o.speedQ; off = the search as before, byte for byte (C6 lane 4 block 5): the
+	// goal field keeps no horizontal speed, so f ranks a slow ball beside the goal before a fast one farther back, and the
+	// heap's cut (heapMax: the worst half goes) drops the fast ones first: the long legs' closest states stand on the known
+	// route's way but SLOW (B8 hard: FV 731's (-0.2,-2.0) px/tick where the route passes at (+6.0,-5.6); Sentinel's run-up
+	// along dot row 102 at 2.5 -> 6.4 px/tick). Every open state of speed class c >= 1 is also in its class's own heap (by
+	// the same f): c = 4 rising faster than a jump (vy < SQ_VY), else 1 / 2 / 3 for |vx| in [2, 4) / [4, 6) / 6+ px/tick;
+	// every SQ_K-th pop takes the best of the next class heap (round robin), and the heap's cut keeps the class states (each
+	// class heap holds at most SQ_CAP, its worst half dropped past it). A type-based best-first: ordering only, no claim.)
+	const SQ = process.env.EEAT_SPEED_Q === '1' || !!o.speedQ;
+	const SQ_K = +process.env.EEAT_SQ_K >= 2 ? +process.env.EEAT_SQ_K : 4;
+	const SQ_VY = process.env.EEAT_SQ_VY !== undefined ? +process.env.EEAT_SQ_VY : -7;
+	const SQ_CAP = +process.env.EEAT_SQ_CAP > 0 ? +process.env.EEAT_SQ_CAP : heapMax >> 3;
+	const sqClass = (s) => {
+		if (s.speed_y < SQ_VY) return 4;
+		const ax = s.speed_x < 0 ? -s.speed_x : s.speed_x;
+		return ax < 2 ? 0 : ax < 4 ? 1 : ax < 6 ? 2 : 3;
+	};
+	const SQH = SQ ? [null, { h: [], f: [] }, { h: [], f: [] }, { h: [], f: [] }, { h: [], f: [] }] : null;
+	const inG = SQ ? [] : null;   // (a node still in the main heap: the cut frees its snapshot only when no heap holds it)
+	const sqCls = SQ ? [] : null;
+	let sqRR = 0, sqPops = 0;
+	const qpush = (Q, i, f) => {
+		const h = Q.h, hq = Q.f;
+		let k = h.length; h.push(i); hq.push(f);
+		while (k > 0) { const p = (k - 1) >> 1; if (hq[p] <= f) break; h[k] = h[p]; hq[k] = hq[p]; k = p; }
+		h[k] = i; hq[k] = f;
+	};
+	const qpop = (Q) => {
+		const h = Q.h, hq = Q.f, top = h[0], n = h.length - 1, li = h[n], lf = hq[n];
+		h.length = n; hq.length = n;
+		if (n > 0) {
+			let k = 0;
+			for (;;) {
+				let c = 2 * k + 1;
+				if (c >= n) break;
+				if (c + 1 < n && hq[c + 1] < hq[c]) c++;
+				if (hq[c] >= lf) break;
+				h[k] = h[c]; hq[k] = hq[c]; k = c;
+			}
+			h[k] = li; hq[k] = lf;
+		}
+		return top;
+	};
+	/** a class state's node into its class heap (its worst half dropped past SQ_CAP: a snapshot no heap holds goes) */
+	const sqAdd = (j, f, c) => {
+		const Q = SQH[c];
+		qpush(Q, j, f);
+		if (Q.h.length <= SQ_CAP) return;
+		const idx = Q.h.map((x, k) => k).sort((a, b) => Q.f[a] - Q.f[b]);
+		const keep = idx.slice(0, SQ_CAP >> 1);
+		for (const k of idx.slice(SQ_CAP >> 1)) { const n = Q.h[k]; sqCls[n] = 0; if (!inG[n] && sn[n]) { pool.push(sn[n]); sn[n] = null; } }
+		const nh = keep.map((k) => Q.h[k]), nf = keep.map((k) => Q.f[k]);
+		Q.h.length = 0; Q.f.length = 0;
+		for (let k = 0; k < nh.length; k++) { Q.h.push(nh[k]); Q.f.push(nf[k]); }   // (sorted by f: a valid heap)
+	};
+	/** the next class heap's best live node (round robin over the classes), or -1 */
+	const sqNext = () => {
+		for (let t = 0; t < 4; t++) {
+			const Q = SQH[1 + ((sqRR + t) & 3)];
+			while (Q.h.length && !sn[Q.h[0]]) qpop(Q);
+			if (Q.h.length) { sqRR = (sqRR + t + 1) & 3; return qpop(Q); }
+		}
+		return -1;
+	};
 	const closed = new PairSet(1 << 16, ENERGY);
 	const dkOf = discKeyCache();
 	const scoreOf = (dist) => {
@@ -581,12 +645,13 @@ function legBest(L, starts, goal, o) {
 		if (X.goalAt(goal, sim, starts[s].tick, beforeTick)) { goals.push({ node: i, mask: -1, depth: gg[i] }); found = gg[i]; continue; }
 		cellKey(); if (ENERGY) closed.addV(ka, kb, Math.hypot(sim.speed_x, sim.speed_y), EDV); else closed.add(ka, kb);
 		hpush(i, gg[i] + w * scoreOf(d));
+		if (SQ) inG[i] = 1;
 	}
 	let why = 'exhausted';
 	let popsAtFound = -1;
 	const drop = { dead: 0, over: 0, oob: 0, region: 0, closed: 0, skipJ: 0 };
 	const over = typeof goal.over === 'function' ? goal.over : null;
-	while (heap.length && goals.length < collect && (popsAtFound < 0 || pops - popsAtFound < 3000)) {
+	while ((heap.length || SQ) && goals.length < collect && (popsAtFound < 0 || pops - popsAtFound < 3000)) {
 		if ((pops & 63) === 0) {
 			const now = Date.now();
 			if (now > deadline) { why = 'time'; break; }
@@ -602,7 +667,8 @@ function legBest(L, starts, goal, o) {
 				if (Date.now() > deadline) { why = 'time'; break; }
 			}
 		}
-		const i = hpop();
+		let i;
+		if (SQ && (++sqPops % SQ_K === 0 || !heap.length)) { i = sqNext(); if (i < 0) { if (!heap.length) break; i = hpop(); } } else i = hpop();
 		pops++;
 		const snap = sn[i];
 		sn[i] = null;
@@ -659,7 +725,9 @@ function legBest(L, starts, goal, o) {
 			const j = par.length;
 			par.push(i); msk.push(m); rp.push(reps); gg.push(g + reps); dst.push(d);
 			sn.push(sim.snapshot(pool.length ? pool.pop() : undefined));
-			hpush(j, g + reps + w * (scoreOf(d) + saxPen(sim)) + (KC !== null ? diePri(L, sim, KC, g + reps) : 0));
+			const fj = g + reps + w * (scoreOf(d) + saxPen(sim)) + (KC !== null ? diePri(L, sim, KC, g + reps) : 0);
+			hpush(j, fj);
+			if (SQ) { inG[j] = 1; const c = sqClass(sim); if (c) { sqCls[j] = c; sqAdd(j, fj, c); } }
 			if (d < 1e9 && (closest.dist < 0 || d < closest.dist)) { closest.dist = d; closest.node = j; closest.pop = pops; }
 			if (FIN && d <= FIN_D && finR === null) keepNear(j, d, cy * W + cx);
 		}
@@ -669,7 +737,7 @@ function legBest(L, starts, goal, o) {
 			const idx = heap.map((x, k) => k).sort((a, b) => hf[a] - hf[b]);
 			const keep = idx.slice(0, heapMax >> 1);
 			const nh = keep.map((k) => heap[k]), nf = keep.map((k) => hf[k]);
-			for (const k of idx.slice(heapMax >> 1)) { const n = heap[k]; if (sn[n]) { pool.push(sn[n]); sn[n] = null; } }
+			for (const k of idx.slice(heapMax >> 1)) { const n = heap[k]; if (SQ) { inG[n] = 0; if (sqCls[n]) continue; } if (sn[n]) { pool.push(sn[n]); sn[n] = null; } }
 			heap.length = 0; hf.length = 0;
 			const ord = nf.map((f, k) => k).sort((a, b) => nf[a] - nf[b]);
 			for (const k of ord) { heap.push(nh[k]); hf.push(nf[k]); }
