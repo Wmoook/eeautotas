@@ -54,6 +54,7 @@ const JV = ((0 - 2) * 26.0 * 1.0) / MULT;     // a jump's speed_y (-6.708)
 const K_T = G * BD / (1 - BD);                // the terminal speed of a fall (13.553)
 const TOL = 0.25;                             // px of margin on every apex (>= 0.0013, the dot-row step; < 0.58, 4-tile ledges)
 const QMAX = 40, QMIN = 9;                    // R levels: Q = 40 with fields, boosts or portals, else 9
+const QMAX_ENV = Math.min(100, Math.max(0, +process.env.EEAT_QMAX | 0));   // (OPT-IN EEAT_QMAX=<n>: reachField's Q)
 const KF = 16, NL = 128;                      // F levels 0..16; C / XR levels 0..127
 const R_ = 0, F_ = 1, X_ = 2, C_ = 3, L_ = 4, NT = 5;
 const NONE = -32768, NONE8 = -128;
@@ -285,6 +286,30 @@ const VJMIN = 7.85;
 const KLJ = Math.ceil(fallD(VJMIN) / 16) - 1;
 const cOfV = (v) => (v >= 16 ? NL - 1 : Math.min(NL - 1, Math.ceil(v * 8 - 1e-9)));
 const vOfC = (c) => (c >= NL - 1 ? 16 : c / 8);
+// THE BOUNCE'S TURN (OPT-IN EEAT_BOUNCE_TURN=1 / opts.bounceTurn; off = the bounce as before, byte for byte): the up-arrow
+// bounce F(k) -> C at a tile t (same-tile edge, bounceC) returns sqrt(v^2 + the gain) >= v for the F level's whole speed v,
+// so falling back into a short up-arrow column and bouncing again gained every cycle: a PUMP to 16 px/tick in a 2-tall
+// column between two spikes (Cold World's (96, 226-227): F7 -> C61 -> F16 -> C127 -> a 20-row rise; the same pump at C127
+// lifted the forward model into the trophy room). But a ball turns round IN t only if it stops within t: its centre is at
+// most 16 px over t's bottom edge, and from a tick-start speed v the centre moves sum v_n (v_n = (v_{n-1} + m) d) before it
+// turns: with the strongest deceleration the engine allows (eesim.js Player.tick: m = the most upward modifier MOD_STRONG,
+// d = BASE_DRAG x NO_MOD_DRAG on the 2 ticks the gravity queue still holds a tile from before t, then t's own up arrow:
+// m = -2 / MULT, d = BASE_DRAG (an arrow as the delayed tile: my = 0, no no-modifier drag; ice only drags less)), every
+// speed above VTURN leaves t first (into the tile below: an F move there, enterDown, whose level only grows, and its own
+// bounce; onto a floor: speed 0, the bounce of v = 0; into a killer: dead). So the bounce at t is the old formula's at
+// min(v, VTURN) (the formula grows with v): SOUND (only a turn the engine cannot make is removed)
+const BOUNCE_TURN = process.env.EEAT_BOUNCE_TURN === '1';
+const VTURN = (() => {
+	const ND = E.constants.NO_MOD_DRAG;
+	const dStop = (v) => {
+		let s = 0;
+		for (let n = 0; v > 0 && n < 4000; n++) { v = (v + MOD_STRONG) * (n < 2 ? BD * ND : BD); if (v < 0.0001) break; s += v; }
+		return s;
+	};
+	let lo = 0, hi = 16;
+	for (let i = 0; i < 60; i++) { const m = (lo + hi) / 2; if (dStop(m) < 16 + TOL) lo = m; else hi = m; }
+	return hi;
+})();
 
 // ---------------------------------------------------------------- the field
 function reachField(level, opts) {
@@ -454,7 +479,13 @@ function reachField(level, opts) {
 		unforceChains(W, H, forcedP, portalExits, srcOf);
 	}
 	// (opts.fxState: a multi-jump or a boosted jump rises past QMIN's 9 half rows)
-	const Q = anyField || anyPortal || (fxS !== null && (fxS.mj >= 2 || fxS.jb === 1)) ? QMAX : QMIN, INF = Q + 1, NR = Q + 3;
+	// (OPT-IN opts.qMax / EEAT_QMAX=<n> (41-100; off = QMAX 40, byte for byte): THE CAPS PAST 40. A portal exit's cap is
+	// q 40 with a pull-up-1 queue, 41 next to an up arrow (9 + riseQ(-22.72, -2 / MULT x 2) = 325 px), and with the ice drag
+	// 44-46 (a boost 46): past Q 40 every such cap is R(INF), a rise anywhere up FOREVER (the rise-q16 fix's 100+ tiles of
+	// sky again): Cold World: 216 / 216 portal exits and 23 / 23 boosts R(INF) (8 ice blocks), the forward model's way into
+	// the trophy room a 105-row rise from a boost. Q 47 holds every cap (the ice boost's 46): R(q) decays 2 levels a row)
+	const QM = opts.qMax > 0 ? Math.min(100, opts.qMax | 0) : QMAX_ENV > QMAX ? QMAX_ENV : QMAX;
+	const Q = anyField || anyPortal || (fxS !== null && (fxS.mj >= 2 || fxS.jb === 1)) ? QM : QMIN, INF = Q + 1, NR = Q + 3;
 	// ---- the rise caps (the n3 rise-q16 fix): every speed is capped at 16 px/tick by the engine's speed update (Player.tick:
 	// (v + modifier) x drag, then the clamp), so an up boost's and a portal exit's rise is finite: R(q), not R(INF) (which
 	// sent the fields up 100+ tiles of open sky from any boost or portal exit: Imps Paradise, Barrel Cannon Canyon, ...).
@@ -482,8 +513,28 @@ function reachField(level, opts) {
 	};
 	const capOf = (e) => { const q = Math.ceil((e + TOL) / 8); return q <= Q ? Math.max(-1, q) : INF; };
 	const rcT = new Int8Array(N), rpT = new Int8Array(N).fill(INF);
-	for (let i = 0; i < N; i++) if (cls[i] === BUP) rcT[i] = opts.riseInf ? INF : capOf(16 + riseQ(-16, pull3(i), modCurR(i), nIceR));
-	for (const p of portalExits.keys()) rpT[p] = opts.riseInf ? INF : capOf(9 + riseQ(-16 * 1.42, pull3(p), modCurR(p), nIceR));
+	// (OPT-IN opts.iceCaps / EEAT_ICE_CAPS=1: THE CAPS' ICE ONLY NEAR ICE. Off = with one ice block anywhere every up boost's
+	// and every portal exit's rise is the ice drag's (boost 16 + 342-366 px = q 43-46, portal 9 + 347-359 = q 44-45: all past
+	// Q 40), so EVERY boost and portal exit of the level is R(INF), a rise anywhere up forever (Cold World: 8 ice blocks; a
+	// boost 95 tiles from the nearest lifted the forward model 105 rows into the trophy room's approach). A rise is slippery
+	// only if the ball is slippery where it starts (iceNear: within ICE_REACH_TILES of ice, portal hops chained) or turns
+	// slippery on the way (eesim.js: current-below ice, the centre right over an ice block): a rise from a boost / an exit
+	// lasts < RISE_TICKS ticks (the portal's 22.72 px/tick with the ice drag every tick: 72) of <= 16.25 px an axis, no hop
+	// inside it (a hop is a new exit: its own cap), so the rise's ice drag only where ice is within RISE_TILES + the ice
+	// reach of the boost / of one of the portal's exits (or of the portal itself); elsewhere the plain cap. SOUND (the same
+	// arithmetic, the ice drag dropped only where no slippery tick can be))
+	let iceCapNear = null;
+	if (ice && nIceR > 0 && !opts.riseInf && (opts.iceCaps !== undefined ? !!opts.iceCaps : ICE_CAPS)) {
+		// (slippery at the start: the ice reach with its portal hops; turning slippery on the way: ice within RISE_TILES + 1,
+		// no hop (a hop ends the rise: the exit's own cap))
+		iceCapNear = iceNearOf(level, W, H, N);
+		const far = iceNearOf(level, W, H, N, RISE_TILES + 1, false);
+		for (let i = 0; i < N; i++) iceCapNear[i] |= far[i];
+	}
+	const nIceAt = (i) => (iceCapNear !== null && !iceCapNear[i] ? 0 : nIceR);
+	const nIceP = (p) => { if (iceCapNear === null || iceCapNear[p]) return nIceR; for (const e of portalExits.get(p)) if (iceCapNear[e]) return nIceR; return 0; };
+	for (let i = 0; i < N; i++) if (cls[i] === BUP) rcT[i] = opts.riseInf ? INF : capOf(16 + riseQ(-16, pull3(i), modCurR(i), nIceAt(i)));
+	for (const p of portalExits.keys()) rpT[p] = opts.riseInf ? INF : capOf(9 + riseQ(-16 * 1.42, pull3(p), modCurR(p), nIceP(p)));
 	// ---- THE EXIT FROM THE ENTRY (opts.exitEntry, src/steer.js's ordering fields; d4-portal-exact): a portal p whose exits
 	// all have its own rotation (eesim.js _portalTeleport: dir 0, the speeds kept, no x 1.42) puts the ball at an exit's tile
 	// corner with the speed it had: a ball rising into p rises about as far from the exit, a falling one falls on. So its
@@ -801,7 +852,8 @@ function reachField(level, opts) {
 	}
 	// ---- the stop in a field, the up-arrow bounce
 	const stopC = (t) => cOfV(vfieldP(prof[pid[t]], 2 * G, lowWall[t] ? 0.5 : 1));
-	const bounceC = (t, k) => { const P = prof[pid[t]], v = VFC[k]; return cOfV(Math.min(16, Math.sqrt(v * v + Math.max(P.push, 8 * G * v + 10 * G * G)))); };
+	const bTurn = opts.bounceTurn !== undefined ? !!opts.bounceTurn : BOUNCE_TURN;   // (THE BOUNCE'S TURN: VTURN above)
+	const bounceC = (t, k) => { const P = prof[pid[t]], v = bTurn ? Math.min(VFC[k], VTURN) : VFC[k]; return cOfV(Math.min(16, Math.sqrt(v * v + Math.max(P.push, 8 * G * v + 10 * G * G)))); };
 
 	// ---- same-tile edges (cost 0) and the edges to other tiles (portals: cost 5; death respawns: DEATH_COST), forward
 	/** the same-tile edges of (t, ty, l): emit(ty2, l2) */
@@ -974,7 +1026,7 @@ function reachField(level, opts) {
 		}
 		field.explain = { row: best, trophyRow, startRow: st ? (st.t / W) | 0 : -1 };
 	}
-	if (opts.debug) Object.defineProperty(field, '_m', { value: { fwd, prof, pid, J, lj, ceilJ, KJD, DIRS, stopC, bounceC, portalExits, respawn, passable, lowWall, segOf, edgesOf, costOf } });
+	if (opts.debug) Object.defineProperty(field, '_m', { value: { fwd, prof, pid, J, lj, ceilJ, KJD, DIRS, stopC, bounceC, portalExits, respawn, passable, lowWall, segOf, edgesOf, costOf, rcT, rpT } });
 	field.ms = Date.now() - t0;
 	return field;
 }
@@ -1298,25 +1350,31 @@ function prioShiftOf(a) { let m = 0; for (let i = 0; i < a.length; i++) if (a[i]
 // tile, walls ignored (they only shorten the way), portal hops chained: every tile a slippery ball's centre can be in
 const ICE_LOCAL = process.env.EEAT_ICE_LOCAL === '1';
 const ICE_REACH_TILES = 16;
-function iceNearOf(level, W, H, N) {
+// (opts.iceCaps / EEAT_ICE_CAPS=1: the boost and portal caps' ice only near ice; see rcT in reachField. RISE_TICKS: the
+// longest rise from a portal exit (-16 x 1.42 px/tick, the most upward queue for 2 ticks, then air, the ice drag every
+// tick: 72 ticks; a boost's -16: 55), a tick moving the centre <= 16.25 px an axis)
+const ICE_CAPS = process.env.EEAT_ICE_CAPS === '1';
+const RISE_TICKS = (() => { let s = -16 * 1.42, n = 0; while (s < 0 && n < 1000) { s = (s + (n < 2 ? MOD_STRONG : G)) * ICE_ND; n++; } return n + 2; })();
+const RISE_TILES = Math.ceil(RISE_TICKS * 16.25 / 16) + 1;
+function iceNearOf(level, W, H, N, radius = ICE_REACH_TILES, hops = true) {
 	const fg = level.fg;
 	const dist = new Int16Array(N).fill(-1);
 	let cur = [];
 	for (let i = 0; i < N; i++) if (fg[i] === ICE) { dist[i] = 0; cur.push(i); }
 	const silent = level.portalsById && level.portalSlot ? silentPortals(level) : null;
 	const exitsOf = (i) => {
-		if (!silent || (fg[i] !== 242 && fg[i] !== 381)) return null;
+		if (!hops || !silent || (fg[i] !== 242 && fg[i] !== 381)) return null;
 		const s = level.portalSlot[i];
 		if (s < 0 || silent[i]) return null;
 		return level.portalsById.get(level.pTarget[s]) || null;
 	};
-	for (let d = 0; d <= ICE_REACH_TILES && cur.length; d++) {
+	for (let d = 0; d <= radius && cur.length; d++) {
 		const nxt = [];
 		for (let k = 0; k < cur.length; k++) {
 			const t = cur[k];
 			const ex = exitsOf(t);   // (a hop: its exits at the same distance)
 			if (ex) for (let q = 0; q < ex.n; q++) { const j = (ex.ys[q] >> 4) * W + (ex.xs[q] >> 4); if (j >= 0 && j < N && dist[j] < 0) { dist[j] = d; cur.push(j); } }
-			if (d === ICE_REACH_TILES) continue;
+			if (d === radius) continue;
 			const x = t % W, y = (t / W) | 0;
 			for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
 				const nx = x + dx, ny = y + dy;
@@ -1772,7 +1830,7 @@ function shareField(f) {
 module.exports = {
 	VERSION: 3, reachField, fxStateOf, fxStateNext, fxChanges, fxAfter, FX_FAR, neverOpenDoors, guideFlags, classOfId, exitApexOn, ALWAYS_SHUT, unforceChains, silentPortals, halfQuadOn, quadOf, moveOK, moveBlocks, QDX, QDY, fifthsAt, fifthsAtRef, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST,
 	// the tables and the lookup's pieces (tests)
-	riseQ, airRise, fallD, fallV, kOfX, cOfV, qOf, interp, RaInv, TABLES, VF, VFC, KLJ, NFV, NTH, FVa, FSa,
+	riseQ, airRise, fallD, fallV, kOfX, cOfV, qOf, interp, RaInv, TABLES, VF, VFC, KLJ, NFV, NTH, FVa, FSa, VTURN, RISE_TILES, iceNearOf,
 	G, BD, JV, K_T, TOL, QMAX, KF, NL, CUT, FAR, R_, F_, X_, C_,
 	WALL, DEADLY, NORM, DOTS, CLIMB, WATER, MUD, UP, BUP, BDOWN, A_CLASS, CAP_CLASS,
 	// v2 names (src/out scripts): the classes

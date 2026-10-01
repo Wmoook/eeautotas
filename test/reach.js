@@ -320,6 +320,28 @@ function pump(h, k) {
  * (4) a portal exit on a down boost (a stale portal entry under a 117; the soundness review's counterexample): the ball
  * teleports up out of the exit tile and rises to a trophy 10 rows above it: no state of the idle run cut
  */
+/**
+ * THE BOUNCE'S TURN (opts.bounceTurn / EEAT_BOUNCE_TURN=1, B7 cold): the up-arrow bounce from a fall at speed v returns
+ * sqrt(v^2 + gain) >= v, so falling back into a short column and bouncing again gained every cycle (a pump to 16 px/tick);
+ * a ball turns in a tile only below VTURN. The up-pump room: the engine never gets 8 rows over a 2 / 3 / 5-row column (its
+ * best centre ~2.6 rows), the field without the turn reaches the trophy there (the pump), with it cut off; where the engine
+ * does reach the trophy (3 rows over the 3 / 5-row columns) the field with the turn is finite
+ */
+function bounceTurnRooms() {
+	for (const h of [2, 3, 5]) {
+		for (const k of [3, 8]) {
+			const L = pump(h, k);
+			const s = startSim(L, 0), I = new E.EEInput();
+			let got = false;
+			for (let t = 0; t < 3000 && !got; t++) { s.tick(I); if (s.has_silver_crown) got = true; }
+			const off = R.costAt(R.reachField(L, { bounceTurn: false }), startSim(L, 0));
+			const fOn = R.reachField(L, { bounceTurn: true, check: true }), on = R.costAt(fOn, startSim(L, 0));
+			const ok = got ? on >= 0 : (k === 8 ? on < 0 && off >= 0 : true);
+			check(`bounce turn: a ${h}-row up-arrow column, the trophy ${k} rows over it: the engine ${got ? 'gets there' : 'does not'}, the field ${got ? 'finite' : 'cut off (the pump without the turn finite)'}`,
+				ok && fOn.mismatches === 0, `engine ${got ? 'yes' : 'no'}, off ${fmt(off)}, on ${fmt(on)}`);
+		}
+	}
+}
 function riseCaps() {
 	const boostRoom = (k, floor) => box([...Array(40 - k).fill('.....'), '..T..', ...Array(k - 1).fill('.....'), '..B..', 'S....', ...(floor ? [floor] : [])]);
 	{
@@ -355,8 +377,23 @@ function riseCaps() {
 	}
 	{
 		const L = ascii(boostRoom(30, 'IIIII'));
-		const c = R.costAt(R.reachField(L, {}), startSim(L, 0));
-		check('rise cap: ice in the level (the ice drag rises further than Q levels hold): the boost keeps "anywhere up" (the trophy 30 rows above finite)', c >= 0, `30: ${fmt(c)}`);
+		const f = R.reachField(L, {});
+		const c = R.costAt(f, startSim(L, 0));
+		if (f.Q <= 45) check('rise cap: ice in the level (the ice drag rises further than Q levels hold): the boost keeps "anywhere up" (the trophy 30 rows above finite)', c >= 0, `30: ${fmt(c)}`);
+		else {
+			// (EEAT_QMAX past 45 (B7 cold, the caps past 40): the ice boost's cap q 46 is held, 23 rows: the engine's best rise
+			// with ice under the boost is 19.1 rows; the trophy 23 rows above finite, 24 and 30 cut off)
+			let best = 1e9;
+			for (let k = 1; k <= 30; k++) for (const hold of [0, 8]) for (const jumpAt of [-1, 0, 2, 5]) {
+				const s = new E.EESim(L); s.reset(); const I = new E.EEInput();
+				for (let t = 0; t < 200; t++) { E.applyMask(I, (t < k ? 4 : 0) | hold | (t === jumpAt ? 1 : 0)); s.tick(I); if (s.py + 8 < best) best = s.py + 8; }
+			}
+			const rise = 16 * 41 - best;
+			const c23 = R.costAt(R.reachField(ascii(boostRoom(23, 'IIIII')), {}), startSim(ascii(boostRoom(23, 'IIIII')), 0));
+			const f24 = R.reachField(ascii(boostRoom(24, 'IIIII')), { check: true }), c24 = R.costAt(f24, startSim(ascii(boostRoom(24, 'IIIII')), 0));
+			check(`rise cap: ice in the level, Q ${f.Q}: the engine rises < 23 rows, the trophy 23 rows above finite, 24 and 30 cut off`,
+				rise < 23 * 16 && c23 >= 0 && c24 < 0 && c < 0 && f24.mismatches === 0, `the engine ${(rise / 16).toFixed(2)} rows, 23: ${fmt(c23)}, 24: ${fmt(c24)}, 30: ${fmt(c)}`);
+		}
 	}
 	{
 		// (4) the soundness review's counterexample (bd1767c): a portal exit whose tile holds a DOWN boost (a portal record,
@@ -411,6 +448,7 @@ function sectionB() {
 		check(`${name}: ${want === 'no' ? 'no way (cut off)' : want === 'yes' ? 'the engine finishes: finite' : 'finite'}`, ok && f.mismatches === 0, detail);
 	}
 	riseCaps();
+	bounceTurnRooms();
 	for (const [name, rows, masks] of ROUTED) {
 		const L = ascii(box(rows)), f = R.reachField(L, { check: true });
 		const ev = C.evaluate(L, Uint8Array.from(masks));
