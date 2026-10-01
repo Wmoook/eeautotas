@@ -246,6 +246,16 @@ const ANCHOR_QUAL = process.env.EEAT_ANCHOR_QUAL !== '0';   // (re-entry by anot
 // (128,114)' (closest 429-561 tiles). The planner's near plans (nearPlans) fire only once EVERY plan's first leg has
 // failed a rung, which the untried third plan blocked. Ordering only: the same plans, the same rungs and budgets.
 const RUNG_BREADTH = () => process.env.EEAT_RUNG_BREADTH === '1';
+// THE RE-PLAN'S CLOCK BEFORE THE FIRST ROUTE (B8 speed, cycle 3; OPT-IN EEAT_PLAN_PRE_MS=<ms>, off = the compile byte for
+// byte): every new anchor (and every anchor whose facts changed) is planned again in THIS thread, synchronously, on 300 ms;
+// on a level of many triggers the plan search is cut by that budget every time ('budget: the most gain', a partial plan),
+// and the thread that dispatches the workers' steps and takes their answers is busy planning: Level 1 Overworld (b0, box 8)
+// a new anchor every 0.3-0.4 s and every next step dispatched exactly 0.3 s after its anchor's birth (the plan's budget),
+// math legs of 0.2-0.7 s waiting for it. With the knob the re-plans before the first route get <ms> (the first plan and
+// the doubling of a cut empty plan as before); after the first route 300 ms as before. EEAT_PLAN_PROF=1 (a measurement): a
+// 'planprof' event before each route event {calls, ms (this thread's plan() time), calls0, ms0 (before the first route)}.
+const PLAN_PRE_MS = +process.env.EEAT_PLAN_PRE_MS > 0 ? +process.env.EEAT_PLAN_PRE_MS : 0;
+const PLAN_PROF = process.env.EEAT_PLAN_PROF === '1';
 /** the plans in their first step's rung order (stable: the planner's order among equal rungs) */
 function breadthOrder(plans) {
 	if (!RUNG_BREADTH() || plans.length < 2) return plans;
@@ -605,6 +615,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	// (a part that overruns its own budget cannot be cut here (a synchronous call): the call is timed, and one that took
 	// LB_SLOW_MS or more is not made again this compile (the arrivals' bounds, the refresh at the end))
 	let lbSlow = false, planSlowSaid = false;
+	const planProf = { n: 0, ms: 0, n0: 0, ms0: 0 };   // (the planner's synchronous time in this thread: all, before the first route)
 	try { const tq = Date.now(); const r = planner.lowerBound ? planner.lowerBound(startAnchorArg, { ms: LB0_MS }) : null; lbPlanner = lbTicks(r); lbComplete = !!(r && r.complete); if (Date.now() - tq >= LB_SLOW_MS) { lbSlow = true; say({ ev: 'warning', text: `the planner's lowerBound took ${((Date.now() - tq) / 1000).toFixed(1)} s (asked ${LB0_MS / 1000} s): not called again this compile` }); } } catch (e) { say({ ev: 'bug', what: 'lowerBound', error: e.message }); }
 	if (lbPlanner === Infinity) { lbInf = true; lbPlanner = 0; say({ ev: 'warning', text: 'the planner\'s lower bound from the start is infinite: no way to the trophy in its relaxation (a proof there, if the model is sound); the moves try anyway' }); }
 	if (bounds && typeof bounds.leg === 'function') {
@@ -713,6 +724,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const better = !best || ev.runTicks < best.runTicks || (ev.runTicks === best.runTicks && ev.complete < best.ticks);
 		if (!better) return { ev, better: false };
 		best = { masks: ev.ms, ticks: ev.complete, runTicks: ev.runTicks, deaths: ev.deaths, chance: ev.chance, legs: legId ? chainOf(legId) : [], how };
+		if (PLAN_PROF) say({ ev: 'planprof', calls: planProf.n, ms: planProf.ms, calls0: planProf.n0, ms0: planProf.ms0 });
 		say({ ev: 'result', kind: 'finish', ticks: ev.complete, runTicks: ev.runTicks, deaths: ev.deaths, chance: ev.chance, how, lb: LB, gap: gapOf(ev.runTicks), inputs: T.strOf(ev.ms) });
 		if (out) { try { C.writeEetas(path.join(out, 'route.eetas'), ev.ms); } catch (e) { /* read-only */ } }
 		lastProgress = Date.now();
@@ -1298,11 +1310,13 @@ async function compile(L, opts = {}, emit = () => {}) {
 		// on big levels (Moving Ice Puzzle 67%, Unforgiving Climb 34%, The Glitch 34%: every re-plan a 2.0-s gap in the event
 		// log, the workers' answers waiting in it). EEAT_REPLAN_FIRST=1: the rule before)
 		const firstPlan = REPLAN_FIRST ? !A.plans : !A.planned;
-		const planMs = Math.max(100, Math.min((firstPlan && anchors.size <= 1 ? 2000 : 300) * (1 << Math.min(4, A.budgetCuts || 0)), (left() - (best ? endRes() : 0)) / 4));
+		const replanMs = PLAN_PRE_MS > 0 && !best ? PLAN_PRE_MS : 300;
+		const planMs = Math.max(PLAN_PRE_MS > 0 && !best ? Math.min(100, PLAN_PRE_MS) : 100, Math.min((firstPlan && anchors.size <= 1 ? 2000 : replanMs) * (1 << Math.min(4, A.budgetCuts || 0)), (left() - (best ? endRes() : 0)) / 4));
 		A.planned = true;
 		const tp = Date.now();
 		try { r = planner.plan(anchorArg(A), { k: 3, depth: depthOf(A), runBound: rb, tickBound, epoch, ms: planMs }); } catch (e) { bug('plan', { error: e.message, anchor: A.id }); r = { plans: [], why: `error: ${e.message}` }; }
 		const tpMs = Date.now() - tp;
+		planProf.n++; planProf.ms += tpMs; if (!best) { planProf.n0++; planProf.ms0 += tpMs; }
 		if (tpMs > 3 * planMs + 1000 && !planSlowSaid) { planSlowSaid = true; say({ ev: 'warning', text: `the planner's plan() took ${(tpMs / 1000).toFixed(1)} s (asked ${(planMs / 1000).toFixed(1)} s): a synchronous overrun the loop cannot cut` }); }
 		const p = plansOf(r);
 		// (branch and bound: a plan whose admissible lb from this anchor cannot beat the bound is not run: a proof. Only
