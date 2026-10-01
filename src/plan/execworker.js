@@ -60,6 +60,8 @@ parentPort.on('message', async (msg) => {
 			if (PROF && result) {
 				result.prof = { post: msg.tPost || 0, recv: tRecv, wait: tReady - tRecv, run: Date.now() - tReady, init: firstAnswer ? initMs : 0,
 					rf: acc.rf - a0.rf, rfN: acc.rfN - a0.rfN, bf: acc.bf - a0.bf, bfN: acc.bfN - a0.bfN, ms: msg.budget && msg.budget.ms, end: Date.now() };
+				// (this worker's own isolate: its used and total heap, MB: where a compile's memory goes)
+				try { const hs = require('v8').getHeapStatistics(); result.prof.heapUsed = Math.round(hs.used_heap_size / 1048576); result.prof.heapTotal = Math.round(hs.total_heap_size / 1048576); result.prof.ext = Math.round(hs.external_memory / 1048576); } catch (e) { /* none */ }
 				firstAnswer = false;
 			}
 			parentPort.postMessage({ id, result });

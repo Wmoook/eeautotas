@@ -846,6 +846,7 @@ function createBackward(L, opts = {}) {
 					});
 				}
 			}
+			if (o.trace) o.trace('meetEnd', nodes.length, ex, heap.size);
 			stats.exhausted = !found && heap.size === 0 && (heap2 === null || heap2.size === 0);
 			if (o.closest && !found && lastBest && (!bestC || lastBest.h < bestC.h)) {
 				const pm = pathTo(lastBest.id), pre = root.prefix || new Uint8Array(0);

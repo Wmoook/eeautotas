@@ -356,6 +356,14 @@ const PF_MS = +process.env.EEAT_PF_MS > 0 ? +process.env.EEAT_PF_MS : 40000;
 const PF_STARTS = +process.env.EEAT_PF_STARTS > 0 ? +process.env.EEAT_PF_STARTS : 1;
 // (its arms: not the leg finder, which is this executor's own tier 3 on the rest of the window)
 const PF_ARMS = process.env.EEAT_PF_ARMS || 'bw,prof,corr,chain';
+// THE PORTFOLIO'S YIELD (P4, OPT-IN EEAT_PF_YIELD=<calls>, unset / 0 = the fixed shares as before byte for byte): from that
+// many calls on, the tier's share of a window follows its yield on the level as the math's does (mathShare: the base share x
+// 4 x its rate of calls with a leg, between EEAT_PF_YIELD_FLOOR (0.25) and 1 of it). Why (P4, the S99 regressions): on the
+// RATE levels the portfolio's 0.3-0.6 of every window failed where the old tiers end early: Relics Of Athena S99-on 1 / 5
+// compiled vs 5 / 5 off (124 calls, 140 worker-s, 8 legs; its rung-3 windows 4-5 x 45 s where the base's ended at 30 s);
+// Presto Penguins 57 calls, 128 worker-s, 1 leg
+const PF_YIELD = +process.env.EEAT_PF_YIELD > 0 ? +process.env.EEAT_PF_YIELD : 0;
+const PF_YIELD_FLOOR = +process.env.EEAT_PF_YIELD_FLOOR > 0 ? +process.env.EEAT_PF_YIELD_FLOOR : 0.25;
 const RUNG_PROJ = [1500, 5000, 15000, 45000];
 const MATH_ALTS = process.env.EEAT_MATH_ALTS !== undefined ? +process.env.EEAT_MATH_ALTS : 6;
 const MATH_ALT_SLACK = process.env.EEAT_MATH_ALT_SLACK !== undefined ? +process.env.EEAT_MATH_ALT_SLACK : 3;
@@ -371,6 +379,13 @@ const MATH_ALT_SLACK = process.env.EEAT_MATH_ALT_SLACK !== undefined ? +process.
 // 3,763), with the math tier's own 6 in 3 (the defaults here) a tie (1,162; kept among the picked, EEAT_NEXT_FIRST=0 the
 // default: EEAT_NEXT_FIRST=1 puts it first, 987 vs 986 on 37 routes).
 const NEXT_ON = () => process.env.EEAT_NEXT === '1';   // OPT-IN (7.9: a tie on the chain harness)
+// THE WORKERS' HEAP (P4, OPT-IN EEAT_EXEC_HEAP_MB=<MB>, unset = V8's own limit as before): each executor worker thread's
+// old generation capped (worker_threads resourceLimits.maxOldGenerationSizeMb), so V8 collects before the isolate's pages
+// grow to the default limit: with the stretch defaults a compile's own process peaked 4.7 GB on EX Crew Odyssey (the
+// portfolio's transient searches in 3 workers; its retained state after a GC is ~12 MB heap + ~150 MB buffers a worker,
+// src/out/p4 mem_pf.js) where the whole compile of block 1 peaked 3.5 GB. A worker past it ends with an error: its step
+// fails ('the worker exited') and the pool replaces it (the error / exit handlers below)
+const EXEC_HEAP_MB = +process.env.EEAT_EXEC_HEAP_MB > 0 ? Math.round(+process.env.EEAT_EXEC_HEAP_MB) : 0;
 const NEXT_FIRST = process.env.EEAT_NEXT_FIRST === '1';   // (1: the next-best arrival first; else among the picked)
 const NEXT_EVAL = 64, NEXT_TRY = +process.env.EEAT_NEXT_TRY > 0 ? +process.env.EEAT_NEXT_TRY : 6, NEXT_MS = +process.env.EEAT_NEXT_MS > 0 ? +process.env.EEAT_NEXT_MS : 25;
 const NEXT_ALTS = +process.env.EEAT_NEXT_ALTS >= 0 && process.env.EEAT_NEXT_ALTS !== undefined ? +process.env.EEAT_NEXT_ALTS : 6;
@@ -486,6 +501,7 @@ function makeCore(L, co) {
 	const portfolio = () => PF_ || (PF_ = require('./portfolio.js').createPortfolio(L, { solver: mathSolver() }));
 	const mY = { dTry: 0, dOk: 0, cTry: 0, cOk: 0 };   // (the math's yield on this level: calls and calls with a leg)
 	const pY = { t: 0, ok: 0 };   // (the profile tier's yield on this level, EEAT_PROFILE=1: calls and calls with a leg)
+	const pfY = { t: 0, ok: 0 };  // (the portfolio tier's, EEAT_PF_YIELD: calls and calls with a leg)
 	const fieldMs = { n: 0, perTile: 0 };
 	let noFieldLegs = 0, noFieldMemo = 0, noFieldBuilt = 0;   // (FIELD_MEMO diagnostics: calls without a field, memo hits, sub-leg builds past the window)
 	let analysis = null;
@@ -745,7 +761,8 @@ function makeCore(L, co) {
 		const pfOn = PF_ON() && mathOn && !walled;
 		if (pfOn && Date.now() < wEnd - 50) {
 			const pr = Math.min(rung, 3);
-			const share = PF_SHARES[Math.min(pr, PF_SHARES.length - 1)];
+			const share0 = PF_SHARES[Math.min(pr, PF_SHARES.length - 1)];
+			const share = PF_YIELD > 0 && pfY.t >= PF_YIELD ? share0 * Math.max(PF_YIELD_FLOOR, Math.min(1, 4 * (pfY.ok + 0.5) / (pfY.t + 1))) : share0;
 			const tP = Date.now(), pEndPF = tP + Math.min(PF_MS, share * (wEnd - tP));
 			const cands = [];
 			const pst = { tier: 'portfolio', tries: 0, ok: false, T: null, arm: null, arms: null, deferred: null, resumed: false };
@@ -771,6 +788,7 @@ function makeCore(L, co) {
 				}
 			} catch (e) { pst.why = 'error: ' + (e && e.message || e); }
 			pst.ms = Date.now() - tP; pst.ok = cands.length > 0;
+			if (pst.tries > 0) { pfY.t++; if (pst.ok) pfY.ok++; }
 			if (cands.length) pst.T = Math.min(...cands.map((c) => c.leg.ticks));
 			tiers.push(pst);
 			if (cands.length) {
@@ -1911,12 +1929,12 @@ async function createExecutor(L, opts) {
 	const queue = [];
 	let jobId = 0;
 	const spawn = (i) => {
-		const w = new Worker(path.join(__dirname, 'execworker.js'), { workerData: { file: path.resolve(String(opts.file)), usePrims: !!opts.prims, useBounds: !!opts.bounds, seed: opts.seed | 0 } });
+		const w = new Worker(path.join(__dirname, 'execworker.js'), { workerData: { file: path.resolve(String(opts.file)), usePrims: !!opts.prims, useBounds: !!opts.bounds, seed: opts.seed | 0 }, ...(EXEC_HEAP_MB > 0 ? { resourceLimits: { maxOldGenerationSizeMb: EXEC_HEAP_MB } } : {}) });
 		const slot = { w, busy: null, i, dead: false };
 		w.on('message', (msg) => {
 			const job = slot.busy;
 			if (!job || msg.id !== job.id) return;
-			if (PROF && emit && msg.result && msg.result.prof) { const p = msg.result.prof; emit({ ev: 'exec.prof', w: i, label: job.label || '', late: !!job.late, ok: !!msg.result.ok, sims: msg.result.sims || 0, tiers: msg.result.tiers || null, queue: job.tDisp ? p.post - job.tDisp : 0, lat: p.recv - p.post, ret: Date.now() - p.end, wait: p.wait, run: p.run, init: p.init, rf: p.rf, rfN: p.rfN, bf: p.bf, bfN: p.bfN, ms: p.ms }); }
+			if (PROF && emit && msg.result && msg.result.prof) { const p = msg.result.prof; emit({ ev: 'exec.prof', w: i, label: job.label || '', late: !!job.late, ok: !!msg.result.ok, sims: msg.result.sims || 0, tiers: msg.result.tiers || null, queue: job.tDisp ? p.post - job.tDisp : 0, lat: p.recv - p.post, ret: Date.now() - p.end, wait: p.wait, run: p.run, init: p.init, rf: p.rf, rfN: p.rfN, bf: p.bf, bfN: p.bfN, ms: p.ms, heapUsed: p.heapUsed, heapTotal: p.heapTotal, ext: p.ext, mainHeap: Math.round(require('v8').getHeapStatistics().used_heap_size / 1048576) }); }
 			slot.busy = null;
 			if (job.clear) job.clear();
 			job.done(msg);
