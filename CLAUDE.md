@@ -588,11 +588,13 @@ ways in.
   STUCK-PLAIN 31, ONE-LEG 18, NEAR 3, CLAIM-DEATH 2 (99 of them stop on a coin step); the 178 that failed in blocks 2 and 3
   +3% triggers. **THE KNOBS ON BY DEFAULT** (main since this merge): the compiler's defaults (`src/plan/defaults.js`:
   EEAT_COVER=3, EEAT_CRUMBS, EEAT_FIELD_MEMO, EEAT_PLAN_ANY, EEAT_PLAN_UNTOGGLE, EEAT_FX_FIELD, EEAT_FX_STATE, EEAT_ICE_LOCAL,
-  EEAT_PROT_LAYER, EEAT_BW_LEVEL=last, **EEAT_PREC_STREAM** (new)), THE STRETCH DEFAULTS (EEAT_PORTFOLIO, EEAT_CORR_FIELDS,
+  EEAT_PROT_LAYER, EEAT_BW_LEVEL=last, **EEAT_PREC_STREAM** (new), and since lane 5 block 4 **EEAT_PREC_AIR +
+  EEAT_PREC_AIR_EARLY** (the precision pair 153 -> 125)), THE STRETCH DEFAULTS (EEAT_PORTFOLIO, EEAT_CORR_FIELDS,
   EEAT_STRETCH, EEAT_BW_CHAIN), and in the code the perfect pass, the braked rests (EEAT_PREC_FAST), the loop cuts and the
-  LOOPS stage with **THE WIDE LOOPS** (new; `EEAT_LOOP_WIDE=0` off), JOINS, the `idle` trick. Every lane knob of blocks 1-3
-  stays OPT-IN, off = the compile byte for byte (EEAT_PLAN_BYPASS, EEAT_FAR_TROPHY / EEAT_FAR_WALK, EEAT_WP_DIEFIELD,
-  EEAT_ANCHOR_DUMP, EEAT_PHYS_PRICE=sa, EEAT_RUNUP / EEAT_RUNUP_GAP, EEAT_ENDGAME_S, EEAT_PREC_AIR, EEAT_PREC_ASYNC,
+  LOOPS stage with **THE WIDE LOOPS** (new; `EEAT_LOOP_WIDE=0` off), JOINS, the `idle` trick, and since lane 5 block 4 **THE
+  ENDGAME** (compile.js: a fifth of the budget, at most 60 s, after the joins; `EEAT_ENDGAME=0` off). Every other lane knob of
+  blocks 1-3 stays OPT-IN, off = the compile byte for byte (EEAT_PLAN_BYPASS, EEAT_FAR_TROPHY / EEAT_FAR_WALK, EEAT_WP_DIEFIELD,
+  EEAT_ANCHOR_DUMP, EEAT_PHYS_PRICE=sa, EEAT_RUNUP / EEAT_RUNUP_GAP, EEAT_PREC_ASYNC,
   EEAT_OS_BW_ST, EEAT_CRUMB_RANK, the one shot, the timer, ...). Its checks: the shared gate (gate20, 60 s, vs
   gate_c6b2.json) exit 0, 16 vs 14, worse 0, 16 / 16 replayed; T-MODEL-EXACT 219 routes 0 unsound, T-PLAN-ORACLE 2 / 0,
   msolve --quick 50 / 0, the unit tests. BEFORE IT (2026-09-30 ~21:30, main 23f1f3a):
@@ -1266,7 +1268,9 @@ ways in.
   Tests that require src/plan/strategy.js directly read the environment (test/planstrategy.js's mock T-STALL fails with
   `EEAT_BW_LEVEL=1`: the child solves the real toy file).
 - **THE ENDGAME and THE AIRBORNE ARRIVAL** (C6 push 3 lane 5 block 3; `src/out/n5/lanes/c6_lane5_b3.md`). THE ENDGAME
-  (strategy.js after JOINS, its own clock; OPT-IN `--endgame=<s>` / `EEAT_ENDGAME_S`, unset / 0 = the compile byte for byte;
+  (strategy.js after JOINS, its own clock; **DEFAULT ON since lane 5 block 4** (`src/out/n5/lanes/c6_lane5_b4.md`): compile.js
+  gives it a fifth of the budget, at most 60 s (`ENDGAME_F`, `ENDGAME_MAX_S`); `--endgame=<s>` / `EEAT_ENDGAME_S=<s>` its
+  clock; `EEAT_ENDGAME=0`, `--endgame=0` or `EEAT_ENDGAME_S=0` = the compile byte for byte as before;
   `EEAT_ENDGAME_K` the ladder's largest K, 64; `report.endgame`): the optimizer's exact endgame ladder (`src/endgame.js`
   `ladder`: every input sequence from the route's own state K = 8, 16, .. 64 ticks before its finish, stateHash merge, the
   admissible trophy bound's cut; the first finish the fastest from that state, an exhausted search a proof that none is
@@ -1274,9 +1278,24 @@ ways in.
   c6 b2 full compile's routes (box 6, 150 s a level, replayed from the level files): My level fef0 60 -> **59 (= the best
   known)**, celeste x2 239 -> 238, INVASION 4,090 -> 4,085, The Blank Page 2,023 -> 2,018; Ruins, My level 730c, Switch
   Labyrinth, the precision puzzle: no faster finish within the route's last 19-33 ticks (proven from the route's own state;
-  not a whole-route proof). THE AIRBORNE ARRIVAL (precision.js, OPT-IN `EEAT_PREC_AIR=1`, off = the stage byte for byte):
+  not a whole-route proof). BLOCK 4 (the default's measure; the stage carries its own off arm: the code before it is the
+  compile without it, `report.endgame.before`): offline on all 47 routes of the c6 b3 full compile (K <= 64, 60 s) 12 of 47
+  faster, 26 ticks in all (The Blank Page -5, INVASION -5, Escape the Lava -3, Bygone / Late christmas / TPs / Trick Or Treat
+  -2, Animaly / On And On / fef0 / celeste x2 -1), on the rest no faster finish within the route's last 9-64 ticks (median
+  31), <= 60 s and <= 2.1 GB a process; IN THE COMPILE (300 s, W3, box 6, the lane's 18 test levels): 18 of 18 compiled and replayed, the stage on every one (0.03-60 s), 4 faster (**My level fef0 60 -> 59 = the best known**, celeste x2 239 -> 238 each, INVASION 4,090 -> 4,085), the rest a proof of no faster finish within the route's last 12-64 ticks; a compile 301-426 s wall, peak RSS 1.5-5.9 GB (the c6 b3 full compile's 1.5-5.3 on the same levels); the shared gate: the EARLY BRAKE's sentence below; T-MODEL-EXACT 219 routes 0 unsound, T-PLAN-ORACLE 2 / 0, msolve --quick 50 / 0, plancompile 31 / 0. THE AIRBORNE ARRIVAL (precision.js, OPT-IN `EEAT_PREC_AIR=1`, off = the stage byte for byte):
   the precision pair's best known (111) rests 0.36 px from the window, jumps, steers in the air and is at x == 5720.0 at the
   tick its fall passes the floor's level; the air pass = from rest the jump, a lateral pattern after a delay (from rest an
   idle tick moves nothing), x == X at the engine's landing tick (`airTimeOf`), the braked rests first: its landings are
   real (the exact local search finishes 19 ticks on), but from the attempts' rests 167 vs the ground pass's 153: no gain
-  yet (the rest must come early: the known's at tick 77).
+  yet (the rest must come early: the known's at tick 77). **THE EARLY BRAKE** (lane 5 block 4; precision.js
+  `earlyAnchorsOf`, `EEAT_PREC_AIR_EARLY=1` with `EEAT_PREC_AIR=1`; both **COMPILER DEFAULTS** in src/plan/defaults.js since
+  block 4, the module's own default off: test/precision.js and Find a route's stage as before): the known route and ours are
+  the SAME run to tick 56 (x 5745.08, vx -3.53); the known brakes from tick 57 and rests 0.36 px off X at tick 77, ours crept
+  to a rest at 5721.21 at tick ~113; movingAnchorsOf's latest 48 states of an attempt were its late creep and the fast-rest
+  budget spread over 144 anchors never covered a 20-tick brake. The air pass's moving anchors are now the EARLIEST kept states
+  moving toward X whose hardest brake (stopDist) still stops at X or at most `EEAT_PREC_EARLY_SPAN` 12 px before it, one per
+  state, `EEAT_PREC_EARLY_K` 4 (ticks 56-59 there): the whole fast-rest budget on the brakes that rest near X soonest.
+  Measured (box 6): the child alone from our 153 route's prefixes (60 s, 3 workers, side by side) **128** vs 153 (air 167);
+  K 8 / span 20 128, K 2 141; IN THE COMPILE (300 s, W3, the precision pair): the exact landing 129 at 20 s, + the perfect
+  pass **125 on both** (NC Naos d3c6, the precision puzzle; verified) vs 153 / 153 (best known 111). The known's air
+  presses span 15 ticks of its 24 (the F table's patterns are at most 11): the next step to 111. THE SHARED GATE with both block-4 defaults (THE ENDGAME, the early brake; box 6, gate20, 60 s, W3, vs gate_c6b2.json): exit 0, compiled 16 vs 14, worse 0, better 11 (NC Naos d3c6 153 -> 125 at 60 s), 16 / 16 replayed. The whole-route proofs of My level fef0 (59) and 730c (93) (tools/perfect/proveroute.js, 900 s, 1.5 M states): open (every idle start at its cap).
