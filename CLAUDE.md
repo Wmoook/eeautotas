@@ -486,7 +486,7 @@ ways in.
   src/compile.js and src/plan.js turn on, unless the environment names them (=0 off; `EEAT_COMPILER_DEFAULTS=0` none),
   EEAT_COVER=3 (the coverage leg finder as the fallback), EEAT_CRUMBS=1 (coins no gate reads as breadcrumb relays),
   EEAT_FIELD_MEMO=1, EEAT_PLAN_ANY=1 (a set-kind trigger group = one edge), EEAT_PLAN_UNTOGGLE=1, EEAT_FX_FIELD=1 /
-  EEAT_FX_STATE=1 (physics goal fields on effect levels), EEAT_ICE_LOCAL=1, EEAT_PROT_LAYER=1, EEAT_BW_LEVEL=last (the chains-lab judge: the last bullet of this section), EEAT_PREC_STREAM=1 (the exact landing's routes as they come: THE FIRST ROUTE'S WAITS below); the modules themselves stay
+  EEAT_FX_STATE=1 (physics goal fields on effect levels), EEAT_ICE_LOCAL=1, EEAT_PROT_LAYER=1, EEAT_BW_LEVEL=last (the chains-lab judge: the last bullet of this section); the modules themselves stay
   opt-in (their tests and the truth checkers read them as before). Box 5, 300 s, W3, one run a level: all of them on (the
   combo, 22 levels) compiled 15 vs the base's 9, none lost (+K Underground, On And On And On, Crypts Of Anubis, Presto
   Penguins, The Witch's House; Vignettes, Perilous Endeavor and Stone Ruin Speedrun compiled in the single-group arms, not
@@ -519,36 +519,6 @@ ways in.
   the lab's 55 stuck known-route trigger legs (30 s) 37 / 55 from the previous trigger, 29 / 32 from 300 route ticks before,
   39 / 42 from 120: 105 / 129. THE FULL COMPILE (300 s, the S99 stack on d674cb9): **50 / 230** vs 46 / 44 without them (the
   "Where it stands" bullet; merged into main 23f1f3a).
-- **THE FIRST ROUTE'S WAITS** (B8 speed, cycle 2, 2026-10-01, branch n5-b8-speed-c2; box 8 `~/b8_speed_c2`;
-  `tools/cmp/firstab.js`: the arms side by side, each compile killed at its first verified route, `--full=1` to the end).
-  Cycle 1's box-8 logs (the 50 compiled levels, load 230): the stages before the moves < 3 s; on the multi-trigger levels
-  2-3 steps in flight nearly all the time (the time to the first route is the failed steps', not idle time); the one
-  IDLE wait was the exact landing: the precision pair (the precision puzzle, NC Naos d3c6) spent 68 / 73 s of their 91 /
-  96 s first route with nothing in flight, the trophy step waiting for `src/precision.js` to END, though the child had
-  printed its coasted rests' route long before (its fast pass, the braked rests, runs on to its 153-tick route). **THE
-  ROUTES AS THEY COME** (`EEAT_PREC_STREAM`, strategy.js `PREC_STREAM`; A COMPILER DEFAULT since this cycle,
-  src/plan/defaults.js; `EEAT_PREC_STREAM=0` = the compile before byte for byte): every better route the child prints is
-  verified (routeOf) at once; the child, its later routes and the step that waits for it as before.
-  Measured (box 8 at load 180-230, side by side): the precision pair's first route in 8 of 8 pairs sooner: the puzzle
-  13.8 / 18.8 / 12.0 / 16.8 s vs 36.4 / 32.6 / 140.9 / 40.4 s, NC Naos 14.7 / 19.7 / 10.5 / 10.4 s vs 38.9 / 38.2 / 33.4 /
-  42.4 s (the first route 332-379 ticks, the 154-tick one streams in later); the final routes (`--full=1`, 300 s) the same:
-  153 = 153 on both; the 6 other levels where a precision child ran (Animaly, Gingerbread House, The Ten Commandments,
-  Ice Cream Expedition, My level 730c / fef0) got no route from it, so their code path is the base's (Animaly 121 vs 203 s
-  and 103 vs 86 s: the load's spread). The 50 levels' first route (cycle 1's base with the pair at its measured times, an
-  estimate: the other 48 run the same code to their first route): median 72.2 -> 64.3 s, p90 237.2 s, by 60 s 19 -> 21.
-  THE SHARED GATE with it on (box 8 at load 190, gate20, 60 s, par 3, vs gate_c6b2.json): exit 1, compiled 14 vs 14,
-  better 6, worse 2, 14 / 14 replayed; the two rerun side by side with the knob off (`gateW`): NC Naos d3c6 no route in
-  either arm (at 60 s the precision child gets 13 s, the rest is the post-route stages' reserve, and its coasted pass
-  found nothing in 13 s at that load: the same code path in both arms), Level 1 Overworld 77 vs 58 anchors (a known 60-s
-  flip): no loss of the knob's; T-MODEL-EXACT 0 unsound (218 routes, 1 stale), T-PLAN-ORACLE 2 / 0, msolve --quick 50 / 0,
-  planstrategy 27 / 0, plancompile 31 / 0 (with the default). NEXT: the precision child's clock at short budgets
-  (13 s of a 60-s compile on the levels whose only route source it is).
-  `EEAT_PREC_ASYNC=1` (OPT-IN, not kept): the child in the background and started again at once with the nearer states
-  that came meanwhile (the moves' end waits for it, `precHold`, and kills it): on a calm box 8 (load 25-60) the 8
-  levels' first routes geo-mean 0.994 of the base's (the base's first child found the route in 15 s; cycle 1's 40-s
-  failures of that child were the load). The load's share: at load 230 the first routes took 1.7-5x their calm box-8
-  times (load 25-60, the base: the pair 17-19 s vs 91-96, Animaly 56 vs 104, Gingerbread House 38 vs 64): a loaded
-  box's median is not the compiler's.
 - **In the app**: the level editor's **Compile** button (POST / GET `/api/editor/compile`, section 9) runs the CLI in its own
   process in `<data>/editor/compile/`, shows its stage lines, replays the route once more, makes a job `<name> (compiled)`
   (watch it, optimize it like any run) and copies its `/loadtas` line. `src/plan.js` is the headless runner (JSON lines):
@@ -713,27 +683,6 @@ ways in.
   the floor 4 rows below, where the jump's 63.42 px leaves the box 0.6 px over the door's top edge: a false near of both
   relaxations (the centre-tile models), which the CEGAR's 3 x 3 walls at the executor's closest tile never refute. Notes:
   `src/out/n5/lanes/c6_lane3_b2.md`.
-  BLOCK 3 (C6 push 3 lane 3): **THE DEATH STEP'S FLAG** (B7's executor.js wpData `dieField`, OPT-IN `EEAT_WP_DIEFIELD=1`)
-  A/B on the 8 death-step levels (Spring Rose, Ice Cream Expedition, First Person Maze, Frolic, Don't Stop Jumping, One
-  Minute Descent, Katwalk, Trail Blazer; box 5, 300 s, W3, 2 runs an arm side by side): the death steps succeed 32 of 55
-  with it vs 11 of 49 without, but compiled 0 vs 1 of 16 level runs (Trail Blazer 3,040 in 1 of 2 off runs) and the
-  progress no better (Spring Rose -1 twice, Ice Cream 11 -> 7 once): NOT a default. **THE ANCHOR DUMP** (strategy.js,
-  OPT-IN `EEAT_ANCHOR_DUMP=<file | dir>`: every anchor's arrivals as input strings at the compile's end, `<dir>/<level>.anchors.jsonl`)
-  and `tools/cmp/nearkrt.js` (the executor's reach from a compile's own anchor at given rungs, then a scan: layers or
-  `--greedy=W` best-first by the px distance to the target, a hit a real leg) + `tools/cmp/nearlist.js` (a log's near
-  misses). THE NEAR LEVELS' EXACT REASONS: **DECOY TROPHIES**: the trophy waypoint is the union of the trophy tiles, so the
-  plans and the goal field go to the nearest: Ice Cream Expedition has 6 (one SEALED at (5,177): planks / emerald / solid
-  around it and one-way platforms 154 at rotation 0 above, passable only moving left; three in a box under coin doors;
-  the routes take (95,339): S99's route ends there) and its NEAR is 2 tiles from the sealed one; DEEPER has 2 ((25,91)
-  in a cell whose floor is live portals, (42,91) open) and its NEAR is at the portal (25,93); both walk-mode levels, so
-  no reach field drops them: the next step is the trophy as ranked COMPONENTS with a per-component CEGAR fact (a
-  component failed at rung >= 2 within 2 tiles, or sealed by a box-exact entry test, leaves that anchor class's trophy
-  set). BOX-EXACT POCKETS / PUSHES: Two's coins above the spawn enter only at py 3040.0 exactly (a ceiling bonk; a
-  best-first engine search from the start reaches the next tile at tick 48, never the coin), Beaches in Space's coin at
-  the end of 3 right arrows needs an entry speed against the push (the best-first search from the anchor: 1.5 M states,
-  3 tiles short at (62,133)), Daybreak's switch 44 only through the shut door of switch 45. Of the chief's NEAR runs' last
-  plans 6 of 8 were relax-only (est >= 1,000,000). The executor's `fail.closest.masks` do not pass the reported closest
-  tile (replayed, 100-200 tiles off): its relay starts begin elsewhere (not chased). Notes: `src/out/n5/lanes/c6_lane3_b3.md`.
 - **Fields in chains** (C6 push 3 lane 2, STUCK-FIELD; `src/out/n5/lanes/c6_lane2_b1.md`): THE KNOWN-ROUTE TEST of 16
   STUCK-FIELD levels' stuck waypoints (tools/cmp/krt.js, box 5): 5 of 13 are not on the known route at all (the plan's
   off-route targets), 4 of the 8 on it are found from the route's previous-trigger state (the compile's anchor there holds
@@ -826,30 +775,6 @@ ways in.
   some field levels (Need for Steed 409 of 774 worker-s, 280 s of it failing at rungs 2-3; Stone Ruin 676 of 894, 402 s),
   but crumbs also succeed at rung 3 (Need for Steed 1, Stone Ruin 3, Flight Path 1); the A/B (box 5, 300 s, those 3 levels, R 2, one run an arm side by side): compiled 0 = 0, progress Need for Steed 3 vs 2, Stone Ruin 10 = 10 (ok steps 13 vs 9), Flight Path 5 vs 7 (6 crumb plans in either arm: the spread): no gain shown. THE PORTFOLIO on the 21
   STUCK-FIELD levels (300 s, W3, one run an arm side by side, box 5 at load 130-140): compiled 2 vs 1 of 21 (Snow Jumping 4,454 run ticks only with it, 1.21 of the best known; Endless Space 2,143 vs 2,493, 1.20 of the best known; both by the backward meet arm, `pfBy_bw`), the unrouted levels' progress better 1 (The Memory Game 10 vs 8), worse 4 (Ring Of Chaos 13 vs 22: 127 portfolio calls took 253 worker-s for 2 legs, 21 anchors vs 40; EXCrew Trolled Minis 24 vs 26, The 7 Depths of Hell 2 vs 4, Forgotten Veil b7be 10 vs 12), the same 14 (+-1); peak RSS mean 2.9 vs 2.8 GB; every .eetas replayed. One run an arm: not a default.
-- **STUCK-FIELD, block 3: every stuck step by the known route, the bypass, First Person Maze** (C6 push 3 lane 1;
-  `src/out/n5/lanes/c6_lane1_b3.md`). THE KNOWN-ROUTE TEST OF EVERY STUCK STEP (the chief's block-2 full compile, the labels
-  failing after each level's last ok step, top 4 by worker time; the 21 levels with a known route, the truth set's fastest
-  complete route; `tools/cmp/krt.js` rungs 1-2 with the compiler's defaults applied, from the route's previous trigger and
-  300 / 120 ticks before): **81 steps: OFF-ROUTE 31** (the known route never enters the target: crumb plans 9, the FIRST
-  STEP OF A WHOLE TROPHY PLAN 15 (Need for Steed's crown, The 7 Depths of Hell's / Ice Slide Ride's / Octorage's coins of a
-  coin-count door, Fall of Zeal's key groups), partial "most gain" plans 6), **LONG 23** (found only from 120-300 route
-  ticks before: Need for Steed's whole-level trophy leg 3,728, Ice Slide Ride's trophy 2,598, Wine Quest I's 1,443-2,723,
-  Machu Picchu's 568-1,981), **ORDER 21** (found at rung 1-2 from the route's previous-trigger state: Treasure Trove Cove's
-  coins 2-114 ticks after the route's blue coin lines, Good Egg's, Weird Perfection's), FINDER 4, FIELD 2. THE BYPASS
-  (`EEAT_PLAN_BYPASS=R`, planner.js `bypassPlan`, OPT-IN, off = byte for byte: search()'s `ban` undefined): once the best
-  plan's first trigger has failed R rungs from the anchor's class, the plan search again with every plan's failed first
-  trigger BANNED at every depth (not only at the root as the k plans' `exclude`), a trophy plan along est walks (g below
-  the PENALTY) in front; test/planplanner.js P-BYPASS (a door by the key, the way around a loop; 55/55). THE A/B (box 5,
-  300 s, W3, one run an arm side by side, the 8 levels with a whole trophy plan's off-route first step): without the
-  PENALTY guard most bypass plans were relaxation-only (the alternatives to the stuck coins of a coin-count door have no
-  est walk) and it HURT (Buuwuu's route lost, The 7 Depths of Hell 4 -> 2 triggers); with it 2 bypass plans in 7 levels,
-  compiled 1 = 1 (Buuwuu 7,146 vs 7,785), triggers 56 vs 59: NO GAIN SHOWN (on Need for Steed the plan search's own CEGAR had
-  put the trophy plan first before the crown failed 2 rungs). FIRST PERSON MAZE: its last leg is not the wall (the trophy
-  from the route's state after switch 34 (21,17) at rung 2, 635 vs 486 ticks); from the route's own states the planner
-  plans the column of switches at x = 118 (the off-route switches the compile stalls on) where the route takes x = 116, and
-  after the first column pass (gain 34) only partial "most gain" plans: the route takes the 31-switch column AGAIN to toggle
-  it back OFF (gain 34 -> 3) before the trophy, which the partial rule (the fewest landmarks, then the most gain) never
-  proposes.
 - **The whole level as one leg, and the ONE-LEG walls** (C6 push 3 lane 4; `src/out/n5/lanes/c6_lane4_b2.md`): strategy.js
   `wholeLevel` (OPT-IN `EEAT_BW_LEVEL=1`: the lab's backward solver on the whole level in a child process next to the
   moves, `src/plan/lab/bwlevel_child.js`; with a gated trophy the plan's triggers as its legs, `EEAT_BW_LEGS`) now behind
@@ -866,34 +791,6 @@ ways in.
   the side-arrow-priced RCH3 field reads 2,515 tiles, took ~290 of 300 s; the switch leg it needs first is found from the
   route's states at rung 3; `EEAT_PHYS_PRICE=1` ranks the switch plans first: 300 s, box 6, one run: switch 0 taken at tick 8,419 (gain 1; the chief's run 0), no route (switch 1 left at 300 tiles); `EEAT_WALL_PRICE=1` the same, 8,497); Tutorial 4's 1.55-2x is crumbs (4
   blue coins the known route never takes).
-- **The run-up relay and the side-arrow price** (C6 push 3 lane 4 block 3; `src/out/n5/lanes/c6_lane4_b3.md`). THE RUN-UP
-  RELAY (executor.js `runupRelay`, OPT-IN `EEAT_RUNUP=1`, off = the executor byte for byte): a skeleton sub-level set that
-  failed twice is tried once more (once a level a call) through the far end of a RUN (a row's maximal stretch of tiles the
-  ball moves along: open tiles over a floor, or dots 4 / 414; 16+ tiles `EEAT_RUNUP_MIN`, within 8 rows `EEAT_RUNUP_RY` of
-  the stuck arrival and over its column; the end farther from the goal by the sub-leg's own field, 8+ tiles away
-  `EEAT_RUNUP_DMIN`; the longest 2 `EEAT_RUNUP_K`, 0.6 of what is left `EEAT_RUNUP_SHARE`; `EEAT_RUNUP_GAP=g`: a run goes on
-  over gaps of up to g open tiles): a region leg to its 3 end tiles, then the stuck set from those arrivals; waypoints only.
-  Sentinel Ravines' first wall IS a run-up (the known route: up the arrow column to (90,108), 29 tiles LEFT, into the
-  45-tile dot row 102 at its left end, right along it to 6.4 px/tick, the dot column (106, 99-102) at speed): from the
-  route's t 200 to the 878 set (block 2: failed with every finder knob) the relay at level 900 then 888 found, closest 909.2
-  -> 890.2; from the start to the trophy 909.2 -> 867.6 (45 s legtrace); its next wall (98-103, 81) is a second run-up
-  (left to (84,85), then a bouncing run right at 6-7.5 px/tick over (104-115, 82-83)) that the gap runs (g 3) do not take
-  (871.6). In the compile (box 6, 300 s, W3, side by side, one tree): 6 ONE-LEG levels (Sentinel, Hold Jump, MegaMan Dash,
-  Revenge of Syssba, Ice O Slide, OCTOS) compiled 0 = 0, the same gain on all 6, the closest nearer on Ice O Slide (54.8 vs
-  127.2 tiles), the rest within a few tiles; Sentinel twice more no route either way (base 811.2 at (153,72) and 772.8:
-  the S99 stack now passes both walls without it; the relay arm 2,516.6 at (99,124), its 2 relays ok at 60 / 64 s, then
-  lost in a side-arrow region, and 772.8); the relays fired on Hold Jump (0 of 2 ok), Revenge of Syssba (1 of 23), MegaMan
-  (0 of 2), Sentinel (1-2 ok); Don't Stop Jumping's switch 1 leg from the route's state after switch 0: 317.6 -> 300.2, no
-  leg. The shared gate with it ON (gate20, 60 s, par 2, vs gate_c6b2.json): exit 0, 15 vs 14, worse 0, better 8, 15 / 15
-  replayed. NO GAIN SHOWN in a compile: opt-in. THE SIDE-ARROW PRICE (planner.js `EEAT_PHYS_PRICE=sa`, OPT-IN; unset / =1 as before, byte for byte: the physics
-  price only for an edge whose RCH3 cost holds reach.js's side-arrow price, 2,500 tiles): Don't Stop Jumping's 64-tick
-  trophy plan goes last (300 s, box 6, 2 runs an arm side by side: gain 0 / 0 -> 2 / 2, purple switch 0 at 199 s), Trick Or
-  Treat slower 2 of 2 (2,974 / 2,993 -> 3,372 / 4,041: its trophy ways hold the price's known misprice), Late christmas
-  5,366 / 5,617 vs 5,553 / 5,519, Hold Jump 0 = 0; the shared gate with it ON (60 s, par 3, vs gate_c6b2.json) exit 1, 14 vs
-  14, better 9, worse 2 (Level 1 Overworld progress 45 -> 37, NC Naos lost): again side by side off / on Naos 153 = 153,
-  Overworld 47 / 44 (the 60-s flips). Past switch 0 DSJ's walls are LONG legs, not the order: from the god route's own
-  state right after switch 0 the 1,398-tick leg to switch 1 fails at rung 3 (found from 718 ticks out), the 2,484-tick leg
-  to switch 2 from after switch 1 fails too.
 - **The stretch solver in its own process** (n5-s99-budget, 2026-09-30; `EEAT_STRETCH=1`, OPT-IN, off = the compile byte for
   byte; `src/plan/lab/stretch_child.js`, strategy.js `st*`; `test/s99stretch.js`): the executor's rung ladder (1.5 / 5 / 15 /
   45 s windows) restarts every solver of a stretch at every rung, and the lab's backward solver (`src/plan/lab/backward.js`)
@@ -958,48 +855,7 @@ ways in.
   route replayed; the stretch solver -20% (Terminal 6 vs 37: its child's whole-level request ran 270 s on the trophy while
   the executor made 63 steps vs 135); the far trophy on the 14 levels where it acted 253 vs 242 triggers (better 5 / worse
   4), and on the 4 where it never acted the same code gave The Tunnels 65 vs 40 and Vignettes no route vs 12,928: one run
-  a level spreads +-40%, no gain shown: both stay opt-in. THE FAR WALK (C6 lane 2 block 3; `EEAT_FAR_WALK=<walk ticks>`,
-  OPT-IN, strategy.js `walkOf` / `farWalk`: the far trophy's cap for every waypoint kind but deaths, by the step's WALK =
-  its est, or for an est at or past the planner's 1e6 PENALTY the rest / 3 (the relaxation's own 3x price); the cap rung
-  `EEAT_FAR_WALK_RUNG`, default 1; the step event's `est` with it). Why the walk and not the est: the far-trophy arm's
-  4,021 step events (the 18 RATE levels, 300 s): the "1,000,000+ cut" ests are NOT whole levels (144 of those steps
-  succeeded, 33 at the 45-s rung: the rest past the penalty is a real walk), and by the walk no plain step of est >= 3,000
-  succeeded at any rung (0 of ~470) and 1 of 230 penalty steps with a rest >= 10,000. The counterfactual (`cf.js`, lane 2
-  block 3): capped at rung 0 past walk 5,000 the failed worker time falls 10.0% with 0 successes lost (pre-S99 data); on
-  the S99 stack's own est events (EEAT_FAR_TROPHY=1e9 = the est logged, no cap) 13.4% with 1 lost (a Perilous Endeavor
-  coin the portfolio found at rung 3 in 8.2 s), past 10,000 3.7% with 0 lost (the whole 20-level S99 run: 7.9% / 1 lost,
-  3.6% / 0 lost). Not A/B'd in a compile yet. THE S99 STACK ON THE RATE CLASS (lane 2 block 3: n5-plan 8ade568's defaults
-  vs `EEAT_S99_DEFAULTS=0`, the 20 RATE test levels, 300 s, W3, 2 runs an arm, all 4 side by side on box 5): triggers 291 /
-  283 vs 304 / 235 (574 vs 539, +6.5%), compiled 1 / 1 vs 0 / 0 (Santa's Workshop 2,195 / 2,239, best known 2,104): NO
-  progress loss side by side (the chief's -12% / -7% were across runs and loads); per level better on EX Crew Ice 48 / 40
-  vs 38 / 27, EX Crew RR 11 / 13 vs 5 / 4, Egg Quest II hard 26 / 28 vs 21 / 13, Starlight 48 / 42 vs 44 / 24, the
-  consistent LOSS Terminal 6 / 6 vs 19 / 23 (its executor 70 steps vs 115). The stretch child's SHORT request (the
-  planner's 1-step trophy plan from the start, `EEAT_ST_SHORT_F` 0.9 of the budget) ran 262-270 s and solved 0 on every
-  RATE level where it ran (13 of 20; the child then got 1-2 stuck stretches); on S99's own full run (box 5's 122 levels)
-  72 short requests, 16 solved, the full-plan solves at 1-66 s but Just One More Time (244 s): `EEAT_ST_SHORT_F=0.3` is
-  the next A/B. THE SAME WAYPOINT FROM SEVERAL ANCHORS (item 3, counterfactual only): a cap of the 45-s rung once an edge
-  failed it from K other anchors frees 10.9% (K 1) / 3.1% (K 2) of the failed time on the chief's 122-level f300 but
-  loses 28 / 7 of its 147 rung-3 successes (here 11 of 71 and 8 of 85 rung-3 successes came after another anchor's
-  rung-3 failure): no cap is free; a shared session (the backward solver's target-side memo, `EEAT_BW_MEMO` 2, per
-  executor worker, no affinity of a waypoint to a worker) is the form left.
-- **THE WIDE LOOPS** (C6 lane 2 block 3; polish.js, the LOOPS stage after the budget; `EEAT_LOOP_WIDE=0`: off, the stage
-  as before byte for byte): once the loop passes at the constants (a partner within 12 px at |dvx| + |dvy| <= 1.5, 3 a
-  tick; `EEAT_LOOP_R` / `_V` / `_K` tune them) end with time left, the same passes again with wider partners (24 px / 4
-  px/tick / 6, 48 / 8 / 8, 96 / 16 / 12): a revisit at another speed is still a cut only by the exact (or coin-blind)
-  rejoin of the route's own later inputs, replayed and judged as before, and each rung starts from the last one's route
-  with the time it left, so the stage never ends slower than it did. Measured (box 5, the stage alone with the 300-s
-  compile's 10-s clock, on all 50 routes of S99's full compile, base = `EEAT_LOOP_WIDE=0`, every route replayed from the
-  level file): 202,321 -> 197,801 run ticks (-2.2%), better 17 / worse 0 / same 33: Tutorial 2 4,792 -> 3,792 (2 of its
-  3 crumb coins dropped: ratio to the best known 1.63 -> 1.29), The Witch's House 9,138 -> 8,096 (1.25 -> 1.11), EX
-  Crew Ice 12,916 -> 12,465, Buuwuu's Stronghold -439, Snow Jumping -426, On And On -318, Tutorial 4 -237, Christmas Town
-  4,307 -> 4,146 (0.68 -> 0.65 of the best known), Summer Bee -133; a 30-s clock gave no more on the 8 levels that used
-  the 10 s. EX CREW ICE (the lane's item 4; `tools/cmp/versus.js` against the god sweep's 5,145-tick route): main's
-  route (12,916, 48 coins) and the god route (15 coins) share the top-left coins and the bottom corridor; the whole gap
-  is ONE stretch: from the coin (36,21) the god route runs east along the top to the red key (170,16) and drops 2,477 px
-  to (178,171) (855 ticks), ours goes through the middle's coins to the green / blue keys (158,117), waits 386 ticks
-  standing for them to expire (their gates) and climbs back up (6,679 ticks); its route came at 298.7 s of 300, so the
-  perfect pass had 0.15 s (0 nodes): the planner's own plan from the start is the trophy (est 3,588), the executor fails
-  that long leg, the crumbs (coins no gate reads) relay it round the level.
+  a level spreads +-40%, no gain shown: both stay opt-in.
 - **Checks**: unit tests `test/plantypes.js`, `planmodel.js`, `planplanner.js`, `planbounds.js`, `planprims.js`,
   `planexec.js --only=unit,fail`, `planstrategy.js`, `plancompile.js` (the CLI and the Compile API with the mock parts
   `test/planmock.js`), `plantruth.js`, `msolve.js --quick`, `kin.js --quick`, `mathsep.js`, `joins.js`, `precision.js`. The truth checkers on
@@ -1232,109 +1088,3 @@ ways in.
   gate with the default (60 s): exit 0, compiled 15 vs the baseline's 11, worse 1 (First Person Maze, the base's own).
   Tests that require src/plan/strategy.js directly read the environment (test/planstrategy.js's mock T-STALL fails with
   `EEAT_BW_LEVEL=1`: the child solves the real toy file).
-- **Bad EE Level 9's mini walls: the deep rung and the warm rung** (B7 lane b9, cycle 2, 2026-09-30, branch n5-b7-b9;
-  strategy.js, both OPT-IN, off = the compile byte for byte): `EEAT_RUNG_DEEP=<ms>` = one more rung of that many ms after
-  the 45-s one (the facts block an (edge, node class) after 5 failures instead of 4; the executor runs it at its top tier,
-  level 3, with the longer window; the relay start goes on from rung 3's closest); `EEAT_RUNG_WARM=1` = an edge that failed
-  rung r by its BUDGET from one node class starts at rung r from the next (never onto a triple already run in its epoch;
-  cleared at a deepening, as the facts are; a find at a lower rung lowers it). WHY: the 54-switch chain stops at minis whose
-  leg needs one long window. Mini 5 (switch 5 (227,264), a ladder maze between spike columns) from its own entrance
-  (tools/cmp/legab.js, box 7 at load 150-190, 6 knob arms x 3 reps: n5-plan's defaults, without the portfolio / the cover /
-  the field memo + corridor fields, with none, + EEAT_Q_CELL): 18 / 18 found, ALL at rung 3 (34-45 s, skel+leg /
-  skel+portfolio, 585-866 ticks), 0 at rungs 1-2 (closest 35.6 / 30.8 tiles in every rep): no knob matters, the WINDOW
-  does; in the compile the 45-s rung is the edge: switch 5's rung-3 steps over 9 runs of 900 s found it 3 of 61 (cycle 1's
-  c4X 0 of 23), its rung-0-2 steps ~0 of 200 (each new node class climbs rungs 0-2 again: 1.5 + 5 + 15 s spent before its
-  one 45-s window). MEASURED (box 7, 900 s, W3, cycle 1's best config FX_CELL + TRANSPLANT + FX_FIELD=0 + FX_STATE=0, one
-  run an arm): with `EEAT_RUNG_DEEP=135000` the 135-s steps on switch 5 found it **5 of 7** (c6D1 2 / 3, c6D2 2 / 3, +WARM
-  c7W2 1 / 1; at 298-427 s), where the same runs' 45-s steps found it 0 of 17; the deep rung took the next walls too: mini 7
-  (5,140) (a blue-spike course, closest (15,114) 39 tiles: 0 of ~50 steps at rungs 0-3, 2 of 7 at rung 4, at 856 / 859 s),
-  mini 13 (225,119) (closest (218,137) 20.8 since cycle 1: 1 of 2 at rung 4, 863 s), switch 10 2 of 2; the two runs'
-  rung-4 steps 9 of 18 found (mini 12 (73,99) 0 of 1); every run's rung-4 steps 17 of 33. CHAIN IDS (of 54, held by one
-  anchor) at 900 s, this cycle side by side (load 160-190): the config's base 4 / 6 (c5C, c9X1: mini 5 never passed; c9X1's
-  switch-5 steps 109, 0 found, 1,560 worker-s), + DEEP **11 / 10** (c6D1 1-11: wave 3 entered; c6D2 1-10), + DEEP + WARM 9 / 6;
-  n5-plan's defaults 11 (c5A: mini 5 passed at rung 3, 1 of 4; walls mini 7 and team 2 (59,194)), + DEEP 10, + DEEP + WARM 6
-  (cycle 1's base samples of the config 17 / 16 / 6 at load ~100-150). So the deep rung passes the wall where the config
-  stalls, and is a tie on the defaults; THE WARM RUNG IS NEGATIVE: it bumps every new class to the 45-s rung and those
-  classes, once failed there, wait behind the planner's lower-rung edges (nearPlans' rung order), so the 135-s rung came
-  late or never (c10DW: 28 rung-3 switch steps, no rung 4). SEEN ON THE WAY (not fixed): with
-  that config one run's main thread planned 3.6-11 s before every step from 56 s on (every plan 'budget: the most gain',
-  856 of 900 s planning; median 0.3 s in the 6 other runs of the config: c5C, 4 ids) and a rung-2 step of it held a worker
-  305 s on its 15-s budget (exec.reach 840 k sims: waiting, not searching); the warm rung's first version repeated a
-  bumped triple (79 transplant steps at rung 1 with no news: c7W1) until the guard above. The landmark rejoin of cycle 1
-  (`EEAT_PLAN_REJOIN=1`, the same branch) found no gain (15-44 hits a run, all on hub checkpoints and solved minis).
-- **Bad EE Level 9, cycle 3: the place rung, and the start is the wall** (B7 lane b9, 2026-10-01, branch n5-b7-b9 = cycle 2
-  + origin/n5-plan e08ad21; strategy.js, both OPT-IN, off = the compile byte for byte; test/planstrategy.js 27/0 with them
-  on and off). THE WALL, again purple switch 5 (227,264) (mini 5's ladder maze): the current compiler at 900 s (box 7, W3,
-  load ~150 beside the scoreboard's full compile, one run an arm, side by side) 6 chain ids (c11A: 1-4, 41, 101; switch 5
-  66 steps, 0 found, 1,038 worker-s), + `EEAT_RUNG_DEEP=135000` 5 (c11D: 1-5; switch 5 0 of 49 at rungs 0-3, 3 of 10 at
-  the 135-s rung, the finds at 91 / 119 / 124 s of their windows). EVERY LINEAGE ENTERS THE MINI IN THE SAME PHYSICAL
-  STATE (c11D a10 and c6D1 a21, other switch sets: px 4198.65, vx -1.37, standing; the door state and the goal field the
-  same, 48.2 tiles), and from it the leg is not found in a 45-s window: tools/cmp/legab.js (rung 3, `--defaults=1`: the
-  compiler's knobs) 0 / 3, and 0 / 1 each from it + one tick of jump, right, left, right + jump, left + jump, 0 / 2 with
-  `EEAT_FX_FIELD=0 EEAT_FX_STATE=0`, 0 / 2 with `EEAT_Q_CELL=1`, every one stuck at (250,255) 30.8 tiles; from cycle 2's
-  start (the entrance reached directly, jumping, 1.3 px right) 3 / 3 at 42.6 s (skel+portfolio, 564 ticks: down the
-  ladder at x 260, then UP the ladder at x 252 between its spike columns to (252,250) and out left, the x 244 ladder, the
-  pocket); that start one tick earlier (standing) 0 / 3. So the finders' 45-s window passes this leg only from a lucky
-  start, and identical arrivals make every new class's try the same failing search. THE PLACE RUNG (`EEAT_RUNG_PLACE=1`):
-  the rung ladder also kept per (edge, the anchor's first arrival tile): a step of an edge whose (edge, place) failed rung
-  r by the budget starts at rung r + 1 at least (the lowest rung its own (edge, class) has not run this epoch; none: the
-  anchor leaves the edge for the epoch); a find lowers the floor; cleared at a deepening. With the deep rung (c12P, the
-  same box and time, one run): **10 ids at 900 s (1-10: waves 1 and 2 complete)**, switch 5 at 424 s (a step bumped
-  r0 -> r3 found it; switch 5 28 steps vs 59-66), mini 7 (5,140) 3 of 3 at the 135-s rung (25 steps), the next wall
-  wave 3's switch 13 (225,119) (closest 15 tiles at rung 3); bumped steps 48, 33 found, 962 worker-s. THE START JITTER
-  (`EEAT_START_JITTER=1`: after a budget failure from a place the next try starts from the first arrival + k ticks of a
-  held input) gained nothing in the leg tests above (every one-tick jitter stuck at the same (250,255)), but IN THE COMPILE
-  (deep + place + jitter, c13J, round 2 of the same box, one run): **13 ids at 900 s (1-13: wave 3 entered, switches 11,
-  12, 13)**, 154 jittered steps 50 found: switch 5 at 162 s (a jittered rung-3 step, 45 s), mini 7 2 finds (a bumped
-  r1 -> r3 jittered step in 42 s, a rung-4 one in 124 s), switch 13 (225,119) (cycle 1's and 2's wall) at 891 s by a
-  jittered rung-3 step in 17 s; deep + place + `EEAT_PLAN_TRANSPLANT=1` (c13T) 10 ids (1-6, 8, 9, 41, 101; switch 5 at
-  618 s; 17 transplant hits of 201, every one a hub checkpoint leg: no mini leg reused); deep + place again (c14P2, a
-  replicate) **13 ids (1-12, 101)**, switch 5 at 157 s (a bumped r0 -> r3 step, 40 s), the walls then wave 3's switch 13
-  (225,119) (closest (218,137) 20.8, cycle 1's) and 15 (277,202). One run an arm on a loaded box (the same code's spread
-  was 4-17 ids in cycles 1-2): the place rung's arms 10 / 13 / 10 / 13 vs 5-6 without it, side by side; no gain shown on
-  any other level (not run
-  there); not merged (no shared gate). NEXT: the minis' legs are ladder exits between spike columns (the found route's
-  x 252 and x 244 climbs: the goal field falls along it, 48.2 -> 33.2 -> 34 -> 31.2 -> 23.6 -> 12.6, so (250,255) is no
-  false near, the finders stall on the way); a dedicated long solve of an (edge, place) that failed twice (the stretch
-  child's 40 / 80 s windows failed switch 5 from 3 anchors) and these knobs on the gate levels.
-- **Bad EE Level 9, cycle 4: the mini legs re-solved per lineage, THE FUNNEL** (B7 lane b9, 2026-10-01, branch n5-b7-b9 =
-  cycle 3 + origin/n5-plan 04ecf95; strategy.js `funnel`, `fnLib`, OPT-IN `EEAT_PLAN_FUNNEL=1` (which turns the landmark
-  rejoin `EEAT_PLAN_REJOIN` on), off = the compile byte for byte; test/planstrategy.js 27/0 with it + the cycle-3 knobs and
-  with every knob off, box 7). WHY: each lineage searched the same mini again (c13J: switch 5 found 3 times, at 162 / 300 /
-  425 s, 91-130 s each at the 135-s rung; mini 7 twice). The lineages enter a mini through its one arch portal but at other
-  fall speeds (c13J switch 5's entry states py 3905.90 / vy 3.70 vs py 3907.16 / vy 5.03: the straight replay of one
-  lineage's mini tail from the other's entry fails both ways), and the landmark rejoin of that tail from the other's entry
-  state hits in 7-8 ticks (the landing; both ways, 1 ms: `src/out/b9c4/funnel2.js`). The rejoin serves only starts at or
-  near the kept leg's start; THE FUNNEL: every kept leg also keeps its last teleports (from its start's last `RJ_BACK` ticks
-  on, the leg's own trajectory from each exit with its physical keys), and a step of its edge that no replay or rejoin
-  served first runs a short executor leg (`EEAT_FUNNEL_MS` 5 s, level 1) from its starts more than `EEAT_FUNNEL_NEAR` 3
-  tiles from every exit to the exit tiles, then the landmark rejoin from each arrival; a place whose funnel found nothing
-  waits for the edge's next kept leg; a funnel that ran and found nothing gives the step's executor a fresh full window.
-  MEASURED (box 7, 900 s, W3, load ~165 beside the scoreboard's full compile, one run an arm, two rounds side by side;
-  K = `EEAT_RUNG_DEEP=135000 EEAT_RUNG_PLACE=1 EEAT_START_JITTER=1`, chain ids of 54 held by one anchor): round 1 the
-  current compiler (knobs off) 5 (1-4, 101; switch 5 57 steps, 0 found, 901 worker-s), K 5 (1-4, 101), K + `EEAT_PLAN_REJOIN=1`
-  **9** (1-6, 9, 10, 101; the rejoin served mini 3's switch at 344 s); round 2 K 5 (1-5), K + FUNNEL **10** (1-6, 8-10, 101)
-  and **11** (1-6, 8-10, 41, 101; 14 triggers); the rejoin served mini switches 4 times over the reuse arms (switch 3, switch
-  5 twice in 15 / 149 ms right after the first find at 584 s, switch 4); the funnel itself ran 12 times, all on hub legs
-  (checkpoints, blue keys, team 2), 5 rejoined, ~58 worker-s in all: no mini step reached it (their starts were near the
-  exits or served by the rejoin first). K alone at 1,800 s (one run): **14 ids (1-14: waves 1-2 complete, wave 3's 11-14;
-  15 triggers)**, ids 10 by 900 s; the walls then switch 12 (73,99) (35 steps, 3 found), mini 7 (5,140) (38 steps, 1,418
-  worker-s, 3 found, all at the 135-s rung) and wave 3's switch 15 (277,202) (0 of 16). The reuse arms 9 / 10 / 11 vs K
-  alone 5 / 5 this cycle (cycle 3's K 13, and the long run's 10 at 900 s): within the same code's spread, NO GAIN SHOWN by
-  the funnel itself; not merged (no shared gate). Seen: the special mini 41's blue coin (75,254) took 561-700 worker-s in 3
-  of 6 runs (closest (81,255) 6.4 tiles; the plans "switch 41 > blue coin > purple reset 41 > switch 41").
-- **THE ENDGAME and THE AIRBORNE ARRIVAL** (C6 push 3 lane 5 block 3; `src/out/n5/lanes/c6_lane5_b3.md`). THE ENDGAME
-  (strategy.js after JOINS, its own clock; OPT-IN `--endgame=<s>` / `EEAT_ENDGAME_S`, unset / 0 = the compile byte for byte;
-  `EEAT_ENDGAME_K` the ladder's largest K, 64; `report.endgame`): the optimizer's exact endgame ladder (`src/endgame.js`
-  `ladder`: every input sequence from the route's own state K = 8, 16, .. 64 ticks before its finish, stateHash merge, the
-  admissible trophy bound's cut; the first finish the fastest from that state, an exhausted search a proof that none is
-  faster from there), kept only when the engine replays it faster with no more deaths and no lower chance. Offline on the
-  c6 b2 full compile's routes (box 6, 150 s a level, replayed from the level files): My level fef0 60 -> **59 (= the best
-  known)**, celeste x2 239 -> 238, INVASION 4,090 -> 4,085, The Blank Page 2,023 -> 2,018; Ruins, My level 730c, Switch
-  Labyrinth, the precision puzzle: no faster finish within the route's last 19-33 ticks (proven from the route's own state;
-  not a whole-route proof). THE AIRBORNE ARRIVAL (precision.js, OPT-IN `EEAT_PREC_AIR=1`, off = the stage byte for byte):
-  the precision pair's best known (111) rests 0.36 px from the window, jumps, steers in the air and is at x == 5720.0 at the
-  tick its fall passes the floor's level; the air pass = from rest the jump, a lateral pattern after a delay (from rest an
-  idle tick moves nothing), x == X at the engine's landing tick (`airTimeOf`), the braked rests first: its landings are
-  real (the exact local search finishes 19 ticks on), but from the attempts' rests 167 vs the ground pass's 153: no gain
-  yet (the rest must come early: the known's at tick 77).
