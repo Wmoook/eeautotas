@@ -1196,7 +1196,14 @@ ways in.
   bounds.at starts from it): celeste x2 h0 **87** again, the other 6 small levels unchanged (their deaths respawn at the
   spawn), 0 violations on the 44 known routes, test/wholepar.js 54/0. A task log written under other tiers is not resumed
   (its tasks are those tiers' function). **celeste 31c0 and cd73: C 95 CLOSED in 56.5 / 62.0 s (36.3 / 36.4 M nodes, 4
-  threads each, box 7 at load ~150): lb 95 on both** (cycle 4's C 95 with h0 74: not one task in 1,800 s on 3 threads).
+  threads each, box 7 at load ~150): lb 95 on both** (cycle 4's C 95 with h0 74: not one task in 1,800 s on 3 threads);
+  **C 96 CLOSED on both (330 M nodes, 562 / 568 s): celeste x2 lb 96** (9x a contour: C 97 ~3 B nodes, its task logs
+  `~/b7_proof_out/c5/cel31.tasks.jsonl` / `celcd.tasks.jsonl` written by code7 = these tiers, for the next resume). THE GAP
+  REPORT of b7 score cycle 4's 43 routes (n5-plan 04ecf95, 300 s; gaprep.js + the exhaustive lbs): PROVEN 1 (Switch
+  Labyrinth 27); routelb raises the compile's lb on 25 of 43; the gap median 88.5% of the route; the least celeste x2
+  59.8% (lb 96 / 239), NC Naos d3c6 62.7% (57 / 153), the precision puzzle 63.4%, Bygone Tutorial 65.7% (633 / 1,847),
+  Tutorial 1 66.1%, Ruins 70.5%, fef0 73.3% (16 / 60), Rosa dei Venti 74.1%, 730c 77.3% (22 / 97). fef0's C 17 resumed
+  on 8 threads: 813 of 1,875 tasks by 888 s (the rest are the pocket's big tasks), not closed.
   THE STARTING BOUND OF EVERY COMPILED ROUTE (the default tiers at the route's first input, the 43 routes of b7 score
   cycle 4): h0 / route Switch Labyrinth 11 / 27, celeste x2 87 / 239, NC Naos d3c6 and the precision puzzle 49 / 153,
   Rosa dei Venti 924 / 3,557, Tutorial 1 488 / 2,090, Bygone Tutorial 420 / 1,847, My level 730c 19 / 97, fef0 4 / 60,
