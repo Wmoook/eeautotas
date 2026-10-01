@@ -1557,6 +1557,49 @@ ways in.
   dump's blue-coin state as the compile's start), the climb out of chapter 2 at (104-110, 206-211) as crumbs (the true
   exit's checkpoints (109,206) -> (118,197) -> (91,196) -> the portal by (82,194)), then the hub's blue door #1; the field's
   XR / C chain (269-294, 155-220) to test with the engine. NOT MERGED (opt-in, no shared gate).
+- **WHY NOTHING LEAVES THE BLUE-COIN POCKET: the climb is a relaxation, the way out is down** (B7 lane cold, cycle 6,
+  2026-10-01; branch n5-b7-cold-c6 = n5-b7-cold-c5 + n5-plan 5214e62; `src/out/b7cold6/` in its worktree: chain.js (the
+  executor along a chain of trigger labels), pl2.js / pl3.js (the planner's plans from an anchor as failures are learned),
+  edges.js (the planner's root edges and the edges after one), walkpath.js (the est walk's way with portal hops), cpat.js,
+  pocket.js, fin.js (a run's triggers and its blue-coin anchors' steps); box 7 `~/b7_cold_r6`, `~/b7_cold_r6b`). THE
+  COMPILES REACH THE COIN, NOTHING LEAVES IT: the C3 stack + `EEAT_GATE_PENDING=1` (box 7, W3, load 130-160, 1,150-1,500 s):
+  E1-E4 the chapter-2 blue coin (98,207) at 218 / 226 / 534 / 217 s (cycles 4-5: 2 of 6), then chapter 1 (gain 4, 27-36
+  anchors), no route; every step from a blue-coin anchor (12-34 a run) a crumb up the chamber ((127,215), (120,206),
+  (117,206), (118,215), (109,206)), closest (106,209-210) 7-20 tiles or the coin itself; 1 ok of ~100 (the crumb (104,211),
+  inside the chamber). THE TWO WAYS. (a) RCH3's climb (`tools/cmp/fieldway.js` from the coin's anchor to the crumb (120,206),
+  35 tiles): the shaft down to (102,215), a jump R7 to (103,213), a jump on the crates (103-105,214) to (106,210) R1, A JUMP
+  AT (106,210) SUPPORTED BY THE CRATE (107,211) DIAGONALLY, (105,208) through the 2-wide gap (104-105,208) (the crates 48 at
+  (102-103,208), the blue coin gate (106,208) shut, the crates (107,207-208)), standing on the gate at (106,207), up to row
+  206 and east: to stand on (107,211) with its centre in column 106 the box must overlap column 107, and to pass row 208 it
+  must be clear of column 106: a 17-px shift in the first 16 px of rise, from a 1-tile support walled on its right; a floor
+  jump from row 213 tops out 0.58 px below row 208 (3,408 - 63.42 = 3,344.58 vs 3,344); the frame borders 1538 are air. The
+  relaxation (no sub-tile x, no horizontal speed) makes every goal field, the crumbs and PHYS_EST's forward pass go UP; the
+  executor never gets past row 209-210 there (11 compiles). (b) THE WAY OUT IS DOWN (a recorded search route, b9cw's
+  o1_walls_s1: the coin at tick 8,212, the hub at 17,414): the one-ways 1052 (108,215) / (110,216) -> the chamber
+  (108-110, 217-222) -> the bottom corridor -> the left room's checkpoints -> the checkpoint (59,239), whose RESPAWN (py
+  3,824) stands on the left column's crates (57-58,240) that a floor jump misses by 1.6 px -> purple switch 2 (73,220) opens
+  the doors (76, 221-223) -> the up boost (77,220) up the 1-wide shaft x 77 -> the blue coin door (84,194) -> the portal
+  (82,193) -> the hub's top (250,2); the executor along it from cycle 4's coin anchor (chain.js, GATE_PENDING, rungs 1-3 a
+  leg): (101,229) 338 ticks r2, (83,224) 164 r1, (78,228) 60 r1, (66,237) 95 r1, (82,236) 108 r1, (59,239) 202 r1, then
+  (58,235) 'proof' (deathless: the goal field -1 before the death, 4.4-6.4 tiles after). THE PLANNER NEVER TARGETS IT:
+  (1) **THE PENDING GATES IN THE PLAN** (`EEAT_PLAN_PENDING=1`, model.js stateOf, OPT-IN, off = byte for byte; planmodel
+  31/31, plantypes 11/0, planplanner 60/60 on and off): the planner's est / now / walk modes read the gates by S.show = the
+  engine's SHOWN counts, 0 on the pickup tick, so the est walk from the coin's anchor went back UP the shaft through its gate
+  (98,205) to the portal by (84,194) and the hub top (250,2) in 20 steps: no CEGAR wall on the climb could move a plan (8
+  learned there: still 'crumb -> coin (132,251) / blue coin (280,82) -> trophy'); with the knob S.show = types.js
+  pendingGates' next-tick copy (now exported): the hub top 80 steps; the lb keeps its min with the anchor's base. (2) THE
+  PHYSICS CUT on the real exit: purple switch 2's root edge carries PHYS_EST's PHYS_CUT_TILES price 8,000 (the forward pass
+  has no respawn: the crates are out of reach) while the climb's coin (132,251) reads 492; after the switch the trophy 348.
+  **`EEAT_PHYS_RESPAWN=1`** (planner.js physFwdOf, OPT-IN inside PHYS_EST, off = byte for byte): a checkpoint the forward
+  pass reaches (a move or more from the anchor) seeds the respawn states there (F 0, R 0) `EEAT_PHYS_RESP_D` 10 moves later,
+  on a level that can kill: switch 2 8,000 -> 564. **`EEAT_PHYS_WALLS=1`** (OPT-IN inside PHYS_EST): the est walls outside the
+  anchor's 5 x 5 solid in the pass's level copy (pl3.js: 5 walls in the chamber turn 'coin (132,251) -> trophy' (808) into
+  'die -> trophy' (8,000)); in a compile CUT_PROG leaves the climb's budget failures wall-less (closest < half the est way),
+  so it does not act there. planplanner 59/60 with `EEAT_PHYS_EST=1` with or without them (PHYS_EST's own known check). (3)
+  `EEAT_CRUMB_WALLS=1` (00f7a1d, planner.js, OPT-IN, physics crumbs only): the closest approach of every failed step of the
+  anchor's node class walls its 3 x 3 (5 x 5 where it stalled twice) in the crumb field's level copy; a walled field that
+  cuts the anchor off is not used: F1 / F2 (E1 / E2 + it, 1,250 s) the coin at 570 / 630 s, then the same climb crumbs:
+  NO GAIN (the walled field has no way: the down exit needs the switch and the respawn). RESULTS_C6
 - **Bad EE Level 9's mini walls: the deep rung and the warm rung** (B7 lane b9, cycle 2, 2026-09-30, branch n5-b7-b9;
   strategy.js, both OPT-IN, off = the compile byte for byte): `EEAT_RUNG_DEEP=<ms>` = one more rung of that many ms after
   the 45-s one (the facts block an (edge, node class) after 5 failures instead of 4; the executor runs it at its top tier,
