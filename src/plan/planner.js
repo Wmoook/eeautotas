@@ -1010,7 +1010,7 @@ function createPlanner(model, facts, o = {}) {
 		return S.feats[f] !== e.S2.feats[f];
 	}
 	// ---------------------------------------------------------------- the plan search
-	function search(a, po, exclude) {
+	function search(a, po, exclude, ban) {
 		const t0 = Date.now();
 		const ms = po.ms, maxExpand = po.maxExpand;
 		pairUntil = t0 + ms;
@@ -1066,6 +1066,7 @@ function createPlanner(model, facts, o = {}) {
 			}
 			for (const e of es) {
 				if (isRoot && exclude.has(e.edge)) continue;
+				if (ban && ban.has(e.edge)) continue;
 				if (UNTOGGLE && untoggles(e, n.S, n.e && n.e.X ? n.e.X : isRoot ? a.viaX : null)) { ST.untoggled = (ST.untoggled || 0) + 1; continue; }
 				const g2 = n.g + e.est, gl2 = n.gl + e.lb;
 				if (!e.X) {
@@ -1394,6 +1395,10 @@ function createPlanner(model, facts, o = {}) {
 			let n = node; while (n.parent && n.parent.parent) n = n.parent;
 			if (n.e) exclude.add(n.e.edge);
 		}
+		// (THE BYPASS, EEAT_PLAN_BYPASS=R: the trophy without the triggers whose legs failed R rungs from this class, first)
+		if (BYPASS > 0 && facts && plans.length) {
+			try { const bp = bypassPlan(a, plans, so, deadline); if (bp) plans.unshift(bp); } catch (e) { if (process.env.EEAT_BYPASS_DBG === '1') console.error('bypassPlan', e.stack); }
+		}
 		// (THE TIMER: a whole plan in the anchor's timed killer's time first; none = a late anchor, the strategy's pick puts
 		// it after the anchors in time)
 		let late = false, timerCost;
@@ -1547,6 +1552,46 @@ function createPlanner(model, facts, o = {}) {
 	// its plan goes after the plan search's own (ordering only: still tried when a worker is free). Why: Need for Steed's
 	// crumbs took 409 of its 774 worker-s at 300 s (280 s failing at rungs 2-3), Stone Ruin's 676 of 894 (402 s)
 	const CRUMB_DEMOTE = process.env.EEAT_CRUMB_DEMOTE !== undefined ? Math.max(0, +process.env.EEAT_CRUMB_DEMOTE | 0) : 0;
+	// THE BYPASS (C6 push 3 block 3 lane 1; EEAT_PLAN_BYPASS=R, 0 / unset = off: the plans as before, byte for byte): the
+	// stuck crumb's rule for every target. A plan's first trigger whose leg has failed R rungs from the anchor's class may
+	// be one the trophy does not need: the plan search's cheapest est walk goes by it (a crown gate's crown, the nearest
+	// coins of a coin-count door, a checkpoint), while a real route goes another way. Once the best plan's first trigger
+	// has failed R rungs, the plan search runs once more with every such trigger BANNED at every depth (the plans' first
+	// triggers failed R rungs, then the bypass's own first trigger if it failed R rungs too, at most BYPASS_MAX of them);
+	// a TROPHY plan found without them (the incumbent counts: a whole plan by the est walk) goes in front of the plan
+	// search's plans. None found: those triggers are needed (as far as the abstract model can tell) and the plans stay as
+	// they were. Ordering only: no edge dropped from the plans, the lb and the proofs untouched. Why (the known-route test
+	// of the 77 stuck steps of the 21 STUCK-FIELD levels with a known route, src/out/n5/lanes/c6_lane1_b3.md): 30 are
+	// targets the known route never enters, 14 of them the FIRST step of a whole trophy plan (Need for Steed's crown
+	// (327,39), The 7 Depths of Hell's coins (76,279) / (78,228) / (64,176) and switch 3, Ice Slide Ride's coins and
+	// checkpoint, Octorage's switch 69 and coins, Fall of Zeal's key groups, UT Eternal Galaxy's checkpoint (166,107), The
+	// Memory Game's coin (179,188)), climbing rung after rung (45-s windows) in every plan call.
+	const BYPASS = process.env.EEAT_PLAN_BYPASS !== undefined ? Math.max(0, +process.env.EEAT_PLAN_BYPASS | 0) : 0;
+	const BYPASS_MAX = +process.env.EEAT_BYPASS_MAX || 4;
+	function bypassPlan(a, plans, so, deadline) {
+		const cls = a.S.key + '|' + a.cls;
+		const firstOf = (p) => (p && p.steps ? p.steps.find((s) => !String(s.edge).startsWith('death:') && !String(s.edge).startsWith('region:key')) || p.steps[0] : null);
+		const failed = (s) => !!s && /^trig:/.test(String(s.edge)) && facts.rungOf(s.edge, cls) >= BYPASS;
+		const s0 = firstOf(plans[0]);
+		if (!failed(s0)) return null;
+		const ban = new Set();
+		for (const p of plans) { const s = firstOf(p); if (failed(s)) ban.add(String(s.edge)); }
+		const end = Math.max(Date.now() + 50, deadline + so.ms / 2);
+		for (let it = 0; it < BYPASS_MAX && Date.now() < end; it++) {
+			const res = search(a, Object.assign({}, so, { ms: Math.max(50, (end - Date.now()) / Math.max(1, BYPASS_MAX - it)) }), new Set(), ban);
+			const node = res.found;
+			if (!node) { ST.bypassNone = (ST.bypassNone || 0) + 1; return null; }
+			const steps = stepsOf(a, node);
+			if (!steps.length) return null;
+			const f = firstOf({ steps });
+			// (the bypass's own first trigger failed R rungs too: banned as well, the search again)
+			if (failed(f) && !ban.has(String(f.edge)) && ban.size < BYPASS_MAX) { ban.add(String(f.edge)); continue; }
+			if (failed(f)) return null;
+			ST.bypassPlans = (ST.bypassPlans || 0) + 1;
+			return { id: `p${ST.plans}.b`, steps, cost: Math.round(node.g), lb: node.gl, partial: false, why: `bypass: the trophy without ${ban.size} trigger(s) that failed rung ${BYPASS - 1}+`, bypass: true };
+		}
+		return null;
+	}
 	function crumbOnWay(a, s0, cands) {
 		const tgt = s0 && s0.waypoint && s0.waypoint.tiles;
 		if (!tgt || !tgt.length) return cands;
