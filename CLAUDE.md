@@ -519,7 +519,6 @@ ways in.
   (real engine states x the trigger state) with the planner's steps and the bounds as its order, in a thread of its own next
   to the executor from the compile's start: its routes are routes (verified), the executor's anchors and routes go into it
   (a route = its bound: its refinement ladder then looks only for faster ones), its arrivals reach the executor only when the
-  executor stalls or has nothing left (THE GATE). Measured (box 6): with the arrivals given at once it HURT (slower routes on 10 of 15 levels, 2 levels lost); with the gate (300 s, 40 levels) 25 = 25 compiled (lost INFINITE and TPs The Horror, late base routes; gained Endless Space and K Underground), the first route 18% sooner (geo-mean), run ticks 0.7% fewer, one thread and ~1.7 GB more a compile: OPT-IN (it does not yet lose nothing). C6 push 3 lane 6: THE ONE SHOT IN A PROCESS OF ITS OWN (`EEAT_OS_PROC`, the default with the knob; 0 = the worker thread): osworker.js forked, every thread of it at nice 19 (its V8 GC threads too: in the thread mode they were the compile process's shared pool), `--max-old-space-size` = `EEAT_OS_HEAP_MB` (1,024: the live heap where its A* stops growing) + 512; the worker-thread mode gets its own nice and the same limit. THE FAR LEGS (`EEAT_OS_BW=1`, opt-in): a waypoint past `LEG_TILES` got no leg, so on the far-step levels the A* was a flood of 10-tick held-mask segments (0 legs, 99.9% 'fan' nodes in 300 s on Tutorial 2 / 4, Egg Quest II, Gravity's Rainbow); now the lab's backward solver from the first node of its abstract state, then from nodes 4 tiles nearer, its clock 1 -> 16 s (`EEAT_OS_BW_MSMAX`), at most half the one shot's time. The spread (box 6, 300 s, one run a level): the base 7 / 12 test levels, the thread 8 / 12 (w0), and over d300 + w0 on the late-route levels (TPs, INFINITE, K Underground, Endless Space) 7 of 10 either way: the one shot's losses are the late routes' spread, not shown to be its cost (a contention test, `src/out/l6/contend.js`: 3 executor stand-in threads 1.91-2.18 M ticks/s alone, 2.22 beside the A* thread, 2.42 beside the A* process). Still OPT-IN: ~1-1.6 GB and a core more a compile (a full compile at par 32 on box 5 would need ~40 GB more).
 - **The corridor's fields pass** (n5-s99-fields, 2026-09-30; `src/plan/lab/corridor.js`, the executor's tier MC under
   `EEAT_CORRIDOR=1`; `EEAT_CORR_FIELDS=1` = the pass, OPT-IN, off = the tier byte for byte; each knob of the corridor off =
   the corridor before). WHY the corridor lost chains through fields: in a field a direct leg (msolve.leg with the field tier
@@ -592,6 +591,29 @@ ways in.
   Christmas Eve 4 vs 5, Helix Reborn 3 vs 5; DEEPER 11 vs 8; Into Magma Panic 0, Tower Domination 2, Forgotten Helix 4 the
   same), all within the C5 / c6 runs' own range (SMB3 6-13,
   Evolution 0-9, Christmas Eve 2-5, Helix Reborn 0-5): the late rule may demote cursed anchors the base went on from.
+  BLOCK 2 (C6 push 3 lane 3): THE TIMER AT THE START (`EEAT_PLAN_TIMER_START`, on inside the knob, =0 off): an anchor
+  with no timer running whose est walk (no CEGAR walls) reaches nothing the plan wants without a timed killer's starter
+  tile gets the deadline plan of the killer it will carry (the doorway starter's est arrival + its duration, eesim.js
+  effectDuration): One Minute Descent's start plan "team 6 -> trophy in the coming timer (6,064 ticks)"; the executor
+  then fails the team-6 leg (a 330-row fall) at rungs 0-2 and the coin plans take over: no route either way (box 5,
+  300 s, 2 runs an arm: gain 9 / 10 vs 10 / 10). THE A/B as a default candidate (box 5, the first 24 of the 36 timed
+  levels, 300 s, W3, one run an arm side by side): routed 3 = 3, all 3 SLOWER with the knob (10,139 vs 14,742 run
+  ticks), unrouted progress less on 12 / more on 2 (VVVVVV 16 -> 7, Fizio1 5 -> 1, Christmas Eve 5 -> 2): NEGATIVE, not
+  a default; its 'timer' plans appeared on One Minute Descent alone, so elsewhere it acts by the late rule and the
+  deadline search's clock: `EEAT_PLAN_TIMER_LATE=0` (inside the knob) drops the late rule, for its own measure.
+  **The boost's way** (model.js, OPT-IN `EEAT_EST_BOOSTDIR=1`, off = byte for byte; test/planboost.js): the est / estNW
+  walks take no step out of a boost tile against its push (the engine sets 16 px/tick along it every tick the centre is
+  in it), a diagonal being its two orthogonal legs through its side tiles; the lb, the proofs and the regions untouched
+  (their memo keys apart). Daybreak's NEAR switch 44 ('1 tile' inside the right boost (294,218)) is out of the est walk
+  from that side; the compile (300 s, one pair) the same gain 17: the planner's relax-only fallback still picks the step
+  (its lb walk keeps the boost's wrong way, as a relaxation must). **The known-route test of TPs The Horror** (krt.js):
+  its trophy and coin (48,31) are found from the known route's previous-trigger states (rungs 1 / 2), its third stuck
+  waypoint coin (1,3) is off the route: from the start the plan is "coin (1,3) -> trophy", cost 160, lb 39 (the known
+  route 4,598): the est walk AND the RCH3 field go up to the top-left portal (1,1) (a 1-tile hole over a pocket whose
+  floor is a 22-coin door) and from its pair (15,86) down a dot tunnel to the trophy; the pocket is entered only from
+  the floor 4 rows below, where the jump's 63.42 px leaves the box 0.6 px over the door's top edge: a false near of both
+  relaxations (the centre-tile models), which the CEGAR's 3 x 3 walls at the executor's closest tile never refute. Notes:
+  `src/out/n5/lanes/c6_lane3_b2.md`.
 - **Fields in chains** (C6 push 3 lane 2, STUCK-FIELD; `src/out/n5/lanes/c6_lane2_b1.md`): THE KNOWN-ROUTE TEST of 16
   STUCK-FIELD levels' stuck waypoints (tools/cmp/krt.js, box 5): 5 of 13 are not on the known route at all (the plan's
   off-route targets), 4 of the 8 on it are found from the route's previous-trigger state (the compile's anchor there holds
@@ -706,6 +728,24 @@ ways in.
   Frostbitten, Vignettes; main's f300: 0 of them); the v4 chain with every node imported at once 7 (+First Person Maze
   1,179, -Vignettes), its first routes later on 6 of 6 both-compiled (Christmas Town 278 vs 106 s: the imports took the
   executor's picks, as the one shot's arrivals did); THE SIDE-BY-SIDE A/B (box 5, one tree, 8 of them, 300 s, W3, one run an arm; every .eetas read back): compiled base 7 / frontier imports at once 7 / THE GATE 6 (Christmas Town lost once: the base's route at 142 s, neither the executor nor the chain that run; First Person Maze none of the three); THE CHAIN'S OWN ROUTES on 4 of 8 in both chain arms, far faster: Late christmas 5,086 / 6,137 vs the base's 8,851 (at 297.6 s; box 6's base run none; best known 7,487), Frostbitten 7,655 / 6,242 vs 8,212 (8,417), Vignettes 8,156 / 8,005 vs 11,303 (10,056), Christmas Town 4,210 (at once) vs 4,504 (6,340); on the 6 levels compiled by the base and the gate 41,703 -> 34,783 run ticks (-16.6%; at once 37,227); the imports at once slowed the executor's own routes (Tutorial 3 4,406 vs 2,197, Animaly 5,970 vs 5,022; with the gate 2,410 / 5,115). OPT-IN, NOT a default: the compile count is a tie within one run's spread (Christmas Town, Late christmas and Vignettes flip between runs of one code), and the chain's legs need 20-40 s of one piece on a loaded box. NEXT: its legs through the portfolio stretch solver (n5-s99-portfolio) and the compile's stuck anchors as chain roots (`o.starts`), more runs an arm.
+- **STUCK-FIELD, block 2: the walk-off nodes, the stuck crumb, the portfolio on the field levels** (C6 push 3 lane 1;
+  `src/out/n5/lanes/c6_lane1_b2.md`). THE WALK-OFF NODES (`EEAT_CHAIN_LIFT=1` / `o.lift`, msolve.js chain, OPT-IN, off =
+  byte for byte): the chain's event fan-out (the 18 held masks to their first landing / class change / teleport) never
+  stopped where a hold walks off a ledge's edge, so "walk off left, then steer right back under the ledge" was no pair of
+  holds and the plain fan-out targets plain standable tiles only; with the knob a standing node's hold also stops at its
+  walk-off (no press; the hold goes on to its landing as before). UT Eternal Galaxy's stuck coin (116,107) is exactly that:
+  the known route walks off the ledge (113,104) left at 1974, steers right, stops on the corner of (114,110) with its centre
+  in the dot row at 2000 (vx = vy = 0, class Z) and jumps from the last tick of the overlap: with the knob the chain's
+  nodes are the walk-off and that corner state exactly, and msolve.chain from the route's state 59 ticks before the coin
+  finds 58 ticks in 15 s (none without; none either way from 79 / 121 ticks before). NO GAIN SHOWN beyond it: through the
+  executor (tools/cmp/krt.js, lane 2's 8 route-entered stuck legs, rungs 1-2, side by side) a tie on all 8 (its chain tier
+  gets <= 800 ms a call; again a tie on all 8 with its share at 0.5 and up to 4 s a call: `EEAT_MATH_CHAIN=0.5 EEAT_MATH_CHAIN_MS=4000`), the chains lab's 55 known-route legs (the chain arm alone, 10 s) 11 vs 12 (Terminal's
+  green key lost: more children a node, fewer expansions). THE STUCK CRUMB (`EEAT_CRUMB_DEMOTE=R`, planner.js crumbPlan,
+  OPT-IN, off = byte for byte): a crumb plan whose leg has failed R rungs from the anchor's class goes after the plan
+  search's own plans (a crumb is never a plan's need); the base's 300-s runs spend most of their worker time on crumbs on
+  some field levels (Need for Steed 409 of 774 worker-s, 280 s of it failing at rungs 2-3; Stone Ruin 676 of 894, 402 s),
+  but crumbs also succeed at rung 3 (Need for Steed 1, Stone Ruin 3, Flight Path 1); the A/B (box 5, 300 s, those 3 levels, R 2, one run an arm side by side): compiled 0 = 0, progress Need for Steed 3 vs 2, Stone Ruin 10 = 10 (ok steps 13 vs 9), Flight Path 5 vs 7 (6 crumb plans in either arm: the spread): no gain shown. THE PORTFOLIO on the 21
+  STUCK-FIELD levels (300 s, W3, one run an arm side by side, box 5 at load 130-140): compiled 2 vs 1 of 21 (Snow Jumping 4,454 run ticks only with it, 1.21 of the best known; Endless Space 2,143 vs 2,493, 1.20 of the best known; both by the backward meet arm, `pfBy_bw`), the unrouted levels' progress better 1 (The Memory Game 10 vs 8), worse 4 (Ring Of Chaos 13 vs 22: 127 portfolio calls took 253 worker-s for 2 legs, 21 anchors vs 40; EXCrew Trolled Minis 24 vs 26, The 7 Depths of Hell 2 vs 4, Forgotten Veil b7be 10 vs 12), the same 14 (+-1); peak RSS mean 2.9 vs 2.8 GB; every .eetas replayed. One run an arm: not a default.
 - **Checks**: unit tests `test/plantypes.js`, `planmodel.js`, `planplanner.js`, `planbounds.js`, `planprims.js`,
   `planexec.js --only=unit,fail`, `planstrategy.js`, `plancompile.js` (the CLI and the Compile API with the mock parts
   `test/planmock.js`), `plantruth.js`, `msolve.js --quick`, `kin.js --quick`, `mathsep.js`. The truth checkers on the known routes
