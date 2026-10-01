@@ -775,6 +775,30 @@ ways in.
   some field levels (Need for Steed 409 of 774 worker-s, 280 s of it failing at rungs 2-3; Stone Ruin 676 of 894, 402 s),
   but crumbs also succeed at rung 3 (Need for Steed 1, Stone Ruin 3, Flight Path 1); the A/B (box 5, 300 s, those 3 levels, R 2, one run an arm side by side): compiled 0 = 0, progress Need for Steed 3 vs 2, Stone Ruin 10 = 10 (ok steps 13 vs 9), Flight Path 5 vs 7 (6 crumb plans in either arm: the spread): no gain shown. THE PORTFOLIO on the 21
   STUCK-FIELD levels (300 s, W3, one run an arm side by side, box 5 at load 130-140): compiled 2 vs 1 of 21 (Snow Jumping 4,454 run ticks only with it, 1.21 of the best known; Endless Space 2,143 vs 2,493, 1.20 of the best known; both by the backward meet arm, `pfBy_bw`), the unrouted levels' progress better 1 (The Memory Game 10 vs 8), worse 4 (Ring Of Chaos 13 vs 22: 127 portfolio calls took 253 worker-s for 2 legs, 21 anchors vs 40; EXCrew Trolled Minis 24 vs 26, The 7 Depths of Hell 2 vs 4, Forgotten Veil b7be 10 vs 12), the same 14 (+-1); peak RSS mean 2.9 vs 2.8 GB; every .eetas replayed. One run an arm: not a default.
+- **STUCK-FIELD, block 3: every stuck step by the known route, the bypass, First Person Maze** (C6 push 3 lane 1;
+  `src/out/n5/lanes/c6_lane1_b3.md`). THE KNOWN-ROUTE TEST OF EVERY STUCK STEP (the chief's block-2 full compile, the labels
+  failing after each level's last ok step, top 4 by worker time; the 21 levels with a known route, the truth set's fastest
+  complete route; `tools/cmp/krt.js` rungs 1-2 with the compiler's defaults applied, from the route's previous trigger and
+  300 / 120 ticks before): **81 steps: OFF-ROUTE 31** (the known route never enters the target: crumb plans 9, the FIRST
+  STEP OF A WHOLE TROPHY PLAN 15 (Need for Steed's crown, The 7 Depths of Hell's / Ice Slide Ride's / Octorage's coins of a
+  coin-count door, Fall of Zeal's key groups), partial "most gain" plans 6), **LONG 23** (found only from 120-300 route
+  ticks before: Need for Steed's whole-level trophy leg 3,728, Ice Slide Ride's trophy 2,598, Wine Quest I's 1,443-2,723,
+  Machu Picchu's 568-1,981), **ORDER 21** (found at rung 1-2 from the route's previous-trigger state: Treasure Trove Cove's
+  coins 2-114 ticks after the route's blue coin lines, Good Egg's, Weird Perfection's), FINDER 4, FIELD 2. THE BYPASS
+  (`EEAT_PLAN_BYPASS=R`, planner.js `bypassPlan`, OPT-IN, off = byte for byte: search()'s `ban` undefined): once the best
+  plan's first trigger has failed R rungs from the anchor's class, the plan search again with every plan's failed first
+  trigger BANNED at every depth (not only at the root as the k plans' `exclude`), a trophy plan along est walks (g below
+  the PENALTY) in front; test/planplanner.js P-BYPASS (a door by the key, the way around a loop; 55/55). THE A/B (box 5,
+  300 s, W3, one run an arm side by side, the 8 levels with a whole trophy plan's off-route first step): without the
+  PENALTY guard most bypass plans were relaxation-only (the alternatives to the stuck coins of a coin-count door have no
+  est walk) and it HURT (Buuwuu's route lost, The 7 Depths of Hell 4 -> 2 triggers); with it 2 bypass plans in 7 levels,
+  compiled 1 = 1 (Buuwuu 7,146 vs 7,785), triggers 56 vs 59: NO GAIN SHOWN (on Need for Steed the plan search's own CEGAR had
+  put the trophy plan first before the crown failed 2 rungs). FIRST PERSON MAZE: its last leg is not the wall (the trophy
+  from the route's state after switch 34 (21,17) at rung 2, 635 vs 486 ticks); from the route's own states the planner
+  plans the column of switches at x = 118 (the off-route switches the compile stalls on) where the route takes x = 116, and
+  after the first column pass (gain 34) only partial "most gain" plans: the route takes the 31-switch column AGAIN to toggle
+  it back OFF (gain 34 -> 3) before the trophy, which the partial rule (the fewest landmarks, then the most gain) never
+  proposes.
 - **The whole level as one leg, and the ONE-LEG walls** (C6 push 3 lane 4; `src/out/n5/lanes/c6_lane4_b2.md`): strategy.js
   `wholeLevel` (OPT-IN `EEAT_BW_LEVEL=1`: the lab's backward solver on the whole level in a child process next to the
   moves, `src/plan/lab/bwlevel_child.js`; with a gated trophy the plan's triggers as its legs, `EEAT_BW_LEGS`) now behind
