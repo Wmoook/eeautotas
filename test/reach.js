@@ -675,7 +675,7 @@ function sectionE() {
 	for (const { level } of levels) {
 		const tr = [];
 		for (let i = 0; i < level.fg.length; i++) if (level.fg[i] === 121) tr.push({ tile: i, cost: 0 });
-		const a = R.reachField(level), b = R.reachField(level, { goals: tr });
+		const a = R.reachField(level), b = R.reachField(level, { goals: tr, sideCap: 0 });
 		if (['costR', 'costF', 'costL', 'costC', 'costX'].every((k) => a[k].length === b[k].length && a[k].every((v, i) => v === b[k][i]))) same++;
 	}
 	check('the trophy tiles as goals give the default field', same === levels.length, `${same} of ${levels.length}`);
@@ -701,6 +701,38 @@ function sectionE() {
 	let refused = false;
 	try { R.writeReachFile(R.reachField(levels[0].level, { goals: [{ tile: 0, cost: 0 }] }), path.join(os.tmpdir(), `reach_goals_${process.pid}.bin`)); } catch (e) { refused = true; }
 	check('writeReachFile refuses a goals field (its cut-off states are no proof)', refused);
+}
+
+// ---------------------------------------------------------------- K the sideways-kept rise's ordering price
+function sectionK() {
+	section('K the sideways-kept rise (opts.sideCap / EEAT_SIDE_CAP, goal fields only): an ordering price, the -1 set kept');
+	const levels = randomLevels();
+	let sameCut = 0, mono = 0, selfOk = 0, acted = 0, phys = 0, offSame = 0;
+	for (const { level } of levels) {
+		const tr = [];
+		for (let i = 0; i < level.fg.length; i++) if (level.fg[i] === 121) tr.push({ tile: i, cost: 0 });
+		const a = R.reachField(level, { goals: tr, sideCap: 0 }), b = R.reachField(level, { goals: tr, sideCap: 2 });
+		const ks = ['costR', 'costF', 'costL', 'costC', 'costX'].filter((k) => a[k]);
+		let cutOk = true, monoOk = true;
+		for (const k of ks) for (let i = 0; i < a[k].length; i++) {
+			if ((a[k][i] === R.CUT) !== (b[k][i] === R.CUT)) cutOk = false;
+			if (a[k][i] !== R.CUT && b[k][i] < a[k][i]) monoOk = false;
+		}
+		if (cutOk) sameCut++;
+		if (monoOk) mono++;
+		if (b.sideCap) { phys++; if (b.sideCap.changed > 0) acted++; }
+		// the capped model alone passes the Bellman self-check (its fwd and inverse tables agree)
+		const c = R.reachField(level, { goals: tr, _sideCapQ: 2, check: true });
+		if (!c.mismatches) selfOk++;
+		// sideCap 0 = the field with no option, byte for byte
+		const d = R.reachField(level, { goals: tr });
+		if (process.env.EEAT_SIDE_CAP || ks.every((k) => d[k].every((v, i) => v === a[k][i]))) offSame++;
+	}
+	check('the -1 set the plain field\'s on every level', sameCut === levels.length, `${sameCut} of ${levels.length}`);
+	check('every finite cost at least the plain field\'s', mono === levels.length, `${mono} of ${levels.length}`);
+	check('the capped model\'s own Bellman self-check', selfOk === levels.length, `${selfOk} of ${levels.length}`);
+	check('sideCap 0 = no option, byte for byte', offSame === levels.length, `${offSame} of ${levels.length}`);
+	check('the price acts on the physics-mode levels', phys > 0 && acted > 0, `${acted} of ${phys} physics-mode levels changed`);
 }
 
 // ---------------------------------------------------------------- I coin doors that never open
@@ -1823,6 +1855,7 @@ function sectionM() {
 	if (want('S')) sectionS();
 	if (want('Q')) sectionQ();
 	if (want('X')) sectionX();
+	if (want('K')) sectionK();
 	if (want('M')) sectionM();
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);
