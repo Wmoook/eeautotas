@@ -37,7 +37,12 @@ const DIRS3 = [0, 2, 4];                              // - L R
 const DIRS9 = [0, 2, 4, 8, 16, 10, 12, 18, 20];       // - L R U D LU RU LD RD
 const NOV_SHARE = process.env.EEAT_PROFILE_NOV !== undefined ? +process.env.EEAT_PROFILE_NOV : 0.3;
 const CELL_DOM = process.env.EEAT_PROFILE_CELL !== '0';
-const GRAD = process.env.EEAT_PROFILE_GRAD === '1';   // the speed credit along the physics field's own descent (experiment)
+const GRAD = process.env.EEAT_PROFILE_GRAD === '1';
+// EEAT_PROFILE_FKEY=1 (n5-s99-fields, opt-in; off = the cut before): a state whose centre tile is a field (no default
+// gravity: arrows, dots, liquids, climbables, boosts) has its diversity cell by the vertical speed's bucket and the sub-tile
+// offset too, not the tile, the x speed and the sign of y alone (in an up / down arrow column or a dot field the x speed
+// tells the arrivals nothing apart: the field entry's offset and speed decide the ticks in the field)
+const FKEY = process.env.EEAT_PROFILE_FKEY === '1';   // the speed credit along the physics field's own descent (experiment)
 // the finish (the move solver from the front's best states): on (EEAT_PROFILE_FIN=0 off), every FIN_EVERY layers the FIN_K
 // best states within FIN_EST ticks of the goal by the time to go, a leg of at most FIN_TMAX ticks, FIN_MS of clock, the
 // coupled family's FIN_CT ticks, the field tier's FIN_FMS
@@ -360,7 +365,9 @@ function profilePass(L, starts, goal, o = {}) {
 				cells.add(ck);
 			}
 			const t = tileNow();
-			kids.push({ sn: sim.snapshot(), dm: m & 30, last: ev ? d : nd.last, gr: !!sim.on_ground, vs: Math.sign(sim.speed_y), vx: sim.speed_x, est: estOf(t), pref: nd.ref, mk: m, tile: t, h });
+			const kd = { sn: sim.snapshot(), dm: m & 30, last: ev ? d : nd.last, gr: !!sim.on_ground, vs: Math.sign(sim.speed_y), vx: sim.speed_x, est: estOf(t), pref: nd.ref, mk: m, tile: t, h };
+			if (FKEY && !dflt(sim.current_tile)) { kd.fk = ((Math.max(-4, Math.min(4, Math.round(sim.speed_y / 1.7))) + 4) * 4 + (((sim.px % 16) + 16) % 16 >> 2)) * 4 + (((sim.py % 16) + 16) % 16 >> 2); }
+			kids.push(kd);
 			return false;
 		};
 		for (let i = 0; i < cur.length; i++) {
@@ -394,7 +401,8 @@ function profilePass(L, starts, goal, o = {}) {
 			if (next.length >= wEst) break;
 			if (k.est >= 1e9) continue;
 			const vb = Math.max(-4, Math.min(4, Math.round(k.vx / 1.7))) + 4;
-			const key = ((k.tile * 9 + vb) * 2 + (k.gr ? 1 : 0)) * 3 + (k.vs + 1);
+			let key = ((k.tile * 9 + vb) * 2 + (k.gr ? 1 : 0)) * 3 + (k.vs + 1);
+			if (k.fk !== undefined) key = -1 - (key * 144 + k.fk);   // (EEAT_PROFILE_FKEY: a field cell of its own)
 			const c = cell.get(key) || 0;
 			if (c >= quota) continue;
 			cell.set(key, c + 1);

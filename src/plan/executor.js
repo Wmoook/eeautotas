@@ -276,6 +276,10 @@ const CORR_TMAX = +process.env.EEAT_CORR_TMAX > 0 ? +process.env.EEAT_CORR_TMAX 
 const CORR_REPLACE = process.env.EEAT_CORR_REPLACE === '1';
 const CORR_CLOSEST = process.env.EEAT_CORR_CLOSEST !== '0';
 const CORR_OPTS = (() => { try { return process.env.EEAT_CORR_OPTS ? JSON.parse(process.env.EEAT_CORR_OPTS) : {}; } catch (e) { return {}; } })();
+// EEAT_CORR_FIELDS=1 (n5-s99-fields; off = the corridor tier as before): the corridor's fields pass (lab/corridor.js o.goalFan,
+// o.directShare, o.restKey, o.refine: the finer field cells only where a search ran out): the 681 field chains of the moves
+// study 59.8-61.1% -> 80.3%+ side by side (tools/lab/corridor_chain.js)
+const CORR_FIELDS = process.env.EEAT_CORR_FIELDS === '1' ? { goalFan: true, directShare: 0.15, restKey: true, refine: true, more: 1 } : null;
 // NO RESTART PER RUNG (n5 lane 2): tier M2's chain search is RESUMED by a later call from the same start state to the same
 // target tiles and horizon (msolve.js chain o.resume: its open list, seen states and best chain kept per worker, the newest
 // 6): a stuck waypoint is retried from the same anchor's arrival at every rung and relay, and each 800-ms call re-expanded
@@ -1105,7 +1109,7 @@ function makeCore(L, co) {
 					let th = 0x811c9dc5;
 					for (const t of mTarget.tiles) { th = (th ^ t) >>> 0; th = Math.imul(th, 0x01000193); }
 					const resume = `${MSv.sim.stateHash()}|${Tmax}|${mTarget.tiles.length}|${th >>> 0}`;
-					try { rc = corridor().solve(s.snap, mTarget, Object.assign({ M: 3, Mu: 1, legT: 90, RX: 18, RD: 30, subStop: 2, plainStops: [8, 20], dom: 'dir', landMax: 0, legMode: 'lazy', lazyWide: true, lazyLegs: false }, CORR_OPTS, { ms: Math.max(10, cEnd - Date.now()), deadline: cEnd, Tmax, resume, first: true })); }
+					try { rc = corridor().solve(s.snap, mTarget, Object.assign({ M: 3, Mu: 1, legT: 90, RX: 18, RD: 30, subStop: 2, plainStops: [8, 20], dom: 'dir', landMax: 0, legMode: 'lazy', lazyWide: true, lazyLegs: false }, CORR_FIELDS, CORR_OPTS, { ms: Math.max(10, cEnd - Date.now()), deadline: cEnd, Tmax, resume, first: true })); }
 					catch (e) { rc = { ok: false, error: String(e && e.message || e) }; }
 					if (rc && rc.ok) mathCands(bi, rc.masks, { T: rc.T, proven: false, lb: 0 }, cands, 'math:corridor');
 					// (no chain: the corridor's most advanced state is the call's closest when it is nearer by the call's own goal

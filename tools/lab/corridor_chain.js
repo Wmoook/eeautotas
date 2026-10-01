@@ -16,6 +16,7 @@ const TS = require('../../src/plan/truthset.js');
 const T = require('../../src/plan/types.js');
 const MS = require('../../src/plan/msolve.js');
 const CR = require('../../src/plan/lab/corridor.js');
+const PR = require('../../src/plan/lab/profile.js');
 
 const argv = Object.fromEntries(process.argv.slice(2).map((a) => { const m = /^--([^=]+)(?:=(.*))?$/.exec(a); return m ? [m[1], m[2] === undefined ? '1' : m[2]] : [a, '1']; }));
 if (argv.agg) { aggregate(argv.agg); process.exit(0); }
@@ -38,6 +39,17 @@ if (argv.lazyLegs === '0') copt.lazyLegs = false;
 if (argv.wideStops) copt.wideStops = argv.wideStops;
 for (const k of ['lazyM', 'lazyRX', 'lazyRU']) if (argv[k] !== undefined) copt[k] = +argv[k];
 if (argv.fan === '0') copt.fan = false;
+// (--exec=1: the executor tier MC's own options, executor.js; the fields pass (n5-s99-fields): --goalFan=1
+// --directShare= --fieldKey=sub --fieldPx= --fieldV= --Kf=; --fields=1: only the chains with a field move (arrow, dot,
+// boost, climb, swim: metric (c)))
+if (argv.exec === '1') Object.assign(copt, { plainStops: [8, 20], dom: 'dir', landMax: 0, legMode: 'lazy', lazyWide: true, lazyLegs: false });
+if (argv.goalFan === '1') copt.goalFan = true;
+if (argv.restKey === '1') copt.restKey = true;
+if (argv.refine === '1') copt.refine = true;
+if (argv.bfs === '1') copt.bfs = true;
+for (const k of ['directShare', 'fieldPx', 'fieldV', 'Kf', 'more', 'wideLand']) if (argv[k] !== undefined) copt[k] = +argv[k];
+if (argv.fieldKey) copt.fieldKey = argv.fieldKey;
+const FIELD_LABELS = new Set(['arrow', 'dot', 'boost', 'climb', 'swim']);
 
 function loadMoves(dir) {
 	const byR = new Map();
@@ -92,6 +104,7 @@ function main() {
 		for (let i = 0; i + KCH - 1 < moves.length; i += EVERY) {
 			const a = moves[i], b = moves[i + KCH - 1];
 			if (a.c0 === 'D' || b.c1 === 'D' || moves.slice(i, i + KCH).some((m) => m.c0 === 'D' || m.c1 === 'D')) continue;
+			if (argv.fields === '1' && !moves.slice(i, i + KCH).some((m) => FIELD_LABELS.has(m.label))) continue;
 			const tele = b.endKind === 'portal';
 			const target = { tiles: [b.tile1], cls: b.c1, tele };
 			if (tele) target.via = portalVia(L, b.tile1);
@@ -102,7 +115,14 @@ function main() {
 				let res;
 				try {
 					if (arm === 'chain') res = S.chain(snaps.get(a.t0), target, { ms: MSB });
-					else if (arm === 'corr') res = X.solve(snaps.get(a.t0), target, Object.assign({}, copt, { ms: MSB, first: true, Tmax: Math.max(400, 4 * routeT) }));
+					else if (arm === 'prof') {
+						// (the speed profiles, src/plan/lab/profile.js profileLeg: the EEAT_PROFILE tier's solver; its goal the chain's
+						// target tile and class, the engine's own test)
+						const gt = S.goal(target), tt = new Set(target.tiles);
+						const q = PR.profileLeg(L, [{ snap: snaps.get(a.t0), tick: 0 }], { test: (s) => gt(s, s.px, s.py), tiles: target.tiles, fieldTiles: null, allowDeath: false }, { ms: MSB });
+						res = { ok: !!q.ok, masks: q.masks, T: q.ok ? q.masks.length : 0, expanded: q.layers || 0, why: q.why };
+						void tt;
+					} else if (arm === 'corr') res = X.solve(snaps.get(a.t0), target, Object.assign({}, copt, { ms: MSB, first: true, Tmax: Math.max(400, 4 * routeT) }));
 					else throw new Error('arm ' + arm);
 				} catch (e) { res = { ok: false, error: String(e && e.message || e) }; }
 				const ar = { ok: !!res.ok, T: res.T || 0, exp: res.expanded || 0, ms: Date.now() - t0, firstMs: res.firstMs || 0, error: res.error };

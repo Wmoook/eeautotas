@@ -27,11 +27,31 @@ const DEFAULTS = [
 	['EEAT_PLAN_ANY', '1'], ['EEAT_PLAN_UNTOGGLE', '1'],
 	['EEAT_FX_FIELD', '1'], ['EEAT_FX_STATE', '1'], ['EEAT_ICE_LOCAL', '1'], ['EEAT_PROT_LAYER', '1'],
 ];
-/** set the defaults the environment does not name (EEAT_COMPILER_DEFAULTS=0: none of them) */
+// THE STRETCH DEFAULTS (S99, 2026-09-30: "a level compiles only if EVERY stretch works"; CLAUDE.md section 11; each =0 off,
+// EEAT_S99_DEFAULTS=0 none of them, EEAT_COMPILER_DEFAULTS=0 none at all):
+//  - EEAT_PORTFOLIO=1 (n5-s99-portfolio: one call per stretch runs the backward meet, the speed profile, the leg finder, the
+//    corridor and msolve.chain in ONE continuous budget): the 1,123 real 4-move chains 88.4% in 5 s / 95.4% in 40 s where
+//    msolve.chain alone did 47.2%; the 55 known-route legs 13 -> 36-38; the executor's krt legs 91 -> 97; the 48-level
+//    compile 20 = 20 at 120 s with the 19 both-routed 11.2% faster (14 faster, 0 slower).
+//  - EEAT_CORR_FIELDS=1 (n5-s99-fields: the corridor's fields pass, also the portfolio's corridor arm): the corridor on the
+//    chains 73.7% -> 87.9% (fields 65.1 -> 85.2%), the portfolio 85.7 -> 87.2% at 5 s; with EEAT_CORRIDOR 13 vs 10, 13 = 13
+//    compiled of 25.
+//  - EEAT_STRETCH=1 (n5-s99-budget: one continuous backward clock a stretch in a child process at nice +10): five A/Bs
+//    pooled 145 vs 139 of 240 level runs (Stone Ruin 0 -> 3 / 5, Gravity's Rainbow 0 -> 3 / 5, The Blank Page 1 -> 5 / 5,
+//    INVASION 3 -> 5 / 5).
+//  - EEAT_BW_CHAIN=1 (n5-s99-gated: the gated levels as a chain of backward legs over trigger orders): 7 = 7 of the 20
+//    gated levels, its own routes on 4 of 8 far faster (Late christmas 5,086 vs 8,851, Vignettes 8,156 vs 11,303); with
+//    the stretch solver on, only on a GATED level (the stretch child takes the one-leg levels' whole-level solve).
+const S99_DEFAULTS = [
+	['EEAT_PORTFOLIO', '1'], ['EEAT_CORR_FIELDS', '1'], ['EEAT_STRETCH', '1'], ['EEAT_BW_CHAIN', '1'],
+];
+/** set the defaults the environment does not name (EEAT_COMPILER_DEFAULTS=0: none of them; EEAT_S99_DEFAULTS=0: not the
+ *  stretch defaults) */
 function apply() {
 	if (process.env.EEAT_COMPILER_DEFAULTS === '0') return [];
 	const set = [];
 	for (const [k, v] of DEFAULTS) if (process.env[k] === undefined) { process.env[k] = v; set.push(k); }
+	if (process.env.EEAT_S99_DEFAULTS !== '0') for (const [k, v] of S99_DEFAULTS) if (process.env[k] === undefined) { process.env[k] = v; set.push(k); }
 	return set;
 }
-module.exports = { DEFAULTS, apply };
+module.exports = { DEFAULTS, S99_DEFAULTS, apply };
