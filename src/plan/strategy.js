@@ -716,6 +716,11 @@ async function compile(L, opts = {}, emit = () => {}) {
 	let tickBound = Number.isFinite(+opts.depth) && +opts.depth > 0 ? +opts.depth : Infinity;
 	let extBound = Number.isFinite(+opts.bound) && +opts.bound > 0 ? +opts.bound : Infinity;
 	let best = null;   // {masks, ticks, runTicks, deaths, chance, legs, how}
+	// (THE HYBRID LEG's route (EEAT_HYBRID): the search's own route, PROVISIONAL: verified and printed at once (a 'result'
+	// event), but not the compiler's best: the compiler's machinery goes on as without it (the stretch / chain children,
+	// the relays, the anchors' picks: they read best), only the moves end at the end reserve as with a route; at the moves'
+	// end the faster of the two is the route the stages after them polish. Off: null, every (best || hyBest) = best)
+	let hyBest = null;
 	const runBound = () => Math.min(best ? best.runTicks : Infinity, extBound);
 	// (the anchor pick's gain: EEAT_CRUMB_RANK leaves the crumbs' part out (1: once a route is known, 2: always))
 	const pickGain = CRUMB_RANK === 3 ? (A) => (A.S && A.S.cgain > 0 && !A.crumbOnWay ? A.gain - A.S.cgain : A.gain)
@@ -1395,7 +1400,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	/** a step's budget: its rung's x 2^deepenings, capped by the time left (the polish's reserve kept once a route is known) */
 	const budgetOf = (rung) => {
 		const r = Math.max(0, Math.min(rungMs.length - 1, rung | 0));
-		const room = left() - (best ? endRes() : 0) - 100;
+		const room = left() - ((best || hyBest) ? endRes() : 0) - 100;
 		const ms = Math.max(50, Math.min(rungMs[r] * mult, room));
 		const deadline = Date.now() + ms;
 		// (fast: before the first route a found leg's tightening is capped by the time it took to find it: executor.js RATE_ON)
@@ -1535,7 +1540,20 @@ async function compile(L, opts = {}, emit = () => {}) {
 	// as a solver in a child process; its answers are verified here like any arrival (verified / routeOf)
 	const HY = process.env.EEAT_HYBRID === '1' && opts.file ? require('./hybrid.js').createHybrid({
 		L, file: path.resolve(String(opts.file)), T, E, RM, say, left: () => left(), hasRoute: () => !!best, stopped: () => stopped, depth: () => tickBound,
-		verified: (step, wp, res, starts) => verified(step, wp, res, starts), routeOf: (m, how, legId) => routeOf(m, how, legId),
+		verified: (step, wp, res, starts) => verified(step, wp, res, starts),
+		// (the search's route: provisional, hyBest above; the better of hyBest and best when faster than both)
+		routeOf: (m, how, legId) => {
+			const ev = C.evaluate(L, m);
+			if (!ev || ev.complete > tickBound) return ev ? { ev, better: false } : null;
+			const cur = [best, hyBest].filter(Boolean).reduce((x, y) => (!x || y.runTicks < x.runTicks ? y : x), null);
+			const better = !cur || ev.runTicks < cur.runTicks || (ev.runTicks === cur.runTicks && ev.complete < cur.ticks);
+			if (!better) return { ev, better: false };
+			hyBest = { masks: ev.ms, ticks: ev.complete, runTicks: ev.runTicks, deaths: ev.deaths, chance: ev.chance, legs: legId ? chainOf(legId) : [], how };
+			say({ ev: 'result', kind: 'finish', ticks: ev.complete, runTicks: ev.runTicks, deaths: ev.deaths, chance: ev.chance, how, provisional: true, lb: LB, gap: gapOf(ev.runTicks), inputs: T.strOf(ev.ms) });
+			if (out) { try { C.writeEetas(path.join(out, 'route.eetas'), ev.ms); } catch (e) { /* read-only */ } }
+			lastProgress = Date.now();
+			return { ev, better: true };
+		},
 		addArrival: (a, S, parent, why, step) => addArrival(a, S, parent, why, step), stateOf: (sim) => model.stateOf(sim), simOf: (a) => simOf(a),
 		labelOf, edgeKey,
 		// (a room the search entered: replayed from the level start (deaths in the anchor's own prefix are its route's: from),
@@ -1946,7 +1964,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 			// (a route known: the moves stop where the polish's reserve begins)
 			// (EEAT_PERFECT: a route too long for the prove stage gives its reserve to the moves / perfect / polish)
 			if (perfectOn && best && best.runTicks > PROVE_MAX_TICKS && proveReserve > 0) { proveReserve = 0; endReserve = polishReserve + perfectReserve; }
-			if (best && left() <= endRes() && !inflight.size) { end = 'time'; break; }
+			if ((best || hyBest) && left() <= endRes() && !inflight.size) { end = 'time'; break; }
 			if (anchors.size !== anchorsSeen || best !== bestSeen) { anchorsSeen = anchors.size; bestSeen = best; progressAt = Date.now(); }
 			if (stallEnd && Date.now() - progressAt > stallEnd) { end = 'stalled'; break; }
 			if (OS_OPEN && osw && !osOpen && !best && !osWantOpen) {
@@ -1958,7 +1976,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 			if (bwlWant && !bwlOpen && !best) bwlRelease(bwlWant);   // (the child's gate: the watchdog saw a stall with no route)
 			if (ST_ON) { stHarvest(); stSchedule(); }   // (the stretch solver: its arrivals, then its next stretch while it is idle)
 			if (HY) { HY.harvest(); HY.schedule(); }   // (THE HYBRID LEG: the search's answers, then its next leg while it is idle)
-			while (inflight.size < P && !(best && left() <= endRes())) {
+			while (inflight.size < P && !((best || hyBest) && left() <= endRes())) {
 				const job = exploreQ.length ? exploreQ.shift() : nextJob();
 				if (!job) break;
 				const ek = edgeKey(job.step);
@@ -1974,7 +1992,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 				// (every anchor exhausted: a global deepening; nothing new since the last one, or no deepening left: the
 				// fallbacks (a direct trophy step, then the frontier) while time is left; else the end)
 				if (exploreQ.length) continue;
-				if (left() < 250 || (best && left() <= endRes())) { end = 'time'; break; }
+				if (left() < 250 || ((best || hyBest) && left() <= endRes())) { end = 'time'; break; }
 				if (nothingSince >= 0 && nothingSince === steps) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } if (osw && await osHold()) continue; if (!best && bwcRelease('the executor has nothing left')) { nothingSince = -1; continue; } if (await bwlHold()) continue; if (ST_ON && await stHold()) continue; if (HY && await HY.hold()) { nothingSince = -1; continue; } if (PREC_ASYNC && await precHold()) continue; end = 'exhausted'; break; }
 				nothingSince = steps;
 				// (a deepening refused for the clock alone (its doubled first rung past the time left) is no exhaustion: the
@@ -2014,6 +2032,11 @@ async function compile(L, opts = {}, emit = () => {}) {
 		if (PREC_ASYNC) { precOver = true; if (precChild) { try { precChild.kill('SIGKILL'); } catch (e) { /* gone */ } } }
 	}
 	if (osw) osHarvest();   // (the one shot's thread: what arrived during the last turn)
+	// (THE HYBRID LEG: the search's provisional route when the compiler has none or a slower one)
+	if (hyBest && (!best || hyBest.runTicks < best.runTicks || (hyBest.runTicks === best.runTicks && hyBest.ticks < best.ticks))) {
+		say({ ev: 'hybrid', what: 'taken', runTicks: hyBest.runTicks, compiler: best ? best.runTicks : null, how: hyBest.how });
+		best = hyBest;
+	}
 	const legTools = (lg) => { const c = {}; for (const g of lg) c[g.tool || '?'] = (c[g.tool || '?'] || 0) + 1; return c; };
 	{
 		const lg = best ? best.legs : [];

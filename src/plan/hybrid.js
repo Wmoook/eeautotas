@@ -228,6 +228,8 @@ function createHybrid(ctx) {
 	/** an idle slot: the next candidate, before the first route, on a slice of the time left */
 	const schedule = () => {
 		if (child && busy && !busy.solved && !busy.halted && Date.now() > busy.slice) halt('the slice');
+		// (a trophy leg's search that has its route gives the slot to another failed leg)
+		if (child && busy && busy.trophy && busy.solved && !busy.halted && !ctx.hasRoute() && pick()) halt('another leg');
 		if (child || busy || ctx.stopped() || ctx.hasRoute()) { if (child && busy && ctx.hasRoute() && !(busy.trophy && busy.solved)) halt('a route'); return; }
 		const c = pick();
 		if (!c) return;
