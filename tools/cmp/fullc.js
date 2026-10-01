@@ -72,7 +72,9 @@ let waitTimer = null;
 function start() {
 	if (parfile) { try { const v = parseInt(fs.readFileSync(parfile, 'utf8'), 10); if (v > 0 && v !== par) { console.log(`par ${par} -> ${v} (${parfile})`); par = v; } } catch (e) { /* none */ } }
 	while (running < par && next < todo.length) {
-		if (minfree > 0 && running > 0 && memAvailGB() < minfree) { if (!waitTimer) waitTimer = setTimeout(() => { waitTimer = null; start(); }, 3000); return; }
+		// (with none of its own running it starts anyway (no deadlock), but never below the RAM guard's line plus 2 GB: a compile
+		// started there is killed at once and queued again, every 2 s (box 6, 03:30Z: 84 kills of the same 3 levels in 20 min))
+		if (minfree > 0 && memAvailGB() < (running > 0 ? minfree : (killfree > 0 ? killfree + 2 : 0))) { if (!waitTimer) waitTimer = setTimeout(() => { waitTimer = null; start(); }, 3000); return; }
 		const f = todo[next++], rel = path.relative(lvDir, f), id = rel.replace(/[\\/]/g, '__').replace(/\.eelvl$/, '');
 		running++;
 		const ts = Date.now();
@@ -90,8 +92,10 @@ function start() {
 			if (me.requeue) { running--; start(); return; }
 			fs.appendFileSync(path.join(out, 'index.jsonl'), JSON.stringify(Object.assign({ rel, id, code: c, sec: (Date.now() - ts) / 1000 }, rssOn ? { peakRssMB: Math.round(me.peak / 1024) } : {})) + '\n');
 			running--; done++;
-			if (done % 10 === 0 || done === todo.length) console.log(`${done}/${todo.length} ${((Date.now() - t0) / 1000).toFixed(0)} s`);
-			if (done === todo.length) { console.log('ALL DONE'); if (rssTimer) clearInterval(rssTimer); }
+			// (a compile the RAM guard killed is in todo twice: the total is todo.length - requeued)
+			const total = todo.length - requeued;
+			if (done % 10 === 0 || done === total) console.log(`${done}/${total} ${((Date.now() - t0) / 1000).toFixed(0)} s`);
+			if (done === total) { console.log('ALL DONE'); if (rssTimer) clearInterval(rssTimer); }
 			start();
 		});
 	}

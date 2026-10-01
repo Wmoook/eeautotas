@@ -68,6 +68,12 @@ const OS_THREAD = process.env.EEAT_OS_THREAD !== '0';
 // platform threads of the process with the executor's worker threads and the main thread. EEAT_OS_PROC=0: the worker
 // thread. The same messages either way: osProc() gives the child the Worker's face.)
 const OS_PROC = process.env.EEAT_OS_PROC !== '0';
+// (THE SHARED SESSION, lane 6 push 3 block 3; OPT-IN EEAT_OS_BW_ST=1 with EEAT_OS_BW=1 and the stretch solver (EEAT_STRETCH,
+// a compiler default): the one shot's far legs go to the compile's stretch child (one backward solver and its closed
+// closures' values a compile, the executor's stretches and the one shot's far legs in turn) instead of a second backward
+// solver of 2-3 GB in the one shot's own process; one far leg out at a time; its answer replayed there and again in the
+// one shot (an injected node, chased). Off: the far legs in the one shot's process as before)
+const OS_BW_ST = process.env.EEAT_OS_BW_ST === '1' && process.env.EEAT_OS_BW === '1';
 /** osworker.js as a child process with a Worker's face (on / once 'message' 'error' 'exit', postMessage, unref, terminate) */
 function osProc(file, data, heapMB) {
 	const cp = require('child_process'), EventEmitter = require('events');
@@ -110,6 +116,48 @@ const STALL_S = 60, STALL_MIN_S = 5, STALL_F = 1 / 6;
 const FAIL_TICKS = 200, UCB_C = 100;
 // (THE TIMER's anchor pick: planner.js EEAT_PLAN_TIMER=1)
 const TIMER_PICK = process.env.EEAT_PLAN_TIMER === '1';
+// THE CRUMB RANK (C6 lane 5 block 2; EEAT_CRUMB_RANK, unset = the anchor pick as before, byte for byte): a crumb (a coin
+// no gate reads, model.js EEAT_CRUMBS) is a relay of a long leg, not progress, but its arrival counts as gain (model.js
+// mkState: the coins taken), so the anchors past a crumb outrank every crumb-free anchor of the same real progress and
+// the compile follows the crumb path to the end (Tutorial 2: a blue coin 101 walk steps off its way taken from the level
+// start, every later anchor past it; the first route 5,022-6,069 run ticks vs 2,901-3,266 with the crumbs off, the direct
+// checkpoint leg found at rung 2). EEAT_CRUMB_RANK=1: once a route is known, the pick's gain leaves the crumbs out (the
+// crumb plans already stop there, planner.js); =2: always (the crumbs' own anchors by the score alone). =2 slowed a level
+// whose only relevant trigger is the trophy and whose crumbs ARE its way (On And On And On: the deepest crumb (118,64) at
+// 272 s vs 169 s, the workers on the lower anchors' 45-s trophy legs; 1 route in 2 runs); =3 THE F GATE: an anchor keeps
+// its crumbs' gain while its f (its arrival tick + its plan's cost) is within CR_F_SLACK x (+ CR_F_ABS ticks) of the least
+// f among the live anchors of its real gain: a crumb ON the route's way keeps the trail depth first (On And On's crumbs:
+// detours of at most 0.114 of a leg, a few % of the route), one off it (Tutorial 2's blue coin (30,10): ~600 ticks on a
+// ~1,600-tick estimate) counts nothing.
+const CRUMB_RANK = process.env.EEAT_CRUMB_RANK === '1' ? 1 : process.env.EEAT_CRUMB_RANK === '2' ? 2 : process.env.EEAT_CRUMB_RANK === '3' ? 3 : 0;
+const CR_F_SLACK = +process.env.EEAT_CR_F_SLACK || 0.1, CR_F_ABS = +process.env.EEAT_CR_F_ABS || 60;
+// THE FAR TROPHY (C6 push 3 lane 2 block 2, RATE; OPT-IN EEAT_FAR_TROPHY=<est ticks>, unset / 0: off, the compile byte for
+// byte as before): a plan whose first step is the trophy and whose est walk to it is longer than that runs at most at rung
+// EEAT_FAR_TROPHY_RUNG (1: a 5-s window) whatever rung its facts reached; its failures still climb the facts' ladder (the
+// planner moves on as before), only the window is cut. Why: the chief's 300-s full compile (box 5's 122 levels): 73% of the
+// failed steps' worker time went to (anchor, edge) pairs that climbed to the 45-s rung and never resolved; on the RATE
+// levels the trophy steps took 25% of the failed time with no success at any rung (the whole level left as one leg)
+const FAR_TROPHY = +process.env.EEAT_FAR_TROPHY > 0 ? +process.env.EEAT_FAR_TROPHY : 0;
+const FAR_TROPHY_RUNG = process.env.EEAT_FAR_TROPHY_RUNG !== undefined ? +process.env.EEAT_FAR_TROPHY_RUNG : 1;
+// THE FAR WALK (C6 push 3 lane 2 block 3, RATE; OPT-IN EEAT_FAR_WALK=<walk ticks>, unset / 0: off, the compile byte for
+// byte as before): the far trophy's window cap for EVERY waypoint kind, by the step's WALK: its est, or for an est at or
+// past the planner's PENALTY (1e6: an edge only the relaxation reaches, est = 3 x the relaxation's walk x the pace +
+// PENALTY; a floor / zone / rch price adds PENALTY too) the rest past the penalties / 3 (the relaxation's own price is
+// 3x). A step whose walk is longer runs at most at rung EEAT_FAR_WALK_RUNG (1) whatever rung its facts reached; its
+// failures still climb the facts' ladder (the planner moves on as before). A death step (its est the dead ticks, its
+// window the respawn's) and a synthetic step keep their rung. Why (lane 2 block 3, the far-trophy arm's step events, the
+// 18 RATE levels, 300 s, 4,021 steps with their est): '1e6+' is NOT a whole level: 144 of those steps succeeded (33 at
+// the 45-s rung), the rest past the penalty is the relaxation's walk; by the WALK, no step of a plain est >= 3,000 ticks
+// succeeded at any rung (0 of ~470) and 1 of 230 of a penalty est with a rest >= 10,000 (an Inferno coin at rung 3).
+const FAR_WALK = +process.env.EEAT_FAR_WALK > 0 ? +process.env.EEAT_FAR_WALK : 0;
+const FAR_WALK_RUNG = process.env.EEAT_FAR_WALK_RUNG !== undefined ? +process.env.EEAT_FAR_WALK_RUNG : 1;
+const EST_PENALTY = 1e6;   // (planner.js PENALTY)
+/** a step's walk est: its est, or past the planner's penalties the relaxation's walk (the rest / 3) */
+const walkOf = (step) => { const e = +step.estTicks; return !Number.isFinite(e) ? 0 : e >= EST_PENALTY ? (e % EST_PENALTY) / 3 : e; };
+const farWalk = (step) => FAR_WALK > 0 && step && !step.synthetic && !String(step.edge).startsWith('death:') && !(step.waypoint && step.waypoint.allowDeath) && walkOf(step) > FAR_WALK;
+/** the rung a step's window is sized by: its own, or the far trophy's / the far walk's cap */
+const windowRung = (step) => (FAR_TROPHY > 0 && step && !step.synthetic && (!step.waypoint || step.waypoint.kind === 'trophy') && +step.estTicks > FAR_TROPHY ? Math.min(step.rung | 0, FAR_TROPHY_RUNG)
+	: farWalk(step) ? Math.min(step.rung | 0, FAR_WALK_RUNG) : step.rung);
 const ARRIVALS_K = 4, MAX_DEEPEN = 4, STEER_MISS = 6000;
 // the polish's share of the budget once a route is known: min(POLISH_MS, POLISH_F x the budget)
 const POLISH_MS = 15000, POLISH_F = 0.25;
@@ -153,6 +201,24 @@ const PREC_FIRST = process.env.EEAT_PREC_FIRST === '1', PREC_AFTER_S = 10;
 // (with the fast rests the coasted pass stops at its first route (--first=1, as measured): the fast pass is the one that
 // looks for the fastest, and precision.js's --after clock (from that first route) would cut it short)
 const PREC_FAST = process.env.EEAT_PREC_FAST !== '0' && process.env.EEAT_PERFECT !== '0';
+// (B8 speed, cycle 2) THE EXACT LANDING WITHOUT THE IDLE WAIT (OPT-IN EEAT_PREC_ASYNC=1; off = the step awaits the child,
+// byte for byte as before): the trophy step that started the precision child returned only when the child ended (up to
+// PREC_S = 40 s), and that step's edge stayed in flight, so on a one-trigger level the whole loop waited: the precision
+// puzzle and NC Naos d3c6 (box 8, n5-plan 8a5d9a6, 300 s, W3) spent 68 / 73 s of their 91 / 96 s first route in that wait
+// (the executor's worker use 0.07); the child's first run, from rung 0's one nearest state, ran out its 40 s, then rungs 1-2
+// ran (20 s), then the second run with their nearest states found the 154-tick route in 24 s. With the knob the child runs
+// in the background (its route goes through routeOf like the stretch child's), the step returns at once, the next rungs
+// run beside it, and a run that ends without a route starts again AT ONCE with the nearest states that came meanwhile
+// (still at most PREC_RUNS runs); the moves' end with no route waits for a running child (precHold) as for the stretch
+// child; the child is killed when the moves end, and a route it prints after that is not taken.
+const PREC_ASYNC = process.env.EEAT_PREC_ASYNC === '1';
+// (B8 speed, cycle 2) THE EXACT LANDING'S ROUTES AS THEY COME (EEAT_PREC_STREAM=1: a compiler default, src/plan/defaults.js;
+// unset here / =0: off, byte for byte): the child
+// prints every faster route it finds (precision.js with the fast rests: the coasted rests' route first, then the braked
+// rests' faster one), but the compile took its route only when the child ENDED; with the knob each better route is verified
+// (routeOf) the moment it is printed, so the first route comes at the coasted pass's find; the child, its later faster
+// routes and the step that waits for it are as before.
+const PREC_STREAM = process.env.EEAT_PREC_STREAM === '1';
 // the proof's starts: the level start after k = 0..R idle ticks, R = the idle ticks until the state rests (the timer starts
 // at the first input: waiting is free); at most PROVE_IDLE_MAX (one exact search each)
 const PROVE_IDLE_MAX = 64;
@@ -200,13 +266,34 @@ const LB0_MS = +process.env.EEAT_LB0_MS || 500;
 // THE WHOLE LEVEL AS ONE LEG (the lab's backward solver, src/plan/lab/bwlevel_child.js, a child process next to the moves
 // stage; OPT-IN EEAT_BW_LEVEL=1, off = the compile byte for byte): the level's start -> the trophy in one solve, at most
 // BW_LEVEL_F of the budget and BW_LEVEL_MAX_S; its route is a route like the moves' (routeOf), the moves go on
-const BW_LEVEL = process.env.EEAT_BW_LEVEL === '1', BW_LEVEL_F = +process.env.EEAT_BW_LEVEL_F || 0.5, BW_LEVEL_MAX_S = +process.env.EEAT_BW_LEVEL_MAX_S || 150;
+// EEAT_BW_LEVEL=last (the chains-lab judge, 2026-09-30): the child's route is a LAST RESORT, taken only when the moves stage
+// ends with no route of its own (a level the compile would fail); where the moves have a route the compile is theirs, byte
+// for byte (the child's earlier route, taken at once with =1, became the refinement's seed in place of the executor's: Rosa
+// dei Venti 3,602 / 3,698 vs 3,546 / 3,550 in two pairs)
+const BW_LEVEL_MODE = process.env.EEAT_BW_LEVEL === 'last' ? 'last' : process.env.EEAT_BW_LEVEL === '1' ? 'now' : '';
+const BW_LEVEL = !!BW_LEVEL_MODE, BW_LEVEL_F = +process.env.EEAT_BW_LEVEL_F || 0.5, BW_LEVEL_MAX_S = +process.env.EEAT_BW_LEVEL_MAX_S || 150;
+// (=last: the whole level alone, no legs, no arrivals: BW_LEGS / BW_GATE below act with =1 only; EEAT_BW_CHAIN=1 its own)
 // (THE WHOLE LEVEL AS LEGS, with BW_LEVEL: a trophy behind a gate gets the first plan's waypoints; each leg's new model state
 // comes back as an imported anchor; EEAT_BW_LEGS=0: the trophy alone, as before)
 const BW_LEGS = process.env.EEAT_BW_LEGS !== '0';
 // (THE CUTS, with BW_LEVEL, OPT-IN EEAT_BW_CUTS=1: a trophy leg the first clock did not solve is cut at the start walk's
 // narrowest exact cuts, bwlevel_child.js cutChain)
 const BW_CUTS = process.env.EEAT_BW_CUTS === '1';
+// THE LEVEL AS A CHAIN OF BACKWARD LEGS (n5-s99-gated, src/plan/lab/bwchain_child.js; OPT-IN EEAT_BW_CHAIN=1, off = the compile
+// byte for byte): the whole-level stage's child for every level: a one-leg level gets the whole-level solve first, a GATED level
+// (the trophy behind doors a trigger opens) the chain at once (a best-first search over trigger orders, one continuous backward
+// leg a trigger, the end states carried exactly: bwchain.js); every chain node goes to the loop as an import (an anchor the
+// executor goes on from); at most BWC_F of the budget and BWC_MAX_S (the child is one thread next to the workers)
+const BW_CHAIN = process.env.EEAT_BW_CHAIN === '1', BWC_F = +process.env.EEAT_BWC_F || 0.98, BWC_MAX_S = +process.env.EEAT_BWC_MAX_S || 900;
+const BWC_IMPORT = process.env.EEAT_BWC_IMPORT !== '0';
+// (THE GATE, as the one shot's: the chain's anchors are held until the executor needs them: a stall of the watchdog or the
+// loop's end with no route; EEAT_BWC_GATE=0: at once)
+const BWC_GATE = process.env.EEAT_BWC_GATE !== '0';   // (the child reads it too: 1 the chain's frontier only (the default), 2 every node)
+// (THE GATE, with BW_LEVEL: the one shot's gate for the child's legs: their arrivals (a leg's new model state) are held until
+// the executor needs them, its watchdog's first stall or the loop's end with no route, then they go to it as they come; its
+// routes are taken at once. Given at once, the imported anchors outranked the executor's own (Ruins, local 100 s: 1,510 vs
+// 1,302 run ticks). EEAT_BW_GATE=0: at once, as before)
+const BW_GATE = process.env.EEAT_BW_GATE !== '0';
 // THE STRETCH SOLVER IN ITS OWN PROCESS (n5-s99-budget; OPT-IN EEAT_STRETCH=1, off = the compile byte for byte): the
 // executor's rung windows (RUNG_MS 1.5 / 5 / 15 / 45 s) restart every solver of a stretch (an anchor's leg to its plan's
 // next waypoint) at every rung; the backward solve of a long leg needs 30-40 s in ONE piece. One child process a compile
@@ -231,21 +318,6 @@ const ST_N = Math.max(1, Math.min(4, +process.env.EEAT_ST_N || 1));
 // (EEAT_ST_GENERAL=0: the short first plan's request alone, no failed stretches after it)
 const ST_GENERAL = process.env.EEAT_ST_GENERAL !== '0';
 const ST_NICE = process.env.EEAT_ST_NICE !== undefined && process.env.EEAT_ST_NICE !== '' ? +process.env.EEAT_ST_NICE : 10;
-// THE LEVEL AS A CHAIN OF BACKWARD LEGS (n5-s99-gated, src/plan/lab/bwchain_child.js; OPT-IN EEAT_BW_CHAIN=1, off = the compile
-// byte for byte): the whole-level stage's child for every level: a one-leg level gets the whole-level solve first, a GATED level
-// (the trophy behind doors a trigger opens) the chain at once (a best-first search over trigger orders, one continuous backward
-// leg a trigger, the end states carried exactly: bwchain.js); every chain node goes to the loop as an import (an anchor the
-// executor goes on from); at most BWC_F of the budget and BWC_MAX_S (the child is one thread next to the workers)
-const BW_CHAIN = process.env.EEAT_BW_CHAIN === '1', BWC_F = +process.env.EEAT_BWC_F || 0.98, BWC_MAX_S = +process.env.EEAT_BWC_MAX_S || 900;
-const BWC_IMPORT = process.env.EEAT_BWC_IMPORT !== '0';
-// (THE GATE, as the one shot's: the chain's anchors are held until the executor needs them: a stall of the watchdog or the
-// loop's end with no route; EEAT_BWC_GATE=0: at once)
-const BWC_GATE = process.env.EEAT_BWC_GATE !== '0';   // (the child reads it too: 1 the chain's frontier only (the default), 2 every node)
-// (THE GATE, with BW_LEVEL: the one shot's gate for the child's legs: their arrivals (a leg's new model state) are held until
-// the executor needs them, its watchdog's first stall or the loop's end with no route, then they go to it as they come; its
-// routes are taken at once. Given at once, the imported anchors outranked the executor's own (Ruins, local 100 s: 1,510 vs
-// 1,302 run ticks). EEAT_BW_GATE=0: at once, as before)
-const BW_GATE = process.env.EEAT_BW_GATE !== '0';
 /** a relative deadline (a step's or a waypoint's beforeTickFrom): a number, or 'prev+N' (N ticks after the previous
  *  step's arrival, i.e. this anchor's arrival: a key's KEY_TICKS) -> ticks | NaN */
 function relOf(x) {
@@ -425,6 +497,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	// ---- THE ONE SHOT's thread (OS_ON + OS_THREAD, a level file, the real parts): started first, it builds its own parts
 	let osw = null, osStats = null, osReady = null, osErr = '', osThreadDone = false, osOpen = !OS_GATE, osReleased = 0, osWantOpen = '';
 	const osQ = [];
+	let osBwReq = null;            // (THE SHARED SESSION) the one shot's far leg waiting for an idle stretch child
 	const osPending = new Map();   // (the gate) abstract state key -> the one shot's soonest arrival's masks, held
 	if (OS_ON && OS_THREAD && opts.file && !opts.parts) {
 		try {
@@ -432,12 +505,14 @@ async function compile(L, opts = {}, emit = () => {}) {
 			// (its isolate's old space: osworker.js OS_HEAP_MB (the live heap where its A* stops growing) + 512 MB; 0: V8's own)
 			const osHeap = process.env.EEAT_OS_HEAP_MB !== undefined && process.env.EEAT_OS_HEAP_MB !== '' && Number.isFinite(+process.env.EEAT_OS_HEAP_MB) ? +process.env.EEAT_OS_HEAP_MB : 1024;
 			const osData = { file: path.resolve(String(opts.file)), graph: process.env.EEAT_OS_GRAPH === '1', graphThreads: 1, cache: process.env.EEAT_OS_CACHE || null };
+			if (OS_BW_ST && ST_ON) osData.bwShare = 1;
 			const osFile = path.join(__dirname, 'oneshot', 'osworker.js');
 			osw = OS_PROC ? osProc(osFile, osData, osHeap)
 				: new Worker(osFile, { workerData: osData, ...(osHeap > 0 ? { resourceLimits: { maxOldGenerationSizeMb: Math.round(osHeap + 512) } } : {}) });
 			osw.on('message', (m) => {
 				if (!m || typeof m !== 'object') return;
 				if (m.type === 'route' || m.type === 'arr') osQ.push(m);
+				else if (m.type === 'bwreq') osBwReq = m;   // (THE SHARED SESSION: one out at a time; stSchedule sends it)
 				else if (m.type === 'stats') { osStats = m.stats; osThreadDone = !!m.done; }
 				else if (m.type === 'ready') { osReady = m; say({ ev: 'oneshot', what: 'ready', ms: m.ms, setupMs: m.setupMs }); }
 				else if (m.type === 'error') { osErr = String(m.error || '').split('\n')[0]; say({ ev: 'warning', text: `the one shot's thread: ${osErr}` }); }
@@ -618,6 +693,17 @@ async function compile(L, opts = {}, emit = () => {}) {
 	let extBound = Number.isFinite(+opts.bound) && +opts.bound > 0 ? +opts.bound : Infinity;
 	let best = null;   // {masks, ticks, runTicks, deaths, chance, legs, how}
 	const runBound = () => Math.min(best ? best.runTicks : Infinity, extBound);
+	// (the anchor pick's gain: EEAT_CRUMB_RANK leaves the crumbs' part out (1: once a route is known, 2: always))
+	const pickGain = CRUMB_RANK === 3 ? (A) => (A.S && A.S.cgain > 0 && !A.crumbOnWay ? A.gain - A.S.cgain : A.gain)
+		: CRUMB_RANK ? (A) => (A.S && A.S.cgain > 0 && (CRUMB_RANK === 2 || best) ? A.gain - A.S.cgain : A.gain) : (A) => A.gain;
+	/** (=3, THE F GATE) each live anchor's crumbOnWay: its f within the slack of the least f of its real gain */
+	const crumbGate = (list) => {
+		const fOf = (A) => A.firstTick + (Number.isFinite(A.costEst) ? A.costEst : Infinity);
+		const realOf = (A) => A.gain - (A.S && A.S.cgain > 0 ? A.S.cgain : 0);
+		const fMin = new Map();
+		for (const A of list) { const g = realOf(A), f = fOf(A); if (!(fMin.get(g) <= f)) fMin.set(g, f); }
+		for (const A of list) { const m = fMin.get(realOf(A)); A.crumbOnWay = Number.isFinite(m) && fOf(A) <= m * (1 + CR_F_SLACK) + CR_F_ABS; }
+	};
 	const gapOf = (rt) => (Number.isFinite(rt) ? Math.max(0, rt - LB) : null);
 	/** a route (masks that finish): C.evaluate'd; the best when faster (run ticks, then ticks) -> {ev, better} | null */
 	const routeOf = (masks, how, legId) => {
@@ -646,13 +732,21 @@ async function compile(L, opts = {}, emit = () => {}) {
 	const precOn = opts.precision !== false && process.env.EEAT_PLAN_PREC !== '0' && !!opts.file;
 	const precAtt = new Map();   // masks string -> dist
 	let precRuns = 0, precBusy = false, precChild = null;
-	const precision = async (closest) => {
-		if (!precOn || !closest || !closest.masks || !(closest.dist >= 0) || closest.dist > PREC_NEAR) return null;
-		const str = typeof closest.masks === 'string' ? closest.masks : T.strOf(closest.masks);
-		if (!/^[0-O]+$/.test(str)) return null;
-		const had = precAtt.size;
-		if (!precAtt.has(str)) precAtt.set(str, +closest.dist);
-		if (precBusy || precRuns >= PREC_RUNS || precAtt.size === had || stopped) return null;
+	// (EEAT_PREC_ASYNC: the attempts the last run was given; the moves ended: no new run, no late route)
+	let precGiven = 0, precOver = false;
+	const precision = async (closest, again) => {
+		if (again) {
+			// (EEAT_PREC_ASYNC: a run ended without a route: again at once when nearest states came meanwhile)
+			if (!precOn || precOver || precBusy || precRuns >= PREC_RUNS || precAtt.size === precGiven || stopped) return null;
+		} else {
+			if (!precOn || !closest || !closest.masks || !(closest.dist >= 0) || closest.dist > PREC_NEAR) return null;
+			const str = typeof closest.masks === 'string' ? closest.masks : T.strOf(closest.masks);
+			if (!/^[0-O]+$/.test(str)) return null;
+			const had = precAtt.size;
+			if (!precAtt.has(str)) precAtt.set(str, +closest.dist);
+			if (precBusy || precRuns >= PREC_RUNS || precAtt.size === had || stopped || precOver) return null;
+		}
+		precGiven = precAtt.size;
 		const secs = Math.floor(Math.min(PREC_S * 1000, left() - endReserve - 2000) / 1000);
 		if (secs < PREC_MIN_S) return null;
 		precBusy = true; precRuns++;
@@ -660,7 +754,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const att = [...precAtt].sort((a, b) => a[1] - b[1]).slice(0, PREC_ATTEMPTS).map((e) => e[0]);
 		const file = path.join(os.tmpdir(), `eeat_prec_${process.pid}_${precRuns}.txt`);
 		const t1 = Date.now();
-		let found = null, done = null, foundRun = Infinity;
+		let found = null, done = null, foundRun = Infinity, streamEv = null;
 		try {
 			fs.writeFileSync(file, att.join('\n') + '\n');
 			say({ ev: 'precision', run: precRuns, attempts: att.length, nearest: Math.round(+precAtt.get(att[0]) * 10) / 10, seconds: secs });
@@ -685,7 +779,11 @@ async function compile(L, opts = {}, emit = () => {}) {
 						let ev = null;
 						try { ev = JSON.parse(line); } catch (e) { continue; }
 						// (the fewest run ticks of its results: the fast pass and --after print each faster one)
-						if (ev.ev === 'result' && ev.kind === 'finish' && typeof ev.inputs === 'string' && (!found || (Number.isFinite(+ev.runTicks) && +ev.runTicks < foundRun))) { found = ev.inputs; foundRun = Number.isFinite(+ev.runTicks) ? +ev.runTicks : Infinity; }
+						if (ev.ev === 'result' && ev.kind === 'finish' && typeof ev.inputs === 'string' && (!found || (Number.isFinite(+ev.runTicks) && +ev.runTicks < foundRun))) {
+							found = ev.inputs; foundRun = Number.isFinite(+ev.runTicks) ? +ev.runTicks : Infinity;
+							// (EEAT_PREC_STREAM: the route at once, not at the child's end)
+							if (PREC_STREAM && !precOver) { const x = routeOf(T.masksOf(found.replace(/[^0-O]/g, '')), 'the exact landing (precision)', null); if (x && x.better) streamEv = x.ev; }
+						}
 						else if (ev.ev === 'done') done = ev.end;
 					}
 				});
@@ -696,13 +794,22 @@ async function compile(L, opts = {}, emit = () => {}) {
 		try { fs.unlinkSync(file); } catch (e) { /* gone */ }
 		precBusy = false;
 		say({ ev: 'precision', run: precRuns, end: found ? 'finish' : done || 'ended', ms: Date.now() - t1 });
-		if (!found) return null;
+		if (PREC_ASYNC && !found && !precOver) setImmediate(() => { precision(null, true).catch((e) => bug('precision', { error: e.message })); });
+		if (!found || (PREC_ASYNC && precOver)) return null;
+		if (PREC_STREAM) return streamEv;
 		const x = routeOf(T.masksOf(found.replace(/[^0-O]/g, '')), 'the exact landing (precision)', null);
 		return x && x.better ? x.ev : null;
 	};
+	/** EEAT_PREC_ASYNC: the executor has nothing left and would end: while the precision child runs (no route yet, time
+	 *  left) the loop waits a turn for it (-> true: go on) */
+	const precHold = async () => {
+		if (!precBusy || best || stopped || left() <= 1000) return false;
+		await new Promise((res) => { const tt = setTimeout(res, 250); if (tt.unref) tt.unref(); });
+		return true;
+	};
 
 	// ---- THE WHOLE LEVEL AS ONE LEG (EEAT_BW_LEVEL=1; BW_LEVEL above): started with the moves loop, killed at its end
-	let bwlChild = null, bwlDone = null, bwlWpFile = null, bwlWpKey = '';
+	let bwlChild = null, bwlDone = null, bwlWpFile = null, bwlWpKey = '', bwlPending = null;
 	// (the gate: BW_GATE above; the held arrivals' inputs in the order they came)
 	let bwlOpen = !BW_GATE, bwlWant = '', bwlReleased = 0;
 	const bwlHeld = [];
@@ -757,10 +864,9 @@ async function compile(L, opts = {}, emit = () => {}) {
 			: Math.floor(Math.min(BW_LEVEL_MAX_S, (+seconds || 60) * BW_LEVEL_F, (left() - endReserve - 2000) / 1000));
 		if (!(secs >= 5)) return;
 		const cp = require('child_process'), t1 = Date.now();
-		// (BW_LEGS: the first plan's waypoints from the start, in order, for the child's legs when the trophy is gated; the
-		// chain child (BW_CHAIN) takes no waypoint file: it searches the trigger orders itself)
+		// (BW_LEGS: the first plan's waypoints from the start, in order, for the child's legs when the trophy is gated)
 		let wpFile = null, nWp = 0;
-		if (BW_LEGS && !BW_CHAIN) {
+		if (BW_LEGS && !BW_CHAIN && BW_LEVEL_MODE !== 'last') {
 			try {
 				wpFile = path.join(require('os').tmpdir(), `eeat_bwl_${process.pid}_${Date.now()}.json`);
 				const A = anchors.get(String(S0.key));
@@ -771,19 +877,19 @@ async function compile(L, opts = {}, emit = () => {}) {
 				bwlWpFile = wpFile;
 			} catch (e) { wpFile = null; say({ ev: 'warning', text: `bwlevel legs: ${e.message}` }); }
 		}
-		say(BW_CHAIN ? { ev: 'bwlevel', seconds: secs, chain: true } : { ev: 'bwlevel', seconds: secs, waypoints: nWp });
+		if (BW_CHAIN) say({ ev: 'bwlevel', seconds: secs, chain: BW_CHAIN }); else say({ ev: 'bwlevel', seconds: secs, waypoints: nWp });
 		let imported = 0;
 		bwlDone = new Promise((resolve) => {
 			let found = null, done = null, buf = '';
-			// (the chain with the stretch solver on: only a GATED level; the stretch child takes a one-leg level's whole-level solve)
-			const childArgs = BW_CHAIN ? [path.join(__dirname, 'lab', 'bwchain_child.js'), String(opts.file), `--ms=${secs * 1000}`, ...(ST_ON ? ['--gatedOnly=1'] : [])]
-				: [path.join(__dirname, 'lab', 'bwlevel_child.js'), String(opts.file), `--ms=${secs * 1000}`, ...(wpFile ? [`--wps=${wpFile}`] : []), ...(BW_CUTS ? ['--cuts=1'] : [])];
-			const ch = cp.spawn(process.execPath, ['--max-old-space-size=2000', ...childArgs], { stdio: ['ignore', 'pipe', 'ignore'] });
+			// (the chain with the stretch solver on: only a GATED level, --gatedOnly=1; the stretch child takes a one-leg level's
+			// whole-level solve)
+			const ch = cp.spawn(process.execPath, ['--max-old-space-size=2000', path.join(__dirname, 'lab', BW_CHAIN ? 'bwchain_child.js' : 'bwlevel_child.js'), String(opts.file), `--ms=${secs * 1000}`, ...(wpFile ? [`--wps=${wpFile}`] : []), ...(BW_CUTS && !BW_CHAIN ? ['--cuts=1'] : []), ...(BW_CHAIN && ST_ON ? ['--gatedOnly=1'] : [])], { stdio: ['ignore', 'pipe', 'ignore'] });
 			bwlChild = ch;
 			const onExit = () => { try { ch.kill('SIGKILL'); } catch (e) { /* gone */ } };
 			process.once('exit', onExit);
 			const kill = setTimeout(onExit, (secs + 20) * 1000);
-			const poll = setInterval(() => { if (stopped || left() <= 0) onExit(); }, 500);
+			// (=last: the moves' first route ends the child: its route would never be taken)
+			const poll = setInterval(() => { if (stopped || left() <= 0 || (BW_LEVEL_MODE === 'last' && !BW_CHAIN && best)) onExit(); }, 500);
 			if (kill.unref) kill.unref();
 			if (poll.unref) poll.unref();
 			ch.stdout.on('data', (d) => {
@@ -795,20 +901,21 @@ async function compile(L, opts = {}, emit = () => {}) {
 					try { ev = JSON.parse(line); } catch (e) { continue; }
 					if (ev.ev === 'result' && ev.kind === 'finish' && typeof ev.inputs === 'string') {
 						found = ev.inputs;
+						if (BW_LEVEL_MODE === 'last' && !BW_CHAIN) { bwlPending = found; say({ ev: 'bwlevel', end: 'finish', runTicks: typeof ev.runTicks === 'number' ? ev.runTicks : null, deferred: true, ms: Date.now() - t1 }); continue; }
 						const x = routeOf(T.masksOf(found.replace(/[^0-O]/g, '')), BW_CHAIN ? 'the level as a chain of backward legs' : 'the whole level as one leg (backward)', null);
 						say({ ev: 'bwlevel', end: 'finish', runTicks: x && x.ev ? x.ev.runTicks : null, better: !!(x && x.better), ms: Date.now() - t1 });
-					} else if (ev.ev === 'arrival' && typeof ev.inputs === 'string' && !best) {
+					} else if (ev.ev === 'arrival' && typeof ev.inputs === 'string' && !best && (BW_LEVEL_MODE !== 'last' || BW_CHAIN)) {
 						// (a leg of the whole level: its new model state an anchor, as an imported state: replayed, addArrival)
 						say({ ev: 'bwlevel', leg: ev.label || '', ticks: ev.ticks, ms: Date.now() - t1, ...(bwlOpen ? {} : { held: true }) });
 						if (bwlOpen) onLine(`import ${ev.inputs.replace(/[^0-O]/g, '')}`);
 						else bwlHeld.push(ev.inputs.replace(/[^0-O]/g, ''));
-					} else if (ev.ev === 'leg') say({ ev: 'bwlevel', legTry: ev.n, of: ev.of, label: ev.label, ok: ev.ok, T: ev.T, why: ev.why, ms: Date.now() - t1 });
-					else if (ev.ev === 'anchor' && BWC_IMPORT && typeof ev.inputs === 'string' && !best && !stopped) {
+					} else if (ev.ev === 'anchor' && BWC_IMPORT && typeof ev.inputs === 'string' && !best && !stopped) {
 						// (a chain node: the loop's import (replayed; a model state not seen yet is an anchor))
 						imported++;
 						if (bwcOpen) onLine('import ' + ev.inputs.replace(/[^0-O]/g, ''));
 						else bwcHeld.push(ev.inputs.replace(/[^0-O]/g, ''));
 					} else if (ev.ev === 'chain') say({ ev: 'bwchain', ok: ev.ok, why: ev.why, legs: ev.legs, legsOk: ev.legsOk, nodes: ev.nodes, gain: ev.gain, imported, ms: Date.now() - t1 });
+					else if (ev.ev === 'leg') say({ ev: 'bwlevel', legTry: ev.n, of: ev.of, label: ev.label, ok: ev.ok, T: ev.T, why: ev.why, ms: Date.now() - t1 });
 					else if (ev.ev === 'done') done = ev.end;
 				}
 			});
@@ -819,13 +926,41 @@ async function compile(L, opts = {}, emit = () => {}) {
 		});
 	};
 
+	/** the gate opens (BW_GATE: the executor stalled or has nothing left, no route): the held arrivals go to it as imports,
+	 *  and every later one as it comes */
+	const bwlRelease = (why) => {
+		if (bwlOpen) return;
+		bwlOpen = true;
+		const n0 = anchors.size, h = bwlHeld.splice(0, bwlHeld.length);
+		for (const x of h) onLine(`import ${x}`);
+		bwlReleased = h.length;
+		say({ ev: 'bwlevel', gate: why, arrivals: h.length, anchors: anchors.size - n0 });
+	};
+	/** (BW_GATE) the executor has nothing left to run and would end: the held arrivals go to it; while the child still
+	 *  solves (no route yet, time left) the loop waits a turn for its arrivals / route (-> true: go on) */
+	const bwlHold = async () => {
+		if (!BW_LEVEL || !BW_GATE || !bwlDone || best || stopped) return false;
+		const n0 = anchors.size;
+		bwlRelease('the executor has nothing left');
+		if (anchors.size !== n0) { nothingSince = -1; return true; }
+		if (!bwlChild || left() <= 1000) return false;
+		await new Promise((res) => { const tt = setTimeout(res, 250); if (tt.unref) tt.unref(); });
+		if (anchors.size !== n0) nothingSince = -1;
+		return true;
+	};
 	// ---- THE STRETCH SOLVER IN ITS OWN PROCESS (EEAT_STRETCH=1; ST_* above): ST_N children, one stretch each at a time on
 	// one clock; slot 0 takes the short first plan, every slot the failed stretches
 	const stSlots = [];              // {ch, busy}: busy = the request in hand {id, A, a, legs, k, ms, cand, t, short}
-	let stSeq = 0, stShortSent = false;
+	let stSeq = 0, stShortSent = false, stLastOs = false;
 	const stQ = [];                  // the children's messages, harvested in the loop's turns (stHarvest)
 	const stCands = new Map();       // `${anchor id}|${edge key}` -> {A, step, wp, cost, rung, n, tries, lastMs, why, solved, inflight}
 	const stStats = { requests: 0, ok: 0, anchors: 0, routes: 0, legs: 0, ms: 0, relays: 0, stale: 0, children: 0, short: null };
+	if (OS_BW_ST) Object.assign(stStats, { osReq: 0, osOk: 0, osMs: 0 });
+	/** (THE SHARED SESSION) the answer to the one shot's far leg id: masks (a string from the level start) or null */
+	const osBwAns = (id, masks, why, ms) => {
+		if (!osw) return;
+		try { osw.postMessage({ type: 'bwans', id, ok: !!masks, masks: masks || '', why: why || '', ms: +ms || 0 }); } catch (e) { /* the one shot is gone */ }
+	};
 	const stBusyAny = () => stSlots.some((s) => s.busy);
 	const stOkWp = (step, wp) => {
 		if (!step || !wp || step.synthetic || wp.allowDeath || wp.dieField || (wp.fieldTiles && wp.fieldTiles.length)) return false;
@@ -858,7 +993,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 			}
 		});
 		ch.stdin.on('error', () => { /* the child ended */ });
-		const gone = () => { if (slot.ch === ch) { slot.ch = null; if (slot.busy && slot.busy.cand) slot.busy.cand.inflight = false; slot.busy = null; } };
+		const gone = () => { if (slot.ch === ch) { slot.ch = null; if (slot.busy && slot.busy.os && !slot.busy.osSent) osBwAns(slot.busy.os, null, 'the stretch child ended'); if (slot.busy && slot.busy.cand) slot.busy.cand.inflight = false; slot.busy = null; } };
 		ch.on('error', gone);
 		ch.on('close', () => { process.removeListener('exit', onExit); gone(); });
 	};
@@ -895,6 +1030,18 @@ async function compile(L, opts = {}, emit = () => {}) {
 			const m = stQ.shift();
 			const slot = stSlots.find((s) => s.busy && s.busy.id === m.id) || null;
 			const q = slot ? slot.busy : null;
+			if (q && q.os) {
+				// (THE SHARED SESSION: the one shot's far leg: its arrival to the one shot (replayed there, an injected node),
+				// none at the done)
+				if (m.ev === 'arrival' && !q.osSent) { q.osSent = true; stStats.osOk++; osBwAns(q.os, String(m.inputs || ''), '', m.ms); }
+				else if (m.ev === 'done') {
+					stStats.osMs += Date.now() - q.t;
+					if (!q.osSent) osBwAns(q.os, null, m.why || 'none', m.ms);
+					say({ ev: 'stretch', what: 'done', id: q.id, oneshot: q.os, ok: !!q.osSent, why: m.why || '', ms: m.ms });
+					slot.busy = null;
+				}
+				continue;
+			}
 			if (m.ev === 'arrival' && q && q.legs[m.k]) {
 				const g = q.legs[m.k];
 				const masks = T.masksOf(String(m.inputs || ''));
@@ -951,6 +1098,31 @@ async function compile(L, opts = {}, emit = () => {}) {
 		if (ok) { c.solved = true; return; }
 		c.rung = Math.max(c.rung, step.rung | 0); c.n++;
 	};
+	/** the failed stretch of the most progress a child may take now (the fewest tries, the most gain, the least cost), or null */
+	const stPickCand = () => {
+		let bestC = null;
+		for (const c of stCands.values()) {
+			if (c.solved || c.inflight || c.rung < ST_RUNG || c.tries >= ST_TRIES || (c.tries > 0 && !/budget/.test(c.why)) || c.A.exhausted || !c.A.arrivals.length) continue;
+			if (!bestC || c.tries < bestC.tries || (c.tries === bestC.tries && (c.A.gain > bestC.A.gain || (c.A.gain === bestC.A.gain && (c.cost < bestC.cost || (c.cost === bestC.cost && c.seq < bestC.seq)))))) bestC = c;
+		}
+		return bestC;
+	};
+	/** (THE SHARED SESSION) the one shot's far leg waiting (osBwReq) to the idle child in slot: one leg from its node's masks
+	 *  to the waypoint's tiles (the trophy: the crown) on its clock -> true when sent */
+	const stSendOs = (slot) => {
+		const m = osBwReq;
+		if (!m || !slot.ch || slot.busy) return false;
+		osBwReq = null;
+		const id = ++stSeq;
+		const ms = Math.max(500, Math.min(+m.ms || 1000, left() - 3000));
+		const wp = m.wp && m.wp.kind === 'trophy' ? { kind: 'trophy' } : { kind: 'tiles', tiles: Array.from((m.wp && m.wp.tiles) || []), expect: null, label: 'the one shot\'s far leg' };
+		slot.busy = { id, os: m.id, A: null, a: null, legs: [], k: 0, ms, cand: null, t: Date.now() };
+		const req = { id, from: String(m.masks || ''), legs: [{ wp, w: 1 }], ms: Math.round(ms), closest: false };
+		try { slot.ch.stdin.write(JSON.stringify(req) + '\n'); } catch (e) { slot.busy = null; osBwAns(m.id, null, 'the stretch child is gone'); return false; }
+		stStats.osReq++; stLastOs = true;
+		say({ ev: 'stretch', what: 'request', id, slot: stSlots.indexOf(slot), oneshot: m.id, legs: [wp.kind === 'trophy' ? 'trophy' : 'far leg'], ms: Math.round(ms), from: String(m.masks || '').length });
+		return true;
+	};
 	/** an idle child: the next request (slot 0: the short first plan once; then the failed stretch of the most progress not
 	 *  in hand in another slot) */
 	const stSchedule = () => {
@@ -959,11 +1131,21 @@ async function compile(L, opts = {}, emit = () => {}) {
 		// whole-level request (whose route may be faster): the child is stopped and started again (its memo lost))
 		for (let i = 0; i < stSlots.length; i++) {
 			const s = stSlots[i], b = s.busy;
-			if (s.ch && b && !b.short && Date.now() - b.t < b.ms - ST_STALE_MS && ((b.cand && b.cand.solved && b.k === 0) || best)) {
+			if (s.ch && b && !b.short && !b.os && Date.now() - b.t < b.ms - ST_STALE_MS && ((b.cand && b.cand.solved && b.k === 0) || best)) {
 				say({ ev: 'stretch', what: 'stale', id: b.id, slot: i, why: best ? 'a route' : 'the executor did it', ms: Date.now() - b.t });
 				stStats.stale++;
 				stKill(s);
 				if (!best && !stopped) stSpawn(i);
+			}
+		}
+		// (THE SHARED SESSION: the one shot's far leg to an idle child, after the short first plan, in turn with the
+		// executor's stretches (one of each while both wait); also once a route is known: the one shot looks for faster ones)
+		if (OS_BW_ST && osBwReq && !stopped && left() - 3000 >= ST_MIN_MS) {
+			for (let i = 0; i < stSlots.length && osBwReq; i++) {
+				const slot = stSlots[i];
+				if (!slot.ch || slot.busy || (i === 0 && !stShortSent && !best)) continue;
+				if (stLastOs && !best && ST_GENERAL && stPickCand()) continue;
+				stSendOs(slot);
 			}
 		}
 		if (stopped || best) return;
@@ -994,12 +1176,13 @@ async function compile(L, opts = {}, emit = () => {}) {
 				}
 			}
 			if (!ST_GENERAL) continue;
-			let bestC = null;
-			for (const c of stCands.values()) {
-				if (c.solved || c.inflight || c.rung < ST_RUNG || c.tries >= ST_TRIES || (c.tries > 0 && !/budget/.test(c.why)) || c.A.exhausted || !c.A.arrivals.length) continue;
-				if (!bestC || c.tries < bestC.tries || (c.tries === bestC.tries && (c.A.gain > bestC.A.gain || (c.A.gain === bestC.A.gain && (c.cost < bestC.cost || (c.cost === bestC.cost && c.seq < bestC.seq)))))) bestC = c;
+			const bestC = stPickCand();
+			if (!bestC) {
+				// (THE SHARED SESSION: no stretch of the executor's waits: the one shot's far leg)
+				if (OS_BW_ST && osBwReq && stSendOs(slot)) continue;
+				return;
 			}
-			if (!bestC) return;
+			stLastOs = false;
 			// (THE REST OF A SHORT PLAN: the anchor's plan through this stretch has at most ST_SHORT steps: its legs in order on
 			// one clock, ST_MS a leg, from its first arrival (the whole-level request's rule from the frontier); EEAT_ST_CHAIN=0:
 			// the stretch alone)
@@ -1017,28 +1200,6 @@ async function compile(L, opts = {}, emit = () => {}) {
 			const a = bestC.A.arrivals.reduce((m, x) => (x.tick < m.tick ? x : m), bestC.A.arrivals[0]);
 			stSend(slot, bestC.A, a, legs, ms, bestC);
 		}
-	};
-	/** the gate opens (BW_GATE: the executor stalled or has nothing left, no route): the held arrivals go to it as imports,
-	 *  and every later one as it comes */
-	const bwlRelease = (why) => {
-		if (bwlOpen) return;
-		bwlOpen = true;
-		const n0 = anchors.size, h = bwlHeld.splice(0, bwlHeld.length);
-		for (const x of h) onLine(`import ${x}`);
-		bwlReleased = h.length;
-		say({ ev: 'bwlevel', gate: why, arrivals: h.length, anchors: anchors.size - n0 });
-	};
-	/** (BW_GATE) the executor has nothing left to run and would end: the held arrivals go to it; while the child still
-	 *  solves (no route yet, time left) the loop waits a turn for its arrivals / route (-> true: go on) */
-	const bwlHold = async () => {
-		if (!BW_LEVEL || !BW_GATE || !bwlDone || best || stopped) return false;
-		const n0 = anchors.size;
-		bwlRelease('the executor has nothing left');
-		if (anchors.size !== n0) { nothingSince = -1; return true; }
-		if (!bwlChild || left() <= 1000) return false;
-		await new Promise((res) => { const tt = setTimeout(res, 250); if (tt.unref) tt.unref(); });
-		if (anchors.size !== n0) nothingSince = -1;
-		return true;
 	};
 
 	// ---- control: stdin lines
@@ -1170,7 +1331,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 		// (the most progress first, then the lowest plan cost + the arrival tick; THE TIMER (planner.js, EEAT_PLAN_TIMER=1): an
 		// anchor with no plan in its timed killer's time and no remover in time (a LATE anchor) after the others, whatever its gain)
 		const lateOf = (A) => (TIMER_PICK && A.plans && A.plans.late ? 1 : 0);
-		const list = live.filter((A) => !A.exhausted).sort((a, b) => (lateOf(a) - lateOf(b)) || (b.gain - a.gain) || (scoreOf(a, N) - scoreOf(b, N)));
+		if (CRUMB_RANK === 3) crumbGate(live);
+		const list = live.filter((A) => !A.exhausted).sort((a, b) => (lateOf(a) - lateOf(b)) || (pickGain(b) - pickGain(a)) || (scoreOf(a, N) - scoreOf(b, N)));
 		for (const A of list) {
 			if (left() < 200 || stopped) return null;
 			const { plans, why } = planOfAnchor(A);
@@ -1335,7 +1497,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const ek = edgeKey(step), tk = `${ek}|${step.rung}|${epoch}`;
 		tried.set(tk, { ok: false });
 		A.picks++; picksN++;
-		const budget = budgetOf(step.rung);
+		const budget = budgetOf(windowRung(step));
 		const wp = waypointOf(step, A);
 		// (the plan's next waypoint: the executor ranks this step's arrivals by the next leg's cost from them, executor.js
 		// NEXT_ON; a death step, a synthetic step or a plan of one step: none)
@@ -1417,6 +1579,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const rec = { ev: 'step', n: steps, anchor: A.id, label: labelOf(step), edge: step.edge, nodeClass: step.nodeClass, rung: step.rung, epoch, tool: res.tool || null, ok: !!res.ok, ms, budgetMs: Math.round(budget.ms),
 			why: res.ok ? '' : (fail && fail.why) || '', arrivals: arr.length, news, routes: routes.length };
 		if (fail && fail.closest) rec.closest = { tile: fail.closest.tile, dist: fail.closest.dist };
+		if (FAR_TROPHY > 0 || FAR_WALK > 0) { rec.est = Number.isFinite(+step.estTicks) ? Math.round(+step.estTicks) : null; if (windowRung(step) !== step.rung) rec.farTrophy = windowRung(step); }
 		// (the executor's exact end search from a near start, when it ran: tier 0b)
 		const nearT = Array.isArray(res.tiers) ? res.tiers.find((x) => x && x.tier === 'near') : null;
 		if (nearT) rec.near = { ok: nearT.ok, runs: nearT.runs, ms: nearT.ms, nearest: nearT.nearest };
@@ -1432,8 +1595,11 @@ async function compile(L, opts = {}, emit = () => {}) {
 		if (fail) { lastFails.push({ n: steps, label: rec.label, rung: step.rung, why: fail.why, closest: fail.closest ? { tile: fail.closest.tile, dist: fail.closest.dist } : null, blockedBy: fail.blockedBy || [], touched: (fail.touched || []).length }); if (lastFails.length > 6) lastFails.shift(); }
 		// (a trophy leg that ended within PREC_NEAR tiles of the trophy: the exact landing, above)
 		if (fail && wp.kind === 'trophy' && fail.closest && !route) {
-			const pr = await precision(fail.closest);
-			if (pr) route = pr;
+			if (PREC_ASYNC) precision(fail.closest).catch((e) => bug('precision', { error: e.message }));   // (in the background: EEAT_PREC_ASYNC)
+			else {
+				const pr = await precision(fail.closest);
+				if (pr) route = pr;
+			}
 		}
 		const verAfter = factsVer(facts);
 		if (verAfter !== verBefore) lastProgress = Date.now();
@@ -1494,7 +1660,9 @@ async function compile(L, opts = {}, emit = () => {}) {
 	const fallbackJob = () => {
 		if (anchors.size !== fallbackAnchors) { fallbackAnchors = anchors.size; fallbacks = 0; }
 		if (fallbacks >= FALLBACK_MAX || stopped || left() < 1000) return null;
-		const list = [...anchors.values()].filter((A) => A.arrivals.length && !uselessA(A)).sort((a, b) => b.gain - a.gain || a.firstTick - b.firstTick);
+		const fbList = [...anchors.values()].filter((A) => A.arrivals.length && !uselessA(A));
+		if (CRUMB_RANK === 3) crumbGate(fbList);
+		const list = fbList.sort((a, b) => pickGain(b) - pickGain(a) || a.firstTick - b.firstTick);
 		for (const A of list) {
 			for (let r = 0; r < rungMs.length; r++) {
 				const step = { n: 0, edge: `fallback:trophy:${A.key}`, nodeClass: `f${A.key}`, rung: r, synthetic: true, fallback: true, estTicks: 0, waypoint: { kind: 'trophy', label: 'trophy (fallback: no plan left)' } };
@@ -1733,7 +1901,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 				cur = { plan: job.plan, step: job.step, anchor: job.anchor.id, ok: null, depth: job.anchor.depth };
 				if (bwlWpFile) bwlPlan(job.anchor);
 				say({ ev: 'plan', anchor: job.anchor.id, steps: job.plan.steps.map(labelOf), cost: job.plan.cost, lb: job.plan.lb, partial: !!job.plan.partial, why: job.plan.why || '', rung: job.step.rung });
-				const f = { job, started: Date.now(), budgetMs: budgetOf(job.step.rung).ms };
+				const f = { job, started: Date.now(), budgetMs: budgetOf(windowRung(job.step)).ms };
 				f.promise = runJob(job).catch((e) => { bug('job', { error: e.message }); return {}; }).then((r) => { inflight.delete(ek); return r; });
 				inflight.set(ek, f);
 			}
@@ -1742,12 +1910,12 @@ async function compile(L, opts = {}, emit = () => {}) {
 				// fallbacks (a direct trophy step, then the frontier) while time is left; else the end)
 				if (exploreQ.length) continue;
 				if (left() < 250 || (best && left() <= endRes())) { end = 'time'; break; }
-				if (nothingSince >= 0 && nothingSince === steps) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } if (osw && await osHold()) continue; if (await bwlHold()) continue; if (!best && bwcRelease('the executor has nothing left')) { nothingSince = -1; continue; } if (ST_ON && await stHold()) continue; end = 'exhausted'; break; }
+				if (nothingSince >= 0 && nothingSince === steps) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } if (osw && await osHold()) continue; if (!best && bwcRelease('the executor has nothing left')) { nothingSince = -1; continue; } if (await bwlHold()) continue; if (ST_ON && await stHold()) continue; if (PREC_ASYNC && await precHold()) continue; end = 'exhausted'; break; }
 				nothingSince = steps;
 				// (a deepening refused for the clock alone (its doubled first rung past the time left) is no exhaustion: the
 				// end is the time's, not a claim that no plan is left (The Flighty Slighty, The Tunnels, Fish Gods, OCTOS:
 				// "end exhausted" 1-5 s before the 60-s budget; every level is possible))
-				if (!deepen('exhausted')) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } if (osw && await osHold()) continue; if (await bwlHold()) continue; if (!best && bwcRelease('the executor has nothing left')) continue; if (ST_ON && await stHold()) continue; end = deepenings < maxDeepen ? 'time' : 'exhausted'; break; }
+				if (!deepen('exhausted')) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } if (osw && await osHold()) continue; if (!best && bwcRelease('the executor has nothing left')) continue; if (await bwlHold()) continue; if (ST_ON && await stHold()) continue; if (PREC_ASYNC && await precHold()) continue; end = deepenings < maxDeepen ? 'time' : 'exhausted'; break; }
 				continue;
 			}
 			if (osw) { /* (the thread runs on its own) */ } else if (os && !osDone && !stopped && !(best && left() <= endReserve)) {
@@ -1762,6 +1930,11 @@ async function compile(L, opts = {}, emit = () => {}) {
 			const wms = Math.max(0, left() - 500);
 			await Promise.race([bwlDone, new Promise((res) => { const tt = setTimeout(res, wms); if (tt.unref) tt.unref(); })]);
 		}
+		// (EEAT_BW_LEVEL=last: the child's route only now, and only when the moves stage has none)
+		if (BW_LEVEL_MODE === 'last' && !BW_CHAIN && bwlPending && !best) {
+			const x = routeOf(T.masksOf(bwlPending.replace(/[^0-O]/g, '')), 'the whole level as one leg (backward, last resort)', null);
+			say({ ev: 'bwlevel', end: 'taken', runTicks: x && x.ev ? x.ev.runTicks : null, better: !!(x && x.better) });
+		}
 		// (in-flight steps: told to stop, awaited briefly)
 		const wasStopped = stopped;
 		stopped = true;
@@ -1772,6 +1945,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		for (const tt of timers) clearInterval(tt);
 		if (bwlChild) { try { bwlChild.kill('SIGKILL'); } catch (e) { /* gone */ } }
 		if (ST_ON) { stHarvest(); stStop(); }
+		if (PREC_ASYNC) { precOver = true; if (precChild) { try { precChild.kill('SIGKILL'); } catch (e) { /* gone */ } } }
 	}
 	if (osw) osHarvest();   // (the one shot's thread: what arrived during the last turn)
 	const legTools = (lg) => { const c = {}; for (const g of lg) c[g.tool || '?'] = (c[g.tool || '?'] || 0) + 1; return c; };
@@ -2059,6 +2233,37 @@ async function compile(L, opts = {}, emit = () => {}) {
 		stage('joins', Date.now() - tm, text);
 	}
 
+	// ---- THE ENDGAME (C6 lane 5 block 3; OPT-IN opts.endgameS (compile.js EEAT_ENDGAME_S / --endgame=<s>), 0 / unset: off,
+	// the compile byte for byte): the exact endgame ladder of src/endgame.js on the finished route: from the route's own state
+	// K = 8, 16, .. 64 ticks before its finish EVERY input sequence (stateHash merge, the admissible trophy bound's cut), the
+	// first finish the fastest from that state, a give-up / an exhausted search a proof that none is faster from there;
+	// kept only when the engine replays it faster with no more deaths and no lower chance. Its own clock after the joins.
+	// (celeste x2: the route's last 34 ticks where the best known takes 16; the ladder 239 -> 238, no faster finish within
+	// the last 31 ticks proven)
+	let endgameInfo = null;
+	if (best && opts.endgameS > 0 && !stopped) {
+		tm = Date.now();
+		let text = '';
+		try {
+			const EG = require('../endgame.js');
+			const r = EG.ladder(L, [{ name: 'route', masks: best.masks }], { K: { max: +process.env.EEAT_ENDGAME_K || 64 }, seconds: opts.endgameS });
+			let provedK = 0;
+			for (const p of r.proofs || []) if (!p.rejected && p.start === 'route') provedK = Math.max(provedK, p.K);
+			endgameInfo = { before: best.runTicks, found: (r.found || []).length, proofs: (r.proofs || []).length, provedK, searches: r.searches, ms: Date.now() - tm };
+			const ev = r.masks ? C.evaluate(L, r.masks) : null;
+			if (ev && ev.deaths <= best.deaths && ev.chance >= best.chance - 1e-9 && ev.runTicks < best.runTicks) {
+				const saved = best.runTicks - ev.runTicks;
+				best = { masks: ev.ms, ticks: ev.complete, runTicks: ev.runTicks, deaths: ev.deaths, chance: ev.chance, legs: best.legs, how: `${best.how} + endgame` };
+				endgameInfo.after = ev.runTicks;
+				say({ ev: 'result', kind: 'finish', ticks: ev.complete, runTicks: ev.runTicks, deaths: ev.deaths, chance: ev.chance, how: best.how, endgame: saved, lb: LB, gap: gapOf(ev.runTicks), inputs: T.strOf(ev.ms) });
+				if (out) { try { C.writeEetas(path.join(out, 'route.eetas'), ev.ms); } catch (e) { /* read-only */ } }
+				text = `-${num(saved)} ticks`;
+			} else text = 'no gain';
+			text += `; ${endgameInfo.proofs} proofs${endgameInfo.provedK ? `, no faster finish within the last ${endgameInfo.provedK} ticks` : ''}`;
+		} catch (e) { bug('endgame', { error: e.message }); text = `failed: ${e.message}`; }
+		stage('endgame', Date.now() - tm, text);
+	}
+
 	// ---- the bound again (the planner's facts may have raised it), the report
 	// (a proof of optimality: the route is one exact leg from the level start, proven the fewest ticks, and the start is
 	// static: no route has fewer run ticks)
@@ -2087,11 +2292,24 @@ async function compile(L, opts = {}, emit = () => {}) {
 	else if (opts.known !== false && (opts.file || opts.md5)) { try { known = knownOf(opts.file, { md5: opts.md5 }); } catch (e) { known = null; } }
 	progress();
 	const why = best ? '' : `no route (end ${end}): ${whyNow().text}`;
+	// THE ANCHOR DUMP (a diagnosis aid, OPT-IN EEAT_ANCHOR_DUMP=<file.jsonl>; unset = nothing written): one JSON line per
+	// anchor {id, gain, tick, fails, via, masks (every arrival's input string)}, so the last mile of a NEAR level (a failed
+	// leg 1-3 tiles from its target) can be replayed from the anchor's exact engine state (tools/cmp/nearkrt.js)
+	if (process.env.EEAT_ANCHOR_DUMP) {
+		try {
+			const lines = [...anchors.values()].map((A) => JSON.stringify({ id: A.id, gain: A.gain, tick: A.firstTick, fails: A.fails, via: A.via || '', edgeVia: A.edgeVia || null,
+				masks: A.arrivals.map((a) => (typeof a.masks === 'string' ? a.masks : T.strOf(a.masks instanceof Uint8Array ? a.masks : T.masksOf(a.masks)))) }));
+			const fs = require('fs'); let f = process.env.EEAT_ANCHOR_DUMP;
+			// (a directory: one file a level, <dir>/<level>.anchors.jsonl, for a full compile's levels)
+			try { if (fs.statSync(f).isDirectory()) f = path.join(f, path.basename(String(opts.file || 'level'), '.eelvl') + '.anchors.jsonl'); } catch (e) { /* a file name */ }
+			fs.writeFileSync(f, lines.join('\n') + '\n');
+		} catch (e) { /* a diagnosis file only */ }
+	}
 	say({ ev: 'done', end, sec: Math.round(secNow() * 10) / 10, steps, okSteps, anchors: anchors.size, routes: best ? 1 : 0, best: best ? best.ticks : null, runTicks: best ? best.runTicks : null, lb: LB, gap: best ? gapOf(best.runTicks) : null,
 		bugs, deepenings, stalls, bnbPlans, bnbArrivals, layers: Math.max(0, ...[...anchors.values()].map((A) => A.firstTick)), ...(why ? { why } : {}) });
 	saveFiles();
 	return { ok: !!best, masks: best ? best.masks : null, route: best ? best.masks : null, runTicks: best ? best.runTicks : null, ticks: best ? best.ticks : null, deaths: best ? best.deaths : null, chance: best ? best.chance : null,
-		lb: LB, lbComplete, lbProof, gap: best ? gapOf(best.runTicks) : null, legs: best ? best.legs : [], stages, known, why, end, anchors: anchors.size, steps, okSteps, bugs, deepenings, stalls, bnbPlans, bnbArrivals, relayRuns, relaySet, relayDrop, ...(ST_ON ? { stretch: stStats } : {}), exec: execStats, perfect: perfectInfo, joins: joinsInfo,
+		lb: LB, lbComplete, lbProof, gap: best ? gapOf(best.runTicks) : null, legs: best ? best.legs : [], stages, known, why, end, anchors: anchors.size, steps, okSteps, bugs, deepenings, stalls, bnbPlans, bnbArrivals, relayRuns, relaySet, relayDrop, ...(ST_ON ? { stretch: stStats } : {}), exec: execStats, perfect: perfectInfo, joins: joinsInfo, ...(endgameInfo ? { endgame: endgameInfo } : {}),
 		...(OS_ON ? { oneshot: os || osw ? Object.assign(os ? os.stats() : Object.assign({}, osStats || {}), { thread: !!osw, readyMs: osReady ? osReady.ms : null, error: osErr || null, gate: osw && OS_GATE ? (osOpen ? 'open' : 'shut') : null, released: osReleased, held: osPending.size, anchorsGiven: osAnchors, injected: osInjected, routeTicks: Number.isFinite(osBestT) ? osBestT : null, how: best ? best.how : null }) : null } : {}) };
 }
 

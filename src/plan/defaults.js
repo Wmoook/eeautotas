@@ -19,13 +19,37 @@
 //    EEAT_ICE_LOCAL=1 + EEAT_PROT_LAYER=1 (doctor cold: the ice rise and the protection only where a ball can have
 //    them, sound): The Witch's House compiled 2 of 2 (base 0 of 2), Tutorial 3 2 of 2 (4,252 / 4,761 vs the base's
 //    6,002 / none), Eurus 2 -> 4, Ice Cream Expedition 7 -> 9; Super Mario Bros 3 and Sand Castles within the spread.
+//  - (OUT of the defaults since the C6 chief's block 2, 2026-09-30 22:50: OPT-IN again, see the end of this bullet)
+//    EEAT_CRUMB_RANK=3 (C6 lane 5 block 2, strategy.js THE CRUMB RANK's F GATE: a crumb's gain counts in the anchor pick
+//    only while the anchor's f (arrival tick + plan cost) is within 10% + 60 ticks of the least f of its real gain; box 6,
+//    300 s, side by side): Tutorial 2 3,112 / 3,673 run ticks vs the base's 7,018 (every base sample 4,479-7,018; main
+//    3,070-3,401; the best known 2,947), On And On 2,516 / 3,226 (base 2,823 / 3,628), Perilous Endeavor - / 5,683 (base -);
+//    COST: EE mountain world 0 of 2 (the base's one run routed it at 293 s through 5 coins and blue coins, 15,233 run
+//    ticks): WATCH. =2 (always out): Tutorial 2 3,133 / 3,334 / 3,960 but On And On 1 of 2; =1 (after the first route)
+//    Tutorial 2 5,924. ON TOP OF THE S99 STRETCH DEFAULTS it lost: the chief's A/B 3 (n5-plan fc07366 = S99 + =3 vs main
+//    23f1f3a = S99 alone, side by side, 300 s, W3, 56 levels, one run an arm) compiled 44 vs 50 (main only Tutorial 2 4,097,
+//    Buuwuu, A Dreary Day, Lab of Insanity, TPs, Pinball Bloom, Ice Cream Expedition; =3 only YMCK), both-routed 43 +2.3% run
+//    ticks (faster 10 / slower 17); the full 230 at 300 s 46 (=3) vs 50 (S99's run of main's compiler); Tutorial 2 with =3:
+//    8,014 / 6,054 / 2,963 / none in 4 runs. Re-measure on the S99 stack (2 runs an arm) before it is a default again.
 // NOT defaults (measured, opt-in): the stones (EEAT_PLAN_STONES) and the prices (EEAT_WALL_PRICE, EEAT_PHYS_PRICE: Late
 // christmas compiled, Treasure Trove Cove 7 -> 5 in 2 of 2), the cover from rung 2 (EEAT_COVER_RUNG=2: lost Stone Ruin and
 // Perilous Endeavor, no control faster).
+// THE CHAINS-LAB JUDGE (2026-09-30, src/out/n5/lab/JUDGE.md): EEAT_BW_LEVEL=last (the lab's backward solver on the whole
+// level in a child process next to the moves stage, its route a LAST RESORT: taken only when the moves stage ends with no
+// route; the moves' first route ends the child): box 5, 300 s, W3: the child's route where the base's moves found none:
+// The Blank Page 2,025 (=last) / 2,011 (=1 with the corridor) vs the base 0 of 1, INVASION 4,091 (=1 with the corridor) vs
+// 0 of 1, Gravity's Rainbow 2,059 (=last) / 2,019 / 2,020 (=1) vs the base's none / 3,402; none of the 28 levels the
+// compile routes lost (the moves' route is the compile's wherever they have one: the base's code path); =1 (the child's
+// route at once, the lab's) made the refinement start from the child's route instead of the executor's: Rosa dei Venti
+// +56 / +148 in two pairs, celeste +5: opt-in.
 const DEFAULTS = [
 	['EEAT_COVER', '3'], ['EEAT_CRUMBS', '1'], ['EEAT_FIELD_MEMO', '1'],
 	['EEAT_PLAN_ANY', '1'], ['EEAT_PLAN_UNTOGGLE', '1'],
 	['EEAT_FX_FIELD', '1'], ['EEAT_FX_STATE', '1'], ['EEAT_ICE_LOCAL', '1'], ['EEAT_PROT_LAYER', '1'],
+	['EEAT_BW_LEVEL', 'last'],
+	// (B8 speed, cycle 2: the exact landing's routes as the child prints them, not at its end: the precision pair's first
+	// route 10-20 s vs 33-141 s on box 8 at load 180-230, the final routes the same 153 ticks; strategy.js PREC_STREAM)
+	['EEAT_PREC_STREAM', '1'],
 ];
 // THE STRETCH DEFAULTS (S99, 2026-09-30: "a level compiles only if EVERY stretch works"; CLAUDE.md section 11; each =0 off,
 // EEAT_S99_DEFAULTS=0 none of them, EEAT_COMPILER_DEFAULTS=0 none at all):
