@@ -62,6 +62,9 @@ for (const ix of [...seen.values()].sort((a, b) => a.rel.localeCompare(b.rel))) 
 		cls: ok ? 'COMPILED' : C ? C.cls : (rep ? 'FAILED' : 'CRASH'), gEnd: C ? C.gEnd : null, failLabel: C && !ok ? C.failLabel || '' : '',
 		peakRssMB: ix.peakRssMB || null, sec: ix.sec, exit: ix.code,
 	};
+	// THE ENDGAME's record (strategy.js endgameInfo: the route's run ticks before it, after it when it gained, the last K
+	// ticks proven to hold no faster finish); absent (an older compiler, or EEAT_ENDGAME=0) = no fields, the row as before
+	if (ok && rep.endgame) Object.assign(row, { egBefore: rep.endgame.before ?? null, egAfter: rep.endgame.after ?? null, egProvedK: rep.endgame.provedK || 0, egMs: rep.endgame.ms ?? null });
 	if (ok && row.best) row.ratio = r3(row.runTicks / row.best);
 	if (ok && lb) row.overLb = r3(row.runTicks / lb);
 	for (const b of bases) { const o = b.rows.get(ix.rel); row[b.name] = okT(o); }
@@ -86,6 +89,12 @@ L.push('## TAS quality', '');
 L.push(`- ticks / best known (${rat.length} compiled levels with a best known): **median ${r3(med(rat.map((r) => r.ratio)))}**; at or under the best known **${rat.filter((r) => r.ratio <= 1).length}**; within 10% ${rat.filter((r) => r.ratio <= 1.1).length}.`);
 L.push(`- at or under: ${rat.filter((r) => r.ratio <= 1).sort((a, b) => a.ratio - b.ratio).map((r) => `${nm(r.rel)} ${r.runTicks} / ${r.best} = ${r.ratio}`).join('; ') || 'none'}.`);
 L.push(`- PROVEN (the route's ticks equal a proven lower bound): **${ok.filter((r) => r.proven).length}**${ok.filter((r) => r.proven).length ? ': ' + ok.filter((r) => r.proven).map((r) => nm(r.rel)).join(', ') : ''}; legs proven ${ok.reduce((s, r) => s + r.provenLegs, 0)} / ${ok.reduce((s, r) => s + r.legs, 0)}; ticks / lower bound median ${r3(med(ok.map((r) => r.overLb)))}.`);
+const eg = ok.filter((r) => r.egBefore !== undefined);
+if (eg.length) {
+	const g = eg.filter((r) => r.egAfter !== null && r.egAfter < r.egBefore);
+	const sb = g.reduce((s, r) => s + r.egBefore, 0), sa = g.reduce((s, r) => s + r.egAfter, 0);
+	L.push(`- THE ENDGAME (the reports' endgame record): ran on ${eg.length} routes, median ${r3(med(eg.map((r) => r.egMs / 1000)))} s; gained on **${g.length}** (${sb - sa} ticks: ${sb} -> ${sa})${g.length ? ': ' + g.sort((a, b) => (b.egBefore - b.egAfter) - (a.egBefore - a.egAfter)).map((r) => `${nm(r.rel)} ${r.egBefore} -> ${r.egAfter}`).join('; ') : ''}; no faster finish within the last K ticks proven on ${eg.filter((r) => r.egProvedK > 0).length} (K median ${med(eg.filter((r) => r.egProvedK > 0).map((r) => r.egProvedK)) ?? '-'}).`);
+}
 L.push(`- compiled with no best known: ${ok.filter((r) => r.best === null).length}${ok.filter((r) => r.best === null).length ? ' (' + ok.filter((r) => r.best === null).map((r) => `${nm(r.rel)} ${r.runTicks}`).join(', ') + ')' : ''}.`, '');
 for (const b of bases) {
 	const nw = rows.filter((r) => r.ok && r[b.name] === null), lost = rows.filter((r) => !r.ok && r[b.name] !== null), both = rows.filter((r) => r.ok && r[b.name] !== null);
