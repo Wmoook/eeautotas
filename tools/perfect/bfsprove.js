@@ -369,10 +369,9 @@ async function main() {
 		out.opt = found.path.length - 1;
 		if (ev) {
 			out.optReplay = ev.runTicks;
-			if (Number.isFinite(U) && ev.runTicks < U) {
-				out.verdict = 'FASTER';
-				if (args.out) { Cm.writeEetas(path.resolve(args.out), ev.ms); out.written = args.out; }
-			} else out.verdict = 'PROVEN';
+			out.verdict = Number.isFinite(U) && ev.runTicks < U ? 'FASTER' : 'PROVEN';
+			// (last hour: the optimum is written in both cases: FASTER and PROVEN are each the first finish = the optimum)
+			if (args.out) { Cm.writeEetas(path.resolve(args.out), ev.ms); out.written = args.out; }
 			lb = ev.runTicks;
 		} else out.verdict = 'replay-failed';
 	} else if (!out.why) {
