@@ -1203,3 +1203,26 @@ ways in.
   idle tick moves nothing), x == X at the engine's landing tick (`airTimeOf`), the braked rests first: its landings are
   real (the exact local search finishes 19 ticks on), but from the attempts' rests 167 vs the ground pass's 153: no gain
   yet (the rest must come early: the known's at tick 77).
+- **THE HARD SET at 900 s: the short request's yield, the deep rung** (B8 hard lane, cycles 1-2, 2026-09-30 / 10-01; branch
+  n5-b8-hard; box 8, every route replayed from the level file by tools/cmp/verify.js). WHERE THE HARD SET STOPS (the 25 hard
+  levels; 10 compile: the 7 one-leg levels at 300 s, EX Crew Ice at 300 s on n5-plan f3aacdf (11,935 / 12,451;
+  B7: 0 of 6 at 300 s with EEAT_CRUMB_RANK=3), Are You A God and EX Crew RR at 900 s): every failing compile ends on
+  'budget' failures of LONG legs (300-800 route ticks from the previous trigger, the known-route test krt.js: found from 120
+  ticks before on 9 of 11) at rung 3 (45 s), which at 900 s take ~half the worker time (1,000-1,700 of ~2,700 worker-s;
+  rung-3 successes 0-7 of 20-39 tries a level). THE SHORT REQUEST'S YIELD (strategy.js, OPT-IN `EEAT_ST_YIELD=<s>`, unset =
+  the stretch child's scheduling byte for byte): the stretch child's short first plan (the whole level as one 'trophy' leg)
+  held the one child 255-270 s on the multi-trigger hard levels; past <s>, with a failed stretch from an anchor past the start
+  (gain > 0), the child is restarted for the failed stretches and the short request's rest comes back once when none waits; a
+  ONE-LEG level never yields. A/B (300 s, W3, side by side, 9 levels, n5-plan f3aacdf + it): compiled 1 = 1, triggers equal
+  or worse on 8 of 9 (Are You A God 10 vs 17), the yielded child's legs 2 (Egg Quest II) vs the base child's 0: NO GAIN, not
+  merged. THE DEEP RUNG ON THE HARD SET (B7's a13588a / 1fd4966 cherry-picked, OPT-IN `EEAT_RUNG_DEEP=135000`: a 5th rung of
+  135 s after the 45-s one) together with the yield, 900 s, W3, par 3 an arm side by side vs the knobs off (n5-b8-hard f045a90
+  = n5-plan f3aacdf + both; 6 hard levels): Are You A God COMPILED 7,613 at 594 s (best known 5,375: 1.42; the base none,
+  gain 20), the other 5 further in every pair (gain at the end with / without: NC Naos 10a3 16 / 6 (its trophy leg left),
+  Egg Quest II base 35 / 27, Forgotten Veil 731 12 / 7, b7be 10 / 7, NC Naos de5f 9 / 6: 82 vs 53); the rung-4 steps found the legs the 45-s window never did (Are You A God's
+  coins (93,114) and (115,124) in 47 s each, Forgotten Veil's coin 4 (72,138) in 126 s); on NC Naos de5f both arms take the
+  known route's own coin order (the red key, then (136,107) ... (254,174)), 1.5x its ticks: the per-leg time is the wall.
+  The two knobs together: not yet split (cycle 3: the deep rung alone, src/out/b8hard/d900c3.sh). NC Naos's coin (111,113) (both
+  copies) is a 1 x 2 pocket left of a 5-tile run of right arrows: the known route enters it at -6.5 px/tick from a dive
+  (route ticks 2,300-2,334); the compile stops 1 tile short at rung 3. Tools: src/out/b8hard (abtab.js, stops.js, rungs.js,
+  routetrace.js; not in git).
