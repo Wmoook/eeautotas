@@ -214,6 +214,8 @@ const EL = require('./eelvl.js');
 const RF = require('./reach.js');
 const SF = require('./steer.js');
 const V8 = require('v8');
+/** this thread's V8 heap in use, MB (the main thread's in progress events: `mainHeapMB`; its limit is V8's default, ~4 GB) */
+const mainHeapMB = () => Math.round(V8.getHeapStatistics().used_heap_size / 1048576);
 
 // the 18 inputs: nothing / left / right x nothing / up / down x jump or not (explore.js's order)
 const OPTIONS = [];
@@ -1671,13 +1673,21 @@ async function gpuMain(a, L, m) {
 		roomList.push(r);
 		return r;
 	};
-	// ---- head A's heap (explore()'s): (priority, cell, version)
-	const hv = [], hc = [], hver = [];
+	// ---- head A's heap (explore()'s): (priority, cell, version), in typed arrays of hn entries: stale entries stay until
+	// a compaction (3 x the cells), and on Good Egg 49.0 M cells took plain arrays past V8's largest array (~112.8 M
+	// elements; growing one further is a fatal error, not an exception): the process died by SIGTRAP at 1,751 s
+	let hcap = 1 << 16, hv = new Float64Array(hcap), hc = new Int32Array(hcap), hver = new Int32Array(hcap), hn = 0;
+	const hgrow = () => {
+		hcap *= 2;
+		const v = new Float64Array(hcap), c = new Int32Array(hcap), r = new Int32Array(hcap);
+		v.set(hv.subarray(0, hn)); c.set(hc.subarray(0, hn)); r.set(hver.subarray(0, hn));
+		hv = v; hc = c; hver = r;
+	};
 	const prio = (c) => cRc[c] + a.lambda * Math.sqrt(cPicks[c]);
 	const hpush = (c) => {
-		let i = hv.length;
+		if (hn >= hcap) hgrow();
+		let i = hn++;
 		const v = prio(c);
-		hv.push(v); hc.push(c); hver.push(cVer[c]);
 		while (i > 0) {
 			const p = (i - 1) >> 1;
 			if (hv[p] <= v) break;
@@ -1690,8 +1700,8 @@ async function gpuMain(a, L, m) {
 	const hpop = () => {
 		const c = hc[0];
 		popVer = hver[0];
-		const v = hv.pop(), lc = hc.pop(), lver = hver.pop();
-		const n = hv.length;
+		const n = --hn;
+		const v = hv[n], lc = hc[n], lver = hver[n];
 		if (n > 0) {
 			let i = 0;
 			for (;;) {
@@ -1709,8 +1719,8 @@ async function gpuMain(a, L, m) {
 	};
 	const compact = () => {
 		let n = 0;
-		for (let i = 0; i < hv.length; i++) if (hver[i] === cVer[hc[i]]) { hv[n] = hv[i]; hc[n] = hc[i]; hver[n] = hver[i]; n++; }
-		hv.length = n; hc.length = n; hver.length = n;
+		for (let i = 0; i < hn; i++) if (hver[i] === cVer[hc[i]]) { hv[n] = hv[i]; hc[n] = hc[i]; hver[n] = hver[i]; n++; }
+		hn = n;
 		for (let i = (n >> 1) - 1; i >= 0; i--) {
 			const v = hv[i], c = hc[i], ver = hver[i];
 			let j = i;
@@ -1729,7 +1739,7 @@ async function gpuMain(a, L, m) {
 	let maxT = a.depth;
 	const rnd = rngOf(a.seed);
 	const popA = () => {
-		while (hv.length) {
+		while (hn) {
 			const c = hpop();
 			if (popVer !== cVer[c] || cT[c] >= maxT) continue;
 			return c;
@@ -1777,7 +1787,7 @@ async function gpuMain(a, L, m) {
 		while (samples.length > 2 && now - samples[1][0] >= 2000) samples.shift();
 		const [ta, ka] = samples[0];
 		say({ ev: 'progress', layer: deepest, tick: deepest, states: nCells, ticks, ticksPerSec: now > ta ? Math.round((ticks - ka) / ((now - ta) / 1000)) : 0, picks,
-			bestCost: minRc >= 1e4 ? null : Math.round(minRc * 100) / 100, found: route ? route.ticks : 0, refined: 0, rooms: roomList.length, workers: 1, gpu: true, batches, full });
+			bestCost: minRc >= 1e4 ? null : Math.round(minRc * 100) / 100, found: route ? route.ticks : 0, refined: 0, rooms: roomList.length, workers: 1, gpu: true, batches, full, mainHeapMB: mainHeapMB() });
 	};
 	const sendNear = () => {
 		if (near === nearSent || near.c === 0) return;
@@ -1850,7 +1860,7 @@ async function gpuMain(a, L, m) {
 		}
 		const h0 = Date.now();
 		// the picks (explore()'s heads, one pick after the other)
-		if (hv.length > 3 * nCells + 4096) compact();
+		if (hn > 3 * nCells + 4096) compact();
 		let K = 0;
 		for (let k = 0; k < a.batch; k++) {
 			let e = -1;
@@ -2079,7 +2089,7 @@ async function main() {
 		say(Object.assign({ ev: 'progress', layer: deepest, tick: deepest, states: total('cells'), ticks: tk, ticksPerSec: now > ta ? Math.round((tk - ka) / ((now - ta) / 1000)) : 0,
 			picks: total('picks'), bestCost: minRc === null || minRc >= 1e4 ? null : Math.round(minRc * 100) / 100, found: route ? route.ticks : 0, refined: total('refined') },
 		a.cells === 'coarse' ? { rooms: nRooms } : {}, one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}, bursts ? { gpu: bursts.stats() } : {},
-		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted'), cpuS: cpuSec() }, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), leadRoutes: nLead, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
+		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted'), cpuS: cpuSec(), mainHeapMB: mainHeapMB() }, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), leadRoutes: nLead, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
 	};
 	// the workers' sources, each room key once per kind unless it improved (an earlier arrival, a lower cost): every
 	// worker finds the same rooms
