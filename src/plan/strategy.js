@@ -276,6 +276,17 @@ const ST_RELAY = process.env.EEAT_ST_RELAY !== '0', ST_CHAIN = process.env.EEAT_
 const ST_N = Math.max(1, Math.min(4, +process.env.EEAT_ST_N || 1));
 // (EEAT_ST_GENERAL=0: the short first plan's request alone, no failed stretches after it)
 const ST_GENERAL = process.env.EEAT_ST_GENERAL !== '0';
+// THE SHORT REQUEST YIELDS (B8 hard lane, 2026-09-30; OPT-IN EEAT_ST_YIELD=<s>, unset / 0 = off, the scheduling byte for byte):
+// the short first plan's request (a ONE-LEG level's whole-level solve from the start: 'trophy') held the one child for
+// ST_SHORT_MAX_S (270 s) on the hard set's multi-trigger levels, where the planner's first plan is the trophy alone (Are You
+// A God, Egg Quest II, Stupid Fox, EX Crew Ice: 255-270 s, 'budget' / 'exhausted', in every S99 and 900-s run), while the
+// executor's failed long legs waited: the lab's backward solver on ONE continuous clock solves 5 of 7 of those legs from the
+// known routes' own states in 2-41 s (executor rungs 1-2: 0 of 5). Once the request has run this many seconds and the
+// executor has a failed stretch from an anchor PAST the start (gain > 0: the level is evidently not one leg), the request
+// yields: the child is restarted and serves the failed stretches; the short request comes back once (its clock's rest)
+// when no failed stretch waits. A ONE-LEG level never yields (its anchors have no gain): Just One More Time's 244-s
+// whole-level route is untouched.
+const ST_YIELD_MS = Math.max(0, +process.env.EEAT_ST_YIELD || 0) * 1000;
 const ST_NICE = process.env.EEAT_ST_NICE !== undefined && process.env.EEAT_ST_NICE !== '' ? +process.env.EEAT_ST_NICE : 10;
 /** a relative deadline (a step's or a waypoint's beforeTickFrom): a number, or 'prev+N' (N ticks after the previous
  *  step's arrival, i.e. this anchor's arrival: a key's KEY_TICKS) -> ticks | NaN */
@@ -886,7 +897,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	// ---- THE STRETCH SOLVER IN ITS OWN PROCESS (EEAT_STRETCH=1; ST_* above): ST_N children, one stretch each at a time on
 	// one clock; slot 0 takes the short first plan, every slot the failed stretches
 	const stSlots = [];              // {ch, busy}: busy = the request in hand {id, A, a, legs, k, ms, cand, t, short}
-	let stSeq = 0, stShortSent = false;
+	let stSeq = 0, stShortSent = false, stShortLeft = null;   // (ST_YIELD_MS: the yielded short request's rest)
 	const stQ = [];                  // the children's messages, harvested in the loop's turns (stHarvest)
 	const stCands = new Map();       // `${anchor id}|${edge key}` -> {A, step, wp, cost, rung, n, tries, lastMs, why, solved, inflight}
 	const stStats = { requests: 0, ok: 0, anchors: 0, routes: 0, legs: 0, ms: 0, relays: 0, stale: 0, children: 0, short: null };
@@ -1015,6 +1026,17 @@ async function compile(L, opts = {}, emit = () => {}) {
 		if (ok) { c.solved = true; return; }
 		c.rung = Math.max(c.rung, step.rung | 0); c.n++;
 	};
+	/** the failed stretch to give a child next: the fewest tries, then the most progress, the least cost, the oldest (null:
+	 *  none); pastStart: only from an anchor with gain (ST_YIELD_MS's test) */
+	const stBestCand = (pastStart) => {
+		let bestC = null;
+		for (const c of stCands.values()) {
+			if (c.solved || c.inflight || c.rung < ST_RUNG || c.tries >= ST_TRIES || (c.tries > 0 && !/budget/.test(c.why)) || c.A.exhausted || !c.A.arrivals.length) continue;
+			if (pastStart && !(c.A.gain > 0)) continue;
+			if (!bestC || c.tries < bestC.tries || (c.tries === bestC.tries && (c.A.gain > bestC.A.gain || (c.A.gain === bestC.A.gain && (c.cost < bestC.cost || (c.cost === bestC.cost && c.seq < bestC.seq)))))) bestC = c;
+		}
+		return bestC;
+	};
 	/** an idle child: the next request (slot 0: the short first plan once; then the failed stretch of the most progress not
 	 *  in hand in another slot) */
 	const stSchedule = () => {
@@ -1031,6 +1053,20 @@ async function compile(L, opts = {}, emit = () => {}) {
 			}
 		}
 		if (stopped || best) return;
+		// (THE SHORT REQUEST YIELDS, ST_YIELD_MS: a short request past its first ST_YIELD_MS while the executor has a failed
+		// stretch from an anchor past the start: the child restarted for the stretches, the request's rest kept for later)
+		if (ST_YIELD_MS > 0) for (let i = 0; i < stSlots.length; i++) {
+			const s = stSlots[i], b = s.busy;
+			if (!s.ch || !b || !b.short || b.yielded || Date.now() - b.t < ST_YIELD_MS) continue;
+			const c = stBestCand(true);
+			if (!c) continue;
+			const ran = Date.now() - b.t;
+			say({ ev: 'stretch', what: 'yield', id: b.id, slot: i, ms: ran, to: labelOf(c.step), anchor: c.A.id });
+			stStats.yields = (stStats.yields | 0) + 1;
+			if (b.ms - ran >= ST_MIN_MS && b.k < b.legs.length) stShortLeft = { A: b.A, a: b.a, legs: b.legs.slice(b.k), ms: b.ms - ran, cand: b.cand };
+			stKill(s);
+			stSpawn(i);
+		}
 		// (before a route the moves have the whole budget: the polish's and the proof's reserves are kept only once a route
 		// is known, and a route of the child's own is one; the whole-level backward solve needed 37 s in one piece on Stone
 		// Ruin at a 90-s clock and failed at 45 s)
@@ -1058,12 +1094,16 @@ async function compile(L, opts = {}, emit = () => {}) {
 				}
 			}
 			if (!ST_GENERAL) continue;
-			let bestC = null;
-			for (const c of stCands.values()) {
-				if (c.solved || c.inflight || c.rung < ST_RUNG || c.tries >= ST_TRIES || (c.tries > 0 && !/budget/.test(c.why)) || c.A.exhausted || !c.A.arrivals.length) continue;
-				if (!bestC || c.tries < bestC.tries || (c.tries === bestC.tries && (c.A.gain > bestC.A.gain || (c.A.gain === bestC.A.gain && (c.cost < bestC.cost || (c.cost === bestC.cost && c.seq < bestC.seq)))))) bestC = c;
+			const bestC = stBestCand(false);
+			if (!bestC) {
+				// (ST_YIELD_MS: no failed stretch waits: the yielded short request's rest, once)
+				if (stShortLeft && i === 0) {
+					const r = stShortLeft;
+					stShortLeft = null;
+					if (stSend(slot, r.A, r.a, r.legs, Math.min(r.ms, room), r.cand)) { slot.busy.short = true; slot.busy.yielded = true; continue; }
+				}
+				return;
 			}
-			if (!bestC) return;
 			// (THE REST OF A SHORT PLAN: the anchor's plan through this stretch has at most ST_SHORT steps: its legs in order on
 			// one clock, ST_MS a leg, from its first arrival (the whole-level request's rule from the frontier); EEAT_ST_CHAIN=0:
 			// the stretch alone)
