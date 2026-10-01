@@ -4,7 +4,8 @@
 // trigger means the compile's own arrival states (or its order) are the fault; a leg found only from a later route state
 // (hit-300 / hit-120) means the finder fails on the leg's length / its field; none found means the finder (or the
 // waypoint) is the fault. The route's states are exact (replayed by the engine), so a find is a real leg.
-//   node tools/cmp/krt.js <level.eelvl> <route.eetas> "<label>" [--rungs=1,2] [--backs=300,120] [--prev=1] [--scale=1]
+//   node tools/cmp/krt.js <level.eelvl> <route.eetas> "<label>" [--rungs=1,2] [--backs=300,120] [--prev=1] [--scale=1] [--fast=1]
+// (--fast=1: the budgets marked fast, as the strategy marks them before the compile's first route)
 // <label>: the model's trigger label as the compile reports it ("coin (93,41)", "purple switch 1 (196,14)", a trailing
 //   " xN" is dropped) or "trophy". --rungs: the calls, one per rung listed, on the same executor (its memos and the
 //   counterexample walls carry over between calls, as in a compile: "1,1,2,2,3" = 5 calls). --backs: starts that many
@@ -32,7 +33,7 @@ const pos = argv.filter((s) => !s.startsWith('--'));
 	const label = String(label0).replace(/ x\d+$/, '');
 	const rungs = String(opt('rungs', '1,2')).split(',').filter(Boolean).map(Number);
 	const backs = String(opt('backs', '300,120')).split(',').filter(Boolean).map(Number).filter((b) => b > 0);
-	const usePrev = opt('prev', '1') !== '0', scale = +opt('scale', 1) || 1;
+	const usePrev = opt('prev', '1') !== '0', scale = +opt('scale', 1) || 1, fast = opt('fast', '0') === '1';
 	const L = T.loadLevelFile(file), W = L.width, H = L.height;
 	const masks = C.readEetas(rfile);
 	const ev = TS.routeEvents(L, masks);
@@ -72,7 +73,7 @@ const pos = argv.filter((s) => !s.startsWith('--'));
 	for (const [name, tk] of starts) {
 		for (const r of rungs) {
 			const t0 = Date.now();
-			const res = await ex.reach([T.strOf(masks.subarray(0, tk))], wp, { ms: RUNG_MS[Math.max(0, Math.min(3, r))] * scale, level: r, k: 4 });
+			const res = await ex.reach([T.strOf(masks.subarray(0, tk))], wp, { ms: RUNG_MS[Math.max(0, Math.min(3, r))] * scale, level: r, k: 4, fast });
 			const cl = res.fail && res.fail.closest;
 			const row = { start: name, tick: tk, routeLeg: hit - tk, rung: r, ok: res.ok, ms: Date.now() - t0, tool: res.tool,
 				ticks: res.ok ? res.arrivals[0].tick - tk : null, why: res.fail ? res.fail.why : null,

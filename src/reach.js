@@ -73,6 +73,68 @@ const TROPHY = 121, CHECKPOINT = 360, PROTECTION = 420, ICE = 1064, CURSE = 421,
 // effects that change jumps, speeds or gravity: walk mode (417 jump, 418 fly, 419 speed, 453 low gravity, 461
 // multijump, 1517 gravity)
 const WILD = new Set([417, 418, 419, 453, 461, 1517]);
+// THE AIR JUMPS (n5 lane 3, OPT-IN: EEAT_AIRJUMP=1 or opts.airJumps true): a level whose only effect tiles are multijumps
+// (461, any number) and whose gravity is the default no longer falls back to the walk: the physics model with an AIR JUMP
+// at every normal tile (eesim.js 1385-1398: with jumps left a jump in the air sets speed_y to the jump's -6.7 whatever the
+// ball was doing): from any R / F / L / XR state R(the jump's rise from the tile's top edge, +8 px of margin), and in the
+// fields that pull (climbables, liquids, up arrows) the fastest C and the jump down F(KJD). The jumps left are not
+// counted (an unlimited count), so the field stays a RELAXATION for every ball of such a level (1, 2, ... or 1000 jumps,
+// or none): its costs lower bounds, its -1 a proof. The side-arrow prices (an added cost) are off with it. Unset / 0:
+// the walk as before, byte for byte. (9 of the 230 levels: Springopolis, On And On And On, Just One More Time,
+// Sandcastle Safari, First Person Maze, Frolic, Floating Temples, Golden Nightingale, Be gone.)
+const AIRJ_ENV = () => process.env.EEAT_AIRJUMP === '1';
+// the effect-state field (opts.fxState, COMPILER DOCTOR 10): the effect reset (1618) turns every static effect off
+const FX_RESET = 1618;
+const jbOf = (v) => (v === 1 || v === 2 ? v : 0);   // eesim.js _jumpMultiplier: 1 x1.3, 2 x0.75, any other number x1
+/** the effect state {mj, jb} of a ball the effect-state field models, or null (fly, low gravity, a gravity rotation,
+ *  infinite jumps; the speed boost changes no vertical physics and is not in it) */
+function fxStateOf(a) {
+	if (a.has_levitation || a.flip_gravity !== 0 || a.low_gravity || !(a.max_jumps < 1000)) return null;
+	return { mj: a.max_jumps, jb: jbOf(a.jump_boost) };
+}
+/** does effect tile id with number v change a ball of effect state s (the engine's touch: eesim.js _touchBlock) */
+function fxChanges(id, v, s) {
+	switch (id) {
+		case 461: return v !== s.mj;                    // multijump: max_jumps = its number
+		case 417: return jbOf(v) !== s.jb;              // jump: jump_boost = its number
+		case 419: return false;                         // speed: no vertical physics
+		case FX_RESET: return s.mj !== 1 || s.jb !== 0; // the reset: max_jumps 1, no boost
+		default: return v !== 0;                        // fly, low gravity, gravity: on unless 0
+	}
+}
+/** the effect state after effect tile id with number v acts on a ball of state s (null: a state not modelled) */
+function fxAfter(id, v, s) {
+	if (!fxChanges(id, v, s)) return s;
+	if (id === 461) return v < 1000 ? { mj: v, jb: s.jb } : null;
+	if (id === 417) return { mj: s.mj, jb: jbOf(v) };
+	if (id === FX_RESET) return { mj: 1, jb: 0 };
+	return null;
+}
+/** the effect state the ball will have for its leg: the state after its idle ticks from here meet an effect tile (a ball
+ *  standing on or falling onto its spawn's multijump tile: the state of the rest of the leg); fxStateOf otherwise */
+function fxStateNext(a) {
+	const s = fxStateOf(a);
+	if (s === null || typeof a.snapshot !== 'function' || typeof a.tick !== 'function') return s;
+	// (the engine itself: the ball's idle ticks from here, at most FX_IDLE, until its state changes, it dies or it rests: a
+	// spawn over an effect tile (Need for Steed: the spawn (632, 14) over its multijump (632, 15), max_jumps 2 at tick 9) is a
+	// leg of the state it falls into; the sim restored exactly, its event hook off meanwhile)
+	const snap = a.snapshot(), hook = a.onEvent;
+	let out = s;
+	try {
+		a.onEvent = null;
+		for (let k = 0; k < FX_IDLE; k++) {
+			a.tick(FX_IDLE_IN);
+			if (a.is_dead) break;
+			const s2 = fxStateOf(a);
+			if (s2 === null || s2.mj !== s.mj || s2.jb !== s.jb) { out = s2; break; }
+			if (k > 0 && a.speed_x === 0 && a.speed_y === 0) break;
+		}
+	} finally { a.restore(snap); a.onEvent = hook; }
+	return out;
+}
+const FX_IDLE = 40, FX_IDLE_IN = new E.EEInput();
+// (a state the physics part of an effect-state field has no way from: its walk + this, behind every way it has)
+const FX_FAR = 4000;
 const COINDOOR = 43, BLUECOINDOOR = 213, COIN_GOLD = 100;
 
 /**
@@ -233,9 +295,32 @@ function reachField(level, opts) {
 	const fl = (id) => (id >= 0 && id < nFlags ? flags[id] : 0);
 	let wild = !(level.gravityMult === 1), protect = false, ice = false, anyField = false, anyPortal = false, checkpoints = false, timed = false;
 	const protOn = [];   // the protection effect's "on" tiles (its number is not 0: Me.as, eesim.js EFFECT_PROTECTION)
+	// opts.plainFx (with opts.goals; COMPILER DOCTOR 6): the field of a PLAIN ball (no effect on: types.js featValue 'fx'
+	// 0) in a level with effect tiles: the physics model up to the first effect tile that changes a plain ball (fxExit)
+	// and that tile a goal at its walk cost (the walk is a lower bound for any effect state, so the field stays a lower
+	// bound and its -1 a proof for the plain ball); an effect tile that leaves a plain ball plain (a fly / jump / speed /
+	// low-gravity / gravity effect of number 0, a multijump of 1) is air. Without it: one effect tile anywhere made the
+	// whole level's field the gravity-blind walk.
+	// opts.fxState {mj, jb} (with opts.goals; COMPILER DOCTOR 10, types.js EEAT_FX_STATE): the same field for a ball that
+	// CARRIES an effect the physics model can take (fxStateOf: max_jumps mj < 1000, jump_boost jb; the speed boost changes
+	// no vertical physics and is ignored; fly, low gravity, a gravity rotation and infinite jumps are not modelled: none):
+	// its jump rises the combined height of its mj jumps (the ground jump + mj - 1 air jumps at the apex: a ball that walks
+	// off a ledge keeps mj - 1 air jumps, eesim.js jump_count, and the R states' free sideways moves let the ledge jump
+	// stand for that way) with the jump effect's speed, none at mj 0; the effect tiles that change THIS state are its exits
+	// (fxChanges: goals at their walk cost), the others air. ORDERING ONLY: a ball the engine takes off the ground some
+	// other way (a portal exit, a boost) keeps air jumps the model does not give it, so the physics part is no lower bound:
+	// costAt never reads its -1 (the walk's cost + FX_FAR there), and the walk's -1 stays the only cut, as on the walk field.
+	let mjTiles = 0, wildOther = false;   // (the air jumps: multijump tiles, any other effect tile)
+	const fxS = opts.fxState && opts.goals ? opts.fxState : null;
+	const plainFx = (!!opts.plainFx && !!opts.goals) || fxS !== null;
+	const fxExit = plainFx ? [] : null;
 	for (let i = 0; i < N; i++) {
 		const id = fg[i];
-		if (WILD.has(id)) wild = true;
+		if (WILD.has(id) || (fxS !== null && id === FX_RESET)) {
+			if (WILD.has(id)) { if (id === 461) mjTiles++; else wildOther = true; }
+			if (!plainFx) wild = true;
+			else if (fxS !== null ? fxChanges(id, lk[i], fxS) : (id === 461 ? lk[i] !== 1 : lk[i] !== 0)) fxExit.push(i);
+		}
 		if (id === PROTECTION && lk[i] !== 0) { protect = true; protOn.push(i); }
 		if (id === ICE) ice = true;
 		if (id === CHECKPOINT) checkpoints = true;
@@ -368,7 +453,8 @@ function reachField(level, opts) {
 		for (const i of portalExits.keys()) { const s = level.portalSlot[i]; if (!srcOf.has(i) && level.pTarget[s] !== level.pId[s]) forcedP[i] = 1; }
 		unforceChains(W, H, forcedP, portalExits, srcOf);
 	}
-	const Q = anyField || anyPortal ? QMAX : QMIN, INF = Q + 1, NR = Q + 3;
+	// (opts.fxState: a multi-jump or a boosted jump rises past QMIN's 9 half rows)
+	const Q = anyField || anyPortal || (fxS !== null && (fxS.mj >= 2 || fxS.jb === 1)) ? QMAX : QMIN, INF = Q + 1, NR = Q + 3;
 	// ---- the rise caps (the n3 rise-q16 fix): every speed is capped at 16 px/tick by the engine's speed update (Player.tick:
 	// (v + modifier) x drag, then the clamp), so an up boost's and a portal exit's rise is finite: R(q), not R(INF) (which
 	// sent the fields up 100+ tiles of open sky from any boost or portal exit: Imps Paradise, Barrel Cannon Canyon, ...).
@@ -416,6 +502,9 @@ function reachField(level, opts) {
 			if (ok) { if (!exitE) exitE = new Uint8Array(N); exitE[p] = 1; }
 		}
 	}
+	// (the air jumps: multijumps the only effect, the default gravity: the physics model with air jumps, not the walk)
+	const airJ = (opts.airJumps !== undefined ? opts.airJumps === true : AIRJ_ENV()) && mjTiles > 0 && !wildOther && level.gravityMult === 1;
+	if (airJ) wild = false;
 	let mode = wild ? 'walk' : 'physics';
 	if (mode === 'physics' && N * (Q + 20) * 2 > 128 * 1048576) mode = 'walk';
 	// the field transit tables (the n3 rise-exit-apex fix: ORDERING fields only, see exitApexOn; on ice only the classes
@@ -441,6 +530,18 @@ function reachField(level, opts) {
 	// ---- walking distance (both modes: walk mode's cost, physics mode's fallback score): 8-way, a diagonal step closed
 	// only between two walls, portals, death respawns
 	const walk = walkField(W, H, cls, passable, trophy, goalF, portalExits, deaths ? { respawn, src: dsrc } : null, maxF, forcedP, blk);
+	// (opts.plainFx: the effect tiles that change a plain ball become goals at their walk cost, the physics field's seeds)
+	let fxSeeds = 0;
+	if (fxExit !== null && fxExit.length && mode === 'physics') {
+		for (const i of fxExit) {
+			if (!passable(i) || walk[i] === CUT) continue;
+			// (opts.fxState + opts.fxSeedCost(tile, the state after it): the exit seeded at the next state's own cost there,
+			// fifths (the next state's field: one unit along a state change), at least the walk's (a lower bound); -1: the walk)
+			let c = walk[i];
+			if (fxS !== null && typeof opts.fxSeedCost === 'function') { const n = opts.fxSeedCost(i, fxAfter(fg[i], lk[i], fxS)); if (n >= 0) c = Math.min(FAR, Math.max(c, n)); }
+			if (!(goalF.get(i) <= c)) { if (!goalF.has(i)) goals++; goalF.set(i, c); fxSeeds++; }
+		}
+	}
 	// walk mode with protection: that walk (killing tiles open where a protected ball can be) is a protected ball's way. An
 	// unprotected ball's (every killing tile deadly; the protection tiles goals at the protected walk's cost from there)
 	// orders every ball, and the protected walk + PROT_COST only where the unprotected one has no way. Sound: a protected
@@ -462,7 +563,7 @@ function reachField(level, opts) {
 			else if (protP[i] && walk[i] !== CUT) { walkOut[i] = Math.min(FAR, walk[i] + PROT_COST); protFallback++; }
 		}
 	}
-	const base = { version: 3, W, H, N, mode, Q, B: Q, INF, ice, deaths: deaths || protFallback > 0, goals, toGoals: goalF !== null, cls, walk: walkOut, mismatches: 0, KLJ,
+	const base = { version: 3, W, H, N, mode, Q, B: Q, INF, ice, deaths: deaths || protFallback > 0, goals, toGoals: goalF !== null, cls, walk: walkOut, mismatches: 0, KLJ, fxSeeds, plainFx: plainFx && fxS === null && mode === 'physics', fx: fxS !== null && mode === 'physics' ? { mj: fxS.mj, jb: fxS.jb } : null,
 		halfQuad: blk ? blk.reduce((a, x) => a + x, 0) : 0,
 		prot: protP === null ? null : { on: protOn.length, tiles: protP.reduce((s, x) => s + x, 0), fallback: protFallback } };
 	if (mode === 'walk') return Object.assign(base, { ms: Date.now() - t0, prioShift: prioShiftOf(walkOut), labels: 0 });
@@ -504,6 +605,12 @@ function reachField(level, opts) {
 	}
 	const xrOK = (i) => cls[i] === NORM && segOf[i] !== 0;
 	const nIce = ice ? 10 : 0;
+	// (OPT-IN opts.iceLocal / EEAT_ICE_LOCAL=1: the jump's ice rise only where a slippery ball can be: iceNear, else the
+	// plain rise. Off = every jump of a level with one ice block anywhere rises as from ice (72.56 px, not 63.42: +9 px, a
+	// row more at the apex), a false near under every ledge 5 rows below a goal: Cold World's chapter-2 blue coin
+	// (98,207), 5 rows over the floor under its 1-wide shaft and 60+ tiles from the level's ice, read 5 tiles from there
+	// (the true way is from above, through its gate); the engine's best from there reaches row 208)
+	const iceNear = ice && (opts.iceLocal !== undefined ? !!opts.iceLocal : ICE_LOCAL) ? iceNearOf(level, W, H, N) : null;
 	const mm0 = modMinOf(level), mm = (id) => (id >= 0 && id < mm0.length ? mm0[id] : G);
 	const T = TABLES[ice ? 1 : 0];
 	const KSTEP = ice ? 2 : 1;   // rows of fall potential per row fallen (ice: the ball may still fall with less drag)
@@ -513,6 +620,10 @@ function reachField(level, opts) {
 	// the lookup's own table (modMin) of that tile's id
 	const J = new Int8Array(N).fill(-128);
 	const modCur = (n) => { const j = curOf[n]; return j < 0 ? G : mm(fg[j]); };
+	// (opts.fxState: the ball's jump speed and jumps; eesim.js _jumpMultiplier: jump_boost 1 x1.3, 2 x0.75)
+	const MJX = fxS !== null ? fxS.mj : 1;
+	const JVX = MJX === 0 ? 0 : fxS !== null ? JV * (fxS.jb === 1 ? 1.3 : fxS.jb === 2 ? 0.75 : 1) : JV;
+	const rjAir = MJX > 1 ? riseQ(JVX, G, G, nIce) : 0;
 	for (let i = 0; i < N; i++) {
 		if (cls[i] !== NORM) continue;
 		if (i < W || cls[i - W] === WALL) continue;   // a ceiling right above: the jump bonks at once
@@ -522,7 +633,9 @@ function reachField(level, opts) {
 			const nx = x + dx, ny = y + dy;
 			if (nx >= 0 && ny >= 0 && nx < W && ny < H) m = Math.min(m, modCur(ny * W + nx));
 		}
-		const rj = riseQ(JV, m, G, nIce);
+		// (opts.fxState: the jump effect's speed; mj jumps: + mj - 1 air jumps from the apex, in plain air; none at mj 0)
+		if (JVX === 0) continue;
+		const rj = riseQ(JVX, m, G, iceNear !== null && !iceNear[i] ? 0 : nIce) + (MJX > 1 ? (MJX - 1) * rjAir : 0);
 		let e = -1e9;
 		if (isFloor(i + W) && !(i + W < N && sp[i + W] === LOWER)) e = Math.max(e, rj - 8);
 		if (sp[i] === LOWER) e = Math.max(e, rj);
@@ -534,7 +647,20 @@ function reachField(level, opts) {
 			if (isFloor(n + W) && !(n + W < N && sp[n + W] === LOWER)) e = Math.max(e, rj - 8);
 			if (sp[n] === LOWER) e = Math.max(e, rj);
 		}
-		if (e > -1e9) J[i] = qOf(e, Q);
+		if (e > -1e9) J[i] = fxS !== null && e + TOL > 8 * Q ? INF : qOf(e, Q);   // (opts.fxState: past Q's rows, anywhere up)
+	}
+	// (the air jumps: the rise of a jump anywhere in a normal tile, the centre up to the tile's top edge: the stand jump's
+	// rise from a floor + 8, and 8 px of margin; the gravity queue as the stand jump's)
+	const JA = airJ ? new Int8Array(N).fill(-128) : null;
+	if (JA !== null) for (let i = 0; i < N; i++) {
+		if (cls[i] !== NORM) continue;
+		const x = i % W, y = (i / W) | 0;
+		let m = G;
+		for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+			const nx = x + dx, ny = y + dy;
+			if (nx >= 0 && ny >= 0 && nx < W && ny < H) m = Math.min(m, modCur(ny * W + nx));
+		}
+		JA[i] = qOf(riseQ(JV, m, G, nIce) + 8, Q);
 	}
 	// landing-tick jump sites: a field tile over a floor (or beside a floor under a neighbour that is not a wall)
 	const lj = new Uint8Array(N);
@@ -546,7 +672,7 @@ function reachField(level, opts) {
 	// up arrows under a ceiling (anything that stops a rise): the jump down from it
 	const ceilJ = new Uint8Array(N);
 	for (let i = 0; i < N; i++) if (cls[i] === UP && (i < W || cls[i - W] === WALL || (fl(fg[i - W]) & (F_SOLID | F_JUMPTHRU | F_HALF | F_ROTHALF | F_DOOR)) !== 0)) ceilJ[i] = 1;
-	const KJD = Math.min(KF, kOfX(fallD(-JV) + 16) + (ice ? 1 : 0));
+	const KJD = Math.min(KF, kOfX(fallD(Math.max(-JV, -JVX)) + 16) + (ice ? 1 : 0));   // (opts.fxState: the stronger jump)
 
 	// ---- per-tile profiles (what fwd reads), the model
 	// (opts.oneWayEntry, src/steer.js only: a one-way platform's centre entry against its pass direction is blocked (a plain
@@ -594,7 +720,8 @@ function reachField(level, opts) {
 		else if (c === BDOWN) emit(F_, KF);
 		else emit(F_, Math.min(KF, k + KSTEP));
 	};
-	const ljump = (P, P2, k, emit) => { if (P.cls === NORM && P2.lj && k >= KLJ) { const cl = cOfV(vfieldP(P2, -JV, 1)); emit(C_, XA !== null ? Math.min(cl, xIn(P2, -JV)) : cl); } };
+	// (opts.fxState: the ball's jump speed; none at mj 0)
+	const ljump = (P, P2, k, emit) => { if (JVX !== 0 && P.cls === NORM && P2.lj && k >= KLJ) { const cl = cOfV(vfieldP(P2, -JVX, 1)); emit(C_, XA !== null ? Math.min(cl, xIn(P2, -JVX)) : cl); } };
 	/** the forward model: a move from a tile of profile P to a neighbour of profile P2 by (dx, dy) of a state (ty, l) */
 	function fwd(P, P2, dx, dy, ty, l, emit) {
 		if ((P2.sp === LOWER && dy < 0) || (P.sp === LOWER && dy > 0) || (P2.sp === RIGHT && dx < 0) || (P.sp === RIGHT && dx > 0)) return;
@@ -682,6 +809,7 @@ function reachField(level, opts) {
 		const c = cls[t];
 		if (c === NORM) {
 			if (J[t] !== -128 && ((ty === R_ && l >= 0) || ty === F_ || ty === X_)) emit(R_, J[t]);   // stand, jump
+			if (JA !== null && JA[t] !== -128) emit(R_, JA[t]);   // (the air jumps: from any state here)
 			if ((ty === R_ && l >= 0) || ty === X_) emit(F_, 1);   // the apex (at or above the middle)
 			if (ty === R_ && l === -1) emit(L_, 0);               // the apex in the lower half
 			if (ty === F_) emit(L_, l);                           // (a falling ball may be in the lower half)
@@ -689,6 +817,7 @@ function reachField(level, opts) {
 			if (ty === F_) emit(C_, c === UP ? bounceC(t, l) : stopC(t));   // stop and rise / bounce
 			if (ty === C_) emit(F_, 0);                                     // turn round
 			if (ceilJ[t] && (ty === F_ || ty === C_)) emit(F_, KJD);         // the jump down from a ceiling in up arrows
+			if (JA !== null && c !== DOTS && (ty === F_ || ty === C_)) { emit(C_, NL - 1); emit(F_, KJD); }   // (the air jumps in a pulling field)
 		} else if (c === BDOWN) emit(F_, KF);
 		else if (c === BUP) emit(R_, rcT[t]);
 	}
@@ -756,7 +885,7 @@ function reachField(level, opts) {
 		return tab;
 	}
 	// ---- the side-arrow and slot prices (ordering only: the -1 set is the plain model's, only the prices of moves change)
-	const SA = sideArrowPrices(level, opts, { N, W, H, cls, curOf, passable, isFloor, fg, srcOf, trophy });
+	const SA = sideArrowPrices(level, airJ ? Object.assign({}, opts, { sideArrow: false }) : opts, { N, W, H, cls, curOf, passable, isFloor, fg, srcOf, trophy });
 	// ---- the backward label-setting search in cost buckets (integer costs; edges cost 0, 5 or 7, a priced move more)
 	let seeds = [];
 	if (goalF) seeds = [...goalF].sort((a, b) => a[1] - b[1]);
@@ -772,9 +901,9 @@ function reachField(level, opts) {
 	const srcList = new Array(N).fill(null);
 	for (const [e, ps] of srcOf) srcList[e] = Int32Array.from(ps);
 	const { labels, maxFin } = labelSearch({ N, W, H, NR, NL, KF, cls, J, ceilJ, KJD, pid, srcP, rowC, rowX, COST, NLV, LO, front, XB, CB, LB,
-		invArr, invTable, nP, stopT, bounceT, srcList, respawnT, dsrc: Int32Array.from(deaths ? dsrc : []), seeds, maxF, rcT, rpT, pen: SA.pen, penCost: SA.cost, blk, exitE, Q, INF });
+		invArr, invTable, nP, stopT, bounceT, srcList, respawnT, dsrc: Int32Array.from(deaths ? dsrc : []), seeds, maxF, rcT, rpT, pen: SA.pen, penCost: SA.cost, blk, exitE, Q, INF, JA });
 	const kinds = invArr.reduce((a, x) => a + (x !== null ? 1 : 0), 0);
-	const field = Object.assign(base, { ms: 0, labels, kinds, profiles: nP, prioShift: 0, KJD, sideArrow: SA.info,
+	const field = Object.assign(base, { ms: 0, labels, kinds, profiles: nP, prioShift: 0, KJD, sideArrow: SA.info, airJumps: airJ,
 		seg: segOf, segPush: Float64Array.from(segPush), segCap: Float64Array.from(segCap), rowC, rowX, costR, costF, costL, costC, costX, nC, nX,
 		modMin: mm0 });
 	field.prioShift = Math.max(0, bitLen(Math.min(maxFin, FAR)) - 12);
@@ -859,6 +988,7 @@ function labelSearch(S) {
 	const { N, W, H, NR, NL: L, cls, J, ceilJ, KJD, pid, srcP, rowC, rowX, COST, NLV, LO, front, XB, CB, LB, invArr, invTable, nP,
 		stopT, bounceT, srcList, respawnT, dsrc, seeds, maxF, rcT, rpT } = S;
 	const blk = S.blk || null, exitE = S.exitE || null, Q = S.Q, INF = S.INF;   // (the half-block quadrants' closed moves; the exit from the entry)
+	const JA = S.JA || null;   // (the air jumps: reachField's JA)
 	const K1 = S.KF + 1;
 	// (a ring of cost buckets longer than the dearest edge: 8 for 5 / 7; with the side-arrow prices a power of two past the
 	// price, its buckets made when first used)
@@ -910,6 +1040,7 @@ function labelSearch(S) {
 			// same-tile edges into (t2, ty2, >= l2) (the inverse of sameTile)
 			if (c2 === NORM) {
 				if (ty2 === R_ && J[t2] !== -128 && l2 <= J[t2]) { push(t2, R_, 1, cur); push(t2, F_, 0, cur); push(t2, X_, 0, cur); }
+				if (JA !== null && ty2 === R_ && JA[t2] !== -128 && l2 <= JA[t2]) { push(t2, R_, 0, cur); push(t2, F_, 0, cur); push(t2, X_, 0, cur); push(t2, L_, 0, cur); }
 				if (ty2 === F_ && l2 <= 1) { push(t2, R_, 1, cur); push(t2, X_, 0, cur); }
 				if (ty2 === L_) { if (l2 <= 0) push(t2, R_, 0, cur); push(t2, F_, l2, cur); }
 			} else if (c2 >= DOTS && c2 <= UP) {
@@ -921,6 +1052,8 @@ function labelSearch(S) {
 					if (l2 <= 0) push(t2, C_, 0, cur);
 					if (ceilJ[t2] && l2 <= KJD) { push(t2, F_, 0, cur); push(t2, C_, 0, cur); }
 				}
+				// (the air jumps in a pulling field: C(fastest) and F(KJD) from any F / C state here)
+				if (JA !== null && c2 !== DOTS && ((ty2 === C_) || (ty2 === F_ && l2 <= KJD))) { push(t2, F_, 0, cur); push(t2, C_, 0, cur); }
 			} else if (c2 === BDOWN) { if (ty2 === F_) pushAllLow(t2, cur); }
 			else if (c2 === BUP) { if (ty2 === R_ && l2 <= rcT[t2]) pushAllLow(t2, cur); }
 			// portals: (portal tile p, any but C) -> (exit, R(rpT[p]) (R(INF) on a down boost: crossEdges), F(16), and C(16 px/tick) in a field)
@@ -1157,6 +1290,47 @@ const qOf = (e, Q) => Math.max(-1, Math.min(Q, Math.ceil((e + TOL) / 8)));
 const bitLen = (v) => { let n = 0; while (v > 0) { n++; v = Math.floor(v / 2); } return n; };
 function prioShiftOf(a) { let m = 0; for (let i = 0; i < a.length; i++) if (a[i] < DEATH_COST && a[i] > m) m = a[i]; return Math.max(0, bitLen(m) - 12); }
 /** per block id: its most upward modifier_y as the delayed tile (input held where the engine lets it act) */
+// ---- the ice's reach (opts.iceLocal): eesim.js sets _slippery = 2.0 on a tick whose current-below tile is ice, 0 on any
+// other solid below, and -0.2 a tick otherwise (the double reaches 2.8e-16 after 10 steps: 11 slippery ticks after the
+// last ice contact, docs/ee_math.md 1.5). So a ball can be slippery only within 11 ticks of an ice contact; a tick moves
+// the centre at most 16.25 px an axis (endgame.js D_TICK), a portal hop moves it for free. ICE_REACH_TILES Chebyshev
+// tiles (12 ticks x 16.25 px = 12.2 tiles, 2 tiles for the centre over the ice tile and the rounding) from every ice
+// tile, walls ignored (they only shorten the way), portal hops chained: every tile a slippery ball's centre can be in
+const ICE_LOCAL = process.env.EEAT_ICE_LOCAL === '1';
+const ICE_REACH_TILES = 16;
+function iceNearOf(level, W, H, N) {
+	const fg = level.fg;
+	const dist = new Int16Array(N).fill(-1);
+	let cur = [];
+	for (let i = 0; i < N; i++) if (fg[i] === ICE) { dist[i] = 0; cur.push(i); }
+	const silent = level.portalsById && level.portalSlot ? silentPortals(level) : null;
+	const exitsOf = (i) => {
+		if (!silent || (fg[i] !== 242 && fg[i] !== 381)) return null;
+		const s = level.portalSlot[i];
+		if (s < 0 || silent[i]) return null;
+		return level.portalsById.get(level.pTarget[s]) || null;
+	};
+	for (let d = 0; d <= ICE_REACH_TILES && cur.length; d++) {
+		const nxt = [];
+		for (let k = 0; k < cur.length; k++) {
+			const t = cur[k];
+			const ex = exitsOf(t);   // (a hop: its exits at the same distance)
+			if (ex) for (let q = 0; q < ex.n; q++) { const j = (ex.ys[q] >> 4) * W + (ex.xs[q] >> 4); if (j >= 0 && j < N && dist[j] < 0) { dist[j] = d; cur.push(j); } }
+			if (d === ICE_REACH_TILES) continue;
+			const x = t % W, y = (t / W) | 0;
+			for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+				const nx = x + dx, ny = y + dy;
+				if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+				const j = ny * W + nx;
+				if (dist[j] < 0) { dist[j] = d + 1; nxt.push(j); }
+			}
+		}
+		cur = nxt;
+	}
+	const near = new Uint8Array(N);
+	for (let i = 0; i < N; i++) if (dist[i] >= 0) near[i] = 1;
+	return near;
+}
 function modMinOf(level) {
 	const n = level.flags.length, a = new Float64Array(n);
 	for (let id = 0; id < n; id++) {
@@ -1501,6 +1675,42 @@ function scoreAt(f, px, py, vy, q0, q1, slip) {
 /** the cost to the trophy in tiles (-1 = cut off): costAt(field, sim), or costAt(field, px, py, vy, onGround) with the
  *  gravity queue unknown (taken as the strongest pull) */
 function costAt(f, a, py, vy) {
+	// (an effect-state field, opts.fxState: a ball in another state is priced by the field's walk; in its own state by the
+	// physics part, an airborne ball's air jumps left (mj - jump_count: the engine counts the ground jump as spent once the
+	// ball is off the ground) looked up as that much more rise; where the physics part has no way, the walk + FX_FAR: its -1
+	// is no proof (ordering only), the walk's is)
+	if (f.fx && typeof a === 'object' && a !== null) {
+		const tx = Math.trunc(a.px + 8) >> 4, ty = Math.trunc(a.py + 8) >> 4;
+		if (tx < 0 || ty < 0 || tx >= f.W || ty >= f.H) return -1;
+		const w = f.walk[ty * f.W + tx];
+		if (w === CUT) return -1;
+		const s = fxStateOf(a);
+		if (s === null || s.mj !== f.fx.mj || s.jb !== f.fx.jb) {
+			// (another state the field models: that state's field, made on first use by the builder the caller left on f,
+			// f.fxOf (types.js goalField, the executor's ordering fields); else the walk)
+			if (s !== null && typeof f.fxOf === 'function') {
+				const g = f.fxOf(s);
+				if (g && g.fx && g.fx.mj === s.mj && g.fx.jb === s.jb) return costAt(g, a);
+			}
+			return w / 5;
+		}
+		let vy = a.speed_y;
+		const left = s.mj >= 2 && a.jump_count > 0 ? s.mj - a.jump_count : 0;
+		if (left > 0) {
+			const jv = JV * (s.jb === 1 ? 1.3 : s.jb === 2 ? 0.75 : 1);
+			vy = -RaInv(riseQ(vy, G, G, 0) + left * riseQ(jv, G, G, 0));
+		}
+		const v = fifthsAt(f, a.px, a.py, vy, a._q0, a._q1, a._slippery);
+		return v < 0 ? Math.min(FAR, w + FX_FAR * 5) / 5 : v / 5;
+	}
+	// (a plain-ball field, opts.plainFx: a ball with an effect on is priced by the field's walk, the walk mode's lookup: the
+	// physics part holds for a plain ball only)
+	if (f.plainFx === true && typeof a === 'object' && a !== null && !(a.has_levitation === false && a.flip_gravity === 0 && a.max_jumps === 1 && a.jump_boost === 0 && a.speed_boost === 0 && !a.low_gravity)) {
+		const tx = Math.trunc(a.px + 8) >> 4, ty = Math.trunc(a.py + 8) >> 4;
+		if (tx < 0 || ty < 0 || tx >= f.W || ty >= f.H) return -1;
+		const w = f.walk[ty * f.W + tx];
+		return w === CUT ? -1 : w / 5;
+	}
 	const v = typeof a === 'object' && a !== null ? fifthsAt(f, a.px, a.py, a.speed_y, a._q0, a._q1, a._slippery) : fifthsAt(f, a, py, vy, -1, -1, f.ice ? 2 : 0);
 	return v < 0 ? -1 : v / 5;
 }
@@ -1560,7 +1770,7 @@ function shareField(f) {
 }
 
 module.exports = {
-	VERSION: 3, reachField, neverOpenDoors, guideFlags, classOfId, exitApexOn, ALWAYS_SHUT, unforceChains, silentPortals, halfQuadOn, quadOf, moveOK, moveBlocks, QDX, QDY, fifthsAt, fifthsAtRef, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST,
+	VERSION: 3, reachField, fxStateOf, fxStateNext, fxChanges, fxAfter, FX_FAR, neverOpenDoors, guideFlags, classOfId, exitApexOn, ALWAYS_SHUT, unforceChains, silentPortals, halfQuadOn, quadOf, moveOK, moveBlocks, QDX, QDY, fifthsAt, fifthsAtRef, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST,
 	// the tables and the lookup's pieces (tests)
 	riseQ, airRise, fallD, fallV, kOfX, cOfV, qOf, interp, RaInv, TABLES, VF, VFC, KLJ, NFV, NTH, FVa, FSa,
 	G, BD, JV, K_T, TOL, QMAX, KF, NL, CUT, FAR, R_, F_, X_, C_,

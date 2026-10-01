@@ -89,6 +89,13 @@ function levelOf(arg) {
 }
 
 async function main() {
+	// THE AIR JUMPS (n5 lane 3): the compiler's reach fields on a level whose only effect tiles are multijumps are the
+	// physics model with an air jump anywhere (reach.js EEAT_AIRJUMP), not the gravity-blind walk; set before any worker
+	// thread or child process starts (they copy the environment); EEAT_AIRJUMP=0: off, the fields as before
+	if (process.env.EEAT_AIRJUMP === undefined) process.env.EEAT_AIRJUMP = '1';
+	// THE DOCTORS' DEFAULTS (src/plan/defaults.js: the cover, the crumbs, the field memo, any member, no toggle-back, the
+	// plain-ball / effect-state fields, the local ice rise, the protection layer; each =0 off; EEAT_COMPILER_DEFAULTS=0 none)
+	require('./plan/defaults.js').apply();
 	const a = parse(process.argv.slice(2));
 	if (!a._.length) {
 		process.stdout.write('usage: node src/compile.js <level.eelvl | level.json | job id> [--out=<file.eetas>] [--seconds=60] [--workers=N] [--json] [--report=<file.json>] [--quiet]\n');
@@ -169,7 +176,8 @@ async function main() {
 		runTicks: r.runTicks, time: r.ok ? C.fmt(r.runTicks) : null, ticks: r.ticks, deaths: r.deaths, chance: r.chance, lb: r.lb, lbComplete: !!r.lbComplete, lbProof: r.lbProof || '', gap: r.gap,
 		gapPct: r.ok && r.runTicks > 0 ? Math.round((r.gap / r.runTicks) * 1000) / 10 : null, legs: r.legs || [], provenLegs: proven, stages: Object.assign({}, r.stages, { parse: parseMs }),
 		known: r.known || null, ratio, why: r.why || '', steps: r.steps, anchors: r.anchors, bugs: r.bugs, deepenings: r.deepenings, stalls: r.stalls, relayRuns: r.relayRuns, relaySet: r.relaySet, relayDrop: r.relayDrop, out: wrote || null, verified,
-		loadtas: wrote ? `/loadtas ${wrote}` : null, inputs: r.ok ? T.strOf(r.masks) : null, math, patterns: ex && Array.isArray(ex.patterns) ? ex.patterns : [], perfect: r.perfect || null, joins: r.joins || null };
+		loadtas: wrote ? `/loadtas ${wrote}` : null, inputs: r.ok ? T.strOf(r.masks) : null, math, patterns: ex && Array.isArray(ex.patterns) ? ex.patterns : [], perfect: r.perfect || null, joins: r.joins || null,
+		...(r.oneshot !== undefined ? { oneshot: r.oneshot } : {}) };
 	if (a.report) { fs.mkdirSync(path.dirname(path.resolve(a.report)), { recursive: true }); fs.writeFileSync(path.resolve(a.report), JSON.stringify(report, null, 1)); }
 	if (json) emitJ(Object.assign({ ev: 'report' }, report));
 	else if (r.ok) {

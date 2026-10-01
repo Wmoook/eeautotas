@@ -42,6 +42,26 @@ const DX8 = [-1, 0, 1, -1, 1, -1, 0, 1], DY8 = [-1, -1, -1, 0, 0, 1, 1, 1];
 // 2,494), but no compile gain at 60 s and I Wanna be the Guy 11 / 1 / 1 / 11 triggers -> 1 in 6 of 6 runs (its spike
 // checkerboards: chains of squeezes the est walk passes and a ball does not), OCTO'S FUN CASTLE 2 -> 0 in 2 of 2)
 const KILL_SQUEEZE = process.env.EEAT_KILL_SQUEEZE === '1';
+// A PROTECTED BALL CANNOT DIE (n5 doctor 2): the engine kills on a killer tile only `!is_invulnerable` (eesim.js
+// gFlags & 4), lava and the curse / zombie / poison effects set nothing on an invulnerable ball, and turning protection on
+// clears the running ones (Me.as:300-315), so under S.feats.prot === 1 no death exists until a protection-off effect or an
+// effect reset (the model's 'prot' / 'reset' touches) turns it off. The death shortcut (deathVia) ignored it: Animaly's plan
+// "protection on (36,42) -> ... -> team 3 -> die, back at a respawn (deaths 3)" spent every rung of the final compiles on a
+// death the engine never gives (closest 0-3 tiles at the killers, 'budget' rung after rung, 25 anchors at 180 s). With it,
+// a death step / a death as a teleport is offered only in a state that can die (lb: still admissible: only an impossible
+// way is dropped). EEAT_PROT_NODIE=0: as before.
+const PROT_NODIE = process.env.EEAT_PROT_NODIE !== '0';
+// THE EST DEATH ON A TIMED-KILLER LEVEL (n5 doctor 2): dieTile marks EVERY tile of a level with a curse / zombie / poison /
+// lava (a running timer kills anywhere: the lb's sound source), so the est death shortcut cost 0 walk steps from anywhere
+// and a death was a 54-tick teleport to the respawn in the plans' est: Animaly's plans were full of "die, back at a
+// respawn" steps (its known route has none: the team rooms' portals), every one a leg the executor could not do cheaply
+// (a death needs a killer or a pickup and its timer: closest 0-12 tiles, 'budget' rung after rung). In the est and walk
+// modes the shortcut now goes to a real death source (model dieSrc: a killer, a tile next to one, lava, a timed killer's
+// pickup) plus that source's delay (deathVia's dt, ticks: the planner adds it to the death's est); the lb (the proofs)
+// unchanged. Only levels with a timed killer change (elsewhere dieTile is the killers and their neighbours = dieSrc).
+// EEAT_DIE_EST=0: as before.
+const DIE_EST = process.env.EEAT_DIE_EST !== '0';
+const PACE_EST = 4;   // ticks a walk step, the planner's first pace (PACE0): the source's rank = its steps x this + its delay
 const KEY_BITS = new Map([[23, 0], [24, 1], [25, 2], [26, 0], [27, 1], [28, 2], [1005, 3], [1006, 4], [1007, 5], [1008, 3], [1009, 4], [1010, 5]]);
 const DEATH_DOORS = new Set([1011, 1012]);
 const KIND_OF = { key: 'key', psw: 'psw', pswR: 'pswR', osw: 'osw', oswR: 'oswR', team: 'team', prot: 'prot', reset: 'reset', fx: 'fx', coins: 'coin', bcoins: 'bcoin', crown: 'crown' };
@@ -67,6 +87,25 @@ function compileModel(L, o = {}) {
 	let deathT = 0;
 	for (let i = 0; i < N; i++) if (DEATH_DOORS.has(fg[i])) deathT = Math.max(deathT, lk[i]);
 	if (deathT > 0) featSet.add('deaths');
+	// THE CRUMBS (doctor 9, n5): coins no gate reads are the designer's breadcrumbs: every known route of a level whose
+	// only relevant trigger is the trophy (or a far key) passes them (On And On And On: 5 coins, legs 383-693 ticks; EX
+	// Crew Fall of Zeal: 28 coins, legs 54-924), while the whole-level leg they cut is out of the finders' reach (Fall of
+	// Zeal's trophy field climbs 212 tiles along its route, 6,174 of its 8,089 ticks above the running min: the skeleton's
+	// level-set descent cannot follow it; from the route's own states 4 of 5 of its coin legs and 5 of 5 of On And On's
+	// are found at rung 1-2). With the knob the coins are a feature of the state (their count and the tiles taken), so each
+	// is a trigger the planner's plans and near plans reach and an arrival at one is progress (gain) the strategy goes on
+	// from; no gate reads them, so the lb and the proofs are unchanged. At most CRUMB_MAX coin tiles (a larger taken map
+	// costs the plan search more than the relays give). OPT-IN EEAT_CRUMBS=1 (off: the model as before).
+	// The crumbs are relevant (a touch changes the state) but marked X.crumb: the planner's plan search leaves them out
+	// (its plans are the ones without the knob) and offers the NEAREST crumb as a plan of its own (planner.js crumbPlan).
+	const crumbFeats = new Set();
+	if (process.env.EEAT_CRUMBS === '1') {
+		const CRUMB_MAX = +process.env.EEAT_CRUMB_MAX || 64;
+		let nc = 0, nb = 0;
+		for (const [, kind] of A.special) { const k = KIND_OF[kind] || kind; if (k === 'coin') nc++; else if (k === 'bcoin') nb++; }
+		if (nc > 0 && nc <= CRUMB_MAX && !featSet.has('coins')) { featSet.add('coins'); crumbFeats.add('coins'); }
+		if (nb > 0 && nb <= CRUMB_MAX && !featSet.has('bcoins')) { featSet.add('bcoins'); crumbFeats.add('bcoins'); }
+	}
 	const feats = [...featSet].sort();
 	const fIdx = new Map(feats.map((f, n) => [f, n]));
 	const hasCoinGate = { coins: false, bcoins: false };
@@ -147,7 +186,7 @@ function compileModel(L, o = {}) {
 		else if (feat === 'psw:*') relevant = feats.some((f) => f.startsWith('psw:'));
 		else if (feat === 'osw:*') relevant = feats.some((f) => f.startsWith('osw:'));
 		else if (feat) relevant = featSet.has(feat);
-		triggers.push({ id, kind, tiles, feat, param, label: labelOf(kind, param, x0, y0) + (tiles.length > 1 ? ` x${tiles.length}` : ''), relevant, coins: null });
+		triggers.push({ id, kind, tiles, feat, param, label: labelOf(kind, param, x0, y0) + (tiles.length > 1 ? ` x${tiles.length}` : ''), relevant, coins: null, crumb: !!(feat && crumbFeats.has(feat)) });
 	}
 	// coin tiles (only where the count is read): index per tile, per component its indices
 	const coinIdx = new Int32Array(N).fill(-1), bcoinIdx = new Int32Array(N).fill(-1);
@@ -237,6 +276,13 @@ function compileModel(L, o = {}) {
 			if (src) dieSrc.push(i);
 		}
 	}
+	// (each death source's delay, ticks from its touch to the death: 0 at a killer, lava's fire (effectDuration(2) + 1),
+	// a curse / zombie / poison's own timer ((v + 2 x ping) x 100 + 1): the est death shortcut's cost, deathVia)
+	const dieDelay = new Int32Array(dieSrc.length);
+	for (let k = 0; k < dieSrc.length; k++) {
+		const i = dieSrc[k], id = fg[i];
+		dieDelay[k] = A.cls[i] === 1 ? 0 : id === LAVA ? 241 : ((id === CURSE || id === ZOMBIE || id === POISON) && lk[i] > 0) ? Math.floor((lk[i] + 0.4) * 100) + 1 : 0;
+	}
 	const sim0 = new E.EESim(L); sim0.reset();
 	const startTile = T.tileOf(sim0, W, H);
 	// the idle trajectory (no input): free before the run timer starts; its tiles are the start's free sources
@@ -316,6 +362,66 @@ function compileModel(L, o = {}) {
 	for (const f of feats) init[f] = f === 'deaths' ? Math.min(T.featValue(sim0, f), deathT) : T.featValue(sim0, f);
 	initV = feats.map((f) => init[f]);
 	const S0 = stateOf(sim0);
+	// ---------------------------------------------------------------- FORCED CHAINS (a state trick, n5-tricks 3)
+	// A boost (114-117) sets the speed to 16 px/tick along its direction; a straight lane of trigger tiles right after it,
+	// walled so the ball cannot leave it sideways, is passed tile by tile (the centre moves < 16 px a tick: no tile
+	// skipped, a touch on every cell change), so its triggers are touched ALL, IN ORDER, with no choice between them (First
+	// Person Maze: 79 such lanes of purple switches, the known route falls one twice; Fizio1 21, Daybreak 5, The Glitch 2,
+	// DEEPER 1, Switch Labyrinth 2: 12 of 228 levels). The planner's one-trigger edges cannot say that: a leg to one switch
+	// in the lane from the ball mid-lane EXHAUSTS (the compile's 'purple switch 27 exhausted 2 tiles'). A chain is one
+	// planner trigger (kind 'chain', model.chains, not in triggers / trigOf): its touch = its members' touches in order,
+	// its waypoint the lane's last relevant tile with that feature's value after the whole chain. Every chain is checked
+	// by the ENGINE: the ball put on the boost at 16 px/tick with no input must visit exactly the lane's tiles in order and
+	// end in the abstract state the members' touches give from S0 (stateOf); else it is no chain. Lanes of coins / crowns
+	// / trophies are cut there (a coin component's touch takes all its coins). OPT-IN EEAT_TRICKS chain / 1 / all.
+	const chains = [];
+	{
+		if (require('./tricks.js').has('chain')) {
+			const BD = { 114: [-1, 0], 115: [1, 0], 116: [0, -1], 117: [0, 1] };
+			const PER_TILE = new Set(['psw', 'osw', 'pswR', 'oswR', 'key', 'team', 'prot', 'reset', 'fx', 'cp']);
+			const inW = (x, y) => x >= 0 && y >= 0 && x < W && y < H;
+			for (let i = 0; i < N && chains.length < 4096; i++) {
+				const d = BD[fg[i]];
+				if (!d) continue;
+				let x = (i % W) + d[0], y = ((i / W) | 0) + d[1];
+				const lane = [];
+				while (inW(x, y)) {
+					const j = y * W + x, id = trigOf[j];
+					if (id < 0 || !PER_TILE.has(triggers[id].kind)) break;
+					lane.push(j); x += d[0]; y += d[1];
+				}
+				const rel = lane.filter((j) => triggers[trigOf[j]].relevant);
+				if (lane.length < 3 || rel.length < 2) continue;
+				// the engine check
+				let ok = false;
+				try {
+					const sim = new E.EESim(L), inp = new E.EEInput();
+					sim.reset(); E.applyMask(inp, 0);
+					const Sb = stateOf(sim);
+					sim.px = (i % W) * 16; sim.py = ((i / W) | 0) * 16; sim.prev_px = sim.px; sim.prev_py = sim.py;
+					sim.speed_x = d[0] * 16; sim.speed_y = d[1] * 16;
+					const seen = [];
+					let last = i;
+					for (let k = 0; k < lane.length * 3 + 12; k++) {
+						sim.tick(inp);
+						if (sim.is_dead) break;
+						const t = T.tileOf(sim, W, H);
+						if (t === last) continue;
+						last = t;
+						if (lane.includes(t)) seen.push(t); else break;
+					}
+					let Sx = Sb;
+					for (const j of lane) { const r = touch0(Sx, triggers[trigOf[j]]); if (r.changed) Sx = r.S2; }
+					const Sa = stateOf(sim);
+					ok = seen.length === lane.length && seen.every((t, k) => t === lane[k]) && Sa.key === Sx.key && Sx.key !== Sb.key;
+				} catch (e) { ok = false; }
+				if (!ok) continue;
+				const last = rel[rel.length - 1], lx = last % W, ly = (last / W) | 0;
+				chains.push({ id: 1000000 + chains.length, kind: 'chain', tiles: [last], members: lane.map((j) => trigOf[j]), lastTrig: trigOf[last], feat: triggers[trigOf[last]].feat, param: 0,
+					relevant: true, coins: null, boost: i, label: `forced chain of ${lane.length} (${(i % W) + d[0]},${((i / W) | 0) + d[1]})-(${lx},${ly})` });
+			}
+		}
+	}
 	// ---------------------------------------------------------------- the abstract touch
 	/**
 	 * touch(S, X) -> {S2, changed, expect}: the state after touching trigger X (S2 === S when nothing relevant changes).
@@ -339,6 +445,15 @@ function compileModel(L, o = {}) {
 		return r;
 	}
 	function touch0(S, X) {
+		if (X.kind === 'chain') {
+			// (a FORCED CHAIN, EEAT_TRICKS chain: its members touched in the lane's order; the expect: the last relevant
+			// member's feature as the whole chain leaves it)
+			let S2 = S;
+			for (const id of X.members) { const r = touch0(S2, triggers[id]); if (r.changed) S2 = r.S2; }
+			if (S2 === S) return { S2: S, changed: false, expect: null };
+			const f = triggers[X.lastTrig].feat, n = fIdx.get(f);
+			return { S2, changed: true, expect: n === undefined ? null : { feat: f, value: S2.vals[n] } };
+		}
 		if (X.kind === 'cp') return cpTracked && S.cp !== X.id ? { S2: mkState(S.vals, S.taken, S.btaken, X.id), changed: true, expect: null } : { S2: S, changed: false, expect: null };
 		if (!X.relevant || X.kind === 'trophy' || X.kind === 'fx') return { S2: S, changed: false, expect: null };
 		const vals = S.vals.slice();
@@ -444,6 +559,8 @@ function compileModel(L, o = {}) {
 	}
 	function doorKey(S, mode, base) {
 		if (mode === 'walk') return (killers ? 'k:' : 'e:') + S.pkey + showKey(S, 'est', base);
+		// ('estNW': the est walk without the planner's CEGAR walls (planner.js WALL_PRICE); the key of the unwalled est)
+		if (mode === 'estNW') return 'e:' + S.pkey + showKey(S, 'est', base);
 		if (mode === 'now') return 'n:' + S.pkey + showKey(S, 'est', base) + (hasTime ? '|t' + (S.td ? 1 : 0) : '') + (hasZombieDoor ? '|z' + (S.zombie ? 1 : 0) : '');
 		if (mode !== 'lb') return (estWalls ? 'w' + estWallVer : 'e') + ':' + S.pkey + showKey(S, 'est', base);
 		if (!killers && !estWalls && !hasCoinGate.coins && !hasCoinGate.bcoins && !hasDeathGate) return 'e:' + S.pkey;
@@ -459,7 +576,7 @@ function compileModel(L, o = {}) {
 		const m = new Uint8Array(N);
 		// (est: a killer is a wall unless the ball is protected; lb: passable, the relaxation)
 		const kill = mode === 'lb' || mode === 'walk' || (S.feats && S.feats.prot === 1) ? 1 : 0;
-		const gm = mode === 'walk' ? 'est' : mode;   // ('now': est's walls with the exact reading of a concrete state)
+		const gm = mode === 'walk' || mode === 'estNW' ? 'est' : mode;   // ('now': est's walls with the exact reading of a concrete state)
 		for (let i = 0; i < N; i++) {
 			const c = A.cls[i];
 			m[i] = c === 0 ? 0 : c === 3 ? (gateOpen(i, S, gm, base) ? 1 : 0) : c === 1 ? kill : 1;
@@ -635,17 +752,30 @@ function compileModel(L, o = {}) {
 	const deathMemo = new Map();
 	function deathVia(S, pos, mode, base) {
 		if (!canDie) return null;
-		const key = doorKey(S, mode, base) + '#' + pos.id;
-		let dk = deathMemo.get(key);
-		if (dk === undefined) {
+		if (PROT_NODIE && S.feats && S.feats.prot === 1) return null;
+		const est = DIE_EST && timed && mode !== 'lb' && dieSrc.length > 0;
+		const key = (est ? 's' : '') + doorKey(S, mode, base) + '#' + pos.id;
+		let m = deathMemo.get(key);
+		if (m === undefined) {
 			const d = dist(S, pos, mode, base);
-			dk = INF;
-			for (let i = 0; i < N; i++) if (dieTile[i] && d[i] < dk) { dk = d[i]; if (dk === 0) break; }
-			deathMemo.set(key, dk);
+			let dk = INF, dt = 0;
+			if (est) {
+				// (the est / walk modes on a level with a timed killer: the walk to a real death source and its delay, the
+				// source by walk steps x PACE_EST + delay; dieTile is every tile there, the lb's sound source)
+				let best = Infinity;
+				for (let k = 0; k < dieSrc.length; k++) {
+					const di = d[dieSrc[k]];
+					if (di >= INF) continue;
+					const c = di * PACE_EST + dieDelay[k];
+					if (c < best) { best = c; dk = di; dt = dieDelay[k]; }
+				}
+			} else for (let i = 0; i < N; i++) if (dieTile[i] && d[i] < dk) { dk = d[i]; if (dk === 0) break; }
+			m = { dk, dt };
+			deathMemo.set(key, m);
 			if (deathMemo.size > 4096) deathMemo.delete(deathMemo.keys().next().value);
 		}
-		if (dk >= INF) return null;
-		return { dk, dr: dist(S, respawnOf(S, mode), mode, base) };
+		if (m.dk >= INF) return null;
+		return { dk: m.dk, dt: m.dt, dr: dist(S, respawnOf(S, mode), mode, base) };
 	}
 	/** pairSteps(S, pos, tiles) -> the walk steps (INF: none; the death shortcut not counted) */
 	function pairSteps(S, pos, tiles, mode = 'est', base = null) { return minOver(dist(S, pos, mode, base), tiles); }
@@ -749,7 +879,7 @@ function compileModel(L, o = {}) {
 	const model = {
 		L, W, H, N, A, feats, init, triggers, gates, stateOf, keyOf, levelOf, regionOf, reachable,
 		// (the planner's machinery)
-		file: o.file || null, S0, startTile, cpTracked, spawnTiles, respawnOf, idleTiles, trophyTiles, trophies, respawn, canDie, dieTile, dieSrc, deathT, timed, coinTiles, bcoinTiles,
+		file: o.file || null, S0, startTile, chains, cpTracked, spawnTiles, respawnOf, idleTiles, trophyTiles, trophies, respawn, canDie, dieTile, dieSrc, deathT, timed, coinTiles, bcoinTiles,
 		pendingOf, setEstWalls, trigOf, gateOf, featSet, fIdx, hasCoinGate, touch, liveTiles, gateOpen, passMask, bfs, hopClosure, revDist, dist, pairSteps, pairLb, pairInfo, lbOfSteps, deathVia,
 		mkState, INF, DEAD_TICKS,
 		stats: () => ({ ms: compileMs, distBuilds, distMs, triggers: triggers.length, relevant: triggers.filter((X) => X.relevant).length, gates: gates.length, feats: feats.length, coins: coinTiles.length, bcoins: bcoinTiles.length }),

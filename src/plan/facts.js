@@ -20,11 +20,18 @@ function createFacts(o = {}) {
 	const rungMax = o.rungMax || o.rungs || RUNG_MAX;
 	let ver = 0, facts = [];
 	let fails = new Map(), blocks = new Set(), proofs = new Set(), needs = new Map(), oks = new Map();
+	// (per edge, over EVERY node class: the failed rungs (the sum of each class's rung count) and whether some class did it)
+	let failAny = new Map(), okAny = new Set();
 	const ek = (edge, cls) => `${edge}\u0001${cls}`;
 	function index(f) {
 		switch (f.kind) {
-			case 'ok': { const k = ek(f.edge, f.nodeClass), had = oks.get(k); oks.set(k, had === undefined ? f.ticks : Math.min(had, f.ticks)); break; }
-			case 'fail': { const k = ek(f.edge, f.nodeClass); fails.set(k, Math.max(fails.get(k) || 0, (f.rung | 0) + 1)); break; }
+			case 'ok': { const k = ek(f.edge, f.nodeClass), had = oks.get(k); oks.set(k, had === undefined ? f.ticks : Math.min(had, f.ticks)); okAny.add(String(f.edge)); break; }
+			case 'fail': {
+				const k = ek(f.edge, f.nodeClass), before = fails.get(k) || 0, now = Math.max(before, (f.rung | 0) + 1);
+				fails.set(k, now);
+				if (now > before) failAny.set(String(f.edge), (failAny.get(String(f.edge)) || 0) + (now - before));
+				break;
+			}
 			case 'needs': { const k = ek(f.edge, f.nodeClass); if (!needs.has(k)) needs.set(k, []); const l = needs.get(k); if (!l.some((x) => x.feat === f.feat && x.value === f.value)) l.push({ feat: f.feat, value: f.value }); break; }
 			case 'proof': proofs.add(ek(f.edge, f.sKey)); break;
 			case 'block': blocks.add(ek(f.edge, f.nodeClass)); break;
@@ -43,6 +50,10 @@ function createFacts(o = {}) {
 		},
 		/** the rung the next try of (edge, nodeClass) is at: the failures so far */
 		rungOf: (edge, cls) => fails.get(ek(edge, cls)) || 0,
+		/** the edge's failed rungs over every node class (0: none), and whether some class reached it (the planner's
+		 *  cross-class failure price, EEAT_PLAN_FAILEST) */
+		failsAny: (edge) => failAny.get(String(edge)) || 0,
+		okAnyOf: (edge) => okAny.has(String(edge)),
 		/** 'block' | 'proof' | null: the edge is out from that node class / abstract state */
 		blocked(edge, cls, sKey) {
 			if (sKey !== undefined && proofs.has(ek(edge, sKey))) return 'proof';
@@ -59,7 +70,7 @@ function createFacts(o = {}) {
 		 *  request; the version still bumps */
 		reset(ro = {}) {
 			const keep = ro.keepProofs ? facts.filter((f) => f.kind === 'proof') : [];
-			facts = []; fails = new Map(); blocks = new Set(); proofs = new Set(); needs = new Map(); oks = new Map();
+			facts = []; fails = new Map(); blocks = new Set(); proofs = new Set(); needs = new Map(); oks = new Map(); failAny = new Map(); okAny = new Set();
 			for (const f of keep) { facts.push(f); index(f); }
 			ver++;
 		},

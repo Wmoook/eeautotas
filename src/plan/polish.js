@@ -251,6 +251,78 @@ function regionGoal(L, sim) {
 		test: (s) => !s.is_dead && T.tileOf(s, W, H) === tile && X.discKey(s) === dk };
 }
 
+// ---------------------------------------------------------------- THE IDLE SHIFT (a state trick, n5-tricks 3)
+// The clock (the time doors' 1000-tick phase, a key's 500 ticks) runs from the level's start, but the run's timer starts
+// at the first input: idle ticks before it are FREE. A route that RESTS (the ball's state the same tick after tick: waiting
+// for a time door's phase, a key to run out, a gate to shut) for w ticks from tick a can drop d of them and start d ticks
+// later instead: every tick after the rest keeps its absolute clock (the same phases, the same key timers), every tick
+// before it runs d ticks later on the clock; the replay decides (a time door met before the rest may now be shut), and
+// the run is d ticks faster. The cut alone (no shift) is tried too: a rest nothing needed. tools/cmp/tricks3.js: 300 rest
+// ticks next to a time door over the known routes (INFINITE 144, Good Egg 70-75). idleShift(L, masks, o) ->
+// {masks, saved, tries, rests, steps}; o: {deadline, accept(masks, how) (the caller's judge; default: faster and no more
+// deaths than the route), minRest (2), maxRests (48)}
+function idleShift(L, masks0, o = {}) {
+	const t0 = Date.now();
+	const deadline = o.deadline || (t0 + 2000);
+	let cur = masks0, tries = 0;
+	const steps = [];
+	let ev0 = null;
+	const accept = o.accept || ((cand, how) => {
+		const ev = C.evaluate(L, cand, true);
+		if (!ev) return false;
+		if (!ev0) ev0 = C.evaluate(L, cur, true);
+		if (!ev0 || ev.runTicks >= ev0.runTicks || ev.deaths > ev0.deaths || (ev.chance || 1) < (ev0.chance || 1)) return false;
+		steps.push({ how, from: ev0.runTicks, to: ev.runTicks });
+		ev0 = ev;
+		return true;
+	});
+	const minRest = o.minRest > 1 ? o.minRest : 2, maxRests = o.maxRests > 0 ? o.maxRests : 48;
+	// the rests of the route: maximal stretches of ticks whose state hash equals the tick before's
+	const restsOf = (ms) => {
+		const sim = new E.EESim(L), inp = new E.EEInput();
+		sim.reset();
+		let first = -1;
+		for (let t = 0; t < ms.length; t++) if ((ms[t] & 31) !== 0) { first = t; break; }
+		const out = [];
+		let h = sim.stateHashClockBlind(), runA = -1;
+		for (let t = 0; t < ms.length; t++) {
+			E.applyMask(inp, ms[t] & 31);
+			sim.tick(inp);
+			const h2 = sim.stateHashClockBlind();
+			// (tick t took the state at t to the same state at t + 1: a rest tick; only after the first input)
+			if (h2 === h && t > first && !sim.is_dead) { if (runA < 0) runA = t; }
+			else if (runA >= 0) { if (t - runA >= minRest) out.push({ a: runA, w: t - runA }); runA = -1; }
+			h = h2;
+			if (sim.has_silver_crown) break;
+		}
+		return { first, rests: out.sort((x, y) => y.w - x.w).slice(0, maxRests) };
+	};
+	let R = restsOf(cur);
+	const rests0 = R.rests.length;
+	for (let i = 0; i < R.rests.length && Date.now() < deadline; i++) {
+		const { a, w } = R.rests[i];
+		const f = Math.max(0, R.first);
+		// (d = the whole rest, then half of it: a door may need part of the wait)
+		for (const d of [w, Math.ceil(w / 2)]) {
+			if (d < 1 || Date.now() >= deadline) break;
+			const body = cur.subarray(f, a), tail = cur.subarray(a + d);
+			// the shift: d idle ticks more before the first input
+			const shifted = new Uint8Array(f + d + body.length + tail.length);
+			shifted.set(cur.subarray(0, f), 0); shifted.set(body, f + d); shifted.set(tail, f + d + body.length);
+			tries++;
+			if (accept(shifted, `idle shift ${d} (rest at ${a})`)) { cur = shifted; R = restsOf(cur); i = -1; break; }
+			// the cut alone
+			const cut = new Uint8Array(a + tail.length);
+			cut.set(cur.subarray(0, a), 0); cut.set(tail, a);
+			tries++;
+			if (accept(cut, `rest cut ${d} (at ${a})`)) { cur = cut; R = restsOf(cur); i = -1; break; }
+		}
+	}
+	const evA = C.evaluate(L, masks0, true), evB = C.evaluate(L, cur, true);
+	return { masks: cur, saved: evA && evB ? evA.runTicks - evB.runTicks : 0, tries, rests: rests0, steps, ms: Date.now() - t0 };
+}
+const TRICKS_IDLE = require('./tricks.js').has('idle');
+
 function polishRoute(L, masks0, o) {
 	o = o || {};
 	const t0 = Date.now();
@@ -273,6 +345,12 @@ function polishRoute(L, masks0, o) {
 		best = ev;
 		return true;
 	};
+	// (a0) THE IDLE SHIFT (EEAT_TRICKS idle; off = the polish before, byte for byte): the route's rests cut, the clock kept by
+	// idle ticks before the first input (free); at most 0.1 of the time
+	if (TRICKS_IDLE && !o.noIdle) {
+		const r = idleShift(L, best.ms, { deadline: Math.min(deadline, Date.now() + 0.1 * ms), accept: (cand, how) => accept(cand, how) });
+		void r;
+	}
 	// (a2) the mutation pass: the classic moves everywhere, exact rejoins combined by DP (a combination the judge refuses:
 	// its shortcuts one at a time, the largest first); passes while they find time and there is time (o.mutShare of it)
 	// (a1) THE LOOP CUTS FIRST (n5-perfect, versus the best known; mutatePass LOOP CUTS): passes of the loop moves alone
@@ -329,6 +407,98 @@ function polishRoute(L, masks0, o) {
 			if (!applied || mp.timeUp) break;
 			ranges = spansOf(applied, 100, best.ms.length);
 		}
+		}
+	}
+	// (a25) THE LOOPS (lane 5, TAS-perfect): a stretch where the ball comes back within LOOP_R px of where it was with nothing
+	// collected or toggled in between (src/loops.js revisits: the optimizer's loop windows) is a detour the mutation's local
+	// moves and the 150-tick segments cannot remove when it is longer than their reach: from the route's state LOOP_PRE ticks
+	// before the loop, best-first (legs.js legBest) to the route's state region LOOP_POST ticks after it, sooner than the
+	// route; spliced and re-anchored like a segment, judged. The 300-s baseline's routes hold 200-1,500 ticks of such loops
+	// (Trick Or Treat 1,380, TPs The Horror 1,478, One Minute Descent 475, Tree Decorating 248, Accident Prone 201).
+	// (o.noLoops or EEAT_POLISH_LOOPS=0: off; o.loopShare)
+	if (!o.noLoops && process.env.EEAT_POLISH_LOOPS !== '0' && Date.now() < deadline) {
+		const LG = require('./legs.js');
+		const lEnd = Math.min(deadline, Date.now() + (o.loopShare > 0 ? o.loopShare : 0.25) * ms);
+		const LOOP_R = 48, LOOP_PRE = 10, LOOP_POST = 40, LOOP_MS = 2000;
+		const lsim = new E.EESim(L), linp = new E.EEInput();
+		const grav = (x) => x.gravity_dir.x * 3 + x.gravity_dir.y;
+		let loops = [];
+		try { loops = require('../loops.js').revisits(L, best.ms, { coins: true, radius: LOOP_R, min: 40, max: 900, keep: 24 }); } catch (e) { loops = []; }
+		// (the loops' ticks are the route's as it was when they were found; every accepted change [at, to) shifts the ticks
+		// after it by its saving, and a loop overlapping a changed span is not searched)
+		const edits = [];
+		const mapT = (p) => { let q = p; for (const e of edits) { if (p >= e.to) q -= e.saved; else if (p > e.at) return -1; } return q; };
+		for (let li = 0; li < loops.length && Date.now() < lEnd && !(stop && stop()); li++) {
+			const cur = best.ms;
+			const lp = loops[li];
+			const a0 = mapT(Math.max(0, lp.a - LOOP_PRE)), b0 = mapT(lp.b + LOOP_POST);
+			if (a0 < 0 || b0 < 0) continue;
+			const a = a0, b = Math.min(cur.length - 1, b0);
+			if (b - a < 20) continue;
+			const R4 = traceRoute(L, cur);
+			const sB = stateAt(R4, cur, b);
+			if (sB.is_dead) continue;
+			const W0 = L.width, H0 = L.height, tile = T.tileOf(sB, W0, H0), dk = X.discKey(sB);
+			const goal = { kind: 'region', tiles: Int32Array.of(tile), mask: null, allowDeath: false, test: (x) => !x.is_dead && T.tileOf(x, W0, H0) === tile && X.discKey(x) === dk };
+			const sA = stateAt(R4, cur, a);
+			if (sA.is_dead) continue;
+			const snapA = sA.snapshot();
+			const field = T.goalField(T.levelNow(L, sA), goal.tiles);
+			const r = LG.legBest(L, [{ snap: snapA, tick: a }], goal, { sim: lsim, field, deadline: Math.min(lEnd, Date.now() + LOOP_MS), stop, depthMax: b - a - 1, kbOn: true, w: 3, noFinish: true });
+			if (r.status !== 'found' || !(r.depth < b - a)) continue;
+			const tail = r.tail;
+			const cands = [];
+			{ const c = new Uint8Array(a + tail.length + (cur.length - b)); c.set(cur.subarray(0, a), 0); c.set(tail, a); c.set(cur.subarray(b), a + tail.length); cands.push(['plain', c]); }
+			lsim.restore(snapA);
+			for (let t = 0; t < tail.length; t++) { E.applyMask(linp, tail[t]); lsim.tick(linp); }
+			const px = lsim.px, py = lsim.py, vx = lsim.speed_x, vy = lsim.speed_y, g = grav(lsim);
+			const q0 = Math.max(a + 1, b - 8), q1 = Math.min(cur.length - 1, b + 150);
+			const rs = stateAt(R4, cur, q0), ranked = [];
+			for (let q = q0; q <= q1; q++) {
+				if (grav(rs) === g) ranked.push([Math.abs(px - rs.px) + Math.abs(py - rs.py) + 3 * (Math.abs(vx - rs.speed_x) + Math.abs(vy - rs.speed_y)), q]);
+				E.applyMask(R4.inp, cur[q]); rs.tick(R4.inp);
+			}
+			ranked.sort((x, y) => x[0] - y[0]);
+			for (const [, q] of ranked.slice(0, 6)) { if (q === b) continue; const c = new Uint8Array(a + tail.length + (cur.length - q)); c.set(cur.subarray(0, a), 0); c.set(tail, a); c.set(cur.subarray(q), a + tail.length); cands.push([`anchor ${q}`, c]); }
+			for (const [how, c] of cands) {
+				if (Date.now() > deadline) break;
+				const n0 = cur.length;
+				// (in the loops' own ticks: the change spans the loop's window; the route after it is shorter by the saving)
+				if (accept(c, `loop ${a}->${b} in ${tail.length} (${how})`)) { edits.push({ at: Math.max(0, lp.a - LOOP_PRE), to: lp.b + LOOP_POST + (how === 'plain' ? 0 : 150), saved: n0 - best.ms.length }); break; }
+			}
+		}
+	}
+	// (a28) THE TROPHY TAILS (lane 5, TAS-perfect): the route's last W ticks (W = TAIL_WINS 200, 400, 800, 1600, ... up to
+	// the route) searched again from the route's state at F - W with the TROPHY as the goal (not the route's state region:
+	// that holds the route's door-reading state, keys and coins taken included, so a segment keeps every detour the route
+	// made for an optional trigger), best-first (legs.js legBest, the kinematic bound in its ranking), depth W - 1: any
+	// finish it finds is faster; judged. Tutorial 1's route takes 2 keys after its 3rd coin (key doors on the executor's
+	// way: 965 ticks to the trophy, the best known 790 without keys). OPT-IN (o.tails or EEAT_POLISH_TAILS=1; o.tailShare):
+	// NEGATIVE as measured (tools/cmp/polcurve.js, box 5, 60 s on the 300-s baseline's routes of 6 levels): one tail found
+	// (TPs The Horror -2), and the time it took from the segments lost Accident Prone's -88 (3,206 vs 3,118) and One Minute
+	// Descent's -18: best-first over 200-1,600 ticks in 1.5-30 s does not find the other ways.
+	if ((o.tails || process.env.EEAT_POLISH_TAILS === '1') && Date.now() < deadline) {
+		const LG = require('./legs.js');
+		const tEnd = Math.min(deadline, Date.now() + (o.tailShare > 0 ? o.tailShare : 0.2) * ms);
+		const TAIL_MS = 1500;
+		const tsim = new E.EESim(L);
+		let bt = null;
+		try { bt = X.boundFor(L, { kind: 'trophy', tiles: [] }); } catch (e) { bt = null; }
+		const cells = bt && bt.cells ? Int32Array.from(bt.cells) : null;
+		for (let W = 200; cells && cells.length && Date.now() < tEnd && !(stop && stop()); W *= 2) {
+			const cur = best.ms;
+			const F = cur.length;
+			const a = Math.max(0, F - W);
+			const R5 = traceRoute(L, cur);
+			const sA = stateAt(R5, cur, a);
+			if (sA.is_dead) { if (a === 0) break; continue; }
+			const snapA = sA.snapshot();
+			const goal = { kind: 'trophy', tiles: cells, mask: null, allowDeath: false, test: (x) => !!x.has_silver_crown };
+			const field = T.goalField(T.levelNow(L, sA), goal.tiles);
+			const share = Math.max(TAIL_MS, (tEnd - Date.now()) / 2);
+			const r = LG.legBest(L, [{ snap: snapA, tick: a }], goal, { sim: tsim, field, deadline: Math.min(tEnd, Date.now() + share), stop, depthMax: F - a - 1, kbOn: true, w: 3, noFinish: true });
+			if (r.status === 'found' && r.depth < F - a) accept(T.concat(cur.subarray(0, a), r.tail), `tail ${a}->${F} to the trophy in ${r.tail.length}`);
+			if (a === 0) break;
 		}
 	}
 	// (a3) the segments: from the route's state at a, best-first (legs.js legBest: the kinematic bound in its ranking,
@@ -584,4 +754,4 @@ function polishLeg(L, start, tail0, goal, o) {
 	return { tail, saved: tail0.length - tail.length, mutated, windows, ms: Date.now() - t0 };
 }
 
-module.exports = { polishRoute, polishLeg, traceRoute, mutatePass, bestShortcutSet, spliceShortcuts, spansOf };
+module.exports = { polishRoute, polishLeg, traceRoute, mutatePass, bestShortcutSet, spliceShortcuts, spansOf, idleShift };

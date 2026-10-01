@@ -17,7 +17,7 @@ const T = require('../src/plan/types.js');
 const M = require('../src/plan/model.js');
 const F = require('../src/plan/facts.js');
 const P = require('../src/plan/planner.js');
-const { LEVELS } = require('./planmodel.js');
+const { LEVELS, level } = require('./planmodel.js');
 
 let pass = 0, fail = 0;
 const check = (name, ok, detail) => { if (ok) pass++; else fail++; console.log(`${name}: ${ok ? 'ok' : 'FAIL'}${detail !== undefined ? ' ' + detail : ''}`); };
@@ -33,6 +33,19 @@ function anchorAfter(L, m, masks) {
 }
 
 function units() {
+	// ---- the long leg's convex price (EEAT_PLAN_LEGT, opt-in): a 57-step corridor, a checkpoint on the way (relevant: a spike
+	// makes deaths move the ball), the trophy at its end: off, the trophy alone; with LEGT 100 the checkpoint first
+	{
+		const cp = require('child_process');
+		const src = `const {LEVELS: _L} = require(${JSON.stringify(require.resolve('./planmodel.js'))});` +
+			`const M = require(${JSON.stringify(require.resolve('../src/plan/model.js'))}), F = require(${JSON.stringify(require.resolve('../src/plan/facts.js'))}), P = require(${JSON.stringify(require.resolve('../src/plan/planner.js'))});` +
+			`const L = require(${JSON.stringify(require.resolve('./planmodel.js'))}).level(['############################################################', '#..........................................................#', '#S.........................c.............................T.#', '##########################x#################################'], {c: [360], x: [361, 1]});` +
+			`const m = M.compileModel(L), p = P.createPlanner(m, F.createFacts(), {}).plan({}, {k: 1})[0];` +
+			`console.log(JSON.stringify(p.steps.map((s) => s.waypoint.label || s.waypoint.kind)));`;
+		const run = (env) => { try { return JSON.parse(cp.execFileSync(process.execPath, ['-e', src], { env: Object.assign({}, process.env, env), encoding: 'utf8' }).trim().split('\n').pop()); } catch (e) { return ['error ' + e.message.slice(0, 120)]; } };
+		const off = run({ EEAT_PLAN_LEGT: '0' }), on = run({ EEAT_PLAN_LEGT: '100' });
+		check('P-UNIT long leg: off the trophy alone, LEGT 100 the checkpoint on the way first', off.length === 1 && off[0] === 'trophy' && on.length === 2 && /^checkpoint/.test(on[0]) && on[1] === 'trophy', `off ${off.join(' -> ')} | on ${on.join(' -> ')}`);
+	}
 	// ---- the key door: the key, the passage past its door, the trophy
 	{
 		const L = LEVELS.keyDoor(), m = M.compileModel(L), pl = P.createPlanner(m, F.createFacts(), {});
@@ -54,6 +67,59 @@ function units() {
 		const p2 = pl.plan(an, { k: 1 })[0];
 		check('P-UNIT keyDoor: from the key\'s arrival the plan is the passage then the trophy, beforeTick = the key\'s + 499',
 			p2 && kindsOf(m, p2).join(',') === 'region,trophy' && p2.steps[0].waypoint.beforeTick === kt + 499, p2 && `${planStr(m, p2)} beforeTick ${p2.steps[0].waypoint.beforeTick} key at ${kt}`);
+	}
+	// ---- ANY MEMBER (o.anyMember / EEAT_PLAN_ANY=1): two red keys = one move, its waypoint the union of their tiles
+	{
+		const L = require('./planmodel.js').level([
+			'########################',
+			'#..........#...........#',
+			'#S..k...k..d.........T.#',
+			'########################',
+		], { k: [6], d: [23] }), W = L.width, at = (x, y) => y * W + x;
+		const m = M.compileModel(L);
+		const off = P.createPlanner(m, F.createFacts(), { anyMember: false }).plan({}, { k: 3 })[0];
+		const pl = P.createPlanner(m, F.createFacts(), { anyMember: true });
+		const on = pl.plan({}, { k: 3 })[0];
+		const t0 = on ? on.steps[0].waypoint : null;
+		check('P-UNIT anyMember off: the first key waypoint is one tile group', !!off && off.steps[0].waypoint.tiles.length === 1 && !/any of/.test(off.steps[0].waypoint.label), off ? planStr(m, off) : 'no plan');
+		check('P-UNIT anyMember on: key -> past the door -> trophy, the key waypoint = both keys, the expect key0 on',
+			!!on && kindsOf(m, on).join(',') === 'key,region,trophy' && t0.tiles.length === 2 && t0.tiles.includes(at(4, 2)) && t0.tiles.includes(at(8, 2)) && /any of 2/.test(t0.label) && t0.expect && t0.expect.feat === 'key0' && t0.expect.value === 1,
+			on ? planStr(m, on) : 'no plan');
+		const a = pl._anchorOf({});
+		const es = pl._edgesOf(a.S, a.pos, a.base, 'plan', true, a.cls).filter((e) => e.X && e.X.kind === 'key');
+		const keyIds = m.triggers.filter((X) => X.kind === 'key').map((X) => X.id);
+		check('P-UNIT anyMember on: one key edge, its id the least member id, its lb <= the nearer key\'s', es.length === 1 && es[0].edge === 'trig:' + Math.min(...keyIds) && es[0].anyOf === 2,
+			es.map((e) => `${e.edge} lb ${e.lb} est ${e.est} any ${e.anyOf}`).join('; '));
+	}
+	// ---- BREADCRUMBS (o.crumbs / EEAT_PLAN_CRUMBS=1): a long corridor to the trophy with coins no door reads
+	{
+		const row = (f) => { let s = ''; for (let x = 0; x < 100; x++) s += f(x); return s; };
+		const L = require('./planmodel.js').level([
+			row(() => '#'),
+			row((x) => (x === 0 || x === 99 ? '#' : '.')),
+			row((x) => (x === 0 || x === 99 ? '#' : x === 1 ? 'S' : x === 97 ? 'T' : x === 10 || x === 30 || x === 45 || x === 70 ? 'c' : '.')),
+			row(() => '#'),
+		], { c: [100] }), W = L.width, at = (x, y) => y * W + x;
+		const m = M.compileModel(L);
+		const off = P.createPlanner(m, F.createFacts(), { crumbs: false }).plan({}, { k: 1 })[0];
+		const on = P.createPlanner(m, F.createFacts(), { crumbs: true }).plan({}, { k: 1 })[0];
+		const s0 = on ? on.steps[0] : null;
+		check('P-UNIT crumbs off: the plan is the trophy alone', !!off && off.steps.length === 1 && off.steps[0].waypoint.kind === 'trophy', off ? planStr(m, off) : 'no plan');
+		check('P-UNIT crumbs on: a crumb first, the farthest coin within reach (30,2), then the trophy; its edge a trig: edge, no expect',
+			!!s0 && s0.crumb === true && /^trig:/.test(s0.edge) && s0.waypoint.tiles.length === 1 && s0.waypoint.tiles[0] === at(30, 2) && s0.waypoint.expect === null
+			&& on.steps[1].waypoint.kind === 'trophy', on ? planStr(m, on) : 'no plan');
+		// (from the crumb's own arrival the next crumb: the anchor after walking right to (30, 2))
+		const masks = new Uint8Array(400).fill(4);
+		const r = T.playTo(L, masks, { goal: T.goalOf(L, s0.waypoint) });
+		const an = anchorAfter(L, m, masks.subarray(0, r.goalAt));
+		const p2 = P.createPlanner(m, F.createFacts(), { crumbs: true }).plan(an, { k: 1 })[0];
+		check('P-UNIT crumbs on: from the crumb (30,2) the next crumb is (70,2)', !!p2 && p2.steps[0].crumb && p2.steps[0].waypoint.tiles[0] === at(70, 2), p2 ? planStr(m, p2) : 'no plan');
+		// (the CEGAR's cuts of the est walk (a failed leg's) do not stop the crumbs: their geometry is the 'now' walk)
+		const w = new Uint8Array(W * L.height); w[at(50, 1)] = 1; w[at(50, 2)] = 1;
+		m.setEstWalls(w);
+		const p3 = P.createPlanner(m, F.createFacts(), { crumbs: true }).plan({}, { k: 1 })[0];
+		m.setEstWalls(null);
+		check('P-UNIT crumbs on: with the est walk cut across the corridor the crumb (30,2) still comes first', !!p3 && p3.steps[0].crumb && p3.steps[0].waypoint.tiles[0] === at(30, 2), p3 ? planStr(m, p3) : 'no plan');
 	}
 	// ---- the coin door: both coins, then the trophy
 	{
@@ -96,6 +162,102 @@ function units() {
 		const L = LEVELS.keySwitch(), m = M.compileModel(L), pl = P.createPlanner(m, F.createFacts(), {});
 		const p = pl.plan({}, { k: 2 })[0];
 		check('P-UNIT keySwitch: key -> past its door -> switch -> trophy', p && kindsOf(m, p).join(',') === 'key,region,psw,trophy', p && planStr(m, p));
+	}
+	// ---- THE PHYSICS PRICE (planner.js PHYS_PRICE, EEAT_PHYS_PRICE=1): the trophy on a shelf whose 1-tile hole the
+	// gravity-blind est walk climbs straight up (11 steps); the physics (RCH3) goes round by the stairs (96 tiles)
+	{
+		const Wd = 56, Hd = 14, g = [];
+		for (let y = 0; y < Hd; y++) g.push(Array(Wd).fill('.'));
+		for (let x = 0; x < Wd; x++) { g[0][x] = '#'; g[Hd - 1][x] = '#'; }
+		for (let y = 0; y < Hd; y++) { g[y][0] = '#'; g[y][Wd - 1] = '#'; }
+		for (let x = 1; x <= 40; x++) if (x !== 4) g[3][x] = '#';
+		for (let i = 0; i < 9; i++) for (let y = 11 - i; y <= 12; y++) g[y][44 + i] = '#';
+		g[2][2] = 'T'; g[12][2] = 'S';
+		const L = level(g.map((r) => r.join('')), {}), m = M.compileModel(L);
+		const off = P.createPlanner(m, F.createFacts(), { physPrice: false }), on = P.createPlanner(m, F.createFacts(), { physPrice: true });
+		const p0 = off.plan({}, { k: 1 })[0], p1 = on.plan({}, { k: 1 })[0];
+		const sim = new (require('../src/eesim.js').EESim)(L); sim.reset();
+		const rc = m.reachable(m.stateOf(sim), sim, m.trophyTiles).cost;
+		check('P-UNIT physics price: off = the walk\'s est (no RCH3 cost read)', !!p0 && p0.cost < 100 && !(off.stats().physPriced > 0), p0 && planStr(m, p0));
+		check('P-UNIT physics price: on = the RCH3 cost x the pace, the lb untouched', !!p1 && p1.cost >= rc * 4 && rc > 2 * 11 + 24 && p1.lb === p0.lb && on.stats().physPriced >= 1, p1 && `${planStr(m, p1)} (RCH3 ${rc} tiles)`);
+	}
+	// ---- THE STEPPING STONES (planner.js STONES, EEAT_PLAN_STONES=1): a 120-tile corridor, the trophy at its far end, 5
+	// irrelevant coins on the way (no coin gate) and one 6 rows off it: the plan goes through coins of the corridor in order (the weighted A* may skip some: the next plans from the stone's anchor split the rest), never the 6th
+	{
+		const Wd = 124, Hd = 12, g = [];
+		for (let y = 0; y < Hd; y++) g.push(Array(Wd).fill('.'));
+		for (let x = 0; x < Wd; x++) { g[0][x] = '#'; g[Hd - 1][x] = '#'; }
+		for (let y = 0; y < Hd; y++) { g[y][0] = '#'; g[y][Wd - 1] = '#'; }
+		g[10][2] = 'S'; g[10][120] = 'T';
+		for (const x of [22, 42, 62, 82, 102]) g[10][x] = 'c';
+		g[3][60] = 'c';
+		const L = level(g.map((r) => r.join('')), { c: [100] }), m = M.compileModel(L);
+		const coins = m.triggers.filter((X) => X.kind === 'coin');
+		const off = P.createPlanner(m, F.createFacts(), { stones: false }), on = P.createPlanner(m, F.createFacts(), { stones: true });
+		const p0 = off.plan({}, { k: 1 })[0], p1 = on.plan({}, { k: 1 })[0];
+		const xs = p1 ? p1.steps.filter((s) => s.waypoint.kind === 'trigger').map((s) => s.waypoint.tiles[0] % Wd) : [];
+		check('P-UNIT stepping stones: the coins irrelevant (no coin gate)', coins.length === 6 && coins.every((X) => !X.relevant), coins.map((X) => X.relevant).join(','));
+		check('P-UNIT stepping stones: off = the trophy alone', !!p0 && kindsOf(m, p0).join(',') === 'trophy', p0 && planStr(m, p0));
+		check('P-UNIT stepping stones: on = coins of the corridor in order, then the trophy, never the coin off the way',
+			!!p1 && kindsOf(m, p1).pop() === 'trophy' && xs.length >= 1 && xs.every((x, i) => i === 0 || x > xs[i - 1]) && !xs.includes(60) && p1.steps.every((s) => s.waypoint.kind !== 'trigger' || s.waypoint.expect === null), p1 && planStr(m, p1));
+		// (a failed stone cuts nothing and is blocked from its second rung on; the same failure of a relevant step cuts)
+		const s0 = p1 && p1.steps.find((s) => s.waypoint.kind === 'trigger');
+		if (s0) {
+			const fl = { ok: false, fail: { why: 'budget', closest: { tile: 10 * Wd + 12, dist: 5 } } };
+			const f1 = on.learn(Object.assign({}, s0, { rung: 0 }), fl, {}), f2 = on.learn(Object.assign({}, s0, { rung: 1 }), fl, {});
+			const all = f1.concat(f2);
+			check('P-UNIT stepping stones: a failed stone cuts nothing, blocked at its second rung', all.every((f) => !f.cut) && f2.some((f) => f.kind === 'block') && !f1.some((f) => f.kind === 'block'), JSON.stringify(all.map((f) => [f.kind, f.rung, !!f.cut])));
+		} else check('P-UNIT stepping stones: a failed stone cuts nothing', false, 'no stone step');
+		// (a stone the anchor took already is no step: held right until the coin at x 22 is taken, then plan)
+		{
+			const E2 = require('../src/eesim.js');
+			const sim = new E2.EESim(L); sim.reset(); const inp = new E2.EEInput();
+			let n = 0; for (; n < 400 && !sim.is_coin_collected(22, 10); n++) { E2.applyMask(inp, 4); sim.tick(inp); }
+			const an = anchorAfter(L, m, new Uint8Array(n).fill(4));
+			const pA = sim.is_coin_collected(22, 10) ? on.plan(an, { k: 1 })[0] : null;
+			const a2 = on._anchorOf(an);
+			const es2 = pA ? on._edgesOf(a2.S, a2.pos, a2.base, 'plan', true, a2.S.key + '|' + a2.cls) : [];
+			const xsA = es2.filter((e) => e.X && e.X.kind === 'coin').map((e) => e.X.tiles[0] % Wd);
+			check('P-UNIT stepping stones: a stone the anchor took already is no edge', !!pA && !xsA.includes(22) && xsA.includes(42) && kindsOf(m, pA).pop() === 'trophy', pA ? `${planStr(m, pA)}; stone edges at x ${xsA.join(',')}` : 'coin not taken');
+		}
+		// (THE WALLED PRICE, EEAT_WALL_PRICE=1: a 1-row tunnel to the trophy; a rung-1 failure's cut in it severs the est walk:
+		// off the trophy edge costs the 1e6 penalty, on WALL_F x the unwalled walk)
+		{
+			const tw = ['##############################################################', '#S...........................................................T#', '##############################################################'];
+			const L2 = level([tw[0], tw[1].slice(0, 62), tw[2]], {}), m2 = M.compileModel(L2);
+			const run = (wp) => {
+				const pl2 = P.createPlanner(m2, F.createFacts(), { wallPrice: wp });
+				const st = pl2.plan({}, { k: 1 })[0].steps[0];
+				const fl = { ok: false, fail: { why: 'budget', closest: { tile: 1 * 62 + 20, dist: 30 } } };
+				pl2.learn(Object.assign({}, st, { rung: 0 }), fl, {}); pl2.learn(Object.assign({}, st, { rung: 1 }), fl, {});
+				return pl2.plan({}, { k: 1 })[0];
+			};
+			const q0 = run(false), q1 = run(true);
+			check('P-UNIT walled price: off = the penalty past a severing cut, on = a finite 3x price', !!q0 && q0.cost >= 1e6 && !!q1 && q1.cost < 1e6 && q1.cost >= 3 * 50 && q1.lb === q0.lb, `${q0 && q0.cost} vs ${q1 && q1.cost}`);
+		}
+		// (THE STONES' WAY, EEAT_PLAN_STONE_WAY=1: the spawn at x 40, a coin behind it at x 5, 7 coins on the way at x 50-110:
+		// with the way only the 4 nearest of those on the way and the farthest are root edges, never the one behind; the plan goes through the
+		// corridor's coins in order to the trophy)
+		{
+			const g3 = [];
+			for (let y = 0; y < Hd; y++) g3.push(Array(Wd).fill('.'));
+			for (let x = 0; x < Wd; x++) { g3[0][x] = '#'; g3[Hd - 1][x] = '#'; }
+			for (let y = 0; y < Hd; y++) { g3[y][0] = '#'; g3[y][Wd - 1] = '#'; }
+			g3[10][40] = 'S'; g3[10][120] = 'T';
+			for (const x of [5, 50, 60, 70, 80, 90, 100, 110]) g3[10][x] = 'c';
+			const L3 = level(g3.map((r) => r.join('')), { c: [100] }), m3 = M.compileModel(L3);
+			const noWay = P.createPlanner(m3, F.createFacts(), { stones: true, stoneWay: false });
+			const way = P.createPlanner(m3, F.createFacts(), { stones: true, stoneWay: true });
+			const rootXs = (pl) => { const a3 = pl._anchorOf({}); return pl._edgesOf(a3.S, a3.pos, a3.base, 'plan', true, a3.S.key + '|' + a3.cls).filter((e) => e.X && e.X.kind === 'coin').map((e) => e.X.tiles[0] % Wd).sort((x, y) => x - y); };
+			const xn = rootXs(noWay), xw = rootXs(way);
+			check('P-UNIT stones\' way: off = every stone a root edge (the one behind the spawn too)', xn.length === 8 && xn.includes(5), xn.join(','));
+			check('P-UNIT stones\' way: on = the 4 nearest stones on the way and the farthest, never the one behind', xw.join(',') === '50,60,70,80,110', xw.join(','));
+			const pw = way.plan({}, { k: 1 })[0];
+			const xsw = pw ? pw.steps.filter((s) => s.waypoint.kind === 'trigger').map((s) => s.waypoint.tiles[0] % Wd) : [];
+			check('P-UNIT stones\' way: the plan = the corridor\'s coins in order, then the trophy', !!pw && kindsOf(m3, pw).pop() === 'trophy' && xsw.length >= 1 && xsw.every((x, i) => x > 40 && (i === 0 || x > xsw[i - 1])), pw && planStr(m3, pw));
+		}
+		const lbOff = off.lowerBound({}), lbOn = on.lowerBound({});
+		check('P-UNIT stepping stones: lowerBound unchanged (stones never in the lb)', lbOff.ticks === lbOn.ticks && lbOff.complete === lbOn.complete, `${lbOff.ticks} ${lbOn.ticks}`);
 	}
 }
 
@@ -328,9 +490,85 @@ function scale() {
 	}
 }
 
+/** P-CRUMBS (doctor 9, EEAT_CRUMBS=1): coins no gate reads are crumbs (state features, X.crumb), left out of the plan
+ *  search, the nearest one offered as a plan in front when the trophy's leg is long; off: the model and plans as before */
+function crumbsUnit() {
+	const mk = () => level([
+		'######################################################################',
+		'#....................................................................#',
+		'#S.......c...................c...................c.................T.#',
+		'######################################################################',
+	], { c: [100] });
+	const L = mk();
+	const saved = process.env.EEAT_CRUMBS;
+	try {
+		delete process.env.EEAT_CRUMBS;
+		const m0 = M.compileModel(L), p0 = P.createPlanner(m0, F.createFacts(), {}).plan({}, { k: 3 });
+		check('P-CRUMBS off: coins not relevant, no crumbs, the first plan the trophy alone', !m0.feats.includes('coins') && !m0.triggers.some((X) => X.crumb) && p0[0] && kindsOf(m0, p0[0]).join(',') === 'trophy', planStr(m0, p0[0]));
+		process.env.EEAT_CRUMBS = '1';
+		// (the crumbs wait for one failed rung of the long leg (EEAT_CRUMB_AFTER 1): none before)
+		{
+			const mA = M.compileModel(L), plA = P.createPlanner(mA, F.createFacts(), {}), pA = plA.plan({}, { k: 3 });
+			check('P-CRUMBS on: no crumb plan before the long leg failed a rung', pA.length && !pA.some((p) => p.crumb), planStr(mA, pA[0]));
+			const s0 = pA[0].steps[0];
+			plA.learn(s0, { ok: false, arrivals: [], fail: { why: 'budget', closest: null, touched: [], blockedBy: [], level: s0.rung } }, {});
+			const pB = plA.plan({}, { k: 3 });
+			check('P-CRUMBS on: after the trophy leg failed its rung 0, the crumb plans come first', pB.length && pB[0].crumb, pB[0] ? planStr(mA, pB[0]) : 'none');
+		}
+		process.env.EEAT_CRUMB_AFTER = '0';
+		const m1 = M.compileModel(L), pl = P.createPlanner(m1, F.createFacts(), {}), p1 = pl.plan({}, { k: 3 });
+		const cr = m1.triggers.filter((X) => X.crumb);
+		check('P-CRUMBS on: 3 crumbs, coins a feature, relevant', m1.feats.includes('coins') && cr.length === 3 && cr.every((X) => X.relevant), `${cr.length} crumbs, feats ${m1.feats.join(',')}`);
+		const c0 = p1[0], near = cr.slice().sort((a, b) => a.tiles[0] % L.width - b.tiles[0] % L.width)[0];
+		check('P-CRUMBS on: the crumb plan first, to the nearest crumb, one step', c0 && c0.crumb && c0.steps.length === 1 && c0.steps[0].waypoint.trig === near.id, c0 ? planStr(m1, c0) : 'none');
+		const own = p1.find((p) => !p.crumb), nCr = p1.filter((p) => p.crumb).length;
+		check('P-CRUMBS on: 2 crumb plans (EEAT_CRUMB_K), then the plan search own plans (the trophy alone: crumbs left out)', nCr === 2 && p1[1].crumb && own && kindsOf(m1, own).join(',') === 'trophy', `${nCr} crumb plans; ${own ? planStr(m1, own) : 'none'}`);
+		// from the nearest crumb's arrival (a gain of 1) the crumb plan goes to the next one
+		let t = 0; const masks = [];
+		for (; t < 400; t++) { masks.push(4); const r = T.playTo(L, Uint8Array.from(masks)); if (r.sim.coins >= 1) break; }
+		const A = anchorAfter(L, m1, Uint8Array.from(masks));
+		const p2 = pl.plan(A, { k: 3 });
+		const second = cr.slice().sort((a, b) => a.tiles[0] % L.width - b.tiles[0] % L.width)[1];
+		check('P-CRUMBS on: from the first crumb (gain > 0: its count and its tile) the crumb plan takes the next crumb', A.S.gain > 0 && p2[0] && p2[0].crumb && p2[0].steps[0].waypoint.trig === second.id, p2[0] ? `gain ${A.S.gain}: ${planStr(m1, p2[0])}` : 'none');
+	} finally {
+		if (saved === undefined) delete process.env.EEAT_CRUMBS; else process.env.EEAT_CRUMBS = saved;
+		delete process.env.EEAT_CRUMB_AFTER;
+	}
+}
+
+/** THE FAR NEAR PLAN (planner.js nearPlans, EEAT_NEAR_FAR): the trophy 3 tiles from the spawn (a small lb: the false near's
+ *  shape) and a red key (its door by the right wall) 7 tiles back: after the trophy's first leg fails, no trigger is nearer
+ *  by the lb, so no near plan; with EEAT_NEAR_FAR=1 the key is offered as a one-step near plan at rung 0 */
+function nearFar() {
+	const { level } = require('./planmodel.js');
+	const L = level([
+		'################',
+		'#k......S..T..d#',
+		'################',
+	], { k: [6], d: [23] });
+	const run = (on) => {
+		if (on) process.env.EEAT_NEAR_FAR = '1'; else delete process.env.EEAT_NEAR_FAR;
+		const m = M.compileModel(L), facts = F.createFacts({ rungs: 4 }), pl = P.createPlanner(m, facts, {});
+		const p0 = pl.plan({}, { k: 1 });
+		const s0 = p0[0] && p0[0].steps[0];
+		if (s0) pl.learn(s0, { ok: false, arrivals: [], fail: { why: 'budget', closest: null, touched: [], blockedBy: [], level: 0 } }, {});
+		const p1 = pl.plan({}, { k: 1 });
+		delete process.env.EEAT_NEAR_FAR;
+		return { p0, p1, s0 };
+	};
+	const off = run(false), on = run(true);
+	const str = (ps) => ps.map((p) => `${p.near ? 'NEAR ' : ''}${p.steps.map((s) => `${s.waypoint.label}[r${s.rung}]`).join(' -> ')}`).join(' | ');
+	check('P-NEARFAR: the first plan is the trophy alone (the false near: its lb below the key\'s)', !!off.s0 && off.s0.waypoint.kind === 'trophy', str(off.p0));
+	check('P-NEARFAR off: after the trophy\'s rung 0 failed, no near plan (no trigger nearer by the lb): the trophy at rung 1', off.p1.length >= 1 && !off.p1.some((p) => p.near) && off.p1[0].steps[0].waypoint.kind === 'trophy' && off.p1[0].steps[0].rung === 1, str(off.p1));
+	check('P-NEARFAR on: the key offered first as a one-step near plan at rung 0, the trophy\'s plan after it (ordering only)',
+		on.p1.length >= 2 && on.p1[0].near && on.p1[0].steps.length === 1 && on.p1[0].steps[0].waypoint.kind === 'trigger' && on.p1[0].steps[0].rung === 0 && on.p1.some((p) => !p.near && p.steps[0].waypoint.kind === 'trophy'), str(on.p1));
+}
+
 if (require.main === module) {
 	units();
 	cegar();
+	crumbsUnit();
+	nearFar();
 	if (process.argv.includes('--truth')) truth();
 	if (process.argv.includes('--scale')) scale();
 	console.log(`${pass}/${pass + fail}`);

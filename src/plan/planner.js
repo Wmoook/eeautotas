@@ -36,14 +36,67 @@ const { lbOfSteps, INF, DEAD_TICKS } = require('./model.js');
 const PACE0 = 4;              // est ticks per walk step before any learned leg
 const EST_W = 1.5;            // the plan search's heuristic weight (est only; the lb search is plain A*)
 const PENALTY = 1e6;          // est of an edge only the relaxation reaches (no est walk) or RCH3 calls impossible
+// THE LONG LEG'S CONVEX PRICE (n5 doctor 2, OPT-IN EEAT_PLAN_LEGT=<ticks>, default 0 = off; EEAT_PLAN_LEGK, default 1): 11 of
+// batch 2's 21 failing levels (12 of FINAL's first 51) plan the level as the trophy alone or 1-2 legs of lb 150-3,000 ticks (the
+// gravity-blind est walk finds the trophy open, so nothing between is relevant), and every such compile ends at gain 0-2, while
+// the known-route test finds the same level's 400-600-tick checkpoint legs at rung 1 (EE mountain world: from the spawn 661 ticks,
+// from hit-600 / 400 630 / 400): a leg's est past LEG_T costs LEG_K more a tick, so the plan search prefers a chain through the
+// relevant triggers on the way (checkpoints where a death can move the ball, coins) to one long leg. Ordering only (the lb and the
+// B&B untouched)
+const LEG_T = Math.max(0, +process.env.EEAT_PLAN_LEGT || 0), LEG_K = +process.env.EEAT_PLAN_LEGK > 0 ? +process.env.EEAT_PLAN_LEGK : 1;
 const LM_W = 60;              // ticks of the plan search's f per landmark not yet achieved (src/landmarks.js, LAMA's count)
 const GAIN_BONUS = 3;         // walk steps of the plan search's f per unit of gain (the relevant triggers achieved)
+const INC_ON = process.env.EEAT_PLAN_INC !== '0';   // the plan search's incumbent (search(): a generated goal at the budget's end)
 const KEY_TICKS = 500;
+// THE STATE TRICKS (n5-tricks, TRICK MINING 3; tools/cmp/tricks3.js over the 218 known routes that replay: 61 deaths in
+// 22 routes, 30 of them RESPAWN SKIPS in 7 levels: the respawn nearer the route's next trigger by more than the dead
+// ticks' worth of running, 23 walk tiles: Good Egg Galaxy, Katwalk 74 / 86, Operation Planet X 254, Your Decision 37,
+// Ice Slide Ride 39, Inferno 43, First Person Maze (its switch column fallen twice: a death back to the checkpoint above
+// it)). OPT-IN EEAT_TRICKS: '1' / 'all' every rule, else a list of names; unset = the planner before, byte for byte.
+//   warp  DEATH WARP: an edge the est walk reaches is taken as a death (the nearest killer, the dead ticks, the state's
+//         respawn) when that is cheaper by WARP_MIN est ticks and WARP_F of the walk (before: a death step only where no
+//         est walk reached the target)
+//   exh   EXHAUSTED -> DEATH: an edge whose leg the executor's exact search EXHAUSTED from a node class (no way there
+//         without a death: a fall that cannot be climbed back, a one-way drop, a door shut behind) is offered from that
+//         class only as its death variant (edge + '~w': a death back at a respawn, then the trigger; its own rungs), where
+//         the level can kill and respawn; the claim was a claim about deathless ways only (goalOf: allowDeath false)
+const TRK = require('./tricks.js');
+const TR_WARP = TRK.has('warp');
+const TR_EXH = TRK.has('exh');
+const TR_DBG = process.env.EEAT_TRICKS_DEBUG === '1';
+// (a forced chain's plan: its boost tile first as a region step, EEAT_CHAIN_HEAD=0: the chain's step alone)
+const CHAIN_HEAD = process.env.EEAT_CHAIN_HEAD !== '0';
+const WARP_MIN = +process.env.EEAT_WARP_MIN || 30;       // est ticks a warp must save at least
+const WARP_F = +process.env.EEAT_WARP_F || 0.8;          // and the death's est at most this share of the walk's
 // the diversification rule (nearPlans): one-step plans to the nearest untried triggers once every plan's first leg
 // failed its rung; DEFAULT 1 since COMPILE-ALL block 3 lane 4 (with the executor's true skeleton closest,
 // EEAT_SKEL_CLOSEST): EEAT_PLAN_NEAR=K (K near plans; 0: off, the planner as before)
 const NEAR_K = process.env.EEAT_PLAN_NEAR !== undefined ? Math.max(0, +process.env.EEAT_PLAN_NEAR | 0) : 1;
 const NEAR_RUNG = process.env.EEAT_NEAR_RUNG !== '0';   // (the rung balance of the near plans: nearPlans; EEAT_NEAR_RUNG=0 off)
+const NEAR_FAR = () => process.env.EEAT_NEAR_FAR === '1';   // (no nearer trigger: the nearest farther one; nearPlans; OPT-IN)
+// THE CROSS-CLASS FAILURE PRICE (n5 doctor b9; OPT-IN EEAT_PLAN_FAILEST=<ticks a failed rung>, 0 / unset: off, the planner
+// as before): the facts' rung ladder is per (edge, node class), and the node class is the whole abstract state (every
+// switch, the checkpoint) + the start's speed, so a leg that failed every rung from one anchor comes back at rung 0, 1, 2,
+// 3 from the next anchor, and the plan search, pricing it by the est walk alone, puts it first again (Bad EE Level 9, 180 s:
+// purple switch 3's mini (a low-gravity spike corridor) failed its 45-s rung from the start, then from the mini's own
+// entrance at the same closest (40.6 tiles, (130,160)), then from 4 more anchors: 17 steps, 190 of the 360 worker-s, never
+// reached, while its sibling minis waited). Every failed rung of an edge from ANY class (facts.failsAny) adds FAIL_EST
+// ticks to its est unless some class reached it (facts.okAnyOf): an untried sibling goes first, a hard leg comes back
+// after the others' rungs (iterative deepening across the plan's independent steps). Ordering only (the est; the lb, the
+// proofs and the blocks untouched).
+const FAIL_EST = process.env.EEAT_PLAN_FAILEST !== undefined ? Math.max(0, +process.env.EEAT_PLAN_FAILEST || 0) : 0;
+// THE TOGGLE-BACK (n5 doctor b9; OPT-IN EEAT_PLAN_UNTOGGLE=1, else the planner as before): a purple / orange switch toggles,
+// so touching the trigger that just turned a switch ON (the plan node's own entering edge, or the anchor's arrival edge:
+// strategy anchorArg `via`), or its reset, turns it OFF again: the abstract state goes back to the one before (a no-op
+// pair), only the ball's modelled position moved. The plan search's alternatives (plans 2 and 3 exclude the best plan's
+// first edge) took exactly such pairs ("purple switch 2 > purple switch 2 > blue key", "purple switch 1 > purple switch 1
+// > blue key"), and the strategy ran their first step: a leg whose start stands ON the switch (closest "0 tiles",
+// 'exhausted' at rungs 0 and 1) or, when found, an anchor that UNDID the progress (Bad EE Level 9, 180 s: 5 such steps,
+// one 'purple switch 2' arrival with switch 2 off again); the near rule offered the reset next to it ("purple reset 2
+// (66,86)", lb 0). Such an edge is skipped where it undoes the node's / anchor's own last toggle. Ordering only: a
+// toggle-back after any other trigger stays an edge (a plan may need a switch off later), the lb and the proofs untouched.
+const UNTOGGLE = process.env.EEAT_PLAN_UNTOGGLE === '1';
+const TOGGLE_FEAT = /^(psw|osw):\d+$/;
 // the floor probe's time (steer.js buildSteer on a level with count gates: the plan the steer's physics layers walk, run
 // again with the gates the model leaves open as floors; env EEAT_PLAN_FLOOR=0: off)
 const FLOOR_MS = +process.env.EEAT_PLAN_FLOOR_MS || 8000;
@@ -62,6 +115,35 @@ const FLOOR_HARD_MS = +process.env.EEAT_PLAN_FLOOR_HARD_MS || 30000;
 const COUNT_GATES = new Set([165, 214]);
 const COLOURS = ['red', 'green', 'blue', 'cyan', 'magenta', 'yellow'];
 
+// THE TIMER (C6 push 3 lane 3; OPT-IN EEAT_PLAN_TIMER=1, off = the planner as before, byte for byte): a ball carrying a
+// running timed killer (curse 421, zombie 422, poison 1584, fire: eesim.js kills it at start + duration) dies where the
+// plan search's est walk does not know it: One Minute Descent's zombie (60 s, picked up on the only way down at tick ~50)
+// kills every plan that takes the 15 blue coins (they open only the crown's doors) before team 6 (16,378) at the bottom
+// and the levitation climb back to the trophy (65,49): its anchors reached team 6 at tick ~4,960 with ~1,100 ticks left
+// for a 2,100-tick climb, every trophy leg 'budget' (the finders' states die), and the only routes (n5-plan and main
+// alike) went through a death: 11,203-12,352 run ticks vs the known route's 3,550 (the zombie, the bottom, the climb).
+// With the knob an anchor with a timer running first gets a DEADLINE plan search (its own half of the plan call's clock:
+// a node whose est arrival from the anchor + the open level's walk to the trophy passes the ticks left is not generated):
+// a whole plan to the trophy in time goes first (`timer`), the plan search's own plans after it; no such plan and no
+// remover of that killer (its block numbered 0) within the ticks left = a LATE anchor, which the strategy's pick puts after
+// the anchors in time. Ordering only (the est walk is no bound): no edge dropped from the plan search itself, the lb
+// untouched, no claim.
+const TIMER = process.env.EEAT_PLAN_TIMER === '1';
+/** {left, id}: the ticks a ball has before its soonest running timed killer kills it (Infinity: none running; eesim.js's
+ *  rule, Player.as:399-404: it dies on the first tick t with t - start > duration) and that killer's effect block (421
+ *  curse, 422 zombie, 1584 poison, 0 fire: no remover block) */
+function timerOf(s) {
+	const r = { left: Infinity, id: -1 };
+	if (!s || s.is_dead) return r;
+	const t = s._ticks, god = !!s.in_god_mode;
+	const one = (on, start, dur, id) => { if (on && dur) { const l = Math.floor(start + dur - t); if (l < r.left) { r.left = l; r.id = id; } } };
+	one(s.is_cursed, s._curse_time_start, s._curse_duration, 421);
+	if (!god) one(s.is_zombie, s._zombie_time_start, s._zombie_duration, 422);
+	one(s.is_on_fire, s._fire_time_start, s._fire_duration, 0);
+	if (!god) one(s.is_poisoned, s._poison_time_start, s._poison_duration, 1584);
+	return r;
+}
+
 /** a heap on f (then g) */
 class Heap {
 	constructor() { this.a = []; }
@@ -78,7 +160,33 @@ function createPlanner(model, facts, o = {}) {
 	const ST = { rchChecks: 0, plans: 0, planMs: 0, expands: 0, lbCalls: 0, lbMs: 0, lbExpands: 0, learned: 0, costOf: 0 };
 	const paceSamples = [];
 	let lastPlans = [], lastWhy = '';
-	const relevant = model.triggers.filter((X) => X.relevant && X.kind !== 'trophy');
+	// (EEAT_TRICKS exh: the (edge, node class) pairs whose leg the exact search exhausted: learn())
+	const exhausted = new Set();
+	const relevant = model.triggers.filter((X) => X.relevant && X.kind !== 'trophy' && !X.crumb).concat(model.chains || []);   // (+ the FORCED CHAINS, model.js, EEAT_TRICKS chain)
+	// (the crumbs: coins no gate reads, relevant only with EEAT_CRUMBS=1 (model.js); left out of the plan search, offered
+	// one at a time by crumbPlan)
+	const crumbs = model.triggers.filter((X) => X.relevant && X.crumb);
+	// ANY MEMBER (doctor 3, COMPILER-PUSH-2): the triggers whose touch makes the SAME abstract state from S (every tile
+	// group of one key colour, of one switch id, one team, the crown: model.touch gives one S2) are ONE move. Before, each
+	// tile group was an edge of its own and a waypoint of its own tiles: NC Naos Antediluvian (145 triggers, ~100 red-key
+	// groups, most of them single tiles) planned 'red key (95,148) x29' / 'red key (75,163) x20' (the est walk's nearest
+	// groups), the executor ended 6-13 tiles short of them from the spawn at every rung, the next plans took the next
+	// group, and the compile ended with gain 0-1 in 60 and 180 s, where the known route takes the red key at (86,170) (a
+	// single-tile group ~15 tiles from the spawn) at tick 374. Now one edge per (kind, S2): its tiles the UNION of the
+	// members' live tiles (the goal field seeded at all of them: the finder takes whichever member the physics reaches),
+	// its lb / est the least over them (admissible: a min of admissible bounds), its edge id the least member id (stable
+	// for the facts whatever member is nearest), its pos2 the nearest member's (the plan's est goes on from there; the
+	// next anchor is the real arrival, anchorOf). Coins never merge (their taken bits make S2 differ). o.anyMember /
+	// EEAT_PLAN_ANY=1: on; off (the default until measured) = the planner as before, byte for byte.
+	const ANY = o.anyMember !== undefined ? !!o.anyMember : process.env.EEAT_PLAN_ANY === '1';
+	// (the SET kinds only: a touch sets the feature whatever it was; the toggles (psw / osw: a member the ball just
+	// pressed is in the union at cost 0 where it stands) and the coins (their own taken bits) stay one edge a trigger)
+	const ANY_KINDS = new Set(['key', 'team', 'prot', 'reset', 'fx', 'crown', 'pswR', 'oswR']);
+	// BREADCRUMBS (crumbStep below; o.crumbs / EEAT_PLAN_CRUMBS=1: on; off (the default until measured) = the planner as before)
+	const CRUMBS = o.crumbs !== undefined ? !!o.crumbs : process.env.EEAT_PLAN_CRUMBS === '1';
+	const CRUMB_MIN = +process.env.EEAT_CRUMB_MIN || 60, CRUMB_REACH = +process.env.EEAT_CRUMB_REACH || 40, CRUMB_NEAR = 6;
+	const CRUMB_SLACK = 3, CRUMB_SLACK_F = 0.03;
+	const crumbCands = CRUMBS ? model.triggers.filter((X) => !X.relevant && (X.kind === 'coin' || X.kind === 'bcoin' || X.kind === 'cp') && X.tiles && X.tiles.length) : [];
 	const trophyTiles = model.trophyTiles;
 	const openS = { key: '__open__', dkey: '__open__', vals: [], feats: {} };
 	// ---------------------------------------------------------------- floors (a count gate the way STANDS on)
@@ -423,7 +531,10 @@ function createPlanner(model, facts, o = {}) {
 		const live = (k) => (S.feats[k] !== undefined ? S.feats[k] : 0);
 		const base = { coins: live('coins'), bcoins: live('bcoins'), deaths: live('deaths') };
 		if (sim) { base.coins = Math.min(base.coins, sim._show_coin_gate | 0); base.bcoins = Math.min(base.bcoins, sim._show_blue_coin_gate | 0); base.deaths = Math.min(base.deaths, sim._show_death_gate | 0); }
-		return { S, pos, tick: arr ? arr.tick || 0 : 0, idle, cls, base, sim, arr };
+		// (the toggle the anchor's own arrival edge made: UNTOGGLE)
+		let viaX = null;
+		if (UNTOGGLE && anchor.via) { const m = /^trig:(\d+)$/.exec(String(anchor.via)); const X = m ? model.triggers[+m[1]] : null; if (X && TOGGLE_FEAT.test(String(X.feat))) viaX = X; }
+		return { S, pos, tick: arr ? arr.tick || 0 : 0, idle, cls, base, sim, arr, viaX };
 	}
 	// ---------------------------------------------------------------- edges
 	const hasCG = model.hasCoinGate.coins || model.hasCoinGate.bcoins;
@@ -438,6 +549,63 @@ function createPlanner(model, facts, o = {}) {
 	 *  rest and rising at the most (a heavy est penalty in the plan search, never a drop: an abstract position is no real
 	 *  state); 'proof' from the anchor's real state (then the edge is dropped at the root: an exact proof) */
 	const rchBad = new Map();
+	// THE PHYSICS PRICE (n5 doctor 4): the est walk is 8-way and GRAVITY-BLIND, so it prices a climb the ball cannot make
+	// as a few steps straight up; verifyPath already builds the RCH3 field of every edge of a found plan (the physics:
+	// jumps, falls, fields; a sound relaxation) and kept only its -1 (a proof). Its COST is the physics' own walk: where it
+	// exceeds the est walk's steps by PHYS_R x + PHYS_ADD tiles, the edge's est is raised to that cost x the pace (a PRICE,
+	// never a drop, the lb untouched: ranking only; a learned ok leg keeps its ticks) and the plan search runs again (as
+	// for a new rchBad). Measured on the batch-4 levels (FINAL's failing ones): I Crew Persian Peril's first plan is the
+	// trophy at est 1,248 ticks (walk 312 steps from the spawn) while RCH3 reads 1,935 tiles there (every upper trigger
+	// 1,850-2,144: the walk climbs straight up, the physics goes round through the lower coins, RCH3 470-625 at walk
+	// 377-506); the compile spent 60 s on the trophy / coin (199,83) legs at closest 1,802-1,986 tiles. Where the walk and
+	// the physics agree (Octorage: RCH3 / walk 1.0-1.2 on all 18 legs of its known route) nothing changes.
+	// EEAT_PHYS_PRICE=1 (OPT-IN: o.physPrice overrides), EEAT_PHYS_R (2), EEAT_PHYS_ADD (24 tiles).
+	const PHYS_PRICE = o.physPrice !== undefined ? !!o.physPrice : process.env.EEAT_PHYS_PRICE === '1';
+	const PHYS_R = +process.env.EEAT_PHYS_R || 2, PHYS_ADD = process.env.EEAT_PHYS_ADD !== undefined ? +process.env.EEAT_PHYS_ADD : 24;
+	const rchPrice = new Map();   // (rchKey -> the RCH3 cost in tiles, where it prices the edge)
+	// THE STEPPING STONES (n5 doctor 4): a ONE-LEG level's plan is one leg of thousands of ticks (13_3 Stone Ruin
+	// Speedrun: the trophy from the spawn, 3,194 route ticks through arrows and dots; the compile spends its 60 s on it and
+	// the far checkpoint, closest 309-493 tiles, 0 triggers), while the finders find legs of <= 300 route ticks from the
+	// right state ~90% of the time and 1,000+ tick legs 4 / 28 (the known-route tests). The level's designer marks the way
+	// with coins: Stone Ruin's known route takes 10 of its 11 coins in order (legs of 14-629 ticks), every one of them 0-63
+	// walk steps off the est walk's way; with no coin gate they are irrelevant to the model, so no plan could use them. Here
+	// an irrelevant coin / blue coin is a STONE: a plan step of its own (a trigger waypoint on its tiles, no Expect, the
+	// state unchanged; the strategy keeps its arrival as an anchor of its own: ANCHOR_QUAL keys it by the edge), and every
+	// edge's est gets est^2 / STONE_LONG on top (plan ranking only: the finders' cost grows much faster than the ticks),
+	// so a long leg is split where stones lie on its way and nowhere else (a detour costs its ticks). The lb, costOf and
+	// lowerBound never see stones. EEAT_PLAN_STONES=1 (OPT-IN: o.stones overrides), EEAT_PLAN_STONE_LONG (1000 ticks),
+	// EEAT_PLAN_STONE_MAX (120: more irrelevant coins than this, no stones).
+	const STONES = o.stones !== undefined ? !!o.stones : process.env.EEAT_PLAN_STONES === '1';
+	const STONE_LONG = +process.env.EEAT_PLAN_STONE_LONG || 1000, STONE_MAX = +process.env.EEAT_PLAN_STONE_MAX || 120;
+	// (THE STONES' WAY, on with the stones (EEAT_PLAN_STONE_WAY=0 / o.stoneWay false: every stone an edge): a stone is a plan edge only where it lies on the way to the
+	// trophy (the est walk to it + the open level's walk from it to the trophy within max(STONE_SLACK, STONE_SLACK_F x the
+	// node's own) of the node's walk to the trophy) and only the STONE_NEAR nearest of those: every stone of a level of many
+	// was an edge of every node, and each new position is one more walk to build, so the plan search ran out of its budget
+	// on one stone (Treasure Trove Cove's first plan 'blue coin (49,173)', PARTIAL, 2.3 s; Perilous Endeavor's 'coin
+	// (158,37)', 3.1 s; Endeavor's switch plan cut after 3 steps))
+	const STONE_WAY = o.stoneWay !== undefined ? !!o.stoneWay : process.env.EEAT_PLAN_STONE_WAY !== '0';
+	const STONE_NEAR = process.env.EEAT_PLAN_STONE_NEAR !== undefined ? +process.env.EEAT_PLAN_STONE_NEAR : 4;
+	const STONE_SLACK = process.env.EEAT_PLAN_STONE_SLACK !== undefined ? +process.env.EEAT_PLAN_STONE_SLACK : 8;
+	const STONE_SLACK_F = process.env.EEAT_PLAN_STONE_SLACK_F !== undefined ? +process.env.EEAT_PLAN_STONE_SLACK_F : 0.15;
+	// (the rungs a failed stone gets before it is blocked: 2 = rungs 0 and 1 (1.5 + 5 s); 3 also rung 2 (15 s), where the
+	// known routes' 400-800-tick legs are found (krt: Stone Ruin's stone legs 415-629 route ticks); EEAT_PLAN_STONE_RUNGS)
+	const STONE_RUNGS = Math.max(1, +process.env.EEAT_PLAN_STONE_RUNGS || 2);
+	let stones = STONES ? model.triggers.filter((X) => !X.relevant && (X.kind === 'coin' || X.kind === 'bcoin') && X.tiles && X.tiles.length) : [];
+	if (stones.length > STONE_MAX) stones = [];
+	const stoneIds = new Set(stones.map((X) => X.id));
+	let stoneLive = null;   // (per plan() call: stone id -> its tiles the anchor has not taken; null: every tile)
+	// THE WALLED PRICE (n5 doctor 4): the CEGAR walls (a failure's cut just past its closest tile and the 3 x 3 around
+	// the closest tile of every failure at rung >= 1) are never taken back, and in a corridor level they SEVER the est
+	// walk: then every edge past them is 'relaxation only' and costs the 1e6 PENALTY, and the plan ranking is gone (every
+	// plan ~1e6). Night 4's FINAL: 105 of the 206 failing compiles end on a plan of est >= 1e6 at 60 s, 126 at 180 s (16
+	// of batch 4's 21). Reproduced (src/out/n5/doctor/batch4.md): Stone Ruin's trophy / checkpoint (357,40) failures of
+	// the box-5 trace fed to learn(): after the checkpoint's rung-2 cut at (151,42) both far edges turn relaxOnly (est
+	// 1,004,932 / 1,005,448) though that is the corridor the known route takes. With the knob an edge the walled est walk
+	// misses but the UNWALLED est walk reaches costs WALL_F (3) x that walk instead of the penalty: a finite, ranked price
+	// (the walls still price their way 3x; a proof or an lb-only way keeps the penalty). EEAT_WALL_PRICE=1 (OPT-IN: o.wallPrice
+	// overrides), EEAT_WALL_F.
+	const WALL_PRICE = o.wallPrice !== undefined ? !!o.wallPrice : process.env.EEAT_WALL_PRICE === '1';
+	const WALL_F = +process.env.EEAT_WALL_F || 3;
 	// (a PROOF is keyed by the abstract state AND the position it was proven from: the executor's proof is "the goal field
 	// of the level as the doors stand is -1 at every START", a fact about where the ball is (a one-way drop, a portal, a
 	// pocket), so it blocks the edge from that (state, position) only, not from every node of the state: the re-entry
@@ -446,21 +614,86 @@ function createPlanner(model, facts, o = {}) {
 	const PROOF_POS = process.env.EEAT_PROOF_POS !== '0';
 	const proofKey = (S, pos) => (PROOF_POS && pos && pos.id !== undefined ? S.key + '@' + pos.id : S.key);
 	const rchKey = (S, pos, edge) => S.pkey + '|' + pos.id + '|' + edge;
+	// THE PHYSICS ESTIMATE of a root edge (OPT-IN EEAT_PHYS_EST=1; n5 doctor 'cold'): the est walk has no gravity, so a
+	// target over a rise the ball cannot make reads as near as any walk (Cold World: the trophy est 124 ticks from the
+	// spawn by the chapter-1 pool, whose rise needs the 33333 portal at speed; its trophy-room crown / blue coin, the
+	// pool's coin / crown / protection: 150 of 180 s of rungs spent there, while the chapter-2 blue coin that opens the
+	// level ran at rungs 0-1 only). Per anchor ONE forward pass of RCH3's own forward model (reach.js fwd / same-tile /
+	// portal edges, field._m.edgesOf, the level as S holds it, with the ice's reach (iceLocal, sound) and the fields'
+	// engine-measured transit tables (exitApex: ordering only)) from the anchor's REAL state: per tile the fewest tile
+	// moves (0-1 BFS over the abstract states, a level dominated at a (tile, type) pruned); a root edge's est = max(est,
+	// those moves x the pace), a target the pass never reaches PHYS_CUT_TILES x the pace: a price only, never a drop (the
+	// transit tables are no proof). Off = the planner byte for byte as before.
+	const PHYS_EST = process.env.EEAT_PHYS_EST === '1';
+	// THE PROGRESS RULE FOR THE CEGAR WALLS (OPT-IN EEAT_CUT_PROG=1; n5 doctor 'cold'): learn() walls a failed step's closest
+	// approach (its 3 x 3 in the est walk, and a cut of the est path just past it) at its second rung, as a counterexample
+	// to the relaxation's way. A BUDGET failure of a long leg is often no counterexample: the leg ran out of time early on
+	// its true way, and the wall then cuts that way. Cold World: the chapter-2 blue coin's rung-1 leg (5 s) ended at the
+	// chapter-2 portal exit (158,229), 13 est steps of the 78 from the spawn; the wall there cut chapter 2 off the est walk
+	// and the planner turned to the pool / trophy-room targets for the rest of the compile. With the rule a budget failure
+	// walls nothing unless its closest approach is at least CUT_PROG_F of the est walk's way from the anchor to the
+	// waypoint (the leg went most of the way and stalled: the false-near shape the walls are for); 'exhausted' as before.
+	// Off = the planner byte for byte as before.
+	const CUT_PROG = process.env.EEAT_CUT_PROG === '1';
+	const CUT_PROG_F = +process.env.EEAT_CUT_PROG_F > 0 ? +process.env.EEAT_CUT_PROG_F : 0.5;
+	const PHYS_CUT_TILES = 2000, PHYS_MAX_STATES = 4e6, PHYS_MEMO = 16;
+	const physMemo = new Map();
+	let RFm = null;
+	function physFwdOf(a) {
+		if (!a || !a.sim) return null;
+		const key = a.S.pkey + '|' + a.sim.stateHash();
+		let d = physMemo.get(key);
+		if (d !== undefined) return d;
+		d = null;
+		const t0 = Date.now();
+		try {
+			if (!RFm) RFm = require('../reach.js');
+			const goal = trophyTiles.length ? trophyTiles : [model.startTile];
+			const f = RFm.reachField(model.levelOf(a.S), { goals: Array.from(goal, (t) => ({ tile: t, cost: 0 })), deaths: false, debug: true, iceLocal: true, exitApex: true });
+			if (f && f.mode === 'physics' && f._m && typeof f._m.edgesOf === 'function') {
+				const s = a.sim, st = RFm.stateOf(f, s.px, s.py, s.speed_y, s._q0, s._q1, s._slippery);
+				const starts = st ? [...(st.base ? [st.base] : []), ...(st.rise || [])] : [];
+				const NT = 5, N = model.N;
+				const seen = new Int16Array(N * NT).fill(-32768);
+				d = new Int32Array(N).fill(INF);
+				let cur = [], nxt = [], depth = 0, n = 0;
+				const add = (t, ty, l, list) => { const k = t * NT + ty; if (seen[k] >= l) return false; seen[k] = l; list.push(t, ty, l); return true; };
+				for (const [ty, l] of starts) add(st.t, ty, l, cur);
+				while (cur.length && n < PHYS_MAX_STATES) {
+					for (let i = 0; i < cur.length && n < PHYS_MAX_STATES; i += 3) {
+						const t = cur[i], ty = cur[i + 1], l = cur[i + 2];
+						n++;
+						if (d[t] > depth) d[t] = depth;
+						f._m.edgesOf(t, ty, l, (t2, ty2, l2) => { add(t2, ty2, l2, t2 === t ? cur : nxt); });
+					}
+					cur = nxt; nxt = []; depth++;
+				}
+				ST.physStates = (ST.physStates || 0) + n;
+			}
+		} catch (e) { d = null; }
+		ST.physMs = (ST.physMs || 0) + (Date.now() - t0);
+		physMemo.set(key, d);
+		if (physMemo.size > PHYS_MEMO) physMemo.delete(physMemo.keys().next().value);
+		return d;
+	}
 	/**
 	 * the edges of node (S, pos): [{X (null: the trophy), S2, pos2, expect, lb, est, steps, viaDeath, edge, live}]. The
 	 * lb reachability (the walk relaxation: killers passable, keys sticky, the death shortcut) keeps an edge; mode 'plan'
 	 * prices it by the est walk (killers walls unless protected; a death step where only a death reaches it; a heavy
 	 * penalty where only the relaxation reaches it) and applies the facts (blocks, proofs, needs, learned ticks)
 	 */
-	function edgesOf(S, pos, base, mode, root, rootCls) {
+	function edgesOf(S, pos, base, mode, root, rootCls, anc, only) {
 		const out = [];
 		const P = pace();
 		const extra = pos.extra || 0;
+		const physD = PHYS_EST && root && mode === 'plan' && anc ? physFwdOf(anc) : null;   // (the physics estimate: PHYS_EST)
 		const dL = model.dist(S, pos, 'lb', base), dvL = model.deathVia(S, pos, 'lb', base);
 		const wantEst = mode === 'plan';
 		const dE = wantEst ? model.dist(S, pos, 'est', base) : null, dvE = wantEst ? model.deathVia(S, pos, 'est', base) : null;
 		const cls = root ? rootCls : S.key + '|*';
-		const leg = (tiles) => {
+		let dNW = null;
+		const nwDist = () => dNW || (dNW = model.dist(S, pos, 'estNW', base));
+		const leg = (tiles, forceDeath) => {
 			let sL = INF, rL = INF, sE = INF, rE = INF;
 			const drL = dvL ? dvL.dr : null, drE = dvE ? dvE.dr : null;
 			for (const t of tiles) {
@@ -475,38 +708,80 @@ function createPlanner(model, facts, o = {}) {
 			if (useBounds) { try { const lvl = model.levelOf(S); if (pairOK(tiles, lvl)) { const bb = bounds.pair(pos.tiles, tiles, lvl); if (Number.isFinite(bb)) lb = Math.max(lb, bb + extra); } } catch (e) { /* the tier-0 bound */ } }
 			let est = lb, steps = sL, viaDeath = false, relaxOnly = false;
 			if (wantEst) {
-				if (sE < INF) { est = sE * P + extra; steps = sE; }
-				else if (drE && rE < INF) { est = (dvE.dk + rE) * P + DEAD_TICKS + extra; steps = dvE.dk + rE; viaDeath = true; }
+				if (sE < INF) {
+					est = sE * P + extra; steps = sE;
+					// (THE DEATH WARP, EEAT_TRICKS warp: the death's est clearly below the walk's)
+					// (not on a level with a TIMED killer: there every tile is a death tile (model.dieTile, the lb's sound source)
+					// and the est's 0 walk steps to a death are a curse's / poison's timer in truth: Evolution Revolution's
+					// first A/B pair planned 10 warps, gain 1 vs 6)
+					if ((TR_WARP && !model.timed || forceDeath) && drE && rE < INF) {
+						const eD = (dvE.dk + rE) * P + (dvE.dt || 0) + DEAD_TICKS + extra;
+						if (forceDeath || (eD + WARP_MIN <= est && eD <= WARP_F * est)) { est = eD; steps = dvE.dk + rE; viaDeath = true; }
+					}
+				}
+				else if (drE && rE < INF) { est = (dvE.dk + rE) * P + (dvE.dt || 0) + DEAD_TICKS + extra; steps = dvE.dk + rE; viaDeath = true; }
 				else {
-					// (only the relaxation reaches it: its walk, else its death shortcut; sL is INF when only the lb's
-					// death way reaches it, and INF x pace overflowed the plan's est to ~4.3e9: The Square)
-					const sR = sL < INF ? sL : drL && rL < INF ? dvL.dk + rL : INF;
-					est = (sR < INF ? sR * P * 3 + (sL < INF ? 0 : DEAD_TICKS) : 0) + PENALTY + extra; relaxOnly = true;
+					// (the walled price: the est walk reaches it once the CEGAR walls are left out: WALL_F x that walk)
+					let sW = INF;
+					if (WALL_PRICE && ST.estWalls > 0) { const dw = nwDist(); for (const t of tiles) if (dw[t] < sW) sW = dw[t]; }
+					if (sW < INF) { est = sW * P * WALL_F + extra; steps = sW; ST.walledPriced = (ST.walledPriced || 0) + 1; }
+					else {
+						// (only the relaxation reaches it: its walk, else its death shortcut; sL is INF when only the lb's
+						// death way reaches it, and INF x pace overflowed the plan's est to ~4.3e9: The Square)
+						const sR = sL < INF ? sL : drL && rL < INF ? dvL.dk + rL : INF;
+						est = (sR < INF ? sR * P * 3 + (sL < INF ? 0 : DEAD_TICKS) : 0) + PENALTY + extra; relaxOnly = true;
+					}
 				}
 				est = Math.max(lb, est);
+				// (THE LONG LEG'S CONVEX PRICE, OPT-IN: a leg's est past LEG_T ticks costs LEG_K more a tick, so a chain of
+				// shorter legs through the triggers on the way (checkpoints, coins) beats one long leg of the same walk)
+				if (LEG_T > 0 && !relaxOnly && est > LEG_T) est += LEG_K * (est - LEG_T);
+				// (the stones' price of a long leg: the finders' cost grows much faster than its ticks)
+				if (STONES && stones.length && !relaxOnly && est > 0) est += est * est / STONE_LONG;
 			}
-			return { lb, est, steps, viaDeath, relaxOnly };
+			// (pen: which penalty priced the edge, a diagnostic for the plan's steps: 'relax' (only the relaxation reaches
+			// it), 'rch' (RCH3 -1 at rest / rising), 'floor' / 'zone' (a count floor not reached))
+			return { lb, est, steps, viaDeath, relaxOnly, pen: relaxOnly ? 'relax' : '' };
 		};
-		const finish = (X, tiles, edge, tr) => {
-			const g = leg(tiles);
+		const finish = (X, tiles, edge, tr, anyOf) => {
+			// (EXHAUSTED -> DEATH, EEAT_TRICKS exh: the leg exhausted from this class; its death variant only, where one
+			// exists: a level that can kill and a respawn the death way reaches the target from)
+			let g = null;
+			if (TR_EXH && wantEst && exhausted.has(edge + '\u0001' + cls)) {
+				const gd = leg(tiles, true);
+				if (TR_DBG) { let rE = INF, sE = INF; const drE = dvE ? dvE.dr : null; for (const t of tiles) { if (drE && drE[t] < rE) rE = drE[t]; if (dE && dE[t] < sE) sE = dE[t]; } process.stderr.write(`[tricks exh] ${edge} viaDeath ${gd ? gd.viaDeath : null} relax ${gd ? gd.relaxOnly : null} dk ${dvE ? dvE.dk : null} sE ${sE} rE ${rE} cp ${S.cp} rsp ${model.respawnOf(S, 'est').id} cls ${String(cls).slice(-28)}\n`); }
+				if (gd && gd.viaDeath) { g = gd; edge += '~w'; }
+			}
+			if (!g) g = leg(tiles);
 			if (!g) return;
 			if (wantEst) {
 				if (facts) {
 					if (facts.blocked(edge, cls, proofKey(S, pos))) return;
 					if (facts.needsOf(edge, cls).some((n) => S.feats[n.feat] !== n.value)) return;
 					const ok = facts.okTicks(edge, cls);
-					if (ok !== undefined) g.est = Math.max(g.lb, ok);
-				}
-				if (X === null) { for (const n of floorNeeds) if (!((S.feats[n.feat] || 0) >= n.min)) { g.est += PENALTY; break; } }
-				else if (floorNeeds.length && zoneNeed(S, tiles)) g.est += PENALTY;
+					if (ok !== undefined) { g.est = Math.max(g.lb, ok); g.pen = ''; }
+					else {
+						if (PHYS_PRICE) { const pr = rchPrice.get(rchKey(S, pos, edge)); if (pr !== undefined) g.est = Math.max(g.est, pr * P + extra); }
+						if (FAIL_EST > 0 && typeof facts.failsAny === 'function') {
+							const fa = facts.failsAny(edge);
+							if (fa > 0 && !facts.okAnyOf(edge)) { g.est += FAIL_EST * fa; ST.failEst = (ST.failEst || 0) + 1; }
+						}
+					}
+				} else if (PHYS_PRICE) { const pr = rchPrice.get(rchKey(S, pos, edge)); if (pr !== undefined) g.est = Math.max(g.est, pr * P + extra); }
+				if (X === null) { for (const n of floorNeeds) if (!((S.feats[n.feat] || 0) >= n.min)) { g.est += PENALTY; g.pen = (g.pen ? g.pen + '+' : '') + 'floor'; break; } }
+				else if (floorNeeds.length && zoneNeed(S, tiles)) { g.est += PENALTY; g.pen = (g.pen ? g.pen + '+' : '') + 'zone'; }
 				const bad = rchBad.get(rchKey(S, pos, edge));
 				if (bad === 'proof' && root) return;
-				if (bad) g.est += PENALTY;
+				if (bad) { g.est += PENALTY; g.pen = (g.pen ? g.pen + '+' : '') + 'rch'; }
+				if (physD) { let dm = INF; for (const t of tiles) if (physD[t] < dm) dm = physD[t]; g.est = Math.max(g.est, (dm < INF ? dm : PHYS_CUT_TILES) * P + extra); }
 			}
-			out.push({ X, S2: tr ? tr.S2 : S, pos2: X ? posOf(X, S, tr ? tr.S2 : S) : null, expect: tr ? tr.expect : null, lb: g.lb, est: g.est, steps: g.steps, viaDeath: g.viaDeath, relaxOnly: g.relaxOnly, edge, live: tiles });
+			const e = { X, S2: tr ? tr.S2 : S, pos2: X ? posOf(X, S, tr ? tr.S2 : S) : null, expect: tr ? tr.expect : null, lb: g.lb, est: g.est, steps: g.steps, viaDeath: g.viaDeath, relaxOnly: g.relaxOnly, pen: g.pen || '', edge, live: tiles };
+			if (anyOf > 1) e.anyOf = anyOf;
+			out.push(e);
 		};
-		for (const X of relevant) {
-			if (pos.trig === X.id && !(X.kind === 'psw' || X.kind === 'osw')) continue;
+		const groups = ANY ? new Map() : null;
+		for (const X of (only || relevant)) {
+			if (pos.trig === X.id && !(X.kind === 'psw' || X.kind === 'osw' || X.kind === 'chain')) continue;
 			const live = model.liveTiles(S, X);
 			if (!live.length) continue;
 			// (reachable first: the touch builds a state)
@@ -515,9 +790,60 @@ function createPlanner(model, facts, o = {}) {
 			if (sL >= INF && !dvL) continue;
 			const tr = model.touch(S, X);
 			if (!tr.changed) continue;
+			if (groups && ANY_KINDS.has(X.kind) && tr.S2 && tr.S2.key !== undefined) {
+				const gk = X.kind + '|' + tr.S2.key;
+				const g = groups.get(gk);
+				if (g) g.push({ X, live, tr }); else groups.set(gk, [{ X, live, tr }]);
+				continue;
+			}
 			finish(X, live, 'trig:' + X.id, tr);
 		}
+		if (groups) {
+			for (const g of groups.values()) {
+				if (g.length === 1) { finish(g[0].X, g[0].live, 'trig:' + g[0].X.id, g[0].tr); continue; }
+				// (the representative: the member nearest by the est walk (else the lb walk); the edge id: the least id)
+				const dd = dE || dL;
+				let rep = g[0], repD = INF, minId = g[0].X.id;
+				const seen = new Set(), all = [];
+				for (const m of g) {
+					if (m.X.id < minId) minId = m.X.id;
+					let d = INF;
+					for (const t of m.live) { if (dd[t] < d) d = dd[t]; if (!seen.has(t)) { seen.add(t); all.push(t); } }
+					if (d < repD) { repD = d; rep = m; }
+				}
+				finish(rep.X, all, 'trig:' + minId, rep.tr, g.length);
+			}
+		}
+		if (only) return out;
 		finish(null, trophyTiles, 'trophy', null);
+		// (the stepping stones: an irrelevant coin / blue coin as a step of its own, the state unchanged; plan mode only)
+		if (wantEst && STONES && stones.length) {
+			// (STONE_WAY: the node's walk to the trophy on the open level, the stones' detour against it)
+			let hPos = INF;
+			if (STONE_WAY && REVH) { hPos = hSteps(pos); if (!revTro) revTro = model.revDist(openOf(), trophyTiles); }
+			const cand = [];
+			for (const X of stones) {
+				if (pos.trig === X.id) continue;
+				// (a stone the anchor's own run took already is none: the model state does not track irrelevant coins)
+				const live = stoneLive ? stoneLive.get(X.id) : X.tiles;
+				if (!live || !live.length) continue;
+				let sE = INF, det = INF;
+				if (dE) for (const t of live) { if (dE[t] < sE) sE = dE[t]; if (hPos < INF && dE[t] + revTro[t] < det) det = dE[t] + revTro[t]; }
+				if (sE >= INF) continue;
+				if (STONE_WAY && REVH) {
+					if (!(hPos < INF) || !(det <= hPos + Math.max(STONE_SLACK, STONE_SLACK_F * hPos))) { ST.stoneOff = (ST.stoneOff || 0) + 1; continue; }
+				}
+				cand.push({ X, live, sE });
+			}
+			// (the STONE_NEAR nearest, then the ones at 2, 4, 8, ... x STONE_NEAR by distance and the farthest on the way: the
+			// plan search can still split a long leg once near its end, as with every stone an edge, at O(log n) edges a node)
+			let pick = cand;
+			if (STONE_WAY && STONE_NEAR > 0 && cand.length > STONE_NEAR) {
+				cand.sort((x, y) => x.sE - y.sE || x.X.id - y.X.id);
+				pick = cand.filter((c, i) => { if (i < STONE_NEAR || i === cand.length - 1) return true; const q = (i + 1) / STONE_NEAR; return Number.isInteger(q) && (q & (q - 1)) === 0; });
+			}
+			for (const c of pick) finish(c.X, c.live, 'trig:' + c.X.id, { S2: S, expect: null });
+		}
 		// DEATHS AS MOVES (lane 2's die edge, lane 5): where a death door (1011) or gate (1012) reads the death count, a death
 		// is an edge of its own (plan mode: the est walk to the nearest killer, the dead ticks, back at the respawn with one
 		// death more), so the door that needs N deaths opens in the plan: Tutorial 2's est walk passed its death door only in
@@ -532,7 +858,7 @@ function createPlanner(model, facts, o = {}) {
 			if (rp && !(facts && facts.blocked(edge, cls, proofKey(S, pos)))) {
 				const ok = facts ? facts.okTicks(edge, cls) : undefined;
 				const lbD = (dvL ? lbOfSteps(dvL.dk) : 0) + DEAD_TICKS + extra;
-				const est = Math.max(lbD, ok !== undefined ? ok : dvE.dk * P + DEAD_TICKS + extra);
+				const est = Math.max(lbD, ok !== undefined ? ok : dvE.dk * P + (dvE.dt || 0) + DEAD_TICKS + extra);
 				const X = { id: -1 - vals[dieIdx], kind: 'die', tiles: rp.tiles, label: `die, back at a respawn (deaths ${vals[dieIdx]})` };
 				out.push({ X, S2, pos2: diePos(rp), expect: { feat: 'deaths', value: vals[dieIdx] }, lb: lbD, est, steps: dvE.dk, viaDeath: false, relaxOnly: false, edge, live: rp.tiles });
 			}
@@ -601,6 +927,10 @@ function createPlanner(model, facts, o = {}) {
 			const bad = r.proof ? (isRoot && a.sim ? 'proof' : true) : false;
 			rchBad.set(k, bad);
 			if (bad) newBad++;
+			// (the physics price: RCH3's cost well above the est walk's steps of this edge)
+			else if (PHYS_PRICE && r.cost > 0 && Number.isFinite(e.steps) && e.steps < INF && !e.relaxOnly && r.cost > PHYS_R * e.steps + PHYS_ADD) {
+				rchPrice.set(k, r.cost); ST.physPriced = (ST.physPriced || 0) + 1; newBad++;
+			}
 		}
 		return newBad;
 	}
@@ -659,6 +989,17 @@ function createPlanner(model, facts, o = {}) {
 		ST.lbExpands += expanded; ST.lbMs += Date.now() - t0;
 		return { ticks, complete, expanded, ms: Date.now() - t0 };
 	}
+	/** UNTOGGLE: edge e from state S toggles back the switch feature enterFeat that the node's entering edge (or the
+	 *  anchor's arrival) toggled: a no-op pair on the abstract state (on -> off -> on, or off -> on -> off) */
+	function untoggles(e, S, enter) {
+		if (!enter || !e || !e.X || !e.S2) return false;
+		const f = e.X.feat;
+		if (f !== enter.feat || !TOGGLE_FEAT.test(String(f))) return false;
+		// (the same trigger component again, or a reset of that switch: another component of the same switch id is a real
+		// move (a door passed with the switch on, then off again: test/planplanner.js toggle2))
+		if (e.X.id !== enter.id && e.X.kind !== 'pswR' && e.X.kind !== 'oswR') return false;
+		return S.feats[f] !== e.S2.feats[f];
+	}
 	// ---------------------------------------------------------------- the plan search
 	function search(a, po, exclude) {
 		const t0 = Date.now();
@@ -669,9 +1010,15 @@ function createPlanner(model, facts, o = {}) {
 		let seq = 0, expanded = 0, found = null, pruned = 0;
 		const P = pace();
 		const root = { S: a.S, pos: a.pos, g: 0, gl: 0, parent: null, e: null, depth: 0, seq: seq++ };
+		// (THE TIMER, EEAT_PLAN_TIMER=1: the deadline search's ticks left (po.tLeft): a node whose est arrival plus the open
+		// level's walk to the trophy passes them is not generated; ordering only, the plan() call's extra search)
+		const tLeft = po.tLeft > 0 ? po.tLeft : Infinity;
 		// (a puzzle, 3+ landmarks left: greedy on the heuristic, g a tie-break (LAMA's greedy best-first); else weighted A*)
-		const gw = hLM(a.S) >= 3 ? 0.1 : 1;
-		const fOf = (g, S, pos) => gw * g + EST_W * hSteps(pos) * P + LM_W * hLM(S) - GAIN_BONUS * P * S.gain;
+		// (the timer's deadline search: the fewest landmarks left first (LAMA's greedy order: the open level's walk is blind to
+		// the doors a landmark opens), then A* on the est; no gain bonus: the trophy in time, not the most gain)
+		const gw = tLeft < Infinity ? 1 : hLM(a.S) >= 3 ? 0.1 : 1;
+		const gainB = tLeft < Infinity ? 0 : GAIN_BONUS, lmW = tLeft < Infinity ? 1e7 : LM_W;
+		const fOf = (g, S, pos) => gw * g + EST_W * hSteps(pos) * P + lmW * hLM(S) - gainB * P * S.gain;
 		root.f = fOf(0, a.S, a.pos);
 		open.push(root);
 		best.set(a.S.key + '#' + a.pos.id, 0);
@@ -679,6 +1026,14 @@ function createPlanner(model, facts, o = {}) {
 		// (the partial plan's end: the fewest landmarks left, then the most gain, then the least f)
 		const better = (x, y) => { const hx = hLM(x.S), hy = hLM(y.S); return hx < hy || (hx === hy && (x.S.gain > y.S.gain || (x.S.gain === y.S.gain && x.f < y.f))); };
 		let rootEdges = -1, bestRootChild = null;   // (-1: the budget ended before the root was expanded: no proof of anything)
+		// (THE INCUMBENT, lane 6 n5 block 1: the cheapest goal node GENERATED so far, a complete plan to the trophy by the est
+		// walk; the budget's end returns it instead of a partial plan (EEAT_PLAN_INC=0: off). The heuristic hSteps is the
+		// relaxed walk's, far below the est of the edges (First Person Maze from the route's own state at tick 676: the
+		// root's f 300, its children 158-170, the trophy edge est 584), and the gain bonus lowers every toggle's f by
+		// GAIN_BONUS x pace: on a switch level the open list never drains to the goal's f, and the budget's end handed the
+		// strategy the "most gain" partial plan (a column of switch toggles) while the trophy leg (486 route ticks) was never
+		// planned. Ordering only: the incumbent is a plan the search generated (its est walk), no edge dropped)
+		let inc = null;
 		while (open.size) {
 			const n = open.pop();
 			if (n.goal) { found = n; break; }
@@ -689,7 +1044,7 @@ function createPlanner(model, facts, o = {}) {
 			expanded++;
 			if (better(n, bestPartial)) bestPartial = n;
 			const isRoot = n === root;
-			const es = edgesOf(n.S, n.pos, a.base, 'plan', isRoot, a.S.key + '|' + a.cls);
+			const es = edgesOf(n.S, n.pos, a.base, 'plan', isRoot, a.S.key + '|' + a.cls, isRoot ? a : null);
 			if (isRoot) rootEdges = es.length;
 			// (the landmarks this node reaches only through killers (the est walk walls them unprotected): protection on
 			// counts as one more landmark here, so the search takes it first; Bad EE Level 9's switch 7 past the spikes)
@@ -702,14 +1057,19 @@ function createPlanner(model, facts, o = {}) {
 			}
 			for (const e of es) {
 				if (isRoot && exclude.has(e.edge)) continue;
+				if (UNTOGGLE && untoggles(e, n.S, n.e && n.e.X ? n.e.X : isRoot ? a.viaX : null)) { ST.untoggled = (ST.untoggled || 0) + 1; continue; }
 				const g2 = n.g + e.est, gl2 = n.gl + e.lb;
 				if (!e.X) {
 					if (gl2 >= budget) { pruned++; continue; }
-					open.push({ S: n.S, pos: null, g: g2, gl: gl2, f: gw < 1 ? -1e12 + g2 : g2, parent: n, e, depth: n.depth + 1, seq: seq++, goal: true });
+					if (g2 > tLeft) { pruned++; continue; }
+					const gn = { S: n.S, pos: null, g: g2, gl: gl2, f: gw < 1 ? -1e12 + g2 : g2, parent: n, e, depth: n.depth + 1, seq: seq++, goal: true };
+					open.push(gn);
+					if (INC_ON && g2 < PENALTY && (!inc || g2 < inc.g)) inc = gn;
 					continue;
 				}
 				const hl = hLb(e.pos2);
 				if (gl2 + hl >= budget) { pruned++; continue; }
+				if (tLeft < Infinity && !(g2 + hSteps(e.pos2) * P <= tLeft)) { pruned++; continue; }
 				const k2 = e.S2.key + '#' + e.pos2.id;
 				const had = best.get(k2);
 				if (had !== undefined && had <= g2) continue;
@@ -720,6 +1080,7 @@ function createPlanner(model, facts, o = {}) {
 			}
 		}
 		ST.expands += expanded;
+		if (!found && inc) { found = inc; ST.incumbents = (ST.incumbents || 0) + 1; }
 		// (the budget out before any child was expanded: the root's best child, a one-step partial plan)
 		if (bestPartial === root && bestRootChild) bestPartial = bestRootChild;
 		return { found, bestPartial: bestPartial === root ? null : bestPartial, expanded, ms: Date.now() - t0, pruned, rootEdges, exhausted: !open.size && !found };
@@ -735,6 +1096,49 @@ function createPlanner(model, facts, o = {}) {
 		return wp;
 	}
 	/** the path of a search node -> the plan's steps (with the key-door passages and death steps inserted) */
+	/** BREADCRUMBS (doctor 3, EEAT_PLAN_CRUMBS=1, default off): the root edge's leg is long (its est walk CRUMB_MIN steps
+	 *  or more) -> the one crumb step to take first: a trigger that changes no model state (a coin, blue coin or checkpoint
+	 *  no gate reads: `relevant` false) whose est-walk detour d(pos -> c) + d(c -> target) - d(pos -> target) is at most
+	 *  max(CRUMB_SLACK, CRUMB_SLACK_F x D), the farthest such within CRUMB_REACH steps (else the nearest beyond it), not
+	 *  nearer than CRUMB_NEAR, not one that failed twice from this node class. Why: a level whose triggers gate nothing
+	 *  is ONE leg for the planner (EX Crew Ice: the plan 'trophy', a 5,145-tick known route, the compile 688 tiles short
+	 *  in 60 and 180 s), where the level's designer put its coins along the way: 13 of the known route's 15 coins lie on a
+	 *  shortest est walk from the start to the trophy (detour 0-3 steps), and from its own arrivals the executor chains
+	 *  those coins leg by leg (src/out/doc3/chain.js). The crumb's edge is 'trig:<id>', so its arrival is an anchor of
+	 *  its own (strategy addArrival's re-entry rule: the same model state, another trigger) that the next plan starts
+	 *  from (receding horizon: one crumb a plan). Ordering only: the crumb is a waypoint, never a gate. */
+	function crumbStep(a, e, cls) {
+		if (!CRUMBS || e.viaDeath) return null;
+		// (the geometry by the 'now' walk: est's walls (killers unless protected) WITHOUT the CEGAR's cuts: a failed long
+		// leg's cuts made its est walk relaxation-only (EX Crew Ice with the first version: 4 crumbs, then the trophy edge
+		// at the 1e6 penalty and no crumb from there))
+		const S = a.S, tgt = e.live || trophyTiles;
+		const dA = model.dist(S, a.pos, 'now', a.base);
+		let D = INF;
+		for (const t of tgt) if (dA[t] < D) D = dA[t];
+		if (!(D >= CRUMB_MIN) || D >= INF) return null;
+		const slack = Math.max(CRUMB_SLACK, CRUMB_SLACK_F * D);
+		let near = null, far = null;
+		for (const X of crumbCands) {
+			const edge = 'trig:' + X.id;
+			if (facts && facts.rungOf(edge, cls) >= 2) continue;
+			const live = model.liveTiles(S, X);
+			if (!live.length) continue;
+			let d1 = INF;
+			for (const t of live) if (dA[t] < d1) d1 = dA[t];
+			if (!(d1 >= CRUMB_NEAR) || d1 >= D) continue;
+			const dX = model.dist(S, { id: 'crumb' + X.id, tiles: live.slice(), extra: 0 }, 'now', a.base);
+			let d2 = INF;
+			for (const t of tgt) if (dX[t] < d2) d2 = dX[t];
+			if (d2 >= INF || d1 + d2 - D > slack) continue;
+			const c = { X, live, d1, edge };
+			if (d1 <= CRUMB_REACH) { if (!far || d1 > far.d1) far = c; } else if (!near || d1 < near.d1) near = c;
+		}
+		const c = far || near;
+		if (!c) return null;
+		return { edge: c.edge, nodeClass: cls, rung: facts ? facts.rungOf(c.edge, cls) : 0, estTicks: Math.round(c.d1 * pace()), lb: 0, crumb: true,
+			waypoint: { kind: 'trigger', tiles: c.live.slice(), trig: c.X.id, expect: null, label: `crumb ${c.X.label}` } };
+	}
 	function stepsOf(a, node) {
 		const path = [];
 		for (let n = node; n && n.e; n = n.parent) path.push({ e: n.e, from: n.parent });
@@ -746,6 +1150,8 @@ function createPlanner(model, facts, o = {}) {
 			const { e, from } = path[i];
 			const isRoot = i === 0;
 			const cls = isRoot ? a.S.key + '|' + a.cls : from.S.key + '|*';
+			// (breadcrumbs: a long root leg goes by a crumb first)
+			if (isRoot && CRUMBS && !(e.X && e.X.kind === 'die')) { const cs = crumbStep(a, e, cls); if (cs) push(cs); }
 			// a death first where only a death reaches the target
 			if (e.viaDeath) {
 				if (deathsNow === null) deathsNow = a.sim ? a.sim.deaths : 0;
@@ -774,8 +1180,16 @@ function createPlanner(model, facts, o = {}) {
 					waypoint: dieField({ kind: 'region', tiles: DIE_ANY && model.respawn && model.respawn.length ? model.respawn.slice() : e.live.slice(), expect: e.expect, allowDeath: true, label: X.label }) });
 				continue;
 			}
-			const wp = X ? { kind: 'trigger', tiles: e.live.slice(), trig: X.id, expect: e.expect, label: X.label } : { kind: 'trophy', label: 'trophy' };
-			push({ edge: e.edge, nodeClass: cls, rung: facts ? facts.rungOf(e.edge, cls) : 0, waypoint: wp, estTicks: Math.round(e.est), lb: e.lb });
+			// (a FORCED CHAIN, EEAT_TRICKS chain: first the lane's boost tile (a region step: the way there, the doors as they
+			// are), then the chain's own step from there (the lane itself is forced: no input needed))
+			// (once: after its first failure from a class the chain's step goes alone, no stall on the head)
+			if (X && X.kind === 'chain' && X.boost !== undefined && CHAIN_HEAD && !(facts && facts.rungOf(e.edge + '^', cls) > 0)) {
+				const eh = e.edge + '^';
+				push({ edge: eh, nodeClass: cls, rung: 0, estTicks: Math.max(0, Math.round(e.est) - 8), lb: 0,
+					waypoint: { kind: 'region', tiles: [X.boost], expect: null, label: `${X.label}: its boost` } });
+			}
+			const wp = X ? { kind: 'trigger', tiles: e.live.slice(), trig: X.id, expect: e.expect, label: e.anyOf > 1 ? `${X.label} (any of ${e.anyOf})` : X.label } : { kind: 'trophy', label: 'trophy' };
+			push({ edge: e.edge, nodeClass: cls, rung: facts ? facts.rungOf(e.edge, cls) : 0, waypoint: wp, estTicks: Math.round(e.est), lb: e.lb, pen: e.pen || '' });
 			// a key followed by its door: the passage while the key is on
 			if (X && X.kind === 'key' && i + 1 < path.length) {
 				const next = path[i + 1].e;
@@ -827,6 +1241,7 @@ function createPlanner(model, facts, o = {}) {
 		for (const fct of facts.list()) {
 			if (fct.kind === 'fail' && fct.cut) for (const j of fct.cut) { if (!mask) mask = new Uint8Array(model.N); if (!mask[j]) { mask[j] = 1; n++; } }
 			if (fct.kind !== 'fail' || !fct.closest || fct.closest.tile === undefined || fct.closest.tile === null) continue;
+			if (fct.noWall) continue;   // (CUT_PROG: a budget failure that made too little progress walls nothing)
 			if (!((fct.rung | 0) >= 1 || fct.why === 'exhausted')) continue;
 			const t = fct.closest.tile, x = t % W, y = (t / W) | 0;
 			for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
@@ -841,6 +1256,38 @@ function createPlanner(model, facts, o = {}) {
 		model.setEstWalls(mask);
 		ST.estWalls = n;
 	}
+	/** THE TIMER: a remover of the anchor's running killer (its block with the number 0) within the ticks left by the est
+	 *  walk in the anchor's state */
+	let removerTiles = null;
+	function removerInTime(a, tm) {
+		if (!(tm.id > 0)) return false;
+		if (!removerTiles) {
+			removerTiles = new Map();
+			const fg = L.fg, lk = L.lookup0;
+			for (let i = 0; i < fg.length; i++) {
+				const id = fg[i];
+				if ((id === 421 || id === 422 || id === 1584) && lk && !(lk[i] > 0)) { let r = removerTiles.get(id); if (!r) removerTiles.set(id, (r = [])); r.push(i); }
+			}
+		}
+		const tiles = removerTiles.get(tm.id);
+		if (!tiles || !tiles.length) return false;
+		const d = model.dist(a.S, a.pos, 'est', a.base);
+		let b = INF;
+		for (const t of tiles) if (d[t] < b) b = d[t];
+		return b < INF && b * pace() <= tm.left;
+	}
+	/** THE TIMER's plan: the plan search with the anchor's timed killer as a deadline (po.tLeft: a node whose est arrival
+	 *  + the open level's walk to the trophy passes it is not generated), a whole plan to the trophy or null; its own
+	 *  clock: half of the plan call's (at least 50 ms) */
+	function timerPlan(a, so, deadline, tl) {
+		const ms = Math.max(50, (so.ms || 300) / 2);
+		const res = search(a, Object.assign({}, so, { ms, tLeft: tl }), new Set());
+		if (process.env.EEAT_TIMER_DBG === '1') console.error(`[timer] left ${tl} found ${!!res.found} g ${res.found ? Math.round(res.found.g) : '-'} expanded ${res.expanded} pruned ${res.pruned} exhausted ${res.exhausted} ms ${res.ms} partial ${res.bestPartial ? Math.round(res.bestPartial.g) + ' h ' + hSteps(res.bestPartial.pos) : '-'}`);
+		if (!res.found) return null;
+		const steps = stepsOf(a, res.found);
+		if (!steps.length) return null;
+		return { id: `p${ST.plans}.t`, steps, cost: Math.round(res.found.g), lb: res.found.gl, partial: false, why: `trophy in the timer (${tl} ticks left)`, expanded: res.expanded, timer: tl };
+	}
 	/**
 	 * plan(anchor, {k, depth, epoch, ms, maxExpand}) -> Plan[] (with .why when empty: 'exhausted' | 'proof')
 	 */
@@ -850,6 +1297,13 @@ function createPlanner(model, facts, o = {}) {
 		ST.plans++;
 		syncWalls();
 		const a = anchorOf(anchor);
+		// (the stones' untaken tiles in the anchor's own state: Treasure Trove Cove's box-5 compile with the stones went back to
+		// the blue coins its anchors held already, 6 of 30 stone steps)
+		stoneLive = null;
+		if (STONES && stones.length && a.sim && typeof a.sim.is_coin_collected === 'function') {
+			stoneLive = new Map();
+			for (const X of stones) stoneLive.set(X.id, X.tiles.filter((t) => !a.sim.is_coin_collected(t % W, (t / W) | 0)));
+		}
 		const k = po.k || 3;
 		const first = ST.plans === 1;
 		const so = { ms: po.ms || (first ? 2000 : 300), maxExpand: po.maxExpand || 200000, depth: po.depth || 0 };
@@ -858,8 +1312,10 @@ function createPlanner(model, facts, o = {}) {
 		const deadline = t0 + so.ms;
 		for (let r = 0; r < k; r++) {
 			let res = search(a, Object.assign({}, so, { ms: Math.max(50, (deadline - Date.now()) / Math.max(1, k - r)) }), exclude);
-			for (let v = 0; v < 6 && res.found && Date.now() < deadline + so.ms / 2; v++) {
-				if (!verifyPath(a, res.found, deadline + so.ms / 2)) break;
+			// (with the physics price a PARTIAL plan's path is checked too: its first legs are what the executor runs next)
+			const vNode = (x) => x.found || (PHYS_PRICE && x.bestPartial && x.bestPartial.e ? x.bestPartial : null);
+			for (let v = 0; v < 6 && vNode(res) && Date.now() < deadline + so.ms / 2; v++) {
+				if (!verifyPath(a, vNode(res), deadline + so.ms / 2)) break;
 				res = search(a, Object.assign({}, so, { ms: Math.max(50, (deadline - Date.now()) / Math.max(1, k - r)) }), exclude);
 			}
 			if (rootEdges < 0) rootEdges = res.rootEdges;
@@ -874,8 +1330,27 @@ function createPlanner(model, facts, o = {}) {
 			let n = node; while (n.parent && n.parent.parent) n = n.parent;
 			if (n.e) exclude.add(n.e.edge);
 		}
+		// (THE TIMER: a whole plan in the anchor's timed killer's time first; none = a late anchor, the strategy's pick puts
+		// it after the anchors in time)
+		let late = false, timerCost;
+		if (TIMER) {
+			const tm = timerOf(a.sim), tl = tm.left;
+			if (tl < Infinity) {
+				let tp = null;
+				try { tp = timerPlan(a, so, deadline, tl); } catch (e) { tp = null; }
+				if (tp) { plans.unshift(tp); timerCost = tp.cost; ST.timerPlans = (ST.timerPlans || 0) + 1; }
+				// (late: no plan in time AND no remover of the killer (its block with the number 0) within the ticks left by
+				// the est walk in the anchor's state: a remover on the way clears it, the plan search does not model that)
+				else if (!removerInTime(a, tm)) { late = true; ST.timerLate = (ST.timerLate || 0) + 1; }
+			}
+		}
 		if (plans.length && NEAR_K > 0 && facts) {
 			try { const near = nearPlans(a, plans); if (near.length) plans.unshift(...near); } catch (e) { /* the rule is ordering only */ }
+		}
+		// (the crumbs are a way to the first route: once a route is known (po.runBound finite) the plans are the plan
+		// search's own: box 5, Ruins (2 crumbs), 60 s: 1,597 run ticks with them vs 1,347 without, a crumb's detour kept)
+		if (plans.length && crumbs.length && !(po.runBound !== undefined && Number.isFinite(+po.runBound))) {
+			try { const cp = crumbPlan(a, plans); if (cp.length) plans.unshift(...cp); } catch (e) { if (process.env.EEAT_CRUMB_DBG === '1') console.error('crumbPlan', e.stack); }
 		}
 		if (!plans.length) {
 			why = rootEdges < 0 ? 'budget' : rootEdges === 0 && !(facts && facts.list().length) ? 'proof' : 'exhausted';
@@ -890,6 +1365,8 @@ function createPlanner(model, facts, o = {}) {
 		const out = plans;
 		out.why = why;
 		out.plans = plans;
+		if (late) out.late = true;
+		if (timerCost !== undefined) out.timerCost = timerCost;
 		return out;
 	}
 	/**
@@ -929,7 +1406,7 @@ function createPlanner(model, facts, o = {}) {
 		let rMin = Infinity;
 		for (const p of plans) { const f = p.steps.find((s) => !String(s.edge).startsWith('death:') && !String(s.edge).startsWith('region:key')) || p.steps[0]; const r = facts.rungOf(f.edge, cls); if (r < 1) return []; if (r < rMin) rMin = r; }
 		const lb0 = Number.isFinite(+s0.lb) ? +s0.lb : Infinity;
-		const es = edgesOf(a.S, a.pos, a.base, 'plan', true, cls);
+		const es = edgesOf(a.S, a.pos, a.base, 'plan', true, cls, a);
 		const used = new Set(plans.map((p) => p.steps[0] && p.steps[0].edge));
 		// (THE RUNG BALANCE, lane 6 block 4, NEAR_RUNG: a near trigger is offered while its rung is below every plan's first
 		// leg's, not only while untried: the plans' first legs climbed rung after rung (5 -> 15 -> 45 s windows, three
@@ -941,8 +1418,13 @@ function createPlanner(model, facts, o = {}) {
 		// T-PLAN-ORACLE unchanged by construction (it fires only after a failed rung): 619 plans, 0 / 0.
 		// EEAT_NEAR_RUNG=0: only untried triggers, as before)
 		const rCap = NEAR_RUNG ? rMin : 1;
-		const cands = es.filter((e) => e.X && !e.relaxOnly && !e.viaDeath && e.edge !== s0.edge && !used.has(e.edge) && e.lb < lb0 && facts.rungOf(e.edge, cls) < rCap)
-			.sort((x, y) => (NEAR_RUNG ? facts.rungOf(x.edge, cls) - facts.rungOf(y.edge, cls) : 0) || x.lb - y.lb || x.est - y.est);
+		const cand0 = (e) => e.X && !e.relaxOnly && !e.viaDeath && e.edge !== s0.edge && !used.has(e.edge) && facts.rungOf(e.edge, cls) < rCap && !(UNTOGGLE && untoggles(e, a.S, a.viaX));
+		const byRungLb = (x, y) => (NEAR_RUNG ? facts.rungOf(x.edge, cls) - facts.rungOf(y.edge, cls) : 0) || x.lb - y.lb || x.est - y.est;
+		let cands = es.filter((e) => cand0(e) && e.lb < lb0).sort(byRungLb);
+		// (THE FAR NEAR PLAN, doctor 5, OPT-IN EEAT_NEAR_FAR=1: no trigger nearer by the lb than the failed first leg: the
+		// nearest farther one, by the same order. The lb of a false near is small (Unforgiving Climb: the trophy's 47-50
+		// ticks, the level's known route 3,914): no trigger was ever nearer and the plans' first legs climbed every rung)
+		if (!cands.length && NEAR_FAR()) cands = es.filter(cand0).sort(byRungLb);
 		const out = [];
 		const root = { S: a.S, pos: a.pos, e: null, parent: null };
 		for (const e of cands.slice(0, NEAR_K)) {
@@ -951,6 +1433,81 @@ function createPlanner(model, facts, o = {}) {
 			out.push({ id: `p${ST.plans}.n${out.length}`, steps, cost: p0.cost, lb: e.lb + hLb(e.pos2), partial: true, why: `near: '${s0.waypoint && s0.waypoint.label}' failed its rung ${facts.rungOf(s0.edge, cls) - 1}; the nearest untried trigger first`, near: true });
 		}
 		ST.nearPlans = (ST.nearPlans || 0) + out.length;
+		return out;
+	}
+	/**
+	 * THE CRUMB PLANS (doctor 9, n5; EEAT_CRUMBS=1, model.js): the CRUMB_K nearest crumbs (coins no gate reads) by the
+	 * admissible bound, as one-step plans in front of the plans, when the best plan's first leg is long (its lb >= CRUMB_LEGMIN ticks)
+	 * and the crumb is nearer than that leg's target (lb below CRUMB_F x its lb); the least lb x (1 + its rung) first (a
+	 * crumb that failed its rung gives way to the next nearest, a far one waits). An arrival at a crumb is a new anchor with one gain more: the
+	 * strategy goes on from it, so the compile follows the level's breadcrumb trail one leg at a time, and every plan from
+	 * each crumb is the plan search's own (the trophy's direct leg first). Ordering only: no edge dropped, the lb untouched.
+	 */
+	// (CRUMB_K crumb plans, the nearest first: a compile's workers run the first plans' legs side by side, so with one the
+	// other worker spent every rung on the long leg itself; box 5, On And On, 60 s, 2 workers: the nearest crumb (a blue
+	// coin off the route, closest 1 tile) took rungs 0-3 while the route's coin waited at rung 2)
+	const CRUMB_LEGMIN = +process.env.EEAT_CRUMB_LEGMIN || 50, CRUMB_F = +process.env.EEAT_CRUMB_F || 0.9;
+	const CRUMB_K = process.env.EEAT_CRUMB_K !== undefined ? Math.max(1, +process.env.EEAT_CRUMB_K | 0) : 2;
+	const CRUMB_AFTER = process.env.EEAT_CRUMB_AFTER !== undefined ? Math.max(0, +process.env.EEAT_CRUMB_AFTER | 0) : 1;
+	// THE CRUMB'S DETOUR (C6 lane 5; EEAT_CRUMB_DETOUR=F, 0 / unset = off: the crumb plans as before, byte for byte): a
+	// crumb is a relay of the long leg only when it lies ON ITS WAY: by the 'now' walk (est's walls without the CEGAR's
+	// cuts, as crumbStep) d(anchor -> crumb) + d(crumb -> the leg's target) - d(anchor -> the target) at most
+	// max(CRUMB_DETOUR_MIN, F x d(anchor -> the target)); and no crumb before a PLANNED DEATH (the plan's first step
+	// 'death:' / 'die:': its long leg starts at the respawn, where the next anchor's crumb plans are asked again). Why: the
+	// nearest crumb by the lb alone took Tutorial 2's compile to a blue coin 101 walk steps off its way (D 176) and to one
+	// beside the checkpoint the plan dies at (1,531 ticks), a route 5,353-6,069 vs 3,070-3,143 without the crumbs; the
+	// crumbs the known routes of 45 levels take (tools/cmp/crumbdetour.js) are all within max(8, 0.351 D) but one (Flight
+	// Path: +73 on a D 34 leg): EX Crew Fall of Zeal 28 crumbs, up to 0.351; Stone Ruin 0.209; On And On 0.114.
+	const CRUMB_DETOUR_F = process.env.EEAT_CRUMB_DETOUR !== undefined ? Math.max(0, +process.env.EEAT_CRUMB_DETOUR || 0) : 0;
+	const CRUMB_DETOUR_MIN = process.env.EEAT_CRUMB_DETOUR_MIN !== undefined ? Math.max(0, +process.env.EEAT_CRUMB_DETOUR_MIN || 0) : 8;
+	function crumbOnWay(a, s0, cands) {
+		const tgt = s0 && s0.waypoint && s0.waypoint.tiles;
+		if (!tgt || !tgt.length) return cands;
+		const dA = model.dist(a.S, a.pos, 'now', a.base);
+		let D = INF;
+		for (const t of tgt) if (dA[t] < D) D = dA[t];
+		if (!(D < INF)) return cands;
+		const slack = Math.max(CRUMB_DETOUR_MIN, CRUMB_DETOUR_F * D);
+		return cands.filter((e) => {
+			const live = e.live || [];
+			let d1 = INF;
+			for (const t of live) if (dA[t] < d1) d1 = dA[t];
+			if (!(d1 < INF)) return false;
+			const dX = model.dist(a.S, { id: 'crumb' + e.X.id, tiles: live.slice(), extra: 0 }, 'now', a.base);
+			let d2 = INF;
+			for (const t of tgt) if (dX[t] < d2) d2 = dX[t];
+			const ok = d2 < INF && d1 + d2 - D <= slack;
+			if (!ok) ST.crumbDetours = (ST.crumbDetours || 0) + 1;
+			return ok;
+		});
+	}
+	function crumbPlan(a, plans) {
+		const p0 = plans.find((p) => !p.near) || plans[0];
+		if (!p0 || !p0.steps || !p0.steps.length) return [];
+		if (CRUMB_DETOUR_F > 0 && /^(death|die):/.test(String(p0.steps[0].edge))) return [];
+		const s0 = p0.steps.find((s) => !String(s.edge).startsWith('death:') && !String(s.edge).startsWith('region:key')) || p0.steps[0];
+		const lb0 = Number.isFinite(+s0.lb) ? +s0.lb : Infinity;
+		if (!(lb0 >= CRUMB_LEGMIN)) return [];
+		const cls = a.S.key + '|' + a.cls;
+		// (only once that leg has failed CRUMB_AFTER rungs from this anchor's class: a first leg the executor finds at its
+		// first rung (the compiled levels' direct legs) keeps both workers; EEAT_CRUMB_AFTER=0: at once)
+		if (CRUMB_AFTER > 0 && facts && facts.rungOf(s0.edge, cls) < CRUMB_AFTER) return [];
+		const es = edgesOf(a.S, a.pos, a.base, 'plan', true, cls, a, crumbs);
+		// (a crumb past the est walk's CEGAR cuts is kept: the cuts come from the long leg's failures, and a way around its
+		// deceptive field is what a crumb is for; its lb is the relaxation's, still admissible)
+		let cands = es.filter((e) => e.X && e.X.crumb && !e.viaDeath && e.lb < CRUMB_F * lb0)
+			.sort((x, y) => (facts ? x.lb * (1 + facts.rungOf(x.edge, cls)) - y.lb * (1 + facts.rungOf(y.edge, cls)) : 0) || x.lb - y.lb || x.est - y.est);
+		if (CRUMB_DETOUR_F > 0 && cands.length) cands = crumbOnWay(a, s0, cands);
+		if (process.env.EEAT_CRUMB_DBG === '1') console.error(`crumbPlan: lb0 ${lb0} crumb edges ${es.length} cands ${cands.length}: ${es.slice(0, 6).map((e) => `${e.X && e.X.label} lb ${e.lb} pen '${e.pen}' relax ${e.relaxOnly} r ${facts ? facts.rungOf(e.edge, cls) : '-'}`).join('; ')}`);
+		const out = [];
+		const root = { S: a.S, pos: a.pos, e: null, parent: null };
+		for (const e of cands) {
+			if (out.length >= CRUMB_K) break;
+			const steps = stepsOf(a, { S: e.S2, pos: e.pos2, e, parent: root });
+			if (!steps.length) continue;
+			out.push({ id: `p${ST.plans}.c${out.length}`, steps, cost: p0.cost, lb: e.lb + hLb(e.pos2), partial: true, why: `crumb: a nearest breadcrumb before '${s0.waypoint && s0.waypoint.label}' (lb ${lb0})`, near: true, crumb: true });
+		}
+		ST.crumbPlans = (ST.crumbPlans || 0) + out.length;
 		return out;
 	}
 	// ---------------------------------------------------------------- CEGAR
@@ -1026,6 +1583,8 @@ function createPlanner(model, facts, o = {}) {
 			return out;
 		}
 		const fail = (result && result.fail) || { why: 'budget' };
+		if (TR_EXH && fail.why === 'exhausted' && model.canDie && !/~w$/.test(edge)) exhausted.add(edge + '\u0001' + cls);
+		if (TR_DBG) process.stderr.write(`[tricks learn] ${edge} why ${fail.why} canDie ${model.canDie} cls ${String(cls).slice(-24)}\n`);
 		const sKey = a ? proofKey(a.S, a.pos) : (cls || '').split('|')[0];
 		if (fail.why === 'proof') out.push(facts.add({ kind: 'proof', edge, sKey }));
 		for (const b of fail.blockedBy || []) {
@@ -1038,13 +1597,25 @@ function createPlanner(model, facts, o = {}) {
 		const rung = facts.rungOf(edge, cls);
 		// (the est walk's path to the waypoint, cut just past the point nearest the closest approach: the next plans'
 		// est walk goes another way there, CEGAR's generalization over every edge through that corridor)
-		let cut = null;
-		if (a && fail.closest && fail.closest.tile !== undefined && fail.closest.tile !== null && (rung + 1 >= 2 || fail.why === 'exhausted')) {
+		// (a STONE is optional: its failure is no counterexample to the corridor (a cut there walled the est walk's way to
+		// every later target: Machu Picchu's stones plan fell back to the penalised trophy leg after two stone failures);
+		// the stone is blocked from its second rung on instead (EEAT_PLAN_STONE_RUNGS, 2: the rungs a stone gets). EEAT_PLAN_STONE_CUT=1: the cut as for any trigger)
+		const isStone = STONES && stones.length && step.waypoint && step.waypoint.trig !== undefined && stoneIds.has(step.waypoint.trig) && process.env.EEAT_PLAN_STONE_CUT !== '1';
+		// (EEAT_FIELD_MEMO=1 (executor.js): a closest of unknown distance (the call had no goal field) cuts nothing)
+		let cut = null, noWall = false;
+		if (CUT_PROG && a && fail.why !== 'exhausted' && fail.closest && fail.closest.tile !== undefined && fail.closest.tile !== null) {
+			// (THE PROGRESS RULE: a budget failure whose closest approach is less than CUT_PROG_F of the est walk's way from
+			// the anchor to the waypoint is no counterexample: see CUT_PROG)
+			const tiles = step.waypoint && step.waypoint.kind !== 'trophy' && step.waypoint.tiles ? step.waypoint.tiles : trophyTiles;
+			const dC = model.pairSteps(a.S, a.pos, [fail.closest.tile], 'est', a.base), dT = model.pairSteps(a.S, a.pos, tiles, 'est', a.base);
+			if (dT > 0 && dT < INF && !(dC >= CUT_PROG_F * dT)) { noWall = true; ST.cutSkipped = (ST.cutSkipped || 0) + 1; }
+		}
+		if (!isStone && !noWall && a && fail.closest && fail.closest.tile !== undefined && fail.closest.tile !== null && !(process.env.EEAT_FIELD_MEMO === '1' && !(fail.closest.dist >= 0)) && (rung + 1 >= 2 || fail.why === 'exhausted')) {
 			const tiles = step.waypoint && step.waypoint.kind !== 'trophy' && step.waypoint.tiles ? step.waypoint.tiles : trophyTiles;
 			cut = cutPast(a.S, a.pos, tiles, a.base, fail.closest.tile);
 		}
-		out.push(facts.add({ kind: 'fail', edge, nodeClass: cls, rung, why: fail.why || 'budget', closest: fail.closest ? { tile: fail.closest.tile, dist: fail.closest.dist } : null, blockedBy: fail.blockedBy || [], cut }));
-		if (rung + 1 >= facts.RUNG_MAX) out.push(facts.add({ kind: 'block', edge, nodeClass: cls }));
+		out.push(facts.add(Object.assign({ kind: 'fail', edge, nodeClass: cls, rung, why: fail.why || 'budget', closest: fail.closest ? { tile: fail.closest.tile, dist: fail.closest.dist } : null, blockedBy: fail.blockedBy || [], cut }, noWall ? { noWall: true } : {})));
+		if (rung + 1 >= facts.RUNG_MAX || (isStone && rung + 1 >= STONE_RUNGS)) out.push(facts.add({ kind: 'block', edge, nodeClass: cls }));
 		return out;
 	}
 	// ---------------------------------------------------------------- the truth checker's price of an order

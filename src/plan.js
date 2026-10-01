@@ -14,6 +14,8 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+// (the doctors' defaults, as src/compile.js; before types.js loads: its FX_FIELD / FX_STATE are read then)
+if (require.main === module) require('./plan/defaults.js').apply();
 const T = require('./plan/types.js');
 
 function parse(argv) {
@@ -32,6 +34,8 @@ function levelOf(arg) {
 	}
 }
 async function main() {
+	// (the air jumps, as src/compile.js: the compiler's own process only; EEAT_AIRJUMP=0 off)
+	if (process.env.EEAT_AIRJUMP === undefined) process.env.EEAT_AIRJUMP = '1';
 	const a = parse(process.argv.slice(2));
 	if (!a._.length) throw new Error('usage: node src/plan.js <level.eelvl|.json|job id> [--seconds=300] [--workers=2] [--stdin=1] [--first=1] [--out=dir]');
 	const emit = T.emitter(process.stdout);
