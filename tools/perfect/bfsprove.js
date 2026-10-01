@@ -58,6 +58,45 @@ function seenTable(sab) {
 	};
 }
 
+// ---------------------------------------------------------------- a layer of states, packed
+// A snapshot object holds ~110 fields (~1.2 KB of V8 heap: its doubles boxed); a layer keeps per state only the fields that
+// differ from the worker's BASE snapshot (Object.is: -0 and NaN exact), each as (field index, type, Float64 value):
+// type 0 a number, 1 true, 2 false, 3 null, 4 undefined, 5 anything else (a reference kept in `refs`: the switch maps and
+// queues, shared copy-on-write by the engine), ~25 fields = ~270 B a state. Every state read back is checked: restored,
+// its stateHash must be the one stored at its insert (else the run throws: no claim).
+const FIELDS = Object.keys(new E.EESnapshot());
+function makeStore() {
+	let n = 0, m = 0, off = new Int32Array(1024), hs = new Float64Array(1024), fi = new Uint8Array(16384), ty = new Uint8Array(16384), va = new Float64Array(16384);
+	const refs = [];
+	const grow = (a, k) => { const b = new a.constructor(Math.max(k, a.length * 2)); b.set(a); return b; };
+	return {
+		get n() { return n; },
+		push(snap, base, h) {
+			if (n + 2 > off.length) { off = grow(off, n + 2); hs = grow(hs, n + 2); }
+			if (m + FIELDS.length > fi.length) { const k = m + FIELDS.length; fi = grow(fi, k); ty = grow(ty, k); va = grow(va, k); }
+			off[n] = m; hs[n] = h;
+			for (let f = 0; f < FIELDS.length; f++) {
+				const k = FIELDS[f], v = snap[k];
+				if (Object.is(v, base[k])) continue;
+				fi[m] = f;
+				if (typeof v === 'number') { ty[m] = 0; va[m] = v; } else if (v === true) ty[m] = 1; else if (v === false) ty[m] = 2;
+				else if (v === null) ty[m] = 3; else if (v === undefined) ty[m] = 4; else { ty[m] = 5; va[m] = refs.length; refs.push(v); }
+				m++;
+			}
+			n++; off[n] = m;
+		},
+		get(i, base, out) {
+			for (let f = 0; f < FIELDS.length; f++) out[FIELDS[f]] = base[FIELDS[f]];
+			for (let j = off[i], e = off[i + 1]; j < e; j++) {
+				const t = ty[j], k = FIELDS[fi[j]];
+				out[k] = t === 0 ? va[j] : t === 1 ? true : t === 2 ? false : t === 3 ? null : t === 4 ? undefined : refs[va[j]];
+			}
+			return hs[i];
+		},
+		bytes: () => off.byteLength + hs.byteLength + fi.byteLength + ty.byteLength + va.byteLength,
+	};
+}
+
 // ---------------------------------------------------------------- a worker: its own front, every layer on the barrier
 function workerMain() {
 	const { file, tiers, C, sab, deadline, maxBytes } = workerData;
@@ -66,35 +105,40 @@ function workerMain() {
 	const insert = seenTable(sab);
 	const { sources } = LP.sourcesOf(L, 3000);
 	const sim = new E.EESim(L), inp = new E.EEInput();
-	let roots = [], front = [], d0 = 0;
-	const par = [], mk = [];   // per layer (from d0 + 1): the parent's index in the layer before, the input
+	let roots = [], front = null, base = null;
+	const cur = new E.EESnapshot(), tmp = new E.EESnapshot();
+	const par = [], mk = [];   // per layer (from the roots on): the parent's index in the layer before, the input
 	parentPort.on('message', (m) => {
 		if (m.type === 'roots') {
-			roots = m.roots; d0 = m.d0; front = [];
+			roots = m.roots; front = makeStore();
 			for (const r of roots) {
 				sim.restore(sources[r.src]);
 				for (const x of r.path) { E.applyMask(inp, x); sim.tick(inp); }
-				front.push(sim.snapshot());
+				const s = sim.snapshot();
+				if (base === null) base = s;
+				front.push(s, base, sim.stateHash());
 			}
-			parentPort.postMessage({ type: 'ready', n: front.length });
+			parentPort.postMessage({ type: 'ready', n: front.n });
 		} else if (m.type === 'layer') {
 			const d = m.d;
-			const next = [], np = [], nm = [];
+			const next = makeStore(), np = [], nm = [];
 			let cut = 0, merged = 0, full = 0, crown = null, stopped = false;
 			const lim = C - (d + 1);
-			for (let i = 0; i < front.length && crown === null; i++) {
-				const snap = front[i];
-				sim.restore(snap);
-				const masks = EG.probeMasks(sim, inp, snap);
+			for (let i = 0; i < front.n && crown === null; i++) {
+				const h0 = front.get(i, base, cur);
+				sim.restore(cur);
+				if (sim.stateHash() !== h0) throw new Error(`bfsprove: a packed state read back wrong (layer ${d}, state ${i})`);
+				const masks = EG.probeMasks(sim, inp, cur);
 				for (const x of masks) {
-					sim.restore(snap); E.applyMask(inp, x); sim.tick(inp);
+					sim.restore(cur); E.applyMask(inp, x); sim.tick(inp);
 					if (sim.has_silver_crown) { crown = { i, x }; break; }
 					if (sim.is_dead && !ctx.canDie) continue;
 					if (lim < 1 || ctx.h(sim, lim) > lim) { cut++; continue; }
-					const r = insert(sim.stateHash());
+					const hs = sim.stateHash();
+					const r = insert(hs);
 					if (r === false) { merged++; continue; }
 					if (r === null) full++;
-					next.push(sim.snapshot()); np.push(i); nm.push(x);
+					next.push(sim.snapshot(tmp), base, hs); np.push(i); nm.push(x);
 				}
 				if ((i & 1023) === 0 && (Date.now() > deadline || process.memoryUsage.rss() > maxBytes)) { stopped = Date.now() > deadline ? 'time' : 'memory'; break; }
 			}
@@ -107,9 +151,10 @@ function workerMain() {
 				const r = roots[j];
 				route = { src: r.src, path: r.path.concat(back.reverse()) };
 			}
-			front = stopped || crown !== null ? [] : next;
+			const states = stopped ? 0 : next.n, bytes = next.bytes();
+			front = stopped || crown !== null ? makeStore() : next;
 			if (!stopped && crown === null) { par.push(Int32Array.from(np)); mk.push(Uint8Array.from(nm)); }
-			parentPort.postMessage({ type: 'done', d, states: stopped ? 0 : next.length, cut, merged, full, stopped, route });
+			parentPort.postMessage({ type: 'done', d, states, cut, merged, full, stopped, route, bytes });
 		} else if (m.type === 'quit') process.exit(0);
 	});
 }
@@ -193,14 +238,14 @@ async function main() {
 		for (;;) {
 			const rs = await Promise.all(wk.map((w) => ask(w, { type: 'layer', d }, 'done')));
 			d++;
-			let states = 0, cut = 0, merged = 0, full = 0, stopped = false, minW = Infinity, maxW = 0;
+			let states = 0, cut = 0, merged = 0, full = 0, stopped = false, minW = Infinity, maxW = 0, bytes = 0;
 			for (const r of rs) {
-				states += r.states; cut += r.cut; merged += r.merged; full += r.full; stopped = stopped || r.stopped;
+				states += r.states; cut += r.cut; merged += r.merged; full += r.full; stopped = stopped || r.stopped; bytes += r.bytes || 0;
 				if (r.states < minW) minW = r.states; if (r.states > maxW) maxW = r.states;
 				if (r.route && found === null) found = r.route;
 			}
 			seen += states;
-			say({ ev: 'layer', d, states, cut, merged, full, seen, minW, maxW, s: Math.round((Date.now() - t0) / 100) / 10, rssGB: Math.round(process.memoryUsage().rss / 1e8) / 10 });
+			say({ ev: 'layer', d, states, cut, merged, full, seen, minW, maxW, frontMB: Math.round(bytes / 1e6), s: Math.round((Date.now() - t0) / 100) / 10, rssGB: Math.round(process.memoryUsage().rss / 1e8) / 10 });
 			if (found !== null) break;
 			if (stopped) { out.why = stopped; break; }
 			if (states === 0) break;
@@ -232,4 +277,4 @@ async function main() {
 
 if (!isMainThread) workerMain();
 else if (require.main === module) main().then(() => process.exit(0)).catch((e) => { console.error(e.stack || e.message); process.exit(1); });
-module.exports = { seenTable };
+module.exports = { seenTable, makeStore, FIELDS };
