@@ -1582,7 +1582,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 	const runJob = async (job) => {
 		const { anchor: A, step, plan } = job;
 		// (THE WARM RUNG: an edge's rung failed by the budget from another class: this class starts there)
-		if (RUNG_WARM && !step.synthetic && warmRung.has(String(step.edge))) { const w = Math.min(rungMs.length - 1, warmRung.get(String(step.edge))); if (w > (step.rung | 0)) { step.warmFrom = step.rung | 0; step.rung = w; } }
+		// (never onto a triple already run in this epoch: the planner's own rung then, as without the knob)
+		if (RUNG_WARM && !step.synthetic && warmRung.has(String(step.edge))) { const w = Math.min(rungMs.length - 1, warmRung.get(String(step.edge))); if (w > (step.rung | 0) && !tried.has(`${edgeKey(step)}|${w}|${epoch}`)) { step.warmFrom = step.rung | 0; step.rung = w; } }
 		const ek = edgeKey(step), tk = `${ek}|${step.rung}|${epoch}`;
 		tried.set(tk, { ok: false });
 		A.picks++; picksN++;
@@ -1772,6 +1773,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	const deepen = (why) => {
 		if (deepenings >= maxDeepen || rungMs[0] * mult * 2 > left() - (best ? endRes() : 0)) return false;
 		deepenings++; epoch++; mult *= 2;
+		warmRung.clear();   // (THE WARM RUNG: the facts start over at a deepening, so does the warm start)
 		try { if (facts && typeof facts.reset === 'function') facts.reset({ keepProofs: true, boost: 2 }); } catch (e) { bug('reset', { error: e.message }); }
 		for (const A of anchors.values()) { if (A.why !== 'bound') { A.exhausted = false; A.why = ''; } A.plans = null; }
 		localBlock.clear();
