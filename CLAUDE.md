@@ -567,6 +567,33 @@ ways in.
   never take a leg's answer away (leg() runs every tier as without them, below a trick's answer: `bres`); they solve
   more of the routes' own moves (tools/tricks/legab.js, fieldlegs.js) but not more compiles (25 vs 25 of 48 at 300 s).
   Mining tools: `tools/tricks/` (mine.js, fieldmine.js, legab.js, fieldlegs.js), `tools/cmp/tricks3.js`, `idleshift.js`.
+- **Where it stands, the last hour** (2026-10-01 ~10:00, the LH ship's paired full compile; `src/out/n5/lasthour/ship/AB.md`
+  / `AB.jsonl`, gitignored): main = **THE LONG-STRETCH SOLVER** merged (n5-lh-ship: n5-p4-long + n5-p4-fix, the next bullet).
+  The full 230 at **300 s**, `--workers=3`, both arms side by side (two tools/cmp/fullc.js drivers a box with the same list
+  and par: a level's A and B compiles at the same time on the same box; box 5 104 levels, box 7 126; every .eetas replayed):
+  **A (main ccaef49) 46 / 230, B (this main) 47 / 230**; B only Stone Ruin Speedrun, EE mountain world, Pinball Bloom,
+  Vignettes; A only Buuwuu's Stronghold, Trail Blazer, Snow Jumping (none compiled in 4+ of the C6 chief's 5 full compiles;
+  the 7 levels that differed rerun side by side: the same 5 compiled in both arms, Trail Blazer and Pinball Bloom in
+  neither: the 300-s edge); the 43 both compiled: B / A run ticks geo-mean **0.995** (faster 13, slower 20, same 10); ticks
+  / best known median 1.107 vs 1.110, 11 at or under the best known in each; a compile's peak RSS median 4,489 -> 4,294 MB,
+  max 8,312 -> 7,767, summed -5.1% (the memory defaults). The block-4 numbers below are the night's.
+- **THE LONG-STRETCH SOLVER** (n5-p4-long 3f1176a + n5-p4-fix 551eff2, merged by the last hour's ship, 2026-10-01): the
+  lab's backward solver (`src/plan/lab/backward.js`, the portfolio's bw arm, the stretch / chain / whole-level children)
+  THE SAME SEARCH 1.5x FASTER (numeric cell keys: dc / ground / x8 / y8 / speeds packed in 53 bits; the lazy child push:
+  the dedup tests before the snapshot, the state hash and the masks' copy; the same answers and counters on the eqtest
+  legs, 30.8 -> 20.0 s); ON by default: `EEAT_BW_ROT` (a gravity effect's acting directions) and `EEAT_BW_HOLD` (levitation's
+  held thrust) (the moves study's 26 turned-gravity / levitation chains 20 -> 21, found in 585 vs 2,170 ms median), THE OPEN
+  WALK in the portfolio's backward arm (`EEAT_PF_OPENWALK`: a stretch whose target the walk with the doors as they stand
+  does not reach gets the walk with every door open but block 50: EX Crew Odyssey's key-door chains in 0.3 s), a dead
+  start replayed through its dead ticks (the portfolio's replay had missed every backward leg from one); OPT-IN
+  `EEAT_BW_DEATHS`, `EEAT_BW_MIX`, `EEAT_BW_DEADPEN`, `EEAT_BW_VPEN`, `EEAT_BW_SAT`, `EEAT_BW_ELL`. Merged with main's THE
+  RESUMABLE CLOSURE (`EEAT_BW_RESUME`, the noClock key fix): both kept (the deaths key word, cellOpen / dead carried
+  through the cut memo). Per stretch (box 5, the 129 known-route legs, 30 s, the portfolio): 105 -> 110 (the box's run-to-run
+  spread ~+-4 legs), legs of 240+ route ticks 45 -> 50 of 64. With it n5-p4-fix's THE MEMORY DEFAULTS (`src/plan/defaults.js` MEM_DEFAULTS:
+  `EEAT_ST_HEAP_MB` / `EEAT_BWC_HEAP_MB` 1536, `EEAT_EXEC_HEAP_MB` 2048; `EEAT_MEM_DEFAULTS=0` none) and its opt-in knobs
+  (the P4 bullet below). Checks on the merged tree (laptop): labbackward 28/0, planstrategy 27/0, plancompile 31/0, msolve
+  --quick 50/0, portfolio 20/20, s99stretch 7/0, bwchain 9/0, joins 22/0, planexec --only=unit,fail 15/15, T-MODEL-EXACT
+  219 routes 0 unsound, T-PLAN-ORACLE 2/0, editor --only=app 97/0, regress --quick 60/0.
 - **Where it stands** (2026-10-01 ~06:30, the C6 chief's block 4, **300 s**, `--workers=3`, one full compile on boxes 5 + 6,
   every .eetas read back to its finish; `src/out/n5/full_c6_b4.md` / `.jsonl`, gitignored): **47 / 230** with n5-plan 5214e62
   = main since the block-4 merge (campaign 40 / 203, hard 7 / 25, Bad EE Level 9 and Cold World 0 / 2; 47 / 47 replayed; a
