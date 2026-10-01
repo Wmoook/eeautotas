@@ -460,6 +460,7 @@ function joinOnce(L, ev0, o, deadline, S) {
 		// the frontier: the route's state first, then the earliest classes (F in all); once the clock is out, the route's
 		// state and the earliest other one (its gain so far carried to the finish by the route's own inputs, else a leg)
 		const all = Array.from(front[k].values()).sort((x, y) => (y.route - x.route) || x.g - y.g);
+		if (typeof o.onWp === "function") o.onWp(k, all, wps);   // (a measurement hook: the frontier at waypoint k before its edges)
 		const keep = timeUp ? all.filter((x, i) => x.route || i === all.findIndex((q) => !q.route)).slice(0, 2) : all.slice(0, F);
 		stats.pruned += all.length - keep.length;
 		stats.nodes += keep.length;

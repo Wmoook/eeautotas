@@ -883,8 +883,11 @@ ways in.
   route: Tutorial 2 base 6,455 -> 3,062 at 210 s through that checkpoint); `EEAT_JOINS_LOOP=1` (joins.js THE DETOUR SKIPS:
   a leg from waypoint k to a later waypoint within `EEAT_JOINS_LOOP_R` 6 tiles in k's blind trigger state, past the span;
   on a time-door level also the arrival padded to the route's door phase) no gain: Tutorial 2's skips land (983 -> 2,123
-  in 78 ticks: the earliest arrival there 1,140 vs the route's 2,191) and die at the time doors (the skip moves the 1,000-
-  tick phase; the idle pad leaves the tile): 4,732 = 4,732 without; `EEAT_PRE_PICK=mix|f` (the f-first pick before the
+  in 78 ticks: the earliest arrival there 1,140 vs the route's 2,191; the gain carried to waypoint 72, 1,164 ticks ahead)
+  and die at a boost passage (waypoint 73, class B, 244 route ticks on): from a carrier 2.7 px and 2 px/tick off the
+  route's state msolve has no leg ('not plain; no coupled candidate', also on a 10-s clock) and the route's own inputs
+  diverge (the level's time doors are met only at route ticks 4,400-4,600): 4,732 = 4,732 without; what it needs is a
+  rejoin (a short exact search from the carrier onto the route's own physical trajectory); `EEAT_PRE_PICK=mix|f` (the f-first pick before the
   first route too). THE MEMORY (EX Crew Odyssey, S99 on, per process (src/out/p4 memprobe.js) and per worker isolate
   (`EEAT_EXEC_PROF=1`: its heap and external memory, a0da1b0)): the tree 7.9 GB = the compile 4.7 GB (3 workers' external
   memory 330 -> 690 MB each over 300 s: the goal / bounds / reach field caches, one copy a thread (types.js FIELDS 256 MB,
