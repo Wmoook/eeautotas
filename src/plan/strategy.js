@@ -184,6 +184,17 @@ const PREC_FIRST = process.env.EEAT_PREC_FIRST === '1', PREC_AFTER_S = 10;
 // (with the fast rests the coasted pass stops at its first route (--first=1, as measured): the fast pass is the one that
 // looks for the fastest, and precision.js's --after clock (from that first route) would cut it short)
 const PREC_FAST = process.env.EEAT_PREC_FAST !== '0' && process.env.EEAT_PERFECT !== '0';
+// (B8 speed, cycle 2) THE EXACT LANDING WITHOUT THE IDLE WAIT (OPT-IN EEAT_PREC_ASYNC=1; off = the step awaits the child,
+// byte for byte as before): the trophy step that started the precision child returned only when the child ended (up to
+// PREC_S = 40 s), and that step's edge stayed in flight, so on a one-trigger level the whole loop waited: the precision
+// puzzle and NC Naos d3c6 (box 8, n5-plan 8a5d9a6, 300 s, W3) spent 68 / 73 s of their 91 / 96 s first route in that wait
+// (the executor's worker use 0.07); the child's first run, from rung 0's one nearest state, ran out its 40 s, then rungs 1-2
+// ran (20 s), then the second run with their nearest states found the 154-tick route in 24 s. With the knob the child runs
+// in the background (its route goes through routeOf like the stretch child's), the step returns at once, the next rungs
+// run beside it, and a run that ends without a route starts again AT ONCE with the nearest states that came meanwhile
+// (still at most PREC_RUNS runs); the moves' end with no route waits for a running child (precHold) as for the stretch
+// child; the child is killed when the moves end, and a route it prints after that is not taken.
+const PREC_ASYNC = process.env.EEAT_PREC_ASYNC === '1';
 // the proof's starts: the level start after k = 0..R idle ticks, R = the idle ticks until the state rests (the timer starts
 // at the first input: waiting is free); at most PROVE_IDLE_MAX (one exact search each)
 const PROVE_IDLE_MAX = 64;
@@ -697,13 +708,21 @@ async function compile(L, opts = {}, emit = () => {}) {
 	const precOn = opts.precision !== false && process.env.EEAT_PLAN_PREC !== '0' && !!opts.file;
 	const precAtt = new Map();   // masks string -> dist
 	let precRuns = 0, precBusy = false, precChild = null;
-	const precision = async (closest) => {
-		if (!precOn || !closest || !closest.masks || !(closest.dist >= 0) || closest.dist > PREC_NEAR) return null;
-		const str = typeof closest.masks === 'string' ? closest.masks : T.strOf(closest.masks);
-		if (!/^[0-O]+$/.test(str)) return null;
-		const had = precAtt.size;
-		if (!precAtt.has(str)) precAtt.set(str, +closest.dist);
-		if (precBusy || precRuns >= PREC_RUNS || precAtt.size === had || stopped) return null;
+	// (EEAT_PREC_ASYNC: the attempts the last run was given; the moves ended: no new run, no late route)
+	let precGiven = 0, precOver = false;
+	const precision = async (closest, again) => {
+		if (again) {
+			// (EEAT_PREC_ASYNC: a run ended without a route: again at once when nearest states came meanwhile)
+			if (!precOn || precOver || precBusy || precRuns >= PREC_RUNS || precAtt.size === precGiven || stopped) return null;
+		} else {
+			if (!precOn || !closest || !closest.masks || !(closest.dist >= 0) || closest.dist > PREC_NEAR) return null;
+			const str = typeof closest.masks === 'string' ? closest.masks : T.strOf(closest.masks);
+			if (!/^[0-O]+$/.test(str)) return null;
+			const had = precAtt.size;
+			if (!precAtt.has(str)) precAtt.set(str, +closest.dist);
+			if (precBusy || precRuns >= PREC_RUNS || precAtt.size === had || stopped || precOver) return null;
+		}
+		precGiven = precAtt.size;
 		const secs = Math.floor(Math.min(PREC_S * 1000, left() - endReserve - 2000) / 1000);
 		if (secs < PREC_MIN_S) return null;
 		precBusy = true; precRuns++;
@@ -747,9 +766,17 @@ async function compile(L, opts = {}, emit = () => {}) {
 		try { fs.unlinkSync(file); } catch (e) { /* gone */ }
 		precBusy = false;
 		say({ ev: 'precision', run: precRuns, end: found ? 'finish' : done || 'ended', ms: Date.now() - t1 });
-		if (!found) return null;
+		if (PREC_ASYNC && !found && !precOver) setImmediate(() => { precision(null, true).catch((e) => bug('precision', { error: e.message })); });
+		if (!found || (PREC_ASYNC && precOver)) return null;
 		const x = routeOf(T.masksOf(found.replace(/[^0-O]/g, '')), 'the exact landing (precision)', null);
 		return x && x.better ? x.ev : null;
+	};
+	/** EEAT_PREC_ASYNC: the executor has nothing left and would end: while the precision child runs (no route yet, time
+	 *  left) the loop waits a turn for it (-> true: go on) */
+	const precHold = async () => {
+		if (!precBusy || best || stopped || left() <= 1000) return false;
+		await new Promise((res) => { const tt = setTimeout(res, 250); if (tt.unref) tt.unref(); });
+		return true;
 	};
 
 	// ---- THE WHOLE LEVEL AS ONE LEG (EEAT_BW_LEVEL=1; BW_LEVEL above): started with the moves loop, killed at its end
@@ -1539,8 +1566,11 @@ async function compile(L, opts = {}, emit = () => {}) {
 		if (fail) { lastFails.push({ n: steps, label: rec.label, rung: step.rung, why: fail.why, closest: fail.closest ? { tile: fail.closest.tile, dist: fail.closest.dist } : null, blockedBy: fail.blockedBy || [], touched: (fail.touched || []).length }); if (lastFails.length > 6) lastFails.shift(); }
 		// (a trophy leg that ended within PREC_NEAR tiles of the trophy: the exact landing, above)
 		if (fail && wp.kind === 'trophy' && fail.closest && !route) {
-			const pr = await precision(fail.closest);
-			if (pr) route = pr;
+			if (PREC_ASYNC) precision(fail.closest).catch((e) => bug('precision', { error: e.message }));   // (in the background: EEAT_PREC_ASYNC)
+			else {
+				const pr = await precision(fail.closest);
+				if (pr) route = pr;
+			}
 		}
 		const verAfter = factsVer(facts);
 		if (verAfter !== verBefore) lastProgress = Date.now();
@@ -1851,12 +1881,12 @@ async function compile(L, opts = {}, emit = () => {}) {
 				// fallbacks (a direct trophy step, then the frontier) while time is left; else the end)
 				if (exploreQ.length) continue;
 				if (left() < 250 || (best && left() <= endRes())) { end = 'time'; break; }
-				if (nothingSince >= 0 && nothingSince === steps) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } if (osw && await osHold()) continue; if (!best && bwcRelease('the executor has nothing left')) { nothingSince = -1; continue; } if (await bwlHold()) continue; if (ST_ON && await stHold()) continue; end = 'exhausted'; break; }
+				if (nothingSince >= 0 && nothingSince === steps) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } if (osw && await osHold()) continue; if (!best && bwcRelease('the executor has nothing left')) { nothingSince = -1; continue; } if (await bwlHold()) continue; if (ST_ON && await stHold()) continue; if (PREC_ASYNC && await precHold()) continue; end = 'exhausted'; break; }
 				nothingSince = steps;
 				// (a deepening refused for the clock alone (its doubled first rung past the time left) is no exhaustion: the
 				// end is the time's, not a claim that no plan is left (The Flighty Slighty, The Tunnels, Fish Gods, OCTOS:
 				// "end exhausted" 1-5 s before the 60-s budget; every level is possible))
-				if (!deepen('exhausted')) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } if (osw && await osHold()) continue; if (!best && bwcRelease('the executor has nothing left')) continue; if (await bwlHold()) continue; if (ST_ON && await stHold()) continue; end = deepenings < maxDeepen ? 'time' : 'exhausted'; break; }
+				if (!deepen('exhausted')) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } if (osw && await osHold()) continue; if (!best && bwcRelease('the executor has nothing left')) continue; if (await bwlHold()) continue; if (ST_ON && await stHold()) continue; if (PREC_ASYNC && await precHold()) continue; end = deepenings < maxDeepen ? 'time' : 'exhausted'; break; }
 				continue;
 			}
 			if (osw) { /* (the thread runs on its own) */ } else if (os && !osDone && !stopped && !(best && left() <= endReserve)) {
@@ -1886,6 +1916,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		for (const tt of timers) clearInterval(tt);
 		if (bwlChild) { try { bwlChild.kill('SIGKILL'); } catch (e) { /* gone */ } }
 		if (ST_ON) { stHarvest(); stStop(); }
+		if (PREC_ASYNC) { precOver = true; if (precChild) { try { precChild.kill('SIGKILL'); } catch (e) { /* gone */ } } }
 	}
 	if (osw) osHarvest();   // (the one shot's thread: what arrived during the last turn)
 	const legTools = (lg) => { const c = {}; for (const g of lg) c[g.tool || '?'] = (c[g.tool || '?'] || 0) + 1; return c; };
