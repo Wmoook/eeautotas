@@ -5,7 +5,7 @@
 // (the first 'result' event of kind finish: the engine evaluated it), which is exact for the time to the first route (a
 // compile is causal: nothing before its first route depends on what comes after it) and costs a fraction of a full run.
 //   node tools/cmp/firstab.js <code dir> <levels dir> <out dir> --list=<file of rel paths> [--arms=base:,rate:EEAT_RATE=1]
-//        [--par=3 (compiles at once an arm)] [--workers=3] [--seconds=300] [--full=0] [--minfree=GB]
+//        [--par=3 (compiles at once an arm)] [--workers=3] [--seconds=300] [--full=0] [--minfree=GB] [--cap=<s>]
 // An arm is name:K=V;K=V (an empty env = the defaults). Output: <out>/<arm>/<id>.log (the JSON events), <out>/index.jsonl
 // one line a compile {arm, rel, first (s), firstTicks, how, code, sec}; at the end the summary (median / p90 of the first
 // route over the levels both arms routed, the count by 60 s) on stdout. Linux only for the group kill (detached spawn).
@@ -14,6 +14,9 @@ const [, , code, lvDir, out, ...rest] = process.argv;
 const opt = (k, d) => { const a = rest.find((s) => s.startsWith('--' + k + '=')); return a ? a.slice(k.length + 3) : d; };
 const par = +opt('par', 3), workers = +opt('workers', 3), seconds = +opt('seconds', 300), full = opt('full', '0') === '1';
 const minfree = +opt('minfree', 0), list = opt('list', '');
+// (--cap=<s>: a compile with no route by <s> s of wall time is killed and counted unrouted (its budget stays --seconds, so
+// the compile is the same up to the cap); default seconds + 10)
+const capS = +opt('cap', 0);
 const arms = opt('arms', 'base:').split(',').map((s) => {
 	const i = s.indexOf(':'); const name = i < 0 ? s : s.slice(0, i); const env = {};
 	for (const kv of (i < 0 ? '' : s.slice(i + 1)).split(';').filter(Boolean)) { const j = kv.indexOf('='); env[kv.slice(0, j)] = kv.slice(j + 1); }
@@ -54,7 +57,7 @@ function launch(a) {
 	});
 	p.stderr.on('data', (d) => log.write(d));
 	// (no route by the budget: killed at seconds + 10 unless --full=1, then the fullc.js hard limit)
-	const cap = setTimeout(killAll, ((full ? seconds * 3 + 60 : seconds + 10)) * 1000);
+	const cap = setTimeout(killAll, ((full ? seconds * 3 + 60 : (capS > 0 ? capS : seconds + 10))) * 1000);
 	p.on('close', (c) => {
 		clearTimeout(cap);
 		log.end();
