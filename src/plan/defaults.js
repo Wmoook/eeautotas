@@ -47,6 +47,9 @@ const DEFAULTS = [
 	['EEAT_PLAN_ANY', '1'], ['EEAT_PLAN_UNTOGGLE', '1'],
 	['EEAT_FX_FIELD', '1'], ['EEAT_FX_STATE', '1'], ['EEAT_ICE_LOCAL', '1'], ['EEAT_PROT_LAYER', '1'],
 	['EEAT_BW_LEVEL', 'last'],
+	// (B8 speed, cycle 2: the exact landing's routes as the child prints them, not at its end: the precision pair's first
+	// route 10-20 s vs 33-141 s on box 8 at load 180-230, the final routes the same 153 ticks; strategy.js PREC_STREAM)
+	['EEAT_PREC_STREAM', '1'],
 ];
 // THE STRETCH DEFAULTS (S99, 2026-09-30: "a level compiles only if EVERY stretch works"; CLAUDE.md section 11; each =0 off,
 // EEAT_S99_DEFAULTS=0 none of them, EEAT_COMPILER_DEFAULTS=0 none at all):
