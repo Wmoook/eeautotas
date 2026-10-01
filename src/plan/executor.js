@@ -2050,6 +2050,37 @@ async function createExecutor(L, opts) {
 	const SKEL_REDIRECT = process.env.EEAT_SKEL_REDIRECT !== '0';   // (DEFAULT ON since n5 lane 6 block 1; =0: off)
 	const REDIRECT_F = +process.env.EEAT_SKEL_REDIRECT_F > 1 ? +process.env.EEAT_SKEL_REDIRECT_F : 2;
 	const skelDirectMs = new Map();   // skelKey -> the largest direct-leg share tried (EEAT_SKEL_REDIRECT)
+	// ---- THE SHARED APPROACH (n5-b8-big cycle 4, OPT-IN EEAT_SKEL_XLV=1; unset = the executor byte for byte): on a big
+	// level the plan's far waypoints are tried from one anchor (Phina and the Rose, 300 s: 17 waypoints from the level start,
+	// c0 4,100-4,570 tiles each, each skeleton walked from c0 again: blue coin (145,7) took rungs 1-3 (65 s) to go 4,181 ->
+	// 29, the others stopped at 207-416 after their own 4,000-tile walks; no waypoint got a second epoch). The memo is per
+	// waypoint, and cycle 2's EEAT_SKEL_XGOAL (another waypoint's DEEPEST level, under 0.5 x c0) never fired: the skeletons
+	// end in different places. With the knob every level any waypoint's skeleton reached from the same first start is kept
+	// (its arrival tile; XLV_CAP of them, the latest), and a call with no memo for its waypoint ranks them by this waypoint's
+	// field at the starts (tileMin(f0) at the level's tile: no build), measures the XLV_TRY best on this waypoint's own field
+	// at their doors (fieldAt, as a resumed level is), in XLV_MS at most, and starts from the least one under XLV_F x c0.
+	// Its arrivals are real engine states from the same first start (only the arrivals prefixed by one of this call's starts
+	// are kept: the final legs are prefixed by it as every resumed level's); a seeded level whose next sub-leg fails twice is
+	// popped (the resumed level's rule) and not seeded again for this waypoint. Ordering / time use only, no claim.
+	const SKEL_XLV = process.env.EEAT_SKEL_XLV === '1';
+	const XLV_F = +process.env.EEAT_SKEL_XLV_F > 0 ? Math.min(0.95, +process.env.EEAT_SKEL_XLV_F) : 0.7;
+	const XLV_TRY = +process.env.EEAT_SKEL_XLV_TRY > 0 ? +process.env.EEAT_SKEL_XLV_TRY | 0 : 6;
+	const XLV_CAP = 512, XLV_MS = 1200;
+	const skelXL = new Map();      // the first start's string -> [{id, label, tile, cur}] (the levels of every waypoint's skeleton)
+	const skelXLBad = new Set();   // skelKey + '#' + id: a seeded level that failed for that waypoint
+	let skelXLId = 0;
+	const xlPush = (startStrs, wp, cur) => {
+		if (!SKEL_XLV || !cur || !cur.length) return;
+		let e;
+		try { e = core.startOf(String(cur[0])); } catch (x) { return; }
+		if (!e || e.dead) return;
+		vsim.restore(e.snap);
+		const tile = T.tileOf(vsim, L.width, L.height);
+		let xs = skelXL.get(startStrs[0]);
+		if (!xs) { xs = []; skelXL.set(startStrs[0], xs); if (skelXL.size > 32) skelXL.delete(skelXL.keys().next().value); }
+		xs.push({ id: ++skelXLId, label: wp.label || '', tile, cur: cur.slice() });
+		if (xs.length > XLV_CAP) xs.splice(0, xs.length - XLV_CAP);
+	};
 	// ---- THE SKELETON ACROSS WALLS (n5 lane 4, RATE): the memo's key holds the waypoint field's wall count, and every
 	// failed direct leg / sub-leg learns counterexample walls, so the next call for the same step (the next rung, the next
 	// deepening) found no memo and started over at the step's starts: Sentinel Ravines' one trophy leg restarted 7 of its 8
@@ -2564,6 +2595,34 @@ async function createExecutor(L, opts) {
 			}
 			if (bestL) { skelMemo.set(key, [bestL]); S.skelReuse = (S.skelReuse || 0) + 1; }
 		}
+		// (no memo for this waypoint: the levels other waypoints' skeletons reached from the same first start, nearest by this
+		// waypoint's field, EEAT_SKEL_XLV=1 above)
+		if (SKEL_XLV && !skelMemo.has(key) && skelXL.has(startStrs[0]) && f0) {
+			const tX = Date.now(), m0 = tileMin(f0), lab = wp.label || '';
+			const cand = [];
+			for (const lv of skelXL.get(startStrs[0])) {
+				if (lv.label === lab || skelXLBad.has(key + '#' + lv.id)) continue;
+				const v = m0[lv.tile];
+				cand.push({ lv, v: v >= 0 && Number.isFinite(v) ? v : Infinity });
+			}
+			cand.sort((a, b) => a.v - b.v || b.lv.id - a.lv.id);
+			let bestL = null, tries = 0;
+			for (const { lv } of cand) {
+				if (tries >= XLV_TRY || Date.now() - tX > XLV_MS) break;
+				const own = lv.cur.filter((s) => startStrs.some((p) => s.length >= p.length && s.startsWith(p)));
+				if (!own.length) continue;
+				if (DEAD_ON && deadEnds.size && own.every((s) => deadEnds.has(hashOf(s)))) continue;
+				tries++;
+				let fw;
+				try { fw = fieldAt(own[0], goal, wp.allowDeath, wArr); } catch (e) { continue; }
+				if (!fw.f || !(fw.c >= 0) || !Number.isFinite(fw.c)) continue;
+				if (!(fw.c < XLV_F * c0) || (bestL && fw.c >= bestL.c)) continue;
+				bestL = { c: fw.c, cur: own, xid: lv.id, from: lv.label };
+			}
+			S.xlvTry = (S.xlvTry || 0) + tries; S.xlvMs = (S.xlvMs || 0) + (Date.now() - tX);
+			if (bestL) { skelMemo.set(key, [{ c: bestL.c, cur: bestL.cur, xid: bestL.xid }]); S.xlv = (S.xlv || 0) + 1; }
+			if (emit) emit({ ev: 'exec.xlv', label: lab, c0: Math.round(c0), c: bestL ? Math.round(bestL.c) : null, from: bestL ? bestL.from : null, pool: cand.length, tries, ms: Date.now() - tX });
+		}
 		const memo = skelMemo.get(key);
 		// (a memo level no deeper than the starts' own cost is not resumed: a relay start (the strategy's nearest state of the
 		// last rung) can stand deeper than the skeleton's deepest level, and resuming went back up to it; EEAT_DEADEND=0: as
@@ -2649,6 +2708,7 @@ async function createExecutor(L, opts) {
 						if (!skelMemo.has(key)) skelMemo.set(key, []);
 						skelMemo.get(key).push({ c: cCur, cur: cur.slice() });
 						skelBasePush(key, cur);
+						if (SKEL_XLV) xlPush(startStrs, wp, cur);
 						continue;
 					}
 				}
@@ -2658,6 +2718,8 @@ async function createExecutor(L, opts) {
 					// (and not seeded again from the wall-free memo on the next walls)
 					const ba = SKEL_REUSE ? skelBase.get(baseKeyOf(key)) : null;
 					if (ba) { const i = ba.findIndex((lv) => lv.cur[0] === top.cur[0]); if (i >= 0) ba.splice(i, 1); }
+					// (nor from another waypoint's level again, EEAT_SKEL_XLV)
+					if (SKEL_XLV && top.xid !== undefined) skelXLBad.add(key + '#' + top.xid);
 				}
 				stuck = true;
 				break;
@@ -2670,6 +2732,7 @@ async function createExecutor(L, opts) {
 			if (!skelMemo.has(key)) skelMemo.set(key, []);
 			skelMemo.get(key).push({ c: cCur, cur: cur.slice() });
 			skelBasePush(key, cur);
+			if (SKEL_XLV) xlPush(startStrs, wp, cur);
 		}
 		if (emit) emit({ ev: 'exec.skel', label: wp.label || '', c0: Math.round(c0), c: Math.round(cCur), resumed: !!memo, levels, walls: wN });
 		// (COVER V3: the skeleton stuck, before the first route: the coverage finder alone on the whole leg from the step's
