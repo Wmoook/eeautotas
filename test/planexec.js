@@ -268,7 +268,7 @@ async function failCases() {
 			wp: (at) => { for (let y = 1; y <= 4; y++) for (let x = dx + 1; x < w - 1; x++) beyond.push(at(x, y)); return { kind: 'region', tiles: beyond, expect: null, label: 'beyond the door' }; } });
 	}
 	const budget = 1500;
-	let within = 0, withClosest = 0, doorOk = 0, doors = 0, worst = 0;
+	let within = 0, withClosest = 0, doorOk = 0, doors = 0, worst = 0, replayOk = 0;
 	for (const c of cases) {
 		const { L, at } = levelOf(c.rows, { '#': [9], S: [255], c: [100], d: [23], e: [24], f: [25], k: [7] }, c.name);
 		const ex = await EX.createExecutor(L, { workers: 0 });
@@ -278,11 +278,18 @@ async function failCases() {
 		worst = Math.max(worst, dt);
 		if (!r.ok && dt <= budget + 200) within++;
 		if (!r.ok && r.fail && r.fail.closest && r.fail.closest.masks instanceof Uint8Array) withClosest++;
+		// (the closest's masks replayed from the level start end on the tile, at the place, the FailReport names: the relays
+		// start from them; a Uint8Array, so T.strOf, never String(), makes their text: C6 lane 3 block 4)
+		if (!r.ok && r.fail && r.fail.closest && r.fail.closest.masks instanceof Uint8Array) {
+			const c = r.fail.closest, p = T.playTo(L, c.masks, { allowDeath: true });
+			if (T.tileOf(p.sim, L.width, L.height) === c.tile && p.sim.px === c.px && p.sim.py === c.py && T.masksOf(T.strOf(c.masks)).every((v, i) => v === c.masks[i])) replayOk++;
+		}
 		if (c.door) { doors++; if (r.fail && r.fail.blockedBy.some((b) => b.feat === c.door)) doorOk++; }
 		await ex.close();
 	}
 	check(`T-EXEC-FAIL ${cases.length} unreachable waypoints fail within budget + 200 ms`, within === cases.length, `${within}/${cases.length}, worst ${worst} ms (budget ${budget})`);
 	check('T-EXEC-FAIL every one has a FailReport with a closest', withClosest === cases.length, `${withClosest}/${cases.length}`);
+	check('T-EXEC-FAIL every closest replays from the level start to its reported tile and place', replayOk === cases.length, `${replayOk}/${cases.length}`);
 	check('T-EXEC-FAIL blockedBy names the key door (no key taken)', doorOk === doors, `${doorOk}/${doors}`);
 }
 

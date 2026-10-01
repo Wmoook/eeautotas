@@ -454,10 +454,21 @@ function compileModel(L, o = {}) {
 	// expansion: mkState's key strings and coin hashes were 18 of The Glitch's 60 s in the main thread, the workers
 	// waiting). The same S2 object for one key (the model's states are never written after mkState). EEAT_TOUCH_MEMO=0: none)
 	const TOUCH_ON = process.env.EEAT_TOUCH_MEMO !== '0', TOUCH_MAX = 200000;
+	// (THE TOUCH BY ITS EFFECT, C6 push 3 block 4 lane 1; OPT-IN EEAT_TOUCH_SIG=1, off = the memo by (S.key, X.id) as before):
+	// a set / toggle trigger's touch reads only its kind, feature and parameter (touch0: key / psw / osw / pswR / oswR /
+	// team / prot / reset / crown), so every tile component of one switch id makes the SAME S2 from S; First Person Maze has
+	// 2,478 relevant triggers of 50 features, and the plan search made a new state for every one of them at every new
+	// abstract state: model.touch 48% of the plan search's time (its mkState strings and the garbage they leave; a 20-s
+	// plan call expanded ~900 nodes). With the knob the memo's key is the effect (kind, feature, parameter) for those kinds
+	// (a coin's touch reads its own tiles, a checkpoint its id, a chain its members: the trigger's id as before). Exact: the
+	// same S2 / expect for every member of a signature (touch0 reads nothing else of X for those kinds).
+	const TOUCH_SIG = process.env.EEAT_TOUCH_SIG === '1';
+	const SIG_KINDS = new Set(['key', 'psw', 'osw', 'pswR', 'oswR', 'team', 'prot', 'reset', 'crown']);
+	const sigOf = (X) => (TOUCH_SIG && X.relevant && SIG_KINDS.has(X.kind) ? 's' + X.kind + '|' + X.feat + '|' + X.param : X.id);
 	const touchMemo = new Map();
 	function touch(S, X) {
 		if (!TOUCH_ON || S.show) return touch0(S, X);
-		const k = S.key + '#' + X.id;
+		const k = S.key + '#' + sigOf(X);
 		const had = touchMemo.get(k);
 		if (had) return had;
 		const r = touch0(S, X);
