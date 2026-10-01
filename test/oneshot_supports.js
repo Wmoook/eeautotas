@@ -60,17 +60,23 @@ sim.reset();
 const start = sim.snapshot();
 
 // ---------------------------------------------------------------- 1 the lattice
-/** the lattice check on a level: [agree, checked] (flip 0; free boxes without one-ways / doors; killers left out) */
+/** the lattice check on a level: [agree, checked] (every flip the level holds; free boxes without one-ways / doors;
+ *  killers left out) */
 function lattice(L, S, quiet) {
+	let A = 0, C = 0;
+	for (const f of S.flips) { const [a, c] = lattice1(L, S, f, quiet); A += a; C += c; }
+	return [A, C];
+}
+function lattice1(L, S, flip, quiet) {
 	const sim = new E.EESim(L), inp = new E.EEInput();
 	sim.reset();
 	const start = sim.snapshot();
 	const P = SP.makeProbe(L);
 	const lines = SP.lineIndex(S);
 	const inSupport = (d, rest, free) => {
-		const ids = lines.get(0 * 4 + d + ':' + rest) || [];
+		const ids = lines.get(flip * 4 + d + ':' + rest) || [];
 		for (const r of ids) {
-			if (S.surf.flags[r] & (SP.SF_XPULL | SP.SF_FXFLIP)) continue;
+			if (S.surf.flags[r] & SP.SF_XPULL) continue;            // (FXFLIP supports ground the ball on that tick: counted)
 			const lo = S.surf.lo[r], hi = S.surf.hi[r], cl = S.surf.closed[r];
 			if ((free > lo || (free === lo && (cl & 1))) && (free < hi || (free === hi && (cl & 2)))) return r;
 		}
@@ -82,7 +88,7 @@ function lattice(L, S, quiet) {
 			if (P.probe(x, y) !== 0 || P.out.no > 0 || P.out.nd > 0) continue;       // a free box, no one-way / door in it
 			const c = SP.centreOf(L, x, y);
 			if ((L.gFlags[c.cur] & 4) !== 0) continue;                             // a killer: dead, not grounded
-			const d = SP.pullDir(L, c.cur, 0);
+			const d = SP.pullDir(L, c.cur, flip);
 			if (d < 0) continue;
 			const vert = d === SP.D_DOWN || d === SP.D_UP;
 			const rest = vert ? y : x, free = vert ? x : y;
@@ -93,13 +99,13 @@ function lattice(L, S, quiet) {
 			const en = inSupport(d, rest, free) >= 0;
 			sim.restore(start);
 			sim.speed_x = 0; sim.speed_y = 0; sim.modifier_x = 0; sim.modifier_y = 0;
-			sim._q0 = c.cur; sim._q1 = c.cur;
+			sim._q0 = c.cur; sim._q1 = c.cur; sim.flip_gravity = flip;
 			sim.px = x; sim.py = y; sim.teleported = true;
 			E.applyMask(inp, 0); sim.tick(inp);
 			const eng = !sim.is_dead && sim.on_ground && (vert ? sim.py : sim.px) === rest;
 			checked++;
 			if (en === eng) agree++;
-			else if (!quiet && bad++ < 5) console.log(`  lattice: (${x}, ${y}) pull ${SP.DIR_NAMES[d]}: enumeration ${en}, engine ${eng} (after: ${sim.px}, ${sim.py}, ground ${sim.on_ground})`);
+			else if (!quiet && bad++ < 5) console.log(`  lattice: (${x}, ${y}) flip ${flip} pull ${SP.DIR_NAMES[d]}: enumeration ${en}, engine ${eng} (after: ${sim.px}, ${sim.py}, ground ${sim.on_ground})`);
 		}
 	}
 	return [agree, checked];
