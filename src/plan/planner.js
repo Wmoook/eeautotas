@@ -609,6 +609,9 @@ function createPlanner(model, facts, o = {}) {
 	// (the walls still price their way 3x; a proof or an lb-only way keeps the penalty). EEAT_WALL_PRICE=1 (OPT-IN: o.wallPrice
 	// overrides), EEAT_WALL_F.
 	const WALL_PRICE = o.wallPrice !== undefined ? !!o.wallPrice : process.env.EEAT_WALL_PRICE === '1';
+	// (the cross-class failure price per planner: o.failEst overrides EEAT_PLAN_FAILEST; the gated chain's own planner
+	// (bwchain.js, EEAT_BWC_LEARN) sets it, the compile's planner reads the env as before)
+	const failEst = o.failEst !== undefined ? Math.max(0, +o.failEst || 0) : FAIL_EST;
 	const WALL_F = +process.env.EEAT_WALL_F || 3;
 	// (a PROOF is keyed by the abstract state AND the position it was proven from: the executor's proof is "the goal field
 	// of the level as the doors stand is -1 at every START", a fact about where the ball is (a one-way drop, a portal, a
@@ -766,9 +769,9 @@ function createPlanner(model, facts, o = {}) {
 					if (ok !== undefined) { g.est = Math.max(g.lb, ok); g.pen = ''; }
 					else {
 						if (PHYS_PRICE) { const pr = rchPrice.get(rchKey(S, pos, edge)); if (pr !== undefined) g.est = Math.max(g.est, pr * P + extra); }
-						if (FAIL_EST > 0 && typeof facts.failsAny === 'function') {
+						if (failEst > 0 && typeof facts.failsAny === 'function') {
 							const fa = facts.failsAny(edge);
-							if (fa > 0 && !facts.okAnyOf(edge)) { g.est += FAIL_EST * fa; ST.failEst = (ST.failEst || 0) + 1; }
+							if (fa > 0 && !facts.okAnyOf(edge)) { g.est += failEst * fa; ST.failEst = (ST.failEst || 0) + 1; }
 						}
 					}
 				} else if (PHYS_PRICE) { const pr = rchPrice.get(rchKey(S, pos, edge)); if (pr !== undefined) g.est = Math.max(g.est, pr * P + extra); }

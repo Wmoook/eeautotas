@@ -44,6 +44,25 @@ const RANK_W = ENVN('EEAT_BWC_RANKW', 0.5), GAIN_W = ENVN('EEAT_BWC_GAINW', 3), 
 // RANK_W a place, the model's other triggers (EXTEND) W_EXT + RANK_W a place)
 const W_PLAN1 = ENVN('EEAT_BWC_WPLAN1', 0.1), W_PLAN2 = ENVN('EEAT_BWC_WPLAN2', 1.5), W_EDGE = ENVN('EEAT_BWC_WEDGE', 2), W_EXT = ENVN('EEAT_BWC_WEXT', 4), EXT_K = ENVN('EEAT_BWC_EXTK', 8);
 const ORDER_LEVEL = process.env.EEAT_BWC_ORDER === 'level';
+// THE NEAREST-FIRST ORDER (P4 gated, OPT-IN EEAT_BWC_RANK=est; unset / 'plan' = the order above byte for byte). The order
+// oracle (tools/cmp/orderoracle.js: the 19 gated levels' known routes, 409 anchors at the route's own state after each of its
+// trigger events, the route's next trigger ranked among the planner's choices): the plans' first steps hold the route's
+// next trigger first at 34.5% and among the first 3 at 56.5%; the planner's own edges by est (the est walk x the pace)
+// at 57.9% / 82.4% (level-weighted top 3: 81.5 vs 71.5%): the planner's plans aim at the trophy or at a far 'most gain'
+// node through the relaxation's false nears (Katwalk, Wine Quest I, Endeavor: the trophy at every anchor; Weird Perfection:
+// 'budget: the most gain' partial plans 1,200-3,000 est ticks away while the route takes the coin 60-200 away). With the
+// knob a node's candidates are its usable edges by est (the nearest first, K + 2 of them), plan 1's first step put at
+// place PLAN_AT (1) unless nearer, the other plans' first steps after them; a candidate's weight W_EST0 + RANK_W x its place
+const RANK_EST = process.env.EEAT_BWC_RANK === 'est';
+const W_EST0 = ENVN('EEAT_BWC_WEST0', 0.25), PLAN_AT = ENVN('EEAT_BWC_PLANAT', 1);
+// THE CHAIN'S MEMORY OF FAILED LEGS (P4 gated, OPT-IN EEAT_BWC_LEARN=1; off = byte for byte): a leg the chain tried at its
+// full clock and lost from one node comes back as the first candidate of the next node (the planner's plan from there is
+// the same false near: Katwalk's / Wine Quest I's trophy, est 12-1,500 at every anchor): (1) its edge's cost x (1 + FAIL_K x
+// its full-clock failures from any node) while no node reached it; (2) the chain's planner learns every leg (planner.learn:
+// the facts' rungs, the pace) and prices an edge that failed from any class by FAIL_EST ticks a failed rung
+// (planner o.failEst), so its next plans go another way
+const LEARN = process.env.EEAT_BWC_LEARN === '1';
+const FAIL_K = ENVN('EEAT_BWC_FAILK', 1), FAIL_EST_C = ENVN('EEAT_BWC_FAILEST', 400);
 
 /** the masks' replay from a snapshot: the first tick the goal holds (the tail candidates tried) -> {masks, sim} | null */
 function hitOf(L, snap, legMasks, goal) {
@@ -75,7 +94,10 @@ function chainLevel(L, o = {}) {
 	const stop = o.stop || (() => false);
 	const model = o.model || MD.compileModel(L);
 	const facts = require('../facts.js').createFacts({ rungs: 4, model });
-	const planner = require('../planner.js').createPlanner(model, facts, { bounds: o.bounds || null, seed: o.seed, file: o.file, floorAsync: false });
+	const planner = require('../planner.js').createPlanner(model, facts, Object.assign({ bounds: o.bounds || null, seed: o.seed, file: o.file, floorAsync: false }, LEARN ? { failEst: FAIL_EST_C } : {}));
+	// (EEAT_BWC_LEARN: the edges' full-clock failures from any node / the edges some node reached)
+	const failN = new Map(), okE = new Set();
+	const failF = (edge) => (LEARN && !okE.has(edge) ? 1 + FAIL_K * (failN.get(edge) || 0) : 1);
 	const B = o.backward || BW.createBackward(L);
 	const CL = o.clocks || CLOCKS;
 	const planMs = o.planMs || ENVN('EEAT_BWC_PLANMS', 600);
@@ -86,6 +108,8 @@ function chainLevel(L, o = {}) {
 	const nodes = [];
 	let seq = 0;
 	const anchorArg = (n) => ({ arrival: n.a, arrivals: [n.a], S: n.S, key: String(n.S.key), tick: n.a.tick, run: n.a.run });
+	/** a node's class in the planner's facts (planner anchorOf: the abstract state + the arrival's speed class) */
+	const classOf = (n) => { if (n.cls === undefined) { try { const a = planner._anchorOf(anchorArg(n)); n.cls = a.S.key + '|' + a.cls; } catch (e) { n.cls = String(n.S.key) + '|*'; } } return n.cls; };
 	const addNode = (masks, sim, parent, label) => {
 		const S = model.stateOf(sim);
 		const key = String(S.key);
@@ -104,15 +128,49 @@ function chainLevel(L, o = {}) {
 	const candsOf = (n) => {
 		if (n.cands) return n.cands;
 		const out = [], seen = new Set();
-		const push = (edge, wp, w) => { const k = String(edge); if (seen.has(k) || !wp) return; seen.add(k); out.push({ edge: k, wp, w, tried: -1 }); };
+		const push = (edge, wp, w, step) => { const k = String(edge); if (seen.has(k) || !wp) return; seen.add(k); out.push({ edge: k, wp, w, tried: -1, step: step || null }); };
 		let r = null;
 		try { r = planner.plan(anchorArg(n), { k: 3, ms: Math.min(planMs, Math.max(100, left() / 10)) }); } catch (e) { r = null; }
 		stats.plans++;
 		let est = Infinity;
+		if (RANK_EST) {
+			// (the nearest-first order: the usable edges by est, plan 1's first step at PLAN_AT, the other plans' after them)
+			const firsts = [];
+			for (const p of (r && r.plans) || []) {
+				if (Number.isFinite(+p.cost)) est = Math.min(est, +p.cost);
+				const s = p.steps && p.steps.find((x) => !(x.waypoint && x.waypoint.allowDeath));
+				if (s && s === p.steps[0] && !firsts.some((f) => String(f.edge) === String(s.edge))) firsts.push(s);
+			}
+			n.h = est;
+			let es = [], cls = '';
+			try {
+				const a = planner._anchorOf(anchorArg(n));
+				cls = a.S.key + '|' + a.cls;
+				es = (planner._edgesOf(a.S, a.pos, a.base, 'plan', true, cls, a) || []).filter((e) => !e.relaxOnly && !e.viaDeath && (e.X ? e.X.kind !== 'die' && e.live && e.live.length : true));
+				es.sort((x, y) => (x.est - y.est) || (x.lb - y.lb));
+			} catch (e) { es = []; }
+			const list = [];
+			for (const e of es.slice(0, K + 2)) {
+				const X = e.X;
+				const wp = X ? { kind: 'trigger', tiles: e.live.slice(), trig: X.id, expect: e.expect, label: e.anyOf > 1 ? `${X.label} (any of ${e.anyOf})` : X.label } : { kind: 'trophy', label: 'trophy' };
+				list.push({ edge: String(e.edge), wp, step: { edge: String(e.edge), nodeClass: cls, rung: 0, waypoint: wp, lb: e.lb } });
+			}
+			firsts.forEach((s, i) => {
+				const j = list.findIndex((c) => c.edge === String(s.edge));
+				const at = i === 0 ? Math.min(PLAN_AT, list.length) : list.length;
+				if (j >= 0) { if (i === 0 && j > at) { const [c] = list.splice(j, 1); list.splice(at, 0, c); } return; }
+				list.splice(at, 0, { edge: String(s.edge), wp: s.waypoint, step: s });
+			});
+			list.forEach((c, i) => push(c.edge, c.wp, W_EST0 + RANK_W * i, c.step));
+			stats.cands += out.length;
+			n.cands = out;
+			n.seen = seen;
+			return out;
+		}
 		for (const p of (r && r.plans) || []) {
 			if (Number.isFinite(+p.cost)) est = Math.min(est, +p.cost);
 			const s = p.steps && p.steps.find((x) => !(x.waypoint && x.waypoint.allowDeath));
-			if (s && s === p.steps[0]) push(s.edge, s.waypoint, out.length ? W_PLAN2 : W_PLAN1);
+			if (s && s === p.steps[0]) push(s.edge, s.waypoint, out.length ? W_PLAN2 : W_PLAN1, s);
 		}
 		n.h = est;
 		try {
@@ -208,7 +266,7 @@ function chainLevel(L, o = {}) {
 					for (let i = 0; i < n.cands.length; i++) {
 						const c = n.cands[i], l = c.tried + 1;
 						if (l >= CL.length) continue;
-						const k = CL[l] * c.w * gf;
+						const k = CL[l] * c.w * gf * failF(c.edge);
 						if (k < bk || (k === bk && bn && better(n, bn) < 0)) { bk = k; bn = n; bc = c; bl = l; }
 					}
 				}
@@ -237,11 +295,23 @@ function chainLevel(L, o = {}) {
 		try { r = B.solve(pick.snap, { tiles }, { ms }); } catch (e) { r = { ok: false, why: 'error: ' + e.message }; }
 		if (!r.ok && /walk|target|bug|error/.test(r.why || '')) pc.tried = CL.length;   // (no clock helps)
 		stats.legs++;
+		const fullTry = lvl >= CL.length - 1 || pc.tried >= CL.length;
 		const leg = { label: wp.label || wp.kind, from: pick.a.tick, depth: pick.depth, ok: false, T: null, ms: Date.now() - tl, why: r.why || '', clock: ms };
 		legs.push(leg);
 		let hit = null;
 		if (r.ok) { hit = hitOf(L, pick.snap, r.masks, goal); if (!hit) { leg.why = 'goal missed'; pc.tried = CL.length; } }
-		if (!hit) { log(`L${lvl} ${leg.label} from tick ${pick.a.tick} (depth ${pick.depth}): FAIL ${leg.why} ${(leg.ms / 1000).toFixed(1)} s`); continue; }
+		if (!hit) {
+			log(`L${lvl} ${leg.label} from tick ${pick.a.tick} (depth ${pick.depth}): FAIL ${leg.why} ${(leg.ms / 1000).toFixed(1)} s`);
+			if (LEARN && fullTry) {
+				failN.set(pc.edge, (failN.get(pc.edge) || 0) + 1); stats.learnFail = (stats.learnFail || 0) + 1;
+				if (pc.step) { try { planner.learn(Object.assign({}, pc.step, { nodeClass: classOf(pick) }), { ok: false, fail: { why: /walk|target/.test(r.why || '') ? 'exhausted' : 'budget' } }, anchorArg(pick)); } catch (e) { /* the price only */ } }
+			}
+			continue;
+		}
+		if (LEARN) {
+			okE.add(pc.edge);
+			if (pc.step) { try { planner.learn(Object.assign({}, pc.step, { nodeClass: classOf(pick) }), { ok: true, ticks: hit.masks.length }, anchorArg(pick)); } catch (e) { /* the price only */ } }
+		}
 		pc.tried = CL.length;
 		const masks = new Uint8Array(pick.masks.length + hit.masks.length);
 		masks.set(pick.masks); masks.set(hit.masks, pick.masks.length);
