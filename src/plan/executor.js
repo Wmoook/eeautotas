@@ -1922,7 +1922,7 @@ async function createExecutor(L, opts) {
 		w.on('message', (msg) => {
 			const job = slot.busy;
 			if (!job || msg.id !== job.id) return;
-			if (PROF && emit && msg.result && msg.result.prof) { const p = msg.result.prof; emit({ ev: 'exec.prof', w: i, label: job.label || '', late: !!job.late, ok: !!msg.result.ok, sims: msg.result.sims || 0, tiers: msg.result.tiers || null, queue: job.tDisp ? p.post - job.tDisp : 0, lat: p.recv - p.post, ret: Date.now() - p.end, wait: p.wait, run: p.run, init: p.init, rf: p.rf, rfN: p.rfN, bf: p.bf, bfN: p.bfN, ms: p.ms }); }
+			if (PROF && emit && msg.result && msg.result.prof) { const p = msg.result.prof; emit({ ev: 'exec.prof', w: i, label: job.label || '', late: !!job.late, ok: !!msg.result.ok, sims: msg.result.sims || 0, tiers: msg.result.tiers || null, queue: job.tDisp ? p.post - job.tDisp : 0, lat: p.recv - p.post, ret: Date.now() - p.end, wait: p.wait, run: p.run, init: p.init, rf: p.rf, rfN: p.rfN, bf: p.bf, bfN: p.bfN, ms: p.ms, heapUsed: p.heapUsed, heapTotal: p.heapTotal, ext: p.ext, mainHeap: Math.round(require('v8').getHeapStatistics().used_heap_size / 1048576) }); }
 			slot.busy = null;
 			if (job.clear) job.clear();
 			job.done(msg);
