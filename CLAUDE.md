@@ -1111,4 +1111,15 @@ ways in.
   the death step; the blue coin (98,207) plan is its 4th (cost 852) and never ran. RCH3 agrees with the walk there
   (`EEAT_PHYS_PRICE=1` leaves 'team 2 -> trophy' at 240): its forward model's up-arrow bounce pump (reach.js bounceC gains
   every bounce) is the relaxation to make sound next. The chapter-1 leg (3,700 ticks from the spawn) is load-sensitive: on
-  box 7 at load ~170 the same config had 0 triggers at 470 s.
+  box 7 at load ~170 the same config had 0 triggers at 470 s. THE PHYSICS PASS OUTSIDE THE BUDGET (planner.js plan(), inside
+  the opt-in `EEAT_PHYS_EST=1`; `EEAT_PHYS_PRE=0` = inside it, as before): the ~1-s forward pass ran inside the first search's
+  share of the plan budget (2 s for the first plan, 0.3 s after), so on a loaded box the plan came from a search cut before
+  its root edges had their physics price: Cold World from the spawn at a 1.5-s budget 'trophy' first without, 'blue coin
+  (98,207) -> trophy' with; box 7 at load ~170: the bare trophy first (run C) vs the blue coin first (E, E2), as on the idle
+  box (B). Still 0 triggers at 430 s in E / E2 there (every target 4 rungs, ~60-68 s each, the switch-1 leg that B found at
+  rung 3 in 40.5 s idle not found loaded). planplanner 51 / 51 off; with `EEAT_PHYS_EST=1` 50 / 51 with or without the pre
+  pass (the PHYS_PRICE-off check reads the walk's est: PHYS_EST's own price). THE SHARED GATE with `EEAT_WP_DIEFIELD=1`
+  (box 7 at load ~170, gate20, 60 s, par 2, vs gate_c6b2.json): exit 1, 13 vs 14, worse 3 (Level 1 Overworld progress
+  45 -> 41, The Blank Page and Fish Gods not compiled: the 60-s flips the list's header names) / better 6, but NO death step
+  ran in any of the 20 logs: the flag never acted, so the gate does not measure it; its A/B is the death-step set
+  (`src/out/b7cold/deathlv.txt`: the 16 levels with death steps in the scoreboard logs).
