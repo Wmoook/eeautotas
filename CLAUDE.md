@@ -928,7 +928,48 @@ ways in.
   route replayed; the stretch solver -20% (Terminal 6 vs 37: its child's whole-level request ran 270 s on the trophy while
   the executor made 63 steps vs 135); the far trophy on the 14 levels where it acted 253 vs 242 triggers (better 5 / worse
   4), and on the 4 where it never acted the same code gave The Tunnels 65 vs 40 and Vignettes no route vs 12,928: one run
-  a level spreads +-40%, no gain shown: both stay opt-in.
+  a level spreads +-40%, no gain shown: both stay opt-in. THE FAR WALK (C6 lane 2 block 3; `EEAT_FAR_WALK=<walk ticks>`,
+  OPT-IN, strategy.js `walkOf` / `farWalk`: the far trophy's cap for every waypoint kind but deaths, by the step's WALK =
+  its est, or for an est at or past the planner's 1e6 PENALTY the rest / 3 (the relaxation's own 3x price); the cap rung
+  `EEAT_FAR_WALK_RUNG`, default 1; the step event's `est` with it). Why the walk and not the est: the far-trophy arm's
+  4,021 step events (the 18 RATE levels, 300 s): the "1,000,000+ cut" ests are NOT whole levels (144 of those steps
+  succeeded, 33 at the 45-s rung: the rest past the penalty is a real walk), and by the walk no plain step of est >= 3,000
+  succeeded at any rung (0 of ~470) and 1 of 230 penalty steps with a rest >= 10,000. The counterfactual (`cf.js`, lane 2
+  block 3): capped at rung 0 past walk 5,000 the failed worker time falls 10.0% with 0 successes lost (pre-S99 data); on
+  the S99 stack's own est events (EEAT_FAR_TROPHY=1e9 = the est logged, no cap) 13.4% with 1 lost (a Perilous Endeavor
+  coin the portfolio found at rung 3 in 8.2 s), past 10,000 3.7% with 0 lost (the whole 20-level S99 run: 7.9% / 1 lost,
+  3.6% / 0 lost). Not A/B'd in a compile yet. THE S99 STACK ON THE RATE CLASS (lane 2 block 3: n5-plan 8ade568's defaults
+  vs `EEAT_S99_DEFAULTS=0`, the 20 RATE test levels, 300 s, W3, 2 runs an arm, all 4 side by side on box 5): triggers 291 /
+  283 vs 304 / 235 (574 vs 539, +6.5%), compiled 1 / 1 vs 0 / 0 (Santa's Workshop 2,195 / 2,239, best known 2,104): NO
+  progress loss side by side (the chief's -12% / -7% were across runs and loads); per level better on EX Crew Ice 48 / 40
+  vs 38 / 27, EX Crew RR 11 / 13 vs 5 / 4, Egg Quest II hard 26 / 28 vs 21 / 13, Starlight 48 / 42 vs 44 / 24, the
+  consistent LOSS Terminal 6 / 6 vs 19 / 23 (its executor 70 steps vs 115). The stretch child's SHORT request (the
+  planner's 1-step trophy plan from the start, `EEAT_ST_SHORT_F` 0.9 of the budget) ran 262-270 s and solved 0 on every
+  RATE level where it ran (13 of 20; the child then got 1-2 stuck stretches); on S99's own full run (box 5's 122 levels)
+  72 short requests, 16 solved, the full-plan solves at 1-66 s but Just One More Time (244 s): `EEAT_ST_SHORT_F=0.3` is
+  the next A/B. THE SAME WAYPOINT FROM SEVERAL ANCHORS (item 3, counterfactual only): a cap of the 45-s rung once an edge
+  failed it from K other anchors frees 10.9% (K 1) / 3.1% (K 2) of the failed time on the chief's 122-level f300 but
+  loses 28 / 7 of its 147 rung-3 successes (here 11 of 71 and 8 of 85 rung-3 successes came after another anchor's
+  rung-3 failure): no cap is free; a shared session (the backward solver's target-side memo, `EEAT_BW_MEMO` 2, per
+  executor worker, no affinity of a waypoint to a worker) is the form left.
+- **THE WIDE LOOPS** (C6 lane 2 block 3; polish.js, the LOOPS stage after the budget; `EEAT_LOOP_WIDE=0`: off, the stage
+  as before byte for byte): once the loop passes at the constants (a partner within 12 px at |dvx| + |dvy| <= 1.5, 3 a
+  tick; `EEAT_LOOP_R` / `_V` / `_K` tune them) end with time left, the same passes again with wider partners (24 px / 4
+  px/tick / 6, 48 / 8 / 8, 96 / 16 / 12): a revisit at another speed is still a cut only by the exact (or coin-blind)
+  rejoin of the route's own later inputs, replayed and judged as before, and each rung starts from the last one's route
+  with the time it left, so the stage never ends slower than it did. Measured (box 5, the stage alone with the 300-s
+  compile's 10-s clock, on all 50 routes of S99's full compile, base = `EEAT_LOOP_WIDE=0`, every route replayed from the
+  level file): 202,321 -> 197,801 run ticks (-2.2%), better 17 / worse 0 / same 33: Tutorial 2 4,792 -> 3,792 (2 of its
+  3 crumb coins dropped: ratio to the best known 1.63 -> 1.29), The Witch's House 9,138 -> 8,096 (1.25 -> 1.11), EX
+  Crew Ice 12,916 -> 12,465, Buuwuu's Stronghold -439, Snow Jumping -426, On And On -318, Tutorial 4 -237, Christmas Town
+  4,307 -> 4,146 (0.68 -> 0.65 of the best known), Summer Bee -133; a 30-s clock gave no more on the 8 levels that used
+  the 10 s. EX CREW ICE (the lane's item 4; `tools/cmp/versus.js` against the god sweep's 5,145-tick route): main's
+  route (12,916, 48 coins) and the god route (15 coins) share the top-left coins and the bottom corridor; the whole gap
+  is ONE stretch: from the coin (36,21) the god route runs east along the top to the red key (170,16) and drops 2,477 px
+  to (178,171) (855 ticks), ours goes through the middle's coins to the green / blue keys (158,117), waits 386 ticks
+  standing for them to expire (their gates) and climbs back up (6,679 ticks); its route came at 298.7 s of 300, so the
+  perfect pass had 0.15 s (0 nodes): the planner's own plan from the start is the trophy (est 3,588), the executor fails
+  that long leg, the crumbs (coins no gate reads) relay it round the level.
 - **Checks**: unit tests `test/plantypes.js`, `planmodel.js`, `planplanner.js`, `planbounds.js`, `planprims.js`,
   `planexec.js --only=unit,fail`, `planstrategy.js`, `plancompile.js` (the CLI and the Compile API with the mock parts
   `test/planmock.js`), `plantruth.js`, `msolve.js --quick`, `kin.js --quick`, `mathsep.js`, `joins.js`, `precision.js`. The truth checkers on
