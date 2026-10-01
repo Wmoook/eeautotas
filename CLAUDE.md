@@ -1105,10 +1105,14 @@ ways in.
   c7W2 1 / 1; at 298-427 s), where the same runs' 45-s steps found it 0 of 17; the deep rung took the next walls too: mini 7
   (5,140) (a blue-spike course, closest (15,114) 39 tiles: 0 of ~50 steps at rungs 0-3, 2 of 7 at rung 4, at 856 / 859 s),
   mini 13 (225,119) (closest (218,137) 20.8 since cycle 1: 1 of 2 at rung 4, 863 s), switch 10 2 of 2; the two runs'
-  rung-4 steps 9 of 18 found (mini 12 (73,99) 0 of 1). Chain ids (of 54, one anchor) at 900 s 11 (1-11: wave 3 entered) /
-  10 (1-10) vs the base config's 17 / 16 / 6 in cycle 1 (box 7 at load ~100-150) and 4 this cycle (load 160-190; c5C,
-  below): at the compile level no gain shown yet (one run an arm, a 2.5-x spread; a class's deep window comes only after its
-  66 s of short rungs, hence the warm rung). SEEN ON THE WAY (not fixed): with
+  rung-4 steps 9 of 18 found (mini 12 (73,99) 0 of 1); every run's rung-4 steps 17 of 33. CHAIN IDS (of 54, held by one
+  anchor) at 900 s, this cycle side by side (load 160-190): the config's base 4 / 6 (c5C, c9X1: mini 5 never passed; c9X1's
+  switch-5 steps 109, 0 found, 1,560 worker-s), + DEEP **11 / 10** (c6D1 1-11: wave 3 entered; c6D2 1-10), + DEEP + WARM 9 / 6;
+  n5-plan's defaults 11 (c5A: mini 5 passed at rung 3, 1 of 4; walls mini 7 and team 2 (59,194)), + DEEP 10, + DEEP + WARM 6
+  (cycle 1's base samples of the config 17 / 16 / 6 at load ~100-150). So the deep rung passes the wall where the config
+  stalls, and is a tie on the defaults; THE WARM RUNG IS NEGATIVE: it bumps every new class to the 45-s rung and those
+  classes, once failed there, wait behind the planner's lower-rung edges (nearPlans' rung order), so the 135-s rung came
+  late or never (c10DW: 28 rung-3 switch steps, no rung 4). SEEN ON THE WAY (not fixed): with
   that config one run's main thread planned 3.6-11 s before every step from 56 s on (every plan 'budget: the most gain',
   856 of 900 s planning; median 0.3 s in the 6 other runs of the config: c5C, 4 ids) and a rung-2 step of it held a worker
   305 s on its 15-s budget (exec.reach 840 k sims: waiting, not searching); the warm rung's first version repeated a
