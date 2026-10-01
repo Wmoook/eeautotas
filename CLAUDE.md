@@ -1166,7 +1166,9 @@ ways in.
   small levels: fef0 16 / 60, 730c 22 / 97, NC Naos d3c6 **57** (C 57 closed this cycle: 114.8 M nodes, 188 s, 3 threads) /
   153, the precision puzzle 56 / 153, celeste x2 94 / 239-240; the gap median 89% of the route (the smallest after Switch
   Labyrinth: NC Naos 62.7%, celeste 60.7%, Bygone Tutorial 68.1%, Tutorial 1 67.7%, Ruins 70.7%); at or under the best known
-  10 of the 40 with one. `wholepar.js --progress=<s>` (default 60): a `progress` line {C, tasks, done, nodes, s} during a long C
+  10 of the 40 with one. The ladders this cycle (box 7 `~/b7_proof_out/c4/`, task logs for the next run's `--resume`): fef0 C 17
+  805 of 1,875 tasks in 1,800 s (1.6 B nodes, 4 threads), 730c C 23 33 of 1,938 (1.27 B nodes, 4 threads), NC Naos C 58 61
+  of 171 (6.09 B nodes in 1,648 s on 12 threads, where C 57 took 115 M: the next pocket). `wholepar.js --progress=<s>` (default 60): a `progress` line {C, tasks, done, nodes, s} during a long C
   (output only; test/wholepar.js 54/0). NEXT: a bound that knows the time to BUILD speed (reach.js's R / F / C states with tick
   costs from the exact per-axis recurrences of src/math/fields.js, x relaxed to the row's field classes; the jump only where
   a real floor is under the box), the only way to close the chambers (fef0 / 730c) and the false-near pockets.
