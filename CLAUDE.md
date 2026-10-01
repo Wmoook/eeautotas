@@ -486,7 +486,7 @@ ways in.
   src/compile.js and src/plan.js turn on, unless the environment names them (=0 off; `EEAT_COMPILER_DEFAULTS=0` none),
   EEAT_COVER=3 (the coverage leg finder as the fallback), EEAT_CRUMBS=1 (coins no gate reads as breadcrumb relays),
   EEAT_FIELD_MEMO=1, EEAT_PLAN_ANY=1 (a set-kind trigger group = one edge), EEAT_PLAN_UNTOGGLE=1, EEAT_FX_FIELD=1 /
-  EEAT_FX_STATE=1 (physics goal fields on effect levels), EEAT_ICE_LOCAL=1, EEAT_PROT_LAYER=1, EEAT_BW_LEVEL=last (the chains-lab judge: the last bullet of this section); the modules themselves stay
+  EEAT_FX_STATE=1 (physics goal fields on effect levels), EEAT_ICE_LOCAL=1, EEAT_PROT_LAYER=1, EEAT_BW_LEVEL=last (the chains-lab judge: the last bullet of this section), EEAT_PREC_STREAM=1 (the exact landing's routes as they come: THE FIRST ROUTE'S WAITS below); the modules themselves stay
   opt-in (their tests and the truth checkers read them as before). Box 5, 300 s, W3, one run a level: all of them on (the
   combo, 22 levels) compiled 15 vs the base's 9, none lost (+K Underground, On And On And On, Crypts Of Anubis, Presto
   Penguins, The Witch's House; Vignettes, Perilous Endeavor and Stone Ruin Speedrun compiled in the single-group arms, not
@@ -519,6 +519,36 @@ ways in.
   the lab's 55 stuck known-route trigger legs (30 s) 37 / 55 from the previous trigger, 29 / 32 from 300 route ticks before,
   39 / 42 from 120: 105 / 129. THE FULL COMPILE (300 s, the S99 stack on d674cb9): **50 / 230** vs 46 / 44 without them (the
   "Where it stands" bullet; merged into main 23f1f3a).
+- **THE FIRST ROUTE'S WAITS** (B8 speed, cycle 2, 2026-10-01, branch n5-b8-speed-c2; box 8 `~/b8_speed_c2`;
+  `tools/cmp/firstab.js`: the arms side by side, each compile killed at its first verified route, `--full=1` to the end).
+  Cycle 1's box-8 logs (the 50 compiled levels, load 230): the stages before the moves < 3 s; on the multi-trigger levels
+  2-3 steps in flight nearly all the time (the time to the first route is the failed steps', not idle time); the one
+  IDLE wait was the exact landing: the precision pair (the precision puzzle, NC Naos d3c6) spent 68 / 73 s of their 91 /
+  96 s first route with nothing in flight, the trophy step waiting for `src/precision.js` to END, though the child had
+  printed its coasted rests' route long before (its fast pass, the braked rests, runs on to its 153-tick route). **THE
+  ROUTES AS THEY COME** (`EEAT_PREC_STREAM`, strategy.js `PREC_STREAM`; A COMPILER DEFAULT since this cycle,
+  src/plan/defaults.js; `EEAT_PREC_STREAM=0` = the compile before byte for byte): every better route the child prints is
+  verified (routeOf) at once; the child, its later routes and the step that waits for it as before.
+  Measured (box 8 at load 180-230, side by side): the precision pair's first route in 8 of 8 pairs sooner: the puzzle
+  13.8 / 18.8 / 12.0 / 16.8 s vs 36.4 / 32.6 / 140.9 / 40.4 s, NC Naos 14.7 / 19.7 / 10.5 / 10.4 s vs 38.9 / 38.2 / 33.4 /
+  42.4 s (the first route 332-379 ticks, the 154-tick one streams in later); the final routes (`--full=1`, 300 s) the same:
+  153 = 153 on both; the 6 other levels where a precision child ran (Animaly, Gingerbread House, The Ten Commandments,
+  Ice Cream Expedition, My level 730c / fef0) got no route from it, so their code path is the base's (Animaly 121 vs 203 s
+  and 103 vs 86 s: the load's spread). The 50 levels' first route (cycle 1's base with the pair at its measured times, an
+  estimate: the other 48 run the same code to their first route): median 72.2 -> 64.3 s, p90 237.2 s, by 60 s 19 -> 21.
+  THE SHARED GATE with it on (box 8 at load 190, gate20, 60 s, par 3, vs gate_c6b2.json): exit 1, compiled 14 vs 14,
+  better 6, worse 2, 14 / 14 replayed; the two rerun side by side with the knob off (`gateW`): NC Naos d3c6 no route in
+  either arm (at 60 s the precision child gets 13 s, the rest is the post-route stages' reserve, and its coasted pass
+  found nothing in 13 s at that load: the same code path in both arms), Level 1 Overworld 77 vs 58 anchors (a known 60-s
+  flip): no loss of the knob's; T-MODEL-EXACT 0 unsound (218 routes, 1 stale), T-PLAN-ORACLE 2 / 0, msolve --quick 50 / 0,
+  planstrategy 27 / 0, plancompile 31 / 0 (with the default). NEXT: the precision child's clock at short budgets
+  (13 s of a 60-s compile on the levels whose only route source it is).
+  `EEAT_PREC_ASYNC=1` (OPT-IN, not kept): the child in the background and started again at once with the nearer states
+  that came meanwhile (the moves' end waits for it, `precHold`, and kills it): on a calm box 8 (load 25-60) the 8
+  levels' first routes geo-mean 0.994 of the base's (the base's first child found the route in 15 s; cycle 1's 40-s
+  failures of that child were the load). The load's share: at load 230 the first routes took 1.7-5x their calm box-8
+  times (load 25-60, the base: the pair 17-19 s vs 91-96, Animaly 56 vs 104, Gingerbread House 38 vs 64): a loaded
+  box's median is not the compiler's.
 - **In the app**: the level editor's **Compile** button (POST / GET `/api/editor/compile`, section 9) runs the CLI in its own
   process in `<data>/editor/compile/`, shows its stage lines, replays the route once more, makes a job `<name> (compiled)`
   (watch it, optimize it like any run) and copies its `/loadtas` line. `src/plan.js` is the headless runner (JSON lines):
@@ -937,7 +967,21 @@ ways in.
   succeeded at any rung (0 of ~470) and 1 of 230 penalty steps with a rest >= 10,000. The counterfactual (`cf.js`, lane 2
   block 3): capped at rung 0 past walk 5,000 the failed worker time falls 10.0% with 0 successes lost (pre-S99 data); on
   the S99 stack's own est events (EEAT_FAR_TROPHY=1e9 = the est logged, no cap) 13.4% with 1 lost (a Perilous Endeavor
-  coin the portfolio found at rung 3 in 8.2 s), past 10,000 3.7% with 0 lost. Not A/B'd in a compile yet.
+  coin the portfolio found at rung 3 in 8.2 s), past 10,000 3.7% with 0 lost (the whole 20-level S99 run: 7.9% / 1 lost,
+  3.6% / 0 lost). Not A/B'd in a compile yet. THE S99 STACK ON THE RATE CLASS (lane 2 block 3: n5-plan 8ade568's defaults
+  vs `EEAT_S99_DEFAULTS=0`, the 20 RATE test levels, 300 s, W3, 2 runs an arm, all 4 side by side on box 5): triggers 291 /
+  283 vs 304 / 235 (574 vs 539, +6.5%), compiled 1 / 1 vs 0 / 0 (Santa's Workshop 2,195 / 2,239, best known 2,104): NO
+  progress loss side by side (the chief's -12% / -7% were across runs and loads); per level better on EX Crew Ice 48 / 40
+  vs 38 / 27, EX Crew RR 11 / 13 vs 5 / 4, Egg Quest II hard 26 / 28 vs 21 / 13, Starlight 48 / 42 vs 44 / 24, the
+  consistent LOSS Terminal 6 / 6 vs 19 / 23 (its executor 70 steps vs 115). The stretch child's SHORT request (the
+  planner's 1-step trophy plan from the start, `EEAT_ST_SHORT_F` 0.9 of the budget) ran 262-270 s and solved 0 on every
+  RATE level where it ran (13 of 20; the child then got 1-2 stuck stretches); on S99's own full run (box 5's 122 levels)
+  72 short requests, 16 solved, the full-plan solves at 1-66 s but Just One More Time (244 s): `EEAT_ST_SHORT_F=0.3` is
+  the next A/B. THE SAME WAYPOINT FROM SEVERAL ANCHORS (item 3, counterfactual only): a cap of the 45-s rung once an edge
+  failed it from K other anchors frees 10.9% (K 1) / 3.1% (K 2) of the failed time on the chief's 122-level f300 but
+  loses 28 / 7 of its 147 rung-3 successes (here 11 of 71 and 8 of 85 rung-3 successes came after another anchor's
+  rung-3 failure): no cap is free; a shared session (the backward solver's target-side memo, `EEAT_BW_MEMO` 2, per
+  executor worker, no affinity of a waypoint to a worker) is the form left.
 - **THE WIDE LOOPS** (C6 lane 2 block 3; polish.js, the LOOPS stage after the budget; `EEAT_LOOP_WIDE=0`: off, the stage
   as before byte for byte): once the loop passes at the constants (a partner within 12 px at |dvx| + |dvy| <= 1.5, 3 a
   tick; `EEAT_LOOP_R` / `_V` / `_K` tune them) end with time left, the same passes again with wider partners (24 px / 4

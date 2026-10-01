@@ -82,7 +82,9 @@ function start() {
 	}
 	if (parfile) { try { const v = parseInt(fs.readFileSync(parfile, 'utf8'), 10); if (v > 0 && v !== par) { console.log(`par ${par} -> ${v} (${parfile})`); par = v; } } catch (e) { /* none */ } }
 	while (running < par && next < todo.length) {
-		if (minfree > 0 && running > 0 && memAvailGB() < minfree) { if (!waitTimer) waitTimer = setTimeout(() => { waitTimer = null; start(); }, 3000); return; }
+		// (with none of its own running it starts anyway (no deadlock), but never below the RAM guard's line plus 2 GB: a compile
+		// started there is killed at once and queued again, every 2 s (box 6, 03:30Z: 84 kills of the same 3 levels in 20 min))
+		if (minfree > 0 && memAvailGB() < (running > 0 ? minfree : (killfree > 0 ? killfree + 2 : 0))) { if (!waitTimer) waitTimer = setTimeout(() => { waitTimer = null; start(); }, 3000); return; }
 		const f = todo[next++], rel = path.relative(lvDir, f), id = rel.replace(/[\\/]/g, '__').replace(/\.eelvl$/, '');
 		running++;
 		const ts = Date.now();
