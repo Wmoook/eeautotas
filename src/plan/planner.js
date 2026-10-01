@@ -73,6 +73,8 @@ const WARP_F = +process.env.EEAT_WARP_F || 0.8;          // and the death's est 
 // EEAT_SKEL_CLOSEST): EEAT_PLAN_NEAR=K (K near plans; 0: off, the planner as before)
 const NEAR_K = process.env.EEAT_PLAN_NEAR !== undefined ? Math.max(0, +process.env.EEAT_PLAN_NEAR | 0) : 1;
 const NEAR_RUNG = process.env.EEAT_NEAR_RUNG !== '0';   // (the rung balance of the near plans: nearPlans; EEAT_NEAR_RUNG=0 off)
+// (THE NEAREST BEFORE A PARTIAL PLAN, P4 gated, OPT-IN EEAT_PLAN_NEAR_PARTIAL=K (0 / unset: off, byte for byte): plan())
+const NEAR_PARTIAL = process.env.EEAT_PLAN_NEAR_PARTIAL !== undefined ? Math.max(0, +process.env.EEAT_PLAN_NEAR_PARTIAL | 0) : 0;
 const NEAR_FAR = () => process.env.EEAT_NEAR_FAR === '1';   // (no nearer trigger: the nearest farther one; nearPlans; OPT-IN)
 // THE CROSS-CLASS FAILURE PRICE (n5 doctor b9; OPT-IN EEAT_PLAN_FAILEST=<ticks a failed rung>, 0 / unset: off, the planner
 // as before): the facts' rung ladder is per (edge, node class), and the node class is the whole abstract state (every
@@ -1426,6 +1428,28 @@ function createPlanner(model, facts, o = {}) {
 		}
 		if (plans.length && NEAR_K > 0 && facts) {
 			try { const near = nearPlans(a, plans); if (near.length) plans.unshift(...near); } catch (e) { /* the rule is ordering only */ }
+		}
+		// (THE NEAREST BEFORE A PARTIAL PLAN, EEAT_PLAN_NEAR_PARTIAL=K: a plan search that ran out of its budget before the
+		// trophy returns its node of the most gain, and that node's first step is anywhere: the order oracle (orderoracle.js,
+		// the 19 gated levels' known routes) holds the route's next trigger at a partial plan's first step 16.0% of 131
+		// anchors, at the nearest usable edge by est 64.1% (Weird Perfection: coins 1,200-3,000 est ticks away while the route
+		// takes the one 60-200 away, the compile's executor at gain 7-8 in 300 s on them); with the knob the K nearest edges
+		// that raise the gain (by est, not tried from this class yet) go first as one-step plans when the best plan is partial;
+		// ordering only, every plan kept after them)
+		if (plans.length && NEAR_PARTIAL > 0 && plans.some((p) => !p.near) && plans.find((p) => !p.near).partial) {
+			try {
+				const cls = a.S.key + '|' + a.cls, g0 = Number.isFinite(+a.S.gain) ? +a.S.gain : 0;
+				const used = new Set(plans.map((p) => p.steps[0] && p.steps[0].edge));
+				const es = edgesOf(a.S, a.pos, a.base, 'plan', true, cls, a)
+					.filter((e) => e.X && !e.relaxOnly && !e.viaDeath && e.X.kind !== 'die' && !used.has(e.edge) && (!facts || facts.rungOf(e.edge, cls) < 1) && e.S2 && Number.isFinite(+e.S2.gain) && +e.S2.gain > g0 && !(UNTOGGLE && untoggles(e, a.S, a.viaX)))
+					.sort((x, y) => x.est - y.est || x.lb - y.lb);
+				const root = { S: a.S, pos: a.pos, e: null, parent: null }, out = [];
+				for (const e of es.slice(0, NEAR_PARTIAL)) {
+					const steps = stepsOf(a, { S: e.S2, pos: e.pos2, e, parent: root });
+					if (steps.length) out.push({ id: `p${ST.plans}.q${out.length}`, steps, cost: plans[0].cost, lb: e.lb + hLb(e.pos2), partial: true, why: 'near: the best plan is partial; the nearest gain first', near: true });
+				}
+				if (out.length) { plans.unshift(...out); ST.nearPartial = (ST.nearPartial || 0) + out.length; }
+			} catch (e) { /* ordering only */ }
 		}
 		// (the crumbs are a way to the first route: once a route is known (po.runBound finite) the plans are the plan
 		// search's own: box 5, Ruins (2 crumbs), 60 s: 1,597 run ticks with them vs 1,347 without, a crumb's detour kept)
