@@ -253,8 +253,37 @@ function pickDiverse(list, k = 4) {
  * other trigger: its -1 is a proof that the goal cannot be reached while the doors stay as they are now (other triggers
  * on the way are air: touching one is a side effect the executor reports).
  */
+// THE PENDING GATE COUNTS (OPT-IN EEAT_GATE_PENDING=1; B7 lane cold, cycle 5; off = the copy before byte for byte): a coin
+// gate (165) / blue coin gate (214) reads its SHOWN count, which PlayState.tick's start sets to the count (each kind's copy
+// refused while the box then overlaps a solid): on the tick a coin is taken (an arrival at a coin, the executor's anchor)
+// the gates of the new count still read open, and every goal field from that state routes through gates the next tick
+// shuts. Cold World's chapter-2 blue coin (98,207): the anchor holds the coin, its shown count 0; a tick later its shaft's
+// gate (98,205) and the gate column (112, 217-222) are solid; the trophy and crumb fields from the anchor ran east
+// through (112,218) and the executor stalled at (111,219) at every rung. With the knob such a gate stands as the next
+// tick's start leaves it: by the count, unless the box overlaps a gate tile of that kind the copy would shut (then the
+// engine refuses the copy: the gates as they stand). Exact: the gate's state from the next tick on.
+const GATE_PENDING = process.env.EEAT_GATE_PENDING === '1';
+function pendingGates(L, sim) {
+	const sc = sim._show_coin_gate, sb = sim._show_blue_coin_gate;
+	const dc = sc !== undefined && sc !== sim.coins, db = sb !== undefined && sb !== sim.blue_coins;
+	if (!dc && !db) return null;
+	const W = L.width, lk = sim._lookup, fg = L.fg;
+	if (!lk) return null;
+	// (the copy is refused for a kind while the box overlaps a tile of it that the new count shuts)
+	const x0 = Math.floor(sim.px / 16), x1 = Math.floor((sim.px + 15.999) / 16), y0 = Math.floor(sim.py / 16), y1 = Math.floor((sim.py + 15.999) / 16);
+	let okC = dc, okB = db;
+	for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+		if (x < 0 || y < 0 || x >= W || y >= L.height) continue;
+		const i = y * W + x;
+		if (fg[i] === 165 && okC && lk[i] <= sim.coins && lk[i] > sc) okC = false;
+		if (fg[i] === 214 && okB && lk[i] <= sim.blue_coins && lk[i] > sb) okB = false;
+	}
+	if (!okC && !okB) return null;
+	return { coin: okC ? sim.coins : null, blue: okB ? sim.blue_coins : null, lk };
+}
 function levelNow(L, sim) {
 	const W = L.width, N = W * L.height, fg = Int32Array.from(L.fg), fl = L.flags;
+	const pg = GATE_PENDING ? pendingGates(L, sim) : null;
 	for (let i = 0; i < N; i++) {
 		const id = fg[i];
 		if (id <= 0 || id >= fl.length || (fl[id] & F_DOOR) === 0 || (fl[id] & F_SOLID) === 0) continue;
@@ -262,6 +291,7 @@ function levelNow(L, sim) {
 		const kb = KEY_DOOR_BIT.get(id);
 		if (kb !== undefined && (sim._keysMask & kb) !== 0) continue;
 		if (id === 50) continue;   // (the secret "appear" block: reach.js guideFlags walls it)
+		if (pg !== null && ((id === 165 && pg.coin !== null) || (id === 214 && pg.blue !== null))) { fg[i] = pg.lk[i] > (id === 165 ? pg.coin : pg.blue) ? 0 : 9; continue; }
 		fg[i] = sim.is_tile_solid_now(i % W, (i / W) | 0) ? 9 : 0;
 	}
 	// (PROT_LAYER: the copy of an UNPROTECTED ball's level says so: goalField builds its protection layer for it)
