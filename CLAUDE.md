@@ -860,14 +860,17 @@ ways in.
   below OPT-IN, off = the compiler byte for byte; records `src/out/p4/` in its worktree, the A/Bs box 5 / 6
   `~/p4_fix_ab/`). THE REGRESSIONS (Presto Penguins, YMCK Puzzle Parade, Relics Of Athena: compiled by both base runs, not
   by the S99 full compile) are the 300-s edge, no single cause: their routes land at 130-294 s in every arm. Relics over
-  every run (the same tree side by side, the S99 full compile, the chief's b2 and his merge A/B) S99-on 3 / 8 vs off 7 / 10;
+  every run (the same tree side by side, the S99 full compile, the chief's b2 and his merge A/B) S99-on 3 / 8 vs off 7 / 10 (4 / 10 with the PF A/B below);
   on box 6 at load off 1 / 4, the portfolio alone (`EEAT_STRETCH=0 EEAT_BW_CHAIN=0`) 1 / 4, `EEAT_PORTFOLIO=0` 1 / 3,
   `EEAT_STRETCH=0` 1 / 3, S99 2 / 3: no component to switch off. Presto 3 / 3 = 3 / 3 paired (S99's first routes later:
   187-243 vs 129-187 s), YMCK 2 / 3 vs 1 / 3. What S99 changes on Relics (its step logs): the portfolio tier's 0.6 of a
   45-s rung-3 window runs to the end (4-5 such steps, 135-151 worker-s in 60-150 s) where the base's rung-3 steps end early
   (1-2 steps, 42-59 worker-s) and its workers go on with 16-28 cheap rung-0 steps (S99 8-10); `EEAT_PF_YIELD=<calls>`
   (executor.js, THE PORTFOLIO'S YIELD: from that many calls the PF tier's share follows its yield on the level like the
-  math's, x 4 x its rate of calls with a leg, between `EEAT_PF_YIELD_FLOOR` 0.25 and 1) is the candidate. THE SLOW ROUTES
+  math's, x 4 x its rate of calls with a leg, between `EEAT_PF_YIELD_FLOOR` 0.25 and 1) measured NEGATIVE (box 6, 300 s,
+  2 runs an arm side by side, `EEAT_PF_YIELD=8` vs the S99 defaults): compiled 7 / 10 vs 8 / 10 (Relics 0 / 2 vs 1 / 2,
+  Snow Jumping (a portfolio-made level) 1 / 2 vs 2 / 2, YMCK 2 / 2 vs 1 / 2), both-compiled geo 1.044; with that A/B's S99
+  arm Relics S99-on is 4 / 10 vs off 7 / 10. THE SLOW ROUTES
   leg by leg (`tools/cmp/versus.js`, the S99 full compile's route vs the best known): Tutorial 2 4,792 vs 2,947 = a crumb
   (blue coin (29,10): 473 ticks to it + the checkpoint leg 2,258 vs 760) + the first two coins +255; Tutorial 4 5,231 vs
   3,515 = the purple switch (239,34) leg 995 vs 137, 3 blue coins +426, orange switches toggled back +431; Trick Or Treat
