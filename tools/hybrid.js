@@ -15,6 +15,8 @@
 //   (editor.js hint: into the CPU search's archive, and where the stall escape runs (coarse cells) the next escape, a fresh
 //   one search with GPU bursts, starts from there at once); where the level has no escape (fine cells), a search of our
 //   own from that prefix (src/goexplore.js --prefix, CPU, --pworkers). A newer furthest anchor that stalls is handed again.
+//   The compiler ended without a route, none known and a minute left: its CPU share (--cworkers) to a prefix search of
+//   our own from its furthest anchor.
 // - THE FEED BACK (--feed=1): while the compiler is stalled and no route exists, the search's nearest attempt goes to the
 //   compiler (its stdin "import": a model state it has not seen becomes an anchor it plans from), at most every 20 s,
 //   each one nearer than the last by a tile.
@@ -216,16 +218,16 @@ function compOn(e) {
 
 // ---- the search's prefix search of our own (levels without the editor's stall escape)
 let pre = null;
-function prefixStart(a) {
+function prefixStart(a, workers, why) {
 	prefixStop('a newer start');
 	const left = Math.floor((END - Date.now()) / 1000) - 15;
 	if (left < 20) return;
-	const k = R.prefix.length + 1, file = path.join(OUT, `prefix_${k}.eetas`);
+	const k = R.prefix.length + 1, file = path.join(OUT, `prefix_${k}.eetas`), w = workers || PW;
 	C.writeEetas(file, T.masksOf(a.inputs));
-	const args = [path.join(SRC, 'goexplore.js'), LEVEL, `--prefix=${file}`, `--seconds=${left}`, `--workers=${PW}`, `--seed=${1000 + k}`, '--first=1',
+	const args = [path.join(SRC, 'goexplore.js'), LEVEL, `--prefix=${file}`, `--seconds=${left}`, `--workers=${w}`, `--seed=${1000 + k}`, '--first=1',
 		'--opts=1', '--frontier=1', '--fBrake=1', '--fPhys=1'];
 	const ch = spawn(process.execPath, args, { cwd: ROOT, stdio: ['ignore', 'pipe', 'ignore'] });
-	const rec = { k, t: sec(), anchor: a.id, gain: a.gain, ticks: a.inputs.length, desc: a.desc, nearest: null, routed: null, end: null };
+	const rec = { k, t: sec(), why: why || 'the compiler stalled', workers: w, anchor: a.id, gain: a.gain, ticks: a.inputs.length, desc: a.desc, nearest: null, routed: null, end: null };
 	R.prefix.push(rec);
 	pre = { ch, rec };
 	const rl = readline.createInterface({ input: ch.stdout, crlfDelay: Infinity });
@@ -241,7 +243,7 @@ function prefixStart(a) {
 		}
 	});
 	ch.on('exit', (code) => { rec.end = sec(); rec.exit = code; if (pre && pre.ch === ch) pre = null; });
-	log(`a prefix search of our own from the compiler's anchor ${a.id} (gain ${a.gain}, ${a.inputs.length} ticks, ${a.desc}): ${PW} workers, ${left} s`);
+	log(`a prefix search of our own (${rec.why}) from the compiler's anchor ${a.id} (gain ${a.gain}, ${a.inputs.length} ticks, ${a.desc}): ${w} workers, ${left} s`);
 }
 function prefixStop(why) {
 	if (!pre) return;
@@ -350,6 +352,11 @@ function tick() {
 	// joins get the best route for the last minute)
 	if (compAlive && !compStopAt && best && !R.compiler.firstRoute && now >= END - 90e3) { compStopAt = sec(); R.compiler.stopped = compStopAt; compSend('stop'); log('the compiler, no route of its own: stopped for the joins on the best'); }
 	if (!compAlive && comp && best && !R.joins) joinsStart();
+	// (the compiler ended without a route, none known, a minute or more left: its CPU share to a prefix search of our own
+	// from its furthest anchor (a fresh archive, another seed than the search's escape))
+	if (!compAlive && comp && !R.first && HINT && !pre && !R.prefix.some((p) => p.why === 'the compiler ended') && furthest && furthest.gain >= 1 && now < END - 60e3) {
+		prefixStart(furthest, CW, 'the compiler ended');
+	}
 	if (now >= END - 3000) { finishAll('the budget'); return; }
 	if (now - (tick.lastW || 0) > 15e3) { tick.lastW = now; writeReport(); }
 }
