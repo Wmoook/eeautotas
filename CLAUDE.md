@@ -555,7 +555,8 @@ ways in.
   fewer each. The 41 ONE-LEG levels n5-plan 3d52987's 300-s full compile (44 / 230) failed, the solver on (box 6, 300 s): the
   child's own routes Just One More Time 2,899, Stone Ruin 3,707, Gravity's Rainbow 2,022; the 36 left again with THE REST OF
   THE CLOCK (the child's variants in the time a solve leaves: a longer relay, finer x speeds; `EEAT_ST_VARIANTS=0` off): the
-  child's clock used to the end (240-270 s), no further route. Per
+  child's clock used to the end (240-270 s), no further route of the child's (1 of the 36 compiled, EX Crew Fall of Zeal 11,851, by
+  the executor). Per
   stretch (the lab's krt data, box 5): from the known route's previous trigger the executor's rungs 1-2 (5 + 15-s windows)
   30 / 49, one continuous 30-s backward clock 34 / 49, either 36 / 49; every start kind 89 / 129 -> 105 / 129 (69% -> 81%).
   The child runs at nice +10 over the compile (`EEAT_ST_NICE`; 0: the same priority); `EEAT_ST_GENERAL=0`: the short plan's
