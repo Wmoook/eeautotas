@@ -1297,6 +1297,33 @@ ways in.
   x 252 and x 244 climbs: the goal field falls along it, 48.2 -> 33.2 -> 34 -> 31.2 -> 23.6 -> 12.6, so (250,255) is no
   false near, the finders stall on the way); a dedicated long solve of an (edge, place) that failed twice (the stretch
   child's 40 / 80 s windows failed switch 5 from 3 anchors) and these knobs on the gate levels.
+- **The hard set at 900 s, cycle 3: the deep rung's cost, its gate, the floor rung** (B8 hard, 2026-10-01, branch
+  n5-b8-hard-c3 = origin/n5-plan 04ecf95 + origin/n5-b7-b9 4fc5666 merged; box 8, 900 s, W3, arms side by side, one run a
+  level, load 190-230; `src/out/n5/b8/hard_c3.txt`). THE KNOBS SPLIT (`EEAT_RUNG_DEEP=135000` alone = d vs + `EEAT_RUNG_PLACE=1
+  EEAT_START_JITTER=1` = dpj): compiled 0 / 0 of 5; triggers Egg Quest II base 23 / 23, NC Naos 10a3 4 / 4 (both stuck at
+  anchor 5 from ~260 s: coins (220,122) 404 tiles, (207,189) 338-364, (208,186) 354-371 at the 135-s rung; coin (111,113)
+  1 tile at rung 3, the 1 x 2 pocket), NC Naos de5f 9 / 11, Forgotten Veil 731 13 / 11, b7be 11 / 6: the place rung and the
+  jitter gave no gain on the hard set (B7's Bad EE Level 9 gain is that level's); cycle 2's deep + yield (f3aacdf) on four
+  of them 35 / 16 / 9 / 12 (10a3 16 vs 4: one 900-s run a level is noise-bound). THE DEEP RUNG'S COST (`src/out/b8hard/deep.js`
+  in the worktree; 16 compiles: cycle 2's deep + yield and this cycle's d / dpj): the 135-s rung found 33 legs and FAILED
+  123 times (13,737 worker-s, ~860 s of a compile's ~2,600); its (edge, class)'s rung-3 closest tells them apart: the finds
+  came after a rung-3 closest <= 80 tiles or under 0.9 x the rung-2 one (the leg nearing as the window grew) in 29 of 33,
+  the fails mostly stood still far away (Egg Quest II's red key (297,153) 994 / 994 tiles, green key 1,790 / 1,790, NC Naos
+  10a3's coins 269 / 269, 404 / 404). THE DEEP RUNG'S GATE (strategy.js, OPT-IN `EEAT_DEEP_GATE=<tiles>` with the deep rung,
+  `EEAT_DEEP_GATE_P` 0.9; off = byte for byte): a deep step of an (edge, class) whose rung-3 closest is known, above the
+  tiles and not under P x its rung-2 closest is not run (the anchor leaves the edge for the epoch; history cleared at a
+  deepening; a `deepgate` event). Offline on the 16 logs: at 80 tiles 29 / 33 finds kept, fails 44 / 123 (5,267 of 13,737
+  s); at 120 31 / 33, 51 (5,990 s); at 160 33 / 33, 63 (7,352 s: 6,385 s freed, ~400 worker-s a compile). THE LEVEL'S FLOOR
+  RUNG (OPT-IN `EEAT_RUNG_FLOOR=<n>`; off = byte for byte): a rung that ran n counted steps on the level (finds + budget
+  fails) at a find rate under 1 / n is dead and the steps proposed below the lowest live rung start there (never above the
+  45-s rung, cleared at a deepening, a `floor` event); its counterfactual on the 16 logs: 6.7% of the worker time in a dead
+  rung's fails (n 24), 8 finds there. ROUND 3, dpj vs dpj + `EEAT_RUNG_FLOOR=24 EEAT_DEEP_GATE=80` side by side (2 levels):
+  Egg Quest II base 32 vs **19** triggers, NC Naos de5f 9 vs **7**: NEGATIVE. The floor CASCADES: lifted to rung 1, the
+  hopeless edges the 1.5-s rung used to screen made rung 1's rate fall too (Egg Quest II rung 1 1 / 26 finds vs 17 / 93
+  without), so it died as well and every step ran at 15 s (rung 2 72 fails, 1,044 worker-s; 168 steps vs 389); the gate did
+  what it should there (12 deep steps not run; the deep rung 7 finds / 7 fails vs 3 / 8). Both stay OPT-IN, not merged.
+  NEXT: the floor's statistics from steps at their own rung only (a lifted step no evidence), at most rung 1; the gate
+  alone at 160 tiles vs the deep rung on the hard set, more runs a level.
 - **THE ENDGAME and THE AIRBORNE ARRIVAL** (C6 push 3 lane 5 block 3; `src/out/n5/lanes/c6_lane5_b3.md`). THE ENDGAME
   (strategy.js after JOINS, its own clock; OPT-IN `--endgame=<s>` / `EEAT_ENDGAME_S`, unset / 0 = the compile byte for byte;
   `EEAT_ENDGAME_K` the ladder's largest K, 64; `report.endgame`): the optimizer's exact endgame ladder (`src/endgame.js`
