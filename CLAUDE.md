@@ -1495,3 +1495,34 @@ ways in.
   opt-in, not merged: the big levels' wall is the hard sub-level set itself (every waypoint stops at one), not the walk to
   it. NEXT: skelClosest by the same set measure (the strategy's relays and near plans read 4,029 on Phina), the hard
   sub-level set from the inside (which tiles of the set the finders never reach, by the engine).
+  CYCLE 5 (box 8, n5-b8-big-c5 = n5-b8-big + n5-plan 5214e62; two OPT-IN knobs, each off = byte for byte; the box's scripts
+  `~/b8_big_c5/abc5.js` (per level and arm: triggers, ok steps, the BLIND step seconds = waypoints with no skeleton call and
+  no success, proofs, the death legs), `noskel.js`, `tp.js` / `tu.js` (a waypoint's goal field from the start, both layers)).
+  FOUND on cycle 3's logs: on the PROTECTION levels the waypoints with no finite goal field at any start (no skeleton, the
+  step's closest -1, the direct leg searching blind for the whole window; THE DEATH LEG never fired: it waits for
+  fail.closedAll, which a blind search on a big level never reaches) took Infinity Pain 487 of its 855 step worker-s,
+  Endless Pain 368 of 853, Nirthophia 199 of 847 (1,054 of the 20 levels' 15,419), none found. WHY: types.js PROT_LAYER's
+  unprotected-ball field fU was built with NO effect-state option, so on a level with protection AND effect tiles (31 of
+  the 149 big failing levels of the c6 b3 full compile) every goal field of an unprotected ball is the gravity-blind WALK
+  (the protected fP is the effect-state physics field); on those 3 levels it is -1 at the start for the trophy, the
+  protection-on tiles, coins and checkpoints (fP 65-111 tiles; the death-enabled field 1,646-1,705 = DEATH_COST + 8-67:
+  respawn at a checkpoint the ball has not touched yet), and a combined build costs 2.4-5.1 s a (waypoint, doors, thread).
+  THE DEATH WAY FIRST (executor.js reachWp, `EEAT_NOFIELD_DEATH=1`; `EEAT_NOFIELD_SHARE` 0.2): no start with a finite
+  field and a finite death-enabled field at one: the direct leg 0.2 of the window, the death leg the rest (also after a
+  proof of no no-death way). THE PROTECTION LAYER'S PHYSICS (types.js goalField, `EEAT_PROT_FX=1`): fU with the plain
+  branch's option (the ball's state {mj, jb} with this layer's next-state seeds, or the plain-ball field), keyed by it, its
+  fxOf this layer's; its -1 (the walk's) read by the executor's proof pre-check as every effect-state field's; the
+  trophy's start value on 25 such levels: 17 cut either way, Mount Uonegatscil 40.2 -> 4,040.2 (the FX_FAR phantom),
+  Revenge of Syssba 80.6 -> 112, The Burj 329 -> 348.6, the rest within 3 tiles; the builds +30-60%; planexec 15/15 with it.
+  THE A/Bs (Infinity Pain campaign + hard, Endless Pain, Nirthophia, Demonic Citadel, MegaMan Dash; 300 s, W3, par 3 an arm
+  side by side, one tree an A/B, `EEAT_EXEC_PROF=1`, the box at load 190-210): (1) base vs `EEAT_NOFIELD_DEATH=1`: compiled
+  0 = 0, triggers 4 vs 6 (Nirthophia; the base's own second run 6), ok steps 25 vs 23, the death legs 0 of 87 found (the
+  death field's way respawns at a checkpoint the ball has not touched: no death from the start gets there), the blind step
+  seconds 1,501 vs 1,501: NO GAIN. (2) base vs `EEAT_PROT_FX=1`: compiled 0 = 0, proofs 0 vs 24, the blind step seconds on
+  the 4 protection levels 1,507 -> 780 (Infinity Pain 473 -> 131, hard 476 -> 171, Endless Pain 313 -> 198, Nirthophia 245
+  -> 280), triggers 6 vs 2 (Nirthophia; its 4 runs 4 / 6 / 6 base-like, 2 with it), ok steps 29 vs 23 (Nirthophia 7 vs 1),
+  peak RSS +0.3-0.6 GB: the freed time went to waypoints that fail too: NO GAIN SHOWN, opt-in, not merged. NEXT: what
+  those waypoints need is a CHECKPOINT then a death (the death-enabled field's way): a planner fact from it (no finite field
+  without deaths, a finite one with them: the respawn tile its way uses names the checkpoint to touch first, as
+  EEAT_NEEDS_DEATHS names a death door's count), so the plan goes checkpoint -> die -> the waypoint; PROT_FX with
+  EEAT_SKEL_REMEAS (the FX_FAR phantom on the unprotected fields).
