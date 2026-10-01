@@ -33,6 +33,7 @@ const T = require('../types.js');
 const C = require('../../common.js');
 const MD = require('../model.js');
 const BW = require('./backward.js');
+const RK = require('./orderrank.js');
 
 const ENVN = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? +process.env[k] : d);
 const CLOCKS = (process.env.EEAT_BWC_CLOCKS || '1500,40000').split(',').map(Number).filter((x) => x > 0);
@@ -53,7 +54,13 @@ const ORDER_LEVEL = process.env.EEAT_BWC_ORDER === 'level';
 // 'budget: the most gain' partial plans 1,200-3,000 est ticks away while the route takes the coin 60-200 away). With the
 // knob a node's candidates are its usable edges by est (the nearest first, K + 2 of them), plan 1's first step put at
 // place PLAN_AT (1) unless nearer, the other plans' first steps after them; a candidate's weight W_EST0 + RANK_W x its place
-const RANK_EST = process.env.EEAT_BWC_RANK === 'est';
+// THE LEARNED ORDER (P4 gated, OPT-IN EEAT_BWC_RANK=learn; src/plan/lab/orderrank.js + orderrank.json, fitted by
+// tools/cmp/ordertrain.js on the known routes' next triggers): the node's usable edges by the learned score (est, lb,
+// the gain, the kind, the plans' first steps, what the touch opens), the K + 2 best its candidates; everything else as
+// RANK=est (KEEP over checkpoints, no toggle back, the relay's target first). No weights file: RANK=est
+const RANK_LEARN = process.env.EEAT_BWC_RANK === 'learn';
+const RANK_EST = process.env.EEAT_BWC_RANK === 'est' || RANK_LEARN;
+const AFTER_K = ENVN('EEAT_BWC_AFTERK', 16);
 const GAIN_FIRST = process.env.EEAT_BWC_GAINFIRST !== '0';
 const W_EST0 = ENVN('EEAT_BWC_WEST0', 0.25), PLAN_AT = ENVN('EEAT_BWC_PLANAT', 1);
 // THE CHAIN'S MEMORY OF FAILED LEGS (P4 gated, OPT-IN EEAT_BWC_LEARN=1; off = byte for byte): a leg the chain tried at its
@@ -174,14 +181,26 @@ function chainLevel(L, o = {}) {
 				const a = planner._anchorOf(anchorArg(n));
 				cls = a.S.key + '|' + a.cls;
 				es = (planner._edgesOf(a.S, a.pos, a.base, 'plan', true, cls, a) || []).filter((e) => !e.relaxOnly && !e.viaDeath && (e.X ? e.X.kind !== 'die' && e.live && e.live.length : true));
-				// (no toggle back: the switch the node's own leg just toggled, at once again (the planner's UNTOGGLE rule))
-				if (n.viaFeat) es = es.filter((e) => !(e.X && String(e.X.feat) === n.viaFeat));
-				// (GAIN FIRST: the edges whose touch raises the model's gain (the trophy too) by est, then the gain-neutral ones (a
-				// checkpoint, a switch back), then the ones that lower it: nearest-first alone cycled among Frostbitten's three
-				// checkpoints (54,136) / (62,137) / (65,137), 62 nodes, gain 16 vs the plans' 17 and their route; EEAT_BWC_GAINFIRST=0 off)
-				const g0 = Number.isFinite(+a.S.gain) ? +a.S.gain : 0;
-				const grp = (e) => { if (!GAIN_FIRST) return 0; if (!e.X) return 0; const d = e.S2 && Number.isFinite(+e.S2.gain) ? +e.S2.gain - g0 : 0; return d > 0 ? 0 : d === 0 ? 1 : 2; };
-				es.sort((x, y) => (grp(x) - grp(y)) || (x.est - y.est) || (x.lb - y.lb));
+				const W = RANK_LEARN ? RK.load() : null;
+				if (W && es.length > 1) {
+					// (THE LEARNED ORDER: the scores over every usable edge, as the data was made; then no toggle back)
+					const t0 = Date.now();
+					const sc = RK.scoreAll(es, { S: a.S, firsts: firsts.map((s) => String(s.edge)), viaFeat: n.viaFeat, after: W.after, afterK: AFTER_K, planner, a }, W);
+					stats.rankMs = (stats.rankMs || 0) + Date.now() - t0;
+					const ix = es.map((e, i) => i).sort((i, j) => sc[j] - sc[i] || es[i].est - es[j].est);
+					es = ix.map((i) => es[i]);
+					if (n.viaFeat) es = es.filter((e) => !(e.X && String(e.X.feat) === n.viaFeat));
+					n.learned = true;
+				} else {
+					// (no toggle back: the switch the node's own leg just toggled, at once again (the planner's UNTOGGLE rule))
+					if (n.viaFeat) es = es.filter((e) => !(e.X && String(e.X.feat) === n.viaFeat));
+					// (GAIN FIRST: the edges whose touch raises the model's gain (the trophy too) by est, then the gain-neutral ones (a
+					// checkpoint, a switch back), then the ones that lower it: nearest-first alone cycled among Frostbitten's three
+					// checkpoints (54,136) / (62,137) / (65,137), 62 nodes, gain 16 vs the plans' 17 and their route; EEAT_BWC_GAINFIRST=0 off)
+					const g0 = Number.isFinite(+a.S.gain) ? +a.S.gain : 0;
+					const grp = (e) => { if (!GAIN_FIRST) return 0; if (!e.X) return 0; const d = e.S2 && Number.isFinite(+e.S2.gain) ? +e.S2.gain - g0 : 0; return d > 0 ? 0 : d === 0 ? 1 : 2; };
+					es.sort((x, y) => (grp(x) - grp(y)) || (x.est - y.est) || (x.lb - y.lb));
+				}
 			} catch (e) { es = []; }
 			const list = [];
 			// (a relay node: its failed target first, at RELAY_W)
@@ -194,8 +213,9 @@ function chainLevel(L, o = {}) {
 			firsts.forEach((s, i) => {
 				if (n.viaFeat && s.waypoint && s.waypoint.trig !== undefined && model.triggers[s.waypoint.trig] && String(model.triggers[s.waypoint.trig].feat) === n.viaFeat) return;
 				const j = list.findIndex((c) => c.edge === String(s.edge));
-				const at = i === 0 ? Math.min(PLAN_AT + (n.relay ? 1 : 0), list.length) : list.length;
-				if (j >= 0) { if (i === 0 && j > at) { const [c] = list.splice(j, 1); list.splice(at, 0, c); } return; }
+				// (THE LEARNED ORDER: plan 1's first step where its score put it; a first step that is no usable edge last)
+				const at = i === 0 && !n.learned ? Math.min(PLAN_AT + (n.relay ? 1 : 0), list.length) : list.length;
+				if (j >= 0) { if (i === 0 && !n.learned && j > at) { const [c] = list.splice(j, 1); list.splice(at, 0, c); } return; }
 				list.splice(at, 0, { edge: String(s.edge), wp: s.waypoint, step: s });
 			});
 			list.forEach((c, i) => push(c.edge, c.wp, c.w !== undefined ? c.w : W_EST0 + RANK_W * i, c.step));
