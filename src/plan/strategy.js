@@ -195,6 +195,12 @@ const PREC_FAST = process.env.EEAT_PREC_FAST !== '0' && process.env.EEAT_PERFECT
 // (still at most PREC_RUNS runs); the moves' end with no route waits for a running child (precHold) as for the stretch
 // child; the child is killed when the moves end, and a route it prints after that is not taken.
 const PREC_ASYNC = process.env.EEAT_PREC_ASYNC === '1';
+// (B8 speed, cycle 2) THE EXACT LANDING'S ROUTES AS THEY COME (OPT-IN EEAT_PREC_STREAM=1; off = byte for byte): the child
+// prints every faster route it finds (precision.js with the fast rests: the coasted rests' route first, then the braked
+// rests' faster one), but the compile took its route only when the child ENDED; with the knob each better route is verified
+// (routeOf) the moment it is printed, so the first route comes at the coasted pass's find; the child, its later faster
+// routes and the step that waits for it are as before.
+const PREC_STREAM = process.env.EEAT_PREC_STREAM === '1';
 // the proof's starts: the level start after k = 0..R idle ticks, R = the idle ticks until the state rests (the timer starts
 // at the first input: waiting is free); at most PROVE_IDLE_MAX (one exact search each)
 const PROVE_IDLE_MAX = 64;
@@ -730,7 +736,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const att = [...precAtt].sort((a, b) => a[1] - b[1]).slice(0, PREC_ATTEMPTS).map((e) => e[0]);
 		const file = path.join(os.tmpdir(), `eeat_prec_${process.pid}_${precRuns}.txt`);
 		const t1 = Date.now();
-		let found = null, done = null, foundRun = Infinity;
+		let found = null, done = null, foundRun = Infinity, streamEv = null;
 		try {
 			fs.writeFileSync(file, att.join('\n') + '\n');
 			say({ ev: 'precision', run: precRuns, attempts: att.length, nearest: Math.round(+precAtt.get(att[0]) * 10) / 10, seconds: secs });
@@ -755,7 +761,11 @@ async function compile(L, opts = {}, emit = () => {}) {
 						let ev = null;
 						try { ev = JSON.parse(line); } catch (e) { continue; }
 						// (the fewest run ticks of its results: the fast pass and --after print each faster one)
-						if (ev.ev === 'result' && ev.kind === 'finish' && typeof ev.inputs === 'string' && (!found || (Number.isFinite(+ev.runTicks) && +ev.runTicks < foundRun))) { found = ev.inputs; foundRun = Number.isFinite(+ev.runTicks) ? +ev.runTicks : Infinity; }
+						if (ev.ev === 'result' && ev.kind === 'finish' && typeof ev.inputs === 'string' && (!found || (Number.isFinite(+ev.runTicks) && +ev.runTicks < foundRun))) {
+							found = ev.inputs; foundRun = Number.isFinite(+ev.runTicks) ? +ev.runTicks : Infinity;
+							// (EEAT_PREC_STREAM: the route at once, not at the child's end)
+							if (PREC_STREAM && !precOver) { const x = routeOf(T.masksOf(found.replace(/[^0-O]/g, '')), 'the exact landing (precision)', null); if (x && x.better) streamEv = x.ev; }
+						}
 						else if (ev.ev === 'done') done = ev.end;
 					}
 				});
@@ -768,6 +778,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		say({ ev: 'precision', run: precRuns, end: found ? 'finish' : done || 'ended', ms: Date.now() - t1 });
 		if (PREC_ASYNC && !found && !precOver) setImmediate(() => { precision(null, true).catch((e) => bug('precision', { error: e.message })); });
 		if (!found || (PREC_ASYNC && precOver)) return null;
+		if (PREC_STREAM) return streamEv;
 		const x = routeOf(T.masksOf(found.replace(/[^0-O]/g, '')), 'the exact landing (precision)', null);
 		return x && x.better ? x.ev : null;
 	};
