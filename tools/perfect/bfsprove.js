@@ -421,22 +421,28 @@ async function main() {
 		const reroot = async () => {
 			const t1 = Date.now();
 			const ds = await Promise.all(wk.map((w) => ask(w, { type: 'dump' }, 'dumped')));
-			const all = [];
-			for (const r of ds) for (let i = 0; i < r.rs.src.length; i++) all.push([r.rs, i]);
-			const shares = Array.from({ length: threads }, () => []);
-			all.forEach((e, i) => shares[i % threads].push(e));
-			const packs = shares.map((sh) => {
-				let total = 0;
-				for (const [rs, i] of sh) total += rs.off[i + 1] - rs.off[i];
-				const src = new Int32Array(sh.length), off = new Int32Array(sh.length + 1), hs = new Float64Array(sh.length), masks = new Uint8Array(total);
-				let at = 0;
-				sh.forEach(([rs, i], q) => { src[q] = rs.src[i]; hs[q] = rs.hs[i]; off[q] = at; masks.set(rs.masks.subarray(rs.off[i], rs.off[i + 1]), at); at += rs.off[i + 1] - rs.off[i]; });
-				off[sh.length] = at;
-				return { src, off, masks, hs };
-			});
+			// dealt round robin over the fronts' concatenated order, in two typed passes (a JS array of a pair a state ran
+			// past V8's array length at ~100 M states: NC Naos C 60's re-rooting threw)
+			const cnt = new Float64Array(threads), tot = new Float64Array(threads);
+			let N = 0;
+			for (const r of ds) { const rs = r.rs; for (let i = 0; i < rs.src.length; i++, N++) { const w = N % threads; cnt[w]++; tot[w] += rs.off[i + 1] - rs.off[i]; } }
+			const packs = Array.from({ length: threads }, (_, w) => ({ src: new Int32Array(cnt[w]), off: new Int32Array(cnt[w] + 1), hs: new Float64Array(cnt[w]), masks: new Uint8Array(tot[w]) }));
+			const qn = new Float64Array(threads), qa = new Float64Array(threads);
+			let g = 0;
+			for (const r of ds) {
+				const rs = r.rs;
+				for (let i = 0; i < rs.src.length; i++, g++) {
+					const w = g % threads, p = packs[w], q = qn[w]++, a = qa[w], o0 = rs.off[i], o1 = rs.off[i + 1];
+					p.src[q] = rs.src[i]; p.hs[q] = rs.hs[i]; p.off[q] = a;
+					for (let t = o0; t < o1; t++) p.masks[a + t - o0] = rs.masks[t];
+					qa[w] = a + o1 - o0;
+				}
+			}
+			for (let w = 0; w < threads; w++) packs[w].off[cnt[w]] = qa[w];
+			ds.length = 0;
 			await Promise.all(wk.map((w, i) => ask(w, { type: 'roots', rs: packs[i] }, 'ready')));
 			rebalances++; rebalMs += Date.now() - t1;
-			say({ ev: 'rebalance', d, states: all.length, ms: Date.now() - t1 });
+			say({ ev: 'rebalance', d, states: N, ms: Date.now() - t1 });
 		};
 		for (;;) {
 			const rs = await Promise.all(wk.map((w) => ask(w, { type: 'layer', d }, 'done')));
