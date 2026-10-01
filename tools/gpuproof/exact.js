@@ -55,7 +55,7 @@ function run(file, args, say) {
 		say({ ev: 'tables', ms: Date.now() - t0, doorStates: nSig, info: tb.info, C: Crun, U: Number.isFinite(U) ? U : null });
 		const tool = args.tool || G.nativeTool();
 		if (!tool) { Object.assign(out, { verdict: 'error', why: 'no eegpu (tools/gpuproof/build-linux.sh)' }); return resolve(out); }
-		const pass = ['seconds', 'htBits', 'arena', 'stage', 'hostGB', 'deaths', 'cachedir', 'launch-ms', 'from', 'ladder', 'progress', 'ptxdir', 'spill', 'dfs', 'dfsThreads'];
+		const pass = ['seconds', 'htBits', 'arena', 'stage', 'hostGB', 'deaths', 'cachedir', 'launch-ms', 'from', 'ladder', 'progress', 'ptxdir', 'spill', 'dfs', 'dfsThreads', 'ttMinLim', 'table2', 'dfsAt'];
 		const eargs = ['exact', blobFile, `--h=${hFile}`, `--C=${Crun}`, '--hpipe=1'];
 		for (const k of pass) if (args[k] !== undefined) eargs.push(`--${k}=${args[k]}`);
 		if (args['launch-ms'] === undefined) eargs.push('--launch-ms=200');

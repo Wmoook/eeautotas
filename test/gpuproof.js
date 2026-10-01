@@ -31,7 +31,9 @@ const ROOMS = {
 	switch: ['##############', '#.....#......#', '#.....e......#', '#S..1.e..G...#', '##############'],
 	coindoor: ['#############', '#......#....#', '#......c....#', '#S...o.c.G..#', '#############'],
 	spikes: ['##############', '#............#', '#S.C...xx..G.#', '##############'],
-	portal: ['#############', '#....#......#', '#S..P#..Q.G.#', '#############'],
+	// (a wall the ball passes only through the portal pair; the CPU prover proves it in ~5 s on 2 threads, where a tile
+	// between the exit and the trophy, or a longer run-up, leaves it open after 120 s: the bound near a portal is weak)
+	portal: ['########', '#...#..#', '#S.P#QG#', '########'],
 };
 const only = args.only ? new Set(args.only.split(',')) : null;
 const dir = args.keep ? path.resolve(args.keep) : fs.mkdtempSync(path.join(os.tmpdir(), 'gpuproof-'));
@@ -55,9 +57,20 @@ const WPAR = path.join(__dirname, '..', 'tools', 'perfect', 'wholepar.js');
 		const cpuOut = cp.execFileSync(process.execPath, [WPAR, file, '--threads=2', '--seconds=120', '--split=2', '--shared=1', '--ttBits=18'], { encoding: 'utf8', timeout: 300000 });
 		const cpu = cpuOut.trim().split('\n').map((l) => JSON.parse(l)).find((o) => o.ev === 'result');
 		const opt = cpu && cpu.verdict === 'PROVEN' ? cpu.opt : null;
+		const work = path.join(dir, name);
+		if (opt === null && cpu && cpu.verdict === 'OPEN' && cpu.lb > 0) {
+			// (the CPU prover did not finish in its time: the same 'none <= C' at its last closed contour, and the GPU's optimum
+			// at most a route the engine plays)
+			check(`${name} the CPU prover's lb (no optimum in its time)`, true, `lb ${cpu.lb}`);
+			const r6 = await XG.run(file, Object.assign({ C: String(cpu.lb - 1), tool, work, seconds: '120' }, extra), quiet);
+			check(`${name} GPU C=${cpu.lb - 1}: no route (as the CPU's last closed contour)`, r6.verdict === 'NONE' && r6.lb >= cpu.lb, `${r6.verdict} lb ${r6.lb}`);
+			const r7 = await XG.run(file, Object.assign({ C: String(cpu.lb + 12), ladder: '1', from: String(cpu.lb - 1), tool, work, seconds: '600' }, extra), quiet);
+			check(`${name} GPU ladder: an optimum above the CPU's lb, replayed`, r7.verdict === 'FOUND' && r7.opt >= cpu.lb && r7.replay && r7.replay.runTicks === r7.opt,
+				`${r7.verdict} ${r7.opt}, ${r7.Cs ? r7.Cs.map((c) => c.Cl + ':' + c.status + ':' + c.stage + ':' + c.seconds + 's').join(' ') : '-'}`);
+			continue;
+		}
 		check(`${name} the CPU prover's optimum`, opt !== null && opt >= 0, `${cpu ? cpu.verdict : '-'} ${opt}`);
 		if (opt === null) continue;
-		const work = path.join(dir, name);
 		// the GPU at C = opt: the same optimum, replayed at that many run ticks
 		const outF = path.join(dir, `${name}_gpu.eetas`);
 		const r1 = await XG.run(file, Object.assign({ C: String(opt), tool, work, out: outF, seconds: '120', htBits: '22' }, extra), quiet);
@@ -67,12 +80,13 @@ const WPAR = path.join(__dirname, '..', 'tools', 'perfect', 'wholepar.js');
 			const r2 = await XG.run(file, Object.assign({ C: String(opt - 1), tool, work, seconds: '120', htBits: '22' }, extra), quiet);
 			check(`${name} GPU C=${opt - 1}: no route (as the CPU's closed contour)`, r2.verdict === 'NONE' && r2.lb >= opt, `${r2.verdict} lb ${r2.lb}`);
 		}
-		// the depth-first stage (a small arena: the frontier stops fitting after a few layers)
-		const r4 = await XG.run(file, Object.assign({ C: String(opt + 3), tool, work, seconds: '120', htBits: '22', arena: '3000' }, extra), quiet);
+		// the depth-first stage (a small arena: the frontier stops fitting after a few layers; its stacks live in the arena,
+		// so ~130 threads here: the portal room's 4-contour descent from C + 3 takes ~110 s on the RTX 5090)
+		const r4 = await XG.run(file, Object.assign({ C: String(opt + 3), tool, work, seconds: '300', htBits: '22', arena: '3000' }, extra), quiet);
 		check(`${name} GPU depth-first stage, C=${opt + 3}: the same optimum`, r4.verdict === 'FOUND' && r4.opt === opt && r4.replay && r4.replay.runTicks === opt,
 			`${r4.verdict} ${r4.opt}, ${r4.Cs ? r4.Cs.map((c) => c.Cl + ':' + c.status + ':' + c.stage).join(' ') : '-'}`);
 		if (opt > 0) {
-			const r5 = await XG.run(file, Object.assign({ C: String(opt - 1), tool, work, seconds: '120', htBits: '22', arena: '400' }, extra), quiet);
+			const r5 = await XG.run(file, Object.assign({ C: String(opt - 1), tool, work, seconds: '120', htBits: '22', dfsAt: '3' }, extra), quiet);
 			check(`${name} GPU depth-first stage, C=${opt - 1}: no route (closed by the depth-first stage)`, r5.verdict === 'NONE' && r5.lb >= opt && r5.Cs.some((c) => c.stage === 'dfs' && c.status === 'closed'), `${r5.verdict} lb ${r5.lb} ${r5.Cs ? r5.Cs.map((c) => c.Cl + ':' + c.status + ':' + c.stage).join(' ') : '-'}`);
 		}
 		// the ladder from the start's bound

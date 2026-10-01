@@ -1289,6 +1289,39 @@ ways in.
   C 26 (6 tasks ran 22+ min, then 1); `--split=6` makes 2,700 tasks at C 27 (the pocket's idle starts 29-36: 2,600 of
   them; the falling starts 0-28 one or two each: in the shaft every input gives the same state), 5-7 M nodes a task, all
   13 workers busy, 1.8 M nodes/s on box 7 at load ~150. **SWITCH LABYRINTH IS PROVEN: THE FIRST WHOLE ROUTE PROVEN OPTIMAL** (box 7, 2026-10-01 01:11 EDT): C 26 closed (19 threads at load 140-175, 1,476,991,460 nodes, 2,159 s: every route >= 26 run ticks), then C 27 (`--split=6 --from=26`, 2,700 tasks) closed by two SEQUENTIAL runs on the task log: a 13-thread run (its 2,189 tasks logged before a helper was started on the same log) and the closing run (19 threads, the other 511 tasks, 434 s; 2,849,047,846 nodes in the C's report): NO ROUTE FINISHES IN FEWER THAN 27 RUN TICKS, so the 27-tick route (the best known = the compiler's route, 1.0 of the best known on the scoreboard) is TICK-PERFECT (verdict PROVEN, gap 0; the tiers checked on both known routes first, 0 violations). The proof rests on: the engine (exact), the tiers kin / rel / gate being admissible, the stateHash merge (53 bits), the shared table's and the task log's rules above. Box 7 `~/b7_proof_out/c3/` (switch_lab_c26.out, switch_lab_c27s.out, c27_seq.tasks.jsonl). ONE RUN AT A TIME on a log: two runs writing one log at once are NOT a proof by the union of their lines (each can prune on a task only the other finished: a subtree searched by neither); a closing run trusts only the lines of runs that ended before it started (cycle 3: a 5-thread helper on the same log, from the other end, was dropped: the C 27 close resumes from the first run's 2,189 lines written before the helper started).
+- **THE EXACT SEARCH ON THE GPU** (box 8 lane 'gpuproof', 2026-10-01; `eegpu exact` = `native/exact.h` + `exactkernels.cu`
+  (its own module `eegpu_exact_<tw>.ptx`: the app's kernels.cu and PTX unchanged) + `exacthost.h`; `tools/perfect/gpuh.js`
+  (the bound tables), `tools/gpuproof/exact.js` (the driver), `build-linux.sh`, `checkengine.js`; `test/gpuproof.js` 70/0; a
+  tool: the compiler and eecore.h unchanged). The CPU prover's search (wholepar.js: every input of every tick over exact
+  engine states from every idle start, contours over the layer bound Cl = C + 1, the max of the kin / rel / gate tiers) on
+  the GPU: BREADTH FIRST by layers (one thread a parent, the 18 inputs, an input bit the tick did not read = its lower
+  option's state, not simulated; a finish = the crown; cut when d + 1 + h > Cl, the least cut the next contour; merged by
+  the visited set: the 53-bit stateHash + a second 64-bit hash of the same key stream (117 bits; open addressing, never
+  overwritten; a full probe keeps the state: no merge); new = its (parent, option) link and its state in the next GPU
+  arena), then, once the next layer would not fit the arena, THE DEPTH-FIRST STAGE (the frontier = the tasks, one stack a
+  thread in the arena, the visited set as wholepar's SHARED TRANSPOSITION TABLE: a slot's least layer by atomicMin, a
+  state pruned only when some thread entered it at a layer <= this one; a second table in the arena's spare memory where
+  the first one's probes are full; only states with lim >= `--ttMinLim` 2 in it; ~150-ms launches, the warp's lanes meet
+  at every tick: 130 M nodes/s; the first version without these 22 M). h = makeCtx(kin, rel, gate)'s h of n5-b7-proof 8ec806d, line for
+  line: endgame.lowerBound ported (exact.h `xkLowerBound`), bounds.js at() on the float32 tile tables gpuh.js exports (one
+  order-tier field per door state; a door state the tables lack: the rel tier alone, and exact.js adds its field through
+  `--hpipe`). A finish's route (the links, the stack's path) is replayed by eesim.js. `node tools/gpuproof/exact.js
+  <level.eelvl> --C=<run ticks> | --route=<a.eetas> [--ladder=1] [--from=<a proven lb>] [--seconds=600] [--out=<found.eetas>]
+  [--tool=<eegpu>] [--cachedir=] [--htBits=] [--arena=] [--deaths=0] [--spill=1] [--dfs=0]`: FOUND (the exact minimum <= C,
+  replayed: below the routes given = a faster route) | NONE (no route takes <= C run ticks; = U - 1: the route is
+  tick-perfect) | OPEN / time; `eegpu exacth` prints the GPU's h along a run. Build ON the Linux box: `sh
+  tools/gpuproof/build-linux.sh` (g++ with build-native.js's flags, NVRTC 12.8 `--fmad=false`: the app's 4 PTX + the exact
+  module's). MEASURED (box 8, RTX 5090): the engine (`checkengine.js`: info, bench 2.34 G ticks/s, a goal beam vs eesim.js
+  on 3 levels: 0 differences); the 7 toy rooms (plain, key door, ledge, switch, coin door, spikes + checkpoint, portal): the
+  CPU prover's optimum = the GPU's at C = opt, NONE at opt - 1, both through the depth-first stage too, the ladder; GPU h =
+  its CPU copy = gpuh.js = the CPU prover's h at every tick of the routes, h <= the ticks left: 70/0. **Switch Labyrinth
+  from scratch: Cl 26 closed in 8.4 s (1.14 G nodes; the CPU prover's C 26: 1.48 G nodes, 2,159 s on 19 threads), Cl 27
+  in 28.3 s (3.69 G nodes), FOUND 27 replayed, 46 s in all: the same tick-perfect proof, ~250x the CPU's wall clock**; the
+  nodes/s on the same box: the GPU's Cl 25 411 M nodes in 3.06 s (134 M/s) vs `wholepar.js --threads=14 --split=6` C 25
+  440 M in 258 s (1.70 M/s, box 8 at load ~190): 84x. Host RSS 263 MB (the first runs' host spill took 85 GB of box 8:
+  `--spill` is off by default, the depth-first stage bounds the memory); GPU: the table 30% of the free memory, the two
+  arenas the rest. NOT YET: the newer CPU tiers (cycles 5-6: the death way's respawn bound o.hResp, the reach field's -1 in
+  levelproof contextOf) are not in the GPU's h (still admissible, weaker on those levels).
 - **THE ENDGAME and THE AIRBORNE ARRIVAL** (C6 push 3 lane 5 block 3; `src/out/n5/lanes/c6_lane5_b3.md`). THE ENDGAME
   (strategy.js after JOINS, its own clock; OPT-IN `--endgame=<s>` / `EEAT_ENDGAME_S`, unset / 0 = the compile byte for byte;
   `EEAT_ENDGAME_K` the ladder's largest K, 64; `report.endgame`): the optimizer's exact endgame ladder (`src/endgame.js`

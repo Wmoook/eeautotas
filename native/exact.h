@@ -452,10 +452,12 @@ struct DfsParams {
 	const u8* tasks; i32 stateBytes; u32 nTasks;   // the frontier: layer D's states
 	i32 D, Cl, deaths;
 	u64* table; u32 tableMask, probeMax; u32* layerOf;
+	u64* table2; u32 tableMask2; u32* layerOf2;      // a second table (null: none) where the first one's probes are full
 	u8* stk; u64* meta; i32 maxDepth; u32 nThreads;   // frame k of thread t: stk + (t * maxDepth + k) * stateBytes
 	i32* depth; u32* task;                           // per thread (-1: no task in hand)
 	u32* taskNext;
 	u32 budget;                                      // child steps a thread per launch
+	i32 ttMinLim;                                    // the table only for children with lim >= this (default 2)
 	unsigned long long* found;                       // the finder's task + 1
 	i32* foundPath;                                  // [0] n, [1..n] the options from the task's state
 	u32* nextF;

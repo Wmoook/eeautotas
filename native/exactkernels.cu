@@ -114,21 +114,31 @@ __device__ void exactDfsBody(const DfsParams& p) {
 		u32 steps = 0;
 		while (steps < p.budget) {
 			if ((steps & 63) == 0 && *(volatile u32*)p.stop) break;
-			if (dep < 0) {
-				tk = atomicAdd(p.taskNext, 1u);
-				if (tk >= p.nTasks) { idle = true; break; }
-				*(State<TW>*)fr0 = *(const State<TW>*)(p.tasks + (size_t)tk * p.stateBytes);
-				const bool src = p.D == 0;
-				mt[0] = xdMeta(src ? 1 : 0, 31, 0x1ff, src);
-				dep = 0;
+			// the next child to simulate: pops, a new task and the twins of a lower option all here, so the warp's lanes
+			// meet again at the tick (SIMT: one step = one child for every lane)
+			i32 o = 0;
+			bool first = false;
+			u32 used = 31, jumpUsed = 0x1ff;
+			bool none = false;
+			for (;;) {
+				if (dep < 0) {
+					tk = atomicAdd(p.taskNext, 1u);
+					if (tk >= p.nTasks) { idle = true; none = true; break; }
+					*(State<TW>*)fr0 = *(const State<TW>*)(p.tasks + (size_t)tk * p.stateBytes);
+					const bool src = p.D == 0;
+					mt[0] = xdMeta(src ? 1 : 0, 31, 0x1ff, src);
+					dep = 0;
+				}
+				const u64 m = mt[dep];
+				o = (i32)(m & 31);
+				first = ((m >> 19) & 1) != 0;
+				used = (u32)((m >> 5) & 31); jumpUsed = (u32)((m >> 10) & 0x1ff);
+				if (!first) while (o > 0 && o < 18 && canonOption(o, used, jumpUsed) != o) { o++; st[1]++; }
+				if (o >= 18) { dep--; continue; }
+				break;
 			}
-			u64 m = mt[dep];
-			const i32 o = (i32)(m & 31);
-			if (o >= 18) { dep--; continue; }
-			const bool first = ((m >> 19) & 1) != 0;
-			u32 used = (u32)((m >> 5) & 31), jumpUsed = (u32)((m >> 10) & 0x1ff);
+			if (none) break;
 			mt[dep] = xdMeta(o + 1, used, jumpUsed, first);
-			if (!first && o > 0 && canonOption(o, used, jumpUsed) != o) { st[1]++; continue; }
 			steps++;
 			State<TW> s = *(const State<TW>*)(fr0 + (size_t)dep * p.stateBytes);
 			Sim<TW> sim(p.L, s);
@@ -169,15 +179,22 @@ __device__ void exactDfsBody(const DfsParams& p) {
 				if (fi < *(volatile u32*)p.nextF) atomicMin(p.nextF, fi);
 				continue;
 			}
-			const u64 a = (sim.hash(false) & 0x1fffffffffffffull) | (1ull << 62);
-			u64 b = sim.hash2(false);
-			if (b == 0) b = 1;
-			u32 slot = 0;
-			const int r = xsInsert(p.table, p.tableMask, p.probeMax, a, b, &slot);
-			if (r == 2) st[7]++;
-			else {
-				const u32 old = atomicMin(&p.layerOf[slot], (u32)c);
-				if (old <= (u32)c) { st[4]++; continue; }
+			// (the table only for states with lim >= ttMinLim: the deepest layers hold most states and their subtrees are
+			// a few ticks, so they are searched again rather than kept; no entry = no prune: sound)
+			if (lim >= p.ttMinLim) {
+				const u64 a = (sim.hash(false) & 0x1fffffffffffffull) | (1ull << 62);
+				u64 b = sim.hash2(false);
+				if (b == 0) b = 1;
+				u32 slot = 0;
+				int r = xsInsert(p.table, p.tableMask, p.probeMax, a, b, &slot);
+				u32* lay = p.layerOf;
+				// (the main table's probes full: the second table, in the stack arena's spare memory)
+				if (r == 2 && p.table2) { r = xsInsert(p.table2, p.tableMask2, p.probeMax, a, b, &slot); lay = p.layerOf2; }
+				if (r == 2) st[7]++;
+				else {
+					const u32 old = atomicMin(&lay[slot], (u32)c);
+					if (old <= (u32)c) { st[4]++; continue; }
+				}
 			}
 			st[5]++;
 			*(State<TW>*)(fr0 + (size_t)(dep + 1) * p.stateBytes) = s;

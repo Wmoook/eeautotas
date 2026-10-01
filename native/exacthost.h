@@ -279,6 +279,8 @@ static int runExact(int argc, char** argv, const LevelBlob& B) {
 	const bool progress = opt(argc, argv, "progress", "1") == "1";
 	const bool spill = opt(argc, argv, "spill", "0") == "1";   // a layer past the GPU arena into host RAM (else: the depth-first stage)
 	const bool dfsOn = opt(argc, argv, "dfs", "1") != "0";
+	const int ttMinLim = atoi(opt(argc, argv, "ttMinLim", "2").c_str());   // the depth-first stage keeps states with lim >= this in the table
+	const int dfsAt = atoi(opt(argc, argv, "dfsAt", "-1").c_str());     // (tests) the depth-first stage from this breadth-first layer on
 	const double hostGB = atof(opt(argc, argv, "hostGB", "24").c_str());
 	const int fromLb = atoi(opt(argc, argv, "from", "-1").c_str());   // a proven lb (run ticks): every route takes >= that many
 	const int maxIdle = 3000;
@@ -339,7 +341,7 @@ static int runExact(int argc, char** argv, const LevelBlob& B) {
 	const double rest = (double)freeB - 20.0 * slots - (spill ? 2.0 * stage * SB : 0) - 8.0 * 18 * stage - 1.5e9;
 	uint64_t arena = (uint64_t)atof(opt(argc, argv, "arena", "0").c_str());
 	if (arena == 0) arena = rest > 0 ? (uint64_t)(rest / 2 / SB) : 0;
-	if (arena < 1024) { printf("{\"error\":\"not enough GPU memory: lower --htBits or --stage (free %.1f GB)\"}\n", freeB / 1e9); return 4; }
+	if (arena < 16) { printf("{\"error\":\"not enough GPU memory: lower --htBits or --stage (free %.1f GB)\"}\n", freeB / 1e9); return 4; }
 	cu::Buf dT, dLay, dA, dB2, dSP, dSC, dPick, dNPick, dFound, dNextF, dStats;
 	bool up = dT.alloc(16ull * slots) && dLay.alloc(4ull * slots) && dA.alloc(SB * arena) && dB2.alloc(SB * arena) && dPick.alloc(8ull * 18 * stage) &&
 		dNPick.alloc(4) && dFound.alloc(8) && dNextF.alloc(4) && dStats.alloc(8 * XS_NSTATS);
@@ -447,7 +449,7 @@ static int runExact(int argc, char** argv, const LevelBlob& B) {
 		for (; d < Cl; d++) {
 			if (cur.n == 0) break;
 			// the next layer would not fit in the GPU: the depth-first stage from this one
-			if (!spill && dfsOn && d > 0 && prevN > 0 && (double)cur.n * ((double)cur.n / (double)prevN) * 1.1 > (double)arena) { dfsD = d; break; }
+			if (!spill && dfsOn && d > 0 && ((prevN > 0 && (double)cur.n * ((double)cur.n / (double)prevN) * 1.1 > (double)arena) || d == dfsAt)) { dfsD = d; break; }
 			P.layer = d; P.Cl = Cl;
 			const auto tl = Clock::now();
 			nxt.clear();
@@ -553,12 +555,26 @@ static int runExact(int argc, char** argv, const LevelBlob& B) {
 			DfsParams Q;
 			memset(&Q, 0, sizeof Q);
 			Q.L = P.L; Q.G = P.G; Q.tasks = (const u8*)(uintptr_t)arCur; Q.stateBytes = (i32)SB; Q.nTasks = (u32)cur.nG;
-			Q.D = dfsD; Q.Cl = Cl; Q.deaths = deaths;
+			Q.D = dfsD; Q.Cl = Cl; Q.deaths = deaths; Q.ttMinLim = ttMinLim;
 			Q.table = P.table; Q.tableMask = P.tableMask; Q.probeMax = P.probeMax; Q.layerOf = P.layerOf;
 			Q.stk = (u8*)(uintptr_t)arNxt; Q.meta = (u64*)(uintptr_t)dMeta.p; Q.maxDepth = maxDepth; Q.nThreads = nThreads;
 			Q.depth = (i32*)(uintptr_t)dDepth.p; Q.task = (u32*)(uintptr_t)dTask.p; Q.taskNext = (u32*)(uintptr_t)dTaskNext.p;
 			Q.found = P.found; Q.foundPath = (i32*)(uintptr_t)dFPath.p; Q.nextF = P.nextF; Q.stats = P.stats;
 			Q.idle = (u32*)(uintptr_t)dIdle.p; Q.stop = (u32*)(uintptr_t)dStop.p;
+			// the second table in the stack arena's spare memory (20 bytes a slot, a power of 2, from 2^20 slots)
+			{
+				const uint64_t stackB = (uint64_t)nThreads * maxDepth * SB;
+				const uint64_t base = (stackB + 255) & ~(uint64_t)255;
+				const uint64_t spare = arena * SB > base ? arena * SB - base : 0;
+				uint64_t s2 = 0;
+				if (opt(argc, argv, "table2", "1") != "0") { s2 = 1ull << 20; if (s2 * 20 > spare) s2 = 0; else while (s2 * 2 * 20 <= spare && s2 < (1ull << 31)) s2 <<= 1; }
+				if (s2) {
+					Q.table2 = (u64*)(uintptr_t)(arNxt + base); Q.tableMask2 = (u32)(s2 - 1); Q.layerOf2 = (u32*)(uintptr_t)(arNxt + base + 16 * s2);
+					lk::memset8(arNxt + base, 0, 16 * s2, "memset");
+					lk::memset8(arNxt + base + 16 * s2, 0xff, 4 * s2, "memset");
+				}
+				printf("{\"ev\":\"table2\",\"slots\":%llu}\n", (unsigned long long)s2);
+			}
 			lk::memset8(dDepth.p, 0xff, 4ull * nThreads, "memset");
 			cu::cuMemsetD8_v2(dTaskNext.p, 0, 4); cu::cuMemsetD8_v2(dStop.p, 0, 4);
 			if (cur.nHost() > 0) { printf("{\"error\":\"the depth-first stage takes a GPU-resident frontier only\"}\n"); return 4; }
