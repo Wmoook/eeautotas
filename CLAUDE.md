@@ -887,8 +887,13 @@ ways in.
   and die at a boost passage (waypoint 73, class B, 244 route ticks on): from a carrier 2.7 px and 2 px/tick off the
   route's state msolve has no leg ('not plain; no coupled candidate', also on a 10-s clock) and the route's own inputs
   diverge (the level's time doors are met only at route ticks 4,400-4,600): 4,732 = 4,732 without; what it needs is a
-  rejoin (a short exact search from the carrier onto the route's own physical trajectory); `EEAT_PRE_PICK=mix|f` (the f-first pick before the
-  first route too). THE MEMORY (EX Crew Odyssey, S99 on, per process (src/out/p4 memprobe.js) and per worker isolate
+  rejoin (a short exact search from the carrier onto the route's own physical trajectory); `EEAT_PRE_PICK=mix|f` (the f-first
+  pick before the first route too; mix: every other pick) NOT a default: the 12 levels x 2 runs an arm, side by side (box
+  5, 300 s, the tree with n5-plan 8a5d9a6's defaults): compiled 21 / 24 vs 23 / 24 (Tutorial 2 0 / 2 vs 2 / 2), the 11
+  both compiled geo 0.959 (faster 5 / slower 6): its first routes better on most (A Dreary Day 4,097 / 4,390 vs 5,108 /
+  5,450, Trick Or Treat 4,431 / 5,428 vs 6,066 / 6,000, INFINITE 4,409 / 4,150 vs 5,064 / 5,210) and the finals (Trick Or
+  Treat 3,997 / 4,295 vs 5,847 / 5,433, A Dreary Day 3,897 / 4,156 vs 4,650 / 4,591), slower on K Underground, On And On,
+  Summer Bee, Tutorial 1 (small). THE MEMORY (EX Crew Odyssey, S99 on, per process (src/out/p4 memprobe.js) and per worker isolate
   (`EEAT_EXEC_PROF=1`: its heap and external memory, a0da1b0)): the tree 7.9 GB = the compile 4.7 GB (3 workers' external
   memory 330 -> 690 MB each over 300 s: the goal / bounds / reach field caches, one copy a thread (types.js FIELDS 256 MB,
   bounds.js memo 256 MB); their V8 heaps 0.2-0.8 GB; the main thread's 30-50 MB) + the stretch child 1.9 GB + the chain
