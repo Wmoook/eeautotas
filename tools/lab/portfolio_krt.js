@@ -64,8 +64,9 @@ function main() {
 			let verified = false;
 			if (r.ok) {
 				chk.restore(snap);
-				let dead = false;
-				for (let t = 0; t < r.masks.length; t++) { E.applyMask(cinp, r.masks[t]); chk.tick(cinp); if (chk.is_dead) dead = true; }
+				// (a start in its dead ticks plays them first: a death after the ball was alive fails the answer)
+				let dead = false, alive = !chk.is_dead;
+				for (let t = 0; t < r.masks.length; t++) { E.applyMask(cinp, r.masks[t]); chk.tick(cinp); if (chk.is_dead) { if (alive && !(+(process.env.EEAT_BW_DEATHS || 0) > 0)) dead = true; } else alive = true; }
 				verified = !dead && tset.has(T.tileOf(chk, W, H));
 			}
 			const rec = { level: c.level, label: c.label, kind: c.kind, start: back > 0 ? 'hit-' + back : 'prev', routeLeg, arm, ok: !!r.ok, verified, T: r.T || 0,

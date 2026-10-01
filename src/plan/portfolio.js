@@ -54,6 +54,11 @@ const FAR = +process.env.EEAT_PF_FAR > 0 ? +process.env.EEAT_PF_FAR : 8;
 const GROW = 4;
 const BW_QUICK_MS = +process.env.EEAT_PF_BWQUICK > 0 ? +process.env.EEAT_PF_BWQUICK : 4000;                             // (a one-piece arm's second run: at least this many times its first piece)
 const ENV = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? process.env[k] : d);
+// THE OPEN WALK in the backward arm (P4 long, EEAT_PF_OPENWALK; =0 off): a stretch whose target the walk from it does not
+// reach with the doors as they stand (a key / switch / coin door the stretch itself opens) gets the walk with every door
+// open (backward.js P.openWalk) instead of the arm's instant "the start is not in the target's walk": the moves study's 2
+// key-door chains (EX Crew Odyssey) in 0.3 s, which no arm found in 40 s; the whole-level children keep the gated signal
+const PF_OPENWALK = +ENV('EEAT_PF_OPENWALK', 1) > 0 ? 1 : 0;
 
 function createPortfolio(L, opts = {}) {
 	const S = opts.solver || MS.createSolver(L, {});
@@ -145,6 +150,28 @@ function createPortfolio(L, opts = {}) {
 	}
 	function parsePlan(s) { return String(s).split(',').filter(Boolean).map((x) => { const [a, f] = x.split(':'); return [a, +f || 0.25]; }); }
 
+	/** an arm's answer replayed: the first tick (1-based) the target's exact test holds, 0 never; a start in its dead ticks
+	 *  (a stretch from a respawn: the krt legs from a known route's state mid-death) plays them first, a death after the
+	 *  ball was alive ends it (msolve's replay ends at the first dead tick: the backward meet's legs from a dead start, which
+	 *  it plays as its own replay does, were all "the replay missed") */
+	const inpR = new E.EEInput();
+	const BW_DEATHS = +(process.env.EEAT_BW_DEATHS || 0) > 0;   // (the backward meet's deaths as moves: a death on the way is a move)
+	function replayOf(snap, masks, target) {
+		sim.restore(snap);
+		if (!sim.is_dead && !BW_DEATHS) return S.replay(snap, masks, target);
+		const goal = S.goal(target);
+		let alive = false;
+		for (let t = 0; t < masks.length; t++) {
+			const px = sim.px, py = sim.py;
+			E.applyMask(inpR, masks[t]);
+			sim.tick(inpR);
+			if (sim.is_dead) { if (alive && !BW_DEATHS) return 0; continue; }
+			alive = true;
+			if (goal(sim, px, py)) return t + 1;
+		}
+		return 0;
+	}
+
 	/** one arm's slice: {ok, masks (replayed, cut at the goal), T, why, ms, done (a one-piece arm ran / an arm closed)} */
 	function runArm(arm, snap, target, ms, deadline, o, sess) {
 		const t0 = Date.now();
@@ -168,7 +195,7 @@ function createPortfolio(L, opts = {}) {
 				// (its quick meet (the fallback order alone, P.quick nodes) gets at least min(0.8 x the piece, BW_QUICK_MS): with
 				// the lab's 0.3 of a 5-s piece it stopped at 1.6 s where the same meet on a 20-s clock found the leg at 1.7 s)
 				const bq = o.bwQuick !== undefined ? +o.bwQuick : BW_QUICK_MS;
-				res = backward().solve(snap, target, bq > 0 ? { ms, quickF: Math.min(0.8, Math.max(0.3, bq / Math.max(1, ms))) } : { ms });
+				res = backward().solve(snap, target, bq > 0 ? { ms, quickF: Math.min(0.8, Math.max(0.3, bq / Math.max(1, ms))), openWalk: PF_OPENWALK } : { ms, openWalk: PF_OPENWALK });
 				r.done = !(res && res.why === 'budget');
 			} else if (arm === 'leg') {
 				// (the executor's tier 3 finder on the stretch: the goal field of the level as it stands at the start, a region
@@ -189,7 +216,7 @@ function createPortfolio(L, opts = {}) {
 		r.ms = Date.now() - t0;
 		r.why = res ? res.why || '' : '';
 		if (res && res.ok && res.masks && res.masks.length) {
-			const hit = S.replay(snap, Uint8Array.from(res.masks), target);
+			const hit = replayOf(snap, Uint8Array.from(res.masks), target);
 			if (hit > 0) { r.ok = true; r.masks = Uint8Array.from(res.masks).subarray(0, hit); r.T = hit; }
 			else r.why = 'the replay missed';
 		}

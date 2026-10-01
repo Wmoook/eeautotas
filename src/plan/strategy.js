@@ -131,6 +131,19 @@ const TIMER_PICK = process.env.EEAT_PLAN_TIMER === '1';
 // ~1,600-tick estimate) counts nothing.
 const CRUMB_RANK = process.env.EEAT_CRUMB_RANK === '1' ? 1 : process.env.EEAT_CRUMB_RANK === '2' ? 2 : process.env.EEAT_CRUMB_RANK === '3' ? 3 : 0;
 const CR_F_SLACK = +process.env.EEAT_CR_F_SLACK || 0.1, CR_F_ABS = +process.env.EEAT_CR_F_ABS || 60;
+// THE REFINEMENT PICK (P4, OPT-IN EEAT_REFINE_PICK, unset / 0 = the pick as before byte for byte): the most-progress-first
+// pick is a depth-first search for a FIRST route; once a route is known only an anchor whose f (its arrival tick + its
+// plan's cost, the score below) is under the route's can give a faster one, and gain-first keeps the workers on the
+// deepest anchors (the route's own neighbours) while a low-f anchor waits forever: Tutorial 2 (S99 full compile) the
+// stretch solver's checkpoint (245,28) at tick 1,730 (the known route's 1,628) was never picked (0 steps in 300 s: every
+// later crumb anchor had more gain) and the route went through a blue coin, its checkpoint at 4,099; b2's die anchor at
+// 2,421 tried 6 times in 10 s, then never. =f: after the first route the pick is the score first (f = arrival + plan cost
+// + FAIL_TICKS x fails - the UCB term), the gain only its tie-break; =mix: every other pick so (the rest as before)
+const REFINE_PICK = process.env.EEAT_REFINE_PICK === 'f' || process.env.EEAT_REFINE_PICK === '1' ? 'f' : process.env.EEAT_REFINE_PICK === 'mix' ? 'mix' : '';
+// (BEFORE the first route, OPT-IN EEAT_PRE_PICK=mix|f, unset = gain first as before: every other pick (mix) or every pick
+// (f) by the score first too: Tutorial 2's crumb path one step ahead (a death after the blue coin) outranked the stretch
+// solver's checkpoint at 1,730 ticks with the same real triggers, whose f is 1,500 ticks less)
+const PRE_PICK = process.env.EEAT_PRE_PICK === 'f' ? 'f' : process.env.EEAT_PRE_PICK === 'mix' ? 'mix' : '';
 // THE FAR TROPHY (C6 push 3 lane 2 block 2, RATE; OPT-IN EEAT_FAR_TROPHY=<est ticks>, unset / 0: off, the compile byte for
 // byte as before): a plan whose first step is the trophy and whose est walk to it is longer than that runs at most at rung
 // EEAT_FAR_TROPHY_RUNG (1: a 5-s window) whatever rung its facts reached; its failures still climb the facts' ladder (the
@@ -318,6 +331,17 @@ const ST_N = Math.max(1, Math.min(4, +process.env.EEAT_ST_N || 1));
 // (EEAT_ST_GENERAL=0: the short first plan's request alone, no failed stretches after it)
 const ST_GENERAL = process.env.EEAT_ST_GENERAL !== '0';
 const ST_NICE = process.env.EEAT_ST_NICE !== undefined && process.env.EEAT_ST_NICE !== '' ? +process.env.EEAT_ST_NICE : 10;
+// (THE STRETCH SOLVER IN THE REFINEMENT, P4, OPT-IN EEAT_ST_REFINE=1, off = the child killed at the first route as before:
+// once a route is known the child goes on with the failed stretches of the anchors whose f (the first arrival + the plan's
+// cost) is under the route's ticks, the least f first (a request whose anchor's f reached the route's is stale); its
+// arrivals are verified and bounded like the executor's (verified: run ticks at the route's are dropped). Why: the slow
+// routes go through crumbs and detours where the direct stretch failed the executor's rungs (Tutorial 2: the start ->
+// checkpoint (245,28) stretch, the child's 64-s clock found it at tick 1,730; the route's own took a blue coin, 4,099))
+const ST_REFINE = process.env.EEAT_ST_REFINE === '1';
+// (THE CHILDREN'S HEAPS, P4: the stretch child's and the whole-level / chain child's V8 old space, --max-old-space-size;
+// EEAT_ST_HEAP_MB (default 3000) / EEAT_BWC_HEAP_MB (default 2000), the values before: the default = byte for byte)
+const ST_HEAP_MB = +process.env.EEAT_ST_HEAP_MB > 0 ? Math.round(+process.env.EEAT_ST_HEAP_MB) : 3000;
+const BWC_HEAP_MB = +process.env.EEAT_BWC_HEAP_MB > 0 ? Math.round(+process.env.EEAT_BWC_HEAP_MB) : 2000;
 /** a relative deadline (a step's or a waypoint's beforeTickFrom): a number, or 'prev+N' (N ticks after the previous
  *  step's arrival, i.e. this anchor's arrival: a key's KEY_TICKS) -> ticks | NaN */
 function relOf(x) {
@@ -883,7 +907,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 			let found = null, done = null, buf = '';
 			// (the chain with the stretch solver on: only a GATED level, --gatedOnly=1; the stretch child takes a one-leg level's
 			// whole-level solve)
-			const ch = cp.spawn(process.execPath, ['--max-old-space-size=2000', path.join(__dirname, 'lab', BW_CHAIN ? 'bwchain_child.js' : 'bwlevel_child.js'), String(opts.file), `--ms=${secs * 1000}`, ...(wpFile ? [`--wps=${wpFile}`] : []), ...(BW_CUTS && !BW_CHAIN ? ['--cuts=1'] : []), ...(BW_CHAIN && ST_ON ? ['--gatedOnly=1'] : [])], { stdio: ['ignore', 'pipe', 'ignore'] });
+			const ch = cp.spawn(process.execPath, [`--max-old-space-size=${BWC_HEAP_MB}`, path.join(__dirname, 'lab', BW_CHAIN ? 'bwchain_child.js' : 'bwlevel_child.js'), String(opts.file), `--ms=${secs * 1000}`, ...(wpFile ? [`--wps=${wpFile}`] : []), ...(BW_CUTS && !BW_CHAIN ? ['--cuts=1'] : []), ...(BW_CHAIN && ST_ON ? ['--gatedOnly=1'] : [])], { stdio: ['ignore', 'pipe', 'ignore'] });
 			bwlChild = ch;
 			const onExit = () => { try { ch.kill('SIGKILL'); } catch (e) { /* gone */ } };
 			process.once('exit', onExit);
@@ -976,7 +1000,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		if (slot.ch) return;
 		const cp = require('child_process');
 		let ch;
-		try { ch = cp.spawn(process.execPath, ['--max-old-space-size=3000', path.join(__dirname, 'lab', 'stretch_child.js'), String(opts.file)], { stdio: ['pipe', 'pipe', 'ignore'] }); } catch (e) { say({ ev: 'warning', text: `the stretch solver: ${e.message}` }); return; }
+		try { ch = cp.spawn(process.execPath, [`--max-old-space-size=${ST_HEAP_MB}`, path.join(__dirname, 'lab', 'stretch_child.js'), String(opts.file)], { stdio: ['pipe', 'pipe', 'ignore'] }); } catch (e) { say({ ev: 'warning', text: `the stretch solver: ${e.message}` }); return; }
 		slot.ch = ch; stStats.children++;
 		// (below the compile's own priority: on a busy machine the executor's workers keep their CPU, the child takes what is
 		// idle; EEAT_ST_NICE=0: the same priority)
@@ -1103,6 +1127,12 @@ async function compile(L, opts = {}, emit = () => {}) {
 		let bestC = null;
 		for (const c of stCands.values()) {
 			if (c.solved || c.inflight || c.rung < ST_RUNG || c.tries >= ST_TRIES || (c.tries > 0 && !/budget/.test(c.why)) || c.A.exhausted || !c.A.arrivals.length) continue;
+			if (best) {
+				// (ST_REFINE, P4: once a route is known only the anchors under the route's f, the least f first)
+				if (!ST_REFINE || !stRefineOk(c.A)) continue;
+				if (!bestC || c.tries < bestC.tries || (c.tries === bestC.tries && stFOf(c.A) < stFOf(bestC.A))) bestC = c;
+				continue;
+			}
 			if (!bestC || c.tries < bestC.tries || (c.tries === bestC.tries && (c.A.gain > bestC.A.gain || (c.A.gain === bestC.A.gain && (c.cost < bestC.cost || (c.cost === bestC.cost && c.seq < bestC.seq)))))) bestC = c;
 		}
 		return bestC;
@@ -1125,17 +1155,20 @@ async function compile(L, opts = {}, emit = () => {}) {
 	};
 	/** an idle child: the next request (slot 0: the short first plan once; then the failed stretch of the most progress not
 	 *  in hand in another slot) */
+	// (ST_REFINE: an anchor whose f is under the route's ticks: a stretch from it may give a faster route)
+	const stFOf = (A) => A.firstTick + (Number.isFinite(A.costEst) ? A.costEst : Infinity);
+	const stRefineOk = (A) => !!best && !!A && !A.exhausted && A.arrivals.length > 0 && !uselessA(A) && stFOf(A) < best.ticks;
 	const stSchedule = () => {
 		if (!ST_ON) return;
 		// (a request gone stale: its stretch done by the executor before the child's first leg, or a route known and it is no
 		// whole-level request (whose route may be faster): the child is stopped and started again (its memo lost))
 		for (let i = 0; i < stSlots.length; i++) {
 			const s = stSlots[i], b = s.busy;
-			if (s.ch && b && !b.short && !b.os && Date.now() - b.t < b.ms - ST_STALE_MS && ((b.cand && b.cand.solved && b.k === 0) || best)) {
+			if (s.ch && b && !b.short && !b.os && Date.now() - b.t < b.ms - ST_STALE_MS && ((b.cand && b.cand.solved && b.k === 0) || (best && !(ST_REFINE && stRefineOk(b.A))))) {
 				say({ ev: 'stretch', what: 'stale', id: b.id, slot: i, why: best ? 'a route' : 'the executor did it', ms: Date.now() - b.t });
 				stStats.stale++;
 				stKill(s);
-				if (!best && !stopped) stSpawn(i);
+				if ((!best || ST_REFINE) && !stopped) stSpawn(i);
 			}
 		}
 		// (THE SHARED SESSION: the one shot's far leg to an idle child, after the short first plan, in turn with the
@@ -1148,16 +1181,16 @@ async function compile(L, opts = {}, emit = () => {}) {
 				stSendOs(slot);
 			}
 		}
-		if (stopped || best) return;
+		if (stopped || (best && !ST_REFINE)) return;
 		// (before a route the moves have the whole budget: the polish's and the proof's reserves are kept only once a route
 		// is known, and a route of the child's own is one; the whole-level backward solve needed 37 s in one piece on Stone
 		// Ruin at a 90-s clock and failed at 45 s)
-		const room = left() - 3000;
+		const room = left() - 3000 - (best ? endRes() : 0);
 		if (room < ST_MIN_MS) return;
 		for (let i = 0; i < stSlots.length; i++) {
 			const slot = stSlots[i];
 			if (!slot.ch || slot.busy) continue;
-			if (i === 0 && !stShortSent) {
+			if (i === 0 && !stShortSent && !best) {
 				stShortSent = true;
 				const A = anchors.get(String(S0.key));
 				const p = A ? planOfAnchor(A) : null;
@@ -1333,7 +1366,11 @@ async function compile(L, opts = {}, emit = () => {}) {
 		// anchor with no plan in its timed killer's time and no remover in time (a LATE anchor) after the others, whatever its gain)
 		const lateOf = (A) => (TIMER_PICK && A.plans && A.plans.late ? 1 : 0);
 		if (CRUMB_RANK === 3) crumbGate(live);
-		const list = live.filter((A) => !A.exhausted).sort((a, b) => (lateOf(a) - lateOf(b)) || (pickGain(b) - pickGain(a)) || (scoreOf(a, N) - scoreOf(b, N)));
+		// (THE REFINEMENT PICK, EEAT_REFINE_PICK: once a route is known, the score (f) first)
+		const pickMode = best ? REFINE_PICK : PRE_PICK;
+		const fFirst = !!pickMode && (pickMode === 'f' || (picksN & 1) === 1);
+		const list = fFirst ? live.filter((A) => !A.exhausted).sort((a, b) => (lateOf(a) - lateOf(b)) || (scoreOf(a, N) - scoreOf(b, N)) || (pickGain(b) - pickGain(a)))
+			: live.filter((A) => !A.exhausted).sort((a, b) => (lateOf(a) - lateOf(b)) || (pickGain(b) - pickGain(a)) || (scoreOf(a, N) - scoreOf(b, N)));
 		for (const A of list) {
 			if (left() < 200 || stopped) return null;
 			const { plans, why } = planOfAnchor(A);
