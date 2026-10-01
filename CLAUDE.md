@@ -1172,3 +1172,39 @@ ways in.
   (output only; test/wholepar.js 54/0). NEXT: a bound that knows the time to BUILD speed (reach.js's R / F / C states with tick
   costs from the exact per-axis recurrences of src/math/fields.js, x relaxed to the row's field classes; the jump only where
   a real floor is under the box), the only way to close the chambers (fef0 / 730c) and the false-near pockets.
+- **THE BOUND ALONG THE ROUTES, the death way's respawn bound** (box 7 lane 'proof' cycle 5, 2026-10-01;
+  `tools/perfect/hcurve.js`, `tools/perfect/leveltext.js`, `tools/perfect/wholepar.js`, `src/plan/levelproof.js`):
+  `node tools/perfect/hcurve.js <level.eelvl> <route.eetas> [--every=1] [--tiers=kin;rel;gate;togo;kin,rel,gate]`: at every
+  run tick of a known route the ticks it has left and what each tier set reads there (`lim` = the ticks left, as the search
+  at C = the route passes it: endgame.lowerBound takes its one-jump-a-landing rise table only for lim < 256, so a caller
+  passing lim = Infinity reads less: 2 vs 3 at fef0's run tick 54); a summary line {at0, meanRatio (h / left), minSlack,
+  viol}. `node tools/perfect/leveltext.js <level.eelvl> [<route.eetas>] [x0 x1 y0 y1]` (ROWS=1: the route's state per run
+  tick): the level one char a tile, the route's centre cells '*'. THE CURVES (box 7, the default tiers kin,rel,gate, every
+  tick, every known route of the 8 small levels: 0 violations on 44 routes): Switch Labyrinth h0 11 / 27 (mean h / left
+  0.85: closed at 27), celeste x2 87 / 235 (0.47), NC Naos d3c6 and the precision puzzle 49 / 111 (0.24 along their 299-315
+  routes), My level 730c 19 / 93 (0.32), de42 19 / 140 (0.26), fef0 4 / 59 (0.34: 4-13 along the whole route; the
+  three My levels are one chamber: the spawn (14,10) under the trophy, spikes (12-13, 9), dots (13-14, 11), a left arrow
+  (12, 11) and an up-arrow column (12, 12-15): the route falls in, drifts to the left arrow, sinks into the up-arrow
+  column and rises out of it with -2.3 px/tick, jumps sideways off the left wall's one-way and rises through the dots
+  and (14, 10) into the trophy with -2.75: no tier knows the up-speed must be BUILT, so every state of the chamber reads
+  4-13). THE DEATH WAY'S RESPAWN BOUND (wholepar.js makeCtx, default on; `EEAT_WP_RESPFIELD=0`: off): the endgame dedup
+  (cycle 3: the rel / gate tiers without bounds.at's endgame max where the kin tier runs) also dropped bounds.at's death way
+  (DEATH_MIN + the rel field at the respawns), and the kin tier caps a way through a death by DEATH_MIN + 1 + the
+  respawns' SPEED-LIMIT bound alone: on celeste x2 the default tiers read **74** at the start where rel alone read 87 (13
+  ticks of bound lost on every state of a level with a checkpoint); now levelproof.js `contextOf(L, {hResp})` takes the
+  larger of its speed-limit bound and the rel field's least value over the respawn tiles (admissible for any state there:
+  bounds.at starts from it): celeste x2 h0 **87** again, the other 6 small levels unchanged (their deaths respawn at the
+  spawn), 0 violations on the 44 known routes, test/wholepar.js 54/0. A task log written under other tiers is not resumed
+  (its tasks are those tiers' function). **celeste 31c0 and cd73: C 95 CLOSED in 56.5 / 62.0 s (36.3 / 36.4 M nodes, 4
+  threads each, box 7 at load ~150): lb 95 on both** (cycle 4's C 95 with h0 74: not one task in 1,800 s on 3 threads).
+  THE STARTING BOUND OF EVERY COMPILED ROUTE (the default tiers at the route's first input, the 43 routes of b7 score
+  cycle 4): h0 / route Switch Labyrinth 11 / 27, celeste x2 87 / 239, NC Naos d3c6 and the precision puzzle 49 / 153,
+  Rosa dei Venti 924 / 3,557, Tutorial 1 488 / 2,090, Bygone Tutorial 420 / 1,847, My level 730c 19 / 97, fef0 4 / 60,
+  the rest 15-314 over 800-9,800-tick routes: no compiled route but Switch Labyrinth within an exact search's reach. NEXT
+  (the chambers): a tier whose state carries the vertical speed: per
+  (column, y to 1 px, vy to 1/64 px/tick) the least ticks to a trophy, a backward Dijkstra over a SOUND one-tick
+  transition (vy by fields.js's exact per-field recurrence with the delayed tile's field: the union over the cells the
+  centre was in 1-2 ticks before, the input's best; y = y + vy, blocked by the walls of the rows the box overlaps; the
+  jump only where a floor is under every x the column allows the box: (14, 10)'s box cannot overlap (15, 11) because
+  (15, 10) is a wall; x free within the column, one column a tick); checked like every tier on the 44 known routes.
+  It must read >= ~49 at fef0's start (8x a layer: an exact search closes ~10 ticks of slack, not 55).
