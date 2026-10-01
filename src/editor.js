@@ -395,7 +395,8 @@ const STRATEGIES = {
 		// (the one search: the GPU bursts from its archive, src/bursts.js; they wait between two launches while the editor's
 		// scheduler gives the GPU to another strategy: its pause file; the trophy arm's bursts order by the steer field when
 		// the GPU tools read it, as the relay did)
-		...(o.bursts ? ['--bursts=1', `--tool=${q.tool}`, ...G.cacheArgs(), `--pausefile=${q.pauseFile}`, `--work=${q.work}`, ...(f.steer && !o.noWayUp ? [`--burstSteer=${f.steer}`] : [])] : [])] },
+		...(o.bursts ? ['--bursts=1', `--tool=${q.tool}`, ...G.cacheArgs(), `--pausefile=${q.pauseFile}`, `--work=${q.work}`, ...(f.steer && !o.noWayUp ? [`--burstSteer=${f.steer}`] : []),
+			...burstSizeArgs(toolInfo && toolInfo.memMB, o.burstPar)] : [])] },
 	gorolls: { label: 'random runs (GPU)', rolls: true, args: (f, o, q) => [f.eelvl, '--gpu=1', `--tool=${o.tool}`, `--bin=${f.bin}`, `--reach=${f.reach}`, `--seconds=${q.seconds}`,
 		`--seed=${o.seed}`, `--depth=${q.depth || o.cpuDepth}`, `--batch=${ROLL_BATCH}`, '--stdin=1'] },
 };
@@ -420,6 +421,23 @@ const STEER_WAIT_MS = 15000;
 // least), and their GPU slices follow their yield (ROLLS_DRY_MAX). Every move and the beams still run (they end early on
 // such levels: Infinity Pain's at 21 s); the bursts take their GPU slices (schedule).
 const ONE_LABEL = 'one search (CPU runs + GPU bursts)';
+// The bursts' sizing by the GPU's memory (goexplore.js --burstPar --gpuCells --burstCap): bursts.js's defaults are the
+// relay's sizing next to every move on an 8 GB laptop GPU (one burst at a time, 2^25 cells, 262,144 states per layer:
+// 2 lanes of 2^26 and 1 M layers took 3-5.7 GB there); the editor passed nothing, so a 24-80 GB GPU ran the one search's
+// only room-finding GPU operator one small burst at a time (the final burst's A100 runs: 147-867 bursts, 0.1-0.25 a
+// second, with the GPU idle between a burst's process start, its replays and the next). Each entry: at least `mb` MB
+// of GPU memory -> `par` bursts side by side (each its own eegpu process: one starts / replays while another runs its
+// kernels), 2^cells tables, `cap` states per layer (0: the settings' own, up to 1 M). Below the smallest: the defaults.
+// The request's burstPar (0: the defaults; 1-4: that many lanes of the largest sizing the GPU holds) overrides the lanes.
+const BURST_SIZES = [{ mb: 20000, par: 3, cells: 26, cap: 0 }, { mb: 12000, par: 2, cells: 26, cap: 0 }];
+function burstSizeArgs(memMB, want) {
+	const w = want === undefined || want === null || want === '' ? NaN : +want;
+	if (w === 0) return [];
+	const s = BURST_SIZES.find((z) => memMB >= z.mb);
+	if (!s && !(w >= 1)) return [];
+	const par = w >= 1 ? Math.min(4, Math.floor(w)) : s.par;
+	return [`--burstPar=${par}`, ...(s ? [`--gpuCells=${s.cells}`, `--burstCap=${s.cap}`] : [])];
+}
 /** the CPU search's worker threads: `want` (the request) or N - 1 of the N threads (one left for the app and the GPU
  *  tools' host work), at most the thread count the CPU benchmark measured fastest (src/bench.js; on many laptops more
  *  threads are slower), and at most half of them while a job's optimizer runs (as for a focus search) */
@@ -1375,7 +1393,7 @@ function start(b, gpu, test) {
 			found: null, error: null, live: false, pass: k === 'explore' && (!test || test.probe) ? PASS_MAX : PASS_START, probe: k === 'explore' && (!test || test.probe) ? 'running' : '',
 			passes: 1, ends: {}, share: 0, depthCap: 0, detail: '', salt: 0, tries: 0, lanes: 1, saltNoted: 0,
 			launchedAt: 0, readyAt: 0, usedMs: 0, prepSec: 0 })) };
-	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, cpuDepth, prune: false, workers, seed, salts: !(test && test.salts === false), lanes, tool, bursts: one,
+	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, cpuDepth, prune: false, workers, seed, salts: !(test && test.salts === false), lanes, tool, bursts: one, burstPar: b.burstPar,
 		refine: b.refine !== false && !(test && test.refine === false), probeS: test && test.probeS ? test.probeS : PROBE_S,
 		// (the wall breaker's clocks and table; tests: shorter, and a small table)
 		breakWait: test && Array.isArray(test.breakWait) ? test.breakWait : BREAK_WAIT_S, breakStep: test && test.breakStep ? test.breakStep : BREAK_STEP_S,
