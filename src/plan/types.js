@@ -192,7 +192,10 @@ function goalOf(L, wp) {
 	const W = L.width, H = L.height, N = W * H;
 	if (wp.kind === 'trophy') {
 		const tr = [];
-		for (let i = 0; i < N; i++) if (L.fg[i] === 121) tr.push(i);
+		// (THE TROPHY'S COMPONENTS, planner.js EEAT_TROPHY_COMP: a trophy waypoint with tiles goes to those trophy tiles; the
+		// test stays the crown, on any tile)
+		if (wp.tiles && wp.tiles.length) for (const t of wp.tiles) if (t >= 0 && t < N && L.fg[t] === 121) tr.push(t);
+		if (!tr.length) for (let i = 0; i < N; i++) if (L.fg[i] === 121) tr.push(i);
 		return { kind: 'trophy', tiles: Int32Array.from(tr), mask: null, test: (sim) => !!sim.has_silver_crown, allowDeath: !!wp.allowDeath };
 	}
 	const mask = new Uint8Array(N);

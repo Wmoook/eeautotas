@@ -50,6 +50,10 @@ const DEFAULTS = [
 	// (B8 speed, cycle 2: the exact landing's routes as the child prints them, not at its end: the precision pair's first
 	// route 10-20 s vs 33-141 s on box 8 at load 180-230, the final routes the same 153 ticks; strategy.js PREC_STREAM)
 	['EEAT_PREC_STREAM', '1'],
+	// (C6 lane 5 block 4: THE AIRBORNE ARRIVAL with THE EARLY BRAKE in the compiler's precision child (the module's own
+	// default stays off: test/precision.js and Find a route's stage as before): the precision pair (the precision puzzle,
+	// NC Naos d3c6) 300 s, W3, box 6: the exact landing 129 at 20 s, + perfect 125, vs 153 / 153 without (best known 111))
+	['EEAT_PREC_AIR', '1'], ['EEAT_PREC_AIR_EARLY', '1'],
 ];
 // THE STRETCH DEFAULTS (S99, 2026-09-30: "a level compiles only if EVERY stretch works"; CLAUDE.md section 11; each =0 off,
 // EEAT_S99_DEFAULTS=0 none of them, EEAT_COMPILER_DEFAULTS=0 none at all):

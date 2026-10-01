@@ -1124,11 +1124,18 @@ function labelSearch(S) {
  */
 const SA_COST = 12500;   // fifths (2,500 tiles): behind a real way (a death is 1,638 tiles) and past the doctors' detours (<= 1,882)
 const SA_KRUN = 4, SA_FEED_X = 80;
+// (THE SIDE ENTRY, C6 push 3 lane 4 block 4, OPT-IN EEAT_SA_ENTRY=1 / opts.saEntry, off = the prices byte for byte: a hard
+// run with an open tile above or below one of its last SA_KRUN tiles toward its exit is no hard run: a ball that drops or
+// rises into it there crosses at most SA_KRUN opposing tiles, which a running ball does (the engine: 4 at 6.7 px/tick);
+// the stateless exit price priced that way too (Trick Or Treat: a drop into a 6-run of right arrows 1-2 tiles from its end,
+// +2,500 tiles on every way to its trophy). Ordering only: the price's edge set is the plain model's either way)
+const SA_ENTRY_ENV = process.env.EEAT_SA_ENTRY === '1';
 function sideArrowPrices(level, opts, M) {
 	const env = process.env.EEAT_SIDEARROW;
 	const mode = opts.sideArrow !== undefined ? (opts.sideArrow === true ? 'arrows' : opts.sideArrow || 'off') : env === '0' ? 'off' : env === 'all' ? 'all' : 'arrows';
 	const on = mode !== 'off';
 	const info = { on: on && !(opts.maxCost >= 0), mode, arrows: 0, runs: 0, fed: 0, slots: 0 };
+	const saEntry = opts.saEntry !== undefined ? !!opts.saEntry : SA_ENTRY_ENV;
 	if (!info.on) return { pen: null, cost: 0, info };
 	const { N, W, H, cls, curOf, passable, isFloor, fg, srcOf, trophy } = M;
 	const gmx = level.gMox, nG = gmx ? gmx.length : 0;
@@ -1200,6 +1207,15 @@ function sideArrowPrices(level, opts, M) {
 				const i = y * W + x;
 				const start = d === 0 ? (x === 0 || push[i - 1] !== -1) : (x === W - 1 || push[i + 1] !== 1);
 				if (!start || rem[d][i] <= SA_KRUN || fed[d][i]) continue;
+				if (saEntry) {
+					const len = rem[d][i];
+					let open = false;
+					for (let k = len - SA_KRUN; k < len && !open; k++) {
+						const t = i + dx * k;
+						for (const v of [t - W, t + W]) if (v >= 0 && v < N && push[v] === 0 && cls[v] !== WALL && cls[v] !== DEADLY && passable(v)) { open = true; break; }
+					}
+					if (open) { info.entries = (info.entries || 0) + 1; continue; }
+				}
 				for (let k = 0; k < rem[d][i]; k++) hard[d][i + dx * k] = 1;
 			}
 		}
