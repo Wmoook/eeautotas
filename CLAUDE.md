@@ -615,6 +615,24 @@ ways in.
   run replicated beside that compile A/B (its finds 1.8x slower) gave 94.2% (the 480+ bucket 66.7 vs 76.8%). Not a default:
   the compile count is a tie. `node test/portfolio.js` (20: the run-up room, each arm replayed, the session's long piece,
   class targets, the executor's tier).
+- **STUCK-FIELD, block 2: the walk-off nodes, the stuck crumb, the portfolio on the field levels** (C6 push 3 lane 1;
+  `src/out/n5/lanes/c6_lane1_b2.md`). THE WALK-OFF NODES (`EEAT_CHAIN_LIFT=1` / `o.lift`, msolve.js chain, OPT-IN, off =
+  byte for byte): the chain's event fan-out (the 18 held masks to their first landing / class change / teleport) never
+  stopped where a hold walks off a ledge's edge, so "walk off left, then steer right back under the ledge" was no pair of
+  holds and the plain fan-out targets plain standable tiles only; with the knob a standing node's hold also stops at its
+  walk-off (no press; the hold goes on to its landing as before). UT Eternal Galaxy's stuck coin (116,107) is exactly that:
+  the known route walks off the ledge (113,104) left at 1974, steers right, stops on the corner of (114,110) with its centre
+  in the dot row at 2000 (vx = vy = 0, class Z) and jumps from the last tick of the overlap: with the knob the chain's
+  nodes are the walk-off and that corner state exactly, and msolve.chain from the route's state 59 ticks before the coin
+  finds 58 ticks in 15 s (none without; none either way from 79 / 121 ticks before). NO GAIN SHOWN beyond it: through the
+  executor (tools/cmp/krt.js, lane 2's 8 route-entered stuck legs, rungs 1-2, side by side) a tie on all 8 (its chain tier
+  gets <= 800 ms a call; again a tie on all 8 with its share at 0.5 and up to 4 s a call: `EEAT_MATH_CHAIN=0.5 EEAT_MATH_CHAIN_MS=4000`), the chains lab's 55 known-route legs (the chain arm alone, 10 s) 11 vs 12 (Terminal's
+  green key lost: more children a node, fewer expansions). THE STUCK CRUMB (`EEAT_CRUMB_DEMOTE=R`, planner.js crumbPlan,
+  OPT-IN, off = byte for byte): a crumb plan whose leg has failed R rungs from the anchor's class goes after the plan
+  search's own plans (a crumb is never a plan's need); the base's 300-s runs spend most of their worker time on crumbs on
+  some field levels (Need for Steed 409 of 774 worker-s, 280 s of it failing at rungs 2-3; Stone Ruin 676 of 894, 402 s),
+  but crumbs also succeed at rung 3 (Need for Steed 1, Stone Ruin 3, Flight Path 1); the A/B (box 5, 300 s, those 3 levels, R 2, one run an arm side by side): compiled 0 = 0, progress Need for Steed 3 vs 2, Stone Ruin 10 = 10 (ok steps 13 vs 9), Flight Path 5 vs 7 (6 crumb plans in either arm: the spread): no gain shown. THE PORTFOLIO on the 21
+  STUCK-FIELD levels (300 s, W3, one run an arm side by side, box 5 at load 130-140): compiled 2 vs 1 of 21 (Snow Jumping 4,454 run ticks only with it, 1.21 of the best known; Endless Space 2,143 vs 2,493, 1.20 of the best known; both by the backward meet arm, `pfBy_bw`), the unrouted levels' progress better 1 (The Memory Game 10 vs 8), worse 4 (Ring Of Chaos 13 vs 22: 127 portfolio calls took 253 worker-s for 2 legs, 21 anchors vs 40; EXCrew Trolled Minis 24 vs 26, The 7 Depths of Hell 2 vs 4, Forgotten Veil b7be 10 vs 12), the same 14 (+-1); peak RSS mean 2.9 vs 2.8 GB; every .eetas replayed. One run an arm: not a default.
 - **Checks**: unit tests `test/plantypes.js`, `planmodel.js`, `planplanner.js`, `planbounds.js`, `planprims.js`,
   `planexec.js --only=unit,fail`, `planstrategy.js`, `plancompile.js` (the CLI and the Compile API with the mock parts
   `test/planmock.js`), `plantruth.js`, `msolve.js --quick`, `kin.js --quick`, `mathsep.js`. The truth checkers on the known routes
