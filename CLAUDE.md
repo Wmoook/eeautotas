@@ -494,6 +494,22 @@ ways in.
   House 5,289 vs 4,658, Tutorial 1 2,189 vs 2,014-2,084: WATCH), faster Tutorial 3 (2,567; the base compiles it 1 of 3) and
   The Ten Commandments (1,465 vs 1,847); the shared gate (60 s) exit 0, 13 vs 11. Every other doctor fix is merged OPT-IN
   (the knobs in SYNTHESIS.md section 3).
+- **THE STRETCH DEFAULTS** (S99, 2026-09-30, branch n5-s99-ship; `src/plan/defaults.js` `S99_DEFAULTS`, applied with the
+  doctors' defaults: each `=0` off, `EEAT_S99_DEFAULTS=0` none of them): "a level compiles only if EVERY stretch works", so the
+  four S99 parts that raise the per-stretch rate are on in the compiler's process: `EEAT_PORTFOLIO=1` (THE PORTFOLIO CHAIN
+  SOLVER below: the 1,123 real 4-move chains 88.4% in one 5-s budget, 95.4% in 40 s, msolve.chain alone 47.2%),
+  `EEAT_CORR_FIELDS=1` (the corridor's fields pass below: the portfolio's corridor arm too), `EEAT_STRETCH=1` (the stretch
+  solver in its own process below: one continuous backward clock a stretch), `EEAT_BW_CHAIN=1` (THE GATED LEVELS below: the
+  trigger orders as a chain of backward legs); with the stretch solver on the chain child takes only a GATED level
+  (`bwchain_child.js --gatedOnly=1`: the stretch child already takes a one-leg level's whole-level solve). Each compile then
+  runs one stretch child (nice +10, 1.0-1.7 GB) and, on a gated level, one chain child (~1 GB). THE SHARED GATE (box 6,
+  gate20, 60 s, par 5, vs gate_c6.json): exit 0, compiled 15 vs 13, better 11 / worse 1 (Booty Return progress 46 -> 39, the
+  60-s flip lanes 1 and 4 saw too), 15 / 15 replayed; faster than the baseline on Bygone Tutorial 2,135 vs 2,806, Desolate
+  Caverns 1,377 vs 1,769, Tree Decorating 1,320 vs 1,620, Ruins 1,227 vs 1,351, Fish Gods 3,817 vs 4,099, Accident Prone
+  3,122 vs 3,318; Tutorial 1 and The Blank Page compile (the baseline: neither). T-MODEL-EXACT 219 routes 0 unsound, T-PLAN-ORACLE 2 / 0, msolve --quick 50 / 0; unit
+  tests portfolio 20/20, labcorridor 18/18, labbackward 16/0, labprofile 12/0, s99stretch 7/0, bwchain 9/0, planstrategy 27/0,
+  planexec 14/14, joins 22/0, precision 12/0, plancompile 31/0 (its failing-executor mock case with EEAT_S99_DEFAULTS=0: the
+  children are real solvers and route the toy).
 - **In the app**: the level editor's **Compile** button (POST / GET `/api/editor/compile`, section 9) runs the CLI in its own
   process in `<data>/editor/compile/`, shows its stage lines, replays the route once more, makes a job `<name> (compiled)`
   (watch it, optimize it like any run) and copies its `/loadtas` line. `src/plan.js` is the headless runner (JSON lines):
