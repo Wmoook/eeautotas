@@ -1297,6 +1297,32 @@ ways in.
   x 252 and x 244 climbs: the goal field falls along it, 48.2 -> 33.2 -> 34 -> 31.2 -> 23.6 -> 12.6, so (250,255) is no
   false near, the finders stall on the way); a dedicated long solve of an (edge, place) that failed twice (the stretch
   child's 40 / 80 s windows failed switch 5 from 3 anchors) and these knobs on the gate levels.
+- **Bad EE Level 9, cycle 4: the mini legs re-solved per lineage, THE FUNNEL** (B7 lane b9, 2026-10-01, branch n5-b7-b9 =
+  cycle 3 + origin/n5-plan 04ecf95; strategy.js `funnel`, `fnLib`, OPT-IN `EEAT_PLAN_FUNNEL=1` (which turns the landmark
+  rejoin `EEAT_PLAN_REJOIN` on), off = the compile byte for byte; test/planstrategy.js 27/0 with it + the cycle-3 knobs and
+  with every knob off, box 7). WHY: each lineage searched the same mini again (c13J: switch 5 found 3 times, at 162 / 300 /
+  425 s, 91-130 s each at the 135-s rung; mini 7 twice). The lineages enter a mini through its one arch portal but at other
+  fall speeds (c13J switch 5's entry states py 3905.90 / vy 3.70 vs py 3907.16 / vy 5.03: the straight replay of one
+  lineage's mini tail from the other's entry fails both ways), and the landmark rejoin of that tail from the other's entry
+  state hits in 7-8 ticks (the landing; both ways, 1 ms: `src/out/b9c4/funnel2.js`). The rejoin serves only starts at or
+  near the kept leg's start; THE FUNNEL: every kept leg also keeps its last teleports (from its start's last `RJ_BACK` ticks
+  on, the leg's own trajectory from each exit with its physical keys), and a step of its edge that no replay or rejoin
+  served first runs a short executor leg (`EEAT_FUNNEL_MS` 5 s, level 1) from its starts more than `EEAT_FUNNEL_NEAR` 3
+  tiles from every exit to the exit tiles, then the landmark rejoin from each arrival; a place whose funnel found nothing
+  waits for the edge's next kept leg; a funnel that ran and found nothing gives the step's executor a fresh full window.
+  MEASURED (box 7, 900 s, W3, load ~165 beside the scoreboard's full compile, one run an arm, two rounds side by side;
+  K = `EEAT_RUNG_DEEP=135000 EEAT_RUNG_PLACE=1 EEAT_START_JITTER=1`, chain ids of 54 held by one anchor): round 1 the
+  current compiler (knobs off) 5 (1-4, 101; switch 5 57 steps, 0 found, 901 worker-s), K 5 (1-4, 101), K + `EEAT_PLAN_REJOIN=1`
+  **9** (1-6, 9, 10, 101; the rejoin served mini 3's switch at 344 s); round 2 K 5 (1-5), K + FUNNEL **10** (1-6, 8-10, 101)
+  and **11** (1-6, 8-10, 41, 101; 14 triggers); the rejoin served mini switches 4 times over the reuse arms (switch 3, switch
+  5 twice in 15 / 149 ms right after the first find at 584 s, switch 4); the funnel itself ran 12 times, all on hub legs
+  (checkpoints, blue keys, team 2), 5 rejoined, ~58 worker-s in all: no mini step reached it (their starts were near the
+  exits or served by the rejoin first). K alone at 1,800 s (one run): **14 ids (1-14: waves 1-2 complete, wave 3's 11-14;
+  15 triggers)**, ids 10 by 900 s; the walls then switch 12 (73,99) (35 steps, 3 found), mini 7 (5,140) (38 steps, 1,418
+  worker-s, 3 found, all at the 135-s rung) and wave 3's switch 15 (277,202) (0 of 16). The reuse arms 9 / 10 / 11 vs K
+  alone 5 / 5 this cycle (cycle 3's K 13, and the long run's 10 at 900 s): within the same code's spread, NO GAIN SHOWN by
+  the funnel itself; not merged (no shared gate). Seen: the special mini 41's blue coin (75,254) took 561-700 worker-s in 3
+  of 6 runs (closest (81,255) 6.4 tiles; the plans "switch 41 > blue coin > purple reset 41 > switch 41").
 - **THE ENDGAME and THE AIRBORNE ARRIVAL** (C6 push 3 lane 5 block 3; `src/out/n5/lanes/c6_lane5_b3.md`). THE ENDGAME
   (strategy.js after JOINS, its own clock; OPT-IN `--endgame=<s>` / `EEAT_ENDGAME_S`, unset / 0 = the compile byte for byte;
   `EEAT_ENDGAME_K` the ladder's largest K, 64; `report.endgame`): the optimizer's exact endgame ladder (`src/endgame.js`
