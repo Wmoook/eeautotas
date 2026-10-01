@@ -182,9 +182,10 @@ function sectionUnit(TMP) {
 	const kinds = evs ? new Set(evs.map((e) => e.ev)) : new Set();
 	const rep2 = evs ? evs.find((e) => e.ev === 'report') : null;
 	// (the perfect pass is on by default: its stage line after verify and the LOOPS stage; EEAT_PERFECT=0: neither)
-	const perfOn = process.env.EEAT_PERFECT !== '0', nStages = perfOn ? 11 : 9;
-	check(`--json: every line a JSON event (stage x${nStages} with ${perfOn ? 'perfect, loops and ' : ''}joins, result, progress, done, report last), exit 0; the report's inputs finish`,
-		r.status === 0 && !!evs && evs.filter((e) => e.ev === 'stage').length === nStages && (!perfOn || (evs.some((e) => e.ev === 'stage' && e.name === 'perfect') && evs.some((e) => e.ev === 'stage' && e.name === 'loops'))) && evs.some((e) => e.ev === 'stage' && e.name === 'joins') &&['result', 'progress', 'done', 'report'].every((k) => kinds.has(k)) && evs[evs.length - 1].ev === 'report' && !!rep2 &&
+	// (THE ENDGAME is on by default since C6 lane 5 block 4: its stage after the joins; EEAT_ENDGAME=0: none)
+	const perfOn = process.env.EEAT_PERFECT !== '0', egOn = process.env.EEAT_ENDGAME !== '0' && process.env.EEAT_ENDGAME_S !== '0', nStages = (perfOn ? 11 : 9) + (egOn ? 1 : 0);
+	check(`--json: every line a JSON event (stage x${nStages} with ${perfOn ? 'perfect, loops and ' : ''}joins${egOn ? ', endgame' : ''}, result, progress, done, report last), exit 0; the report's inputs finish`,
+		r.status === 0 && !!evs && evs.filter((e) => e.ev === 'stage').length === nStages && (!perfOn || (evs.some((e) => e.ev === 'stage' && e.name === 'perfect') && evs.some((e) => e.ev === 'stage' && e.name === 'loops'))) && evs.some((e) => e.ev === 'stage' && e.name === 'joins') && (!egOn || evs.some((e) => e.ev === 'stage' && e.name === 'endgame')) && ['result', 'progress', 'done', 'report'].every((k) => kinds.has(k)) && evs[evs.length - 1].ev === 'report' && !!rep2 &&
 		!!C.evaluate(L, T.masksOf(rep2.inputs)), `exit ${r.status}, ${jl.length} lines, ${[...kinds].join(',')}`);
 }
 
@@ -280,8 +281,8 @@ function sectionApi(TMP) {
 	const d = x.done || {};
 	const names = (d.stages || []).map((s) => s.name);
 	// (the perfect pass is on by default: its stage after verify and the LOOPS stage; EEAT_PERFECT=0: neither)
-	const perfOn = process.env.EEAT_PERFECT !== '0';
-	const want = ['parse', 'model', 'bounds', 'plan', 'moves', 'verify'].concat(perfOn ? ['perfect'] : [], ['polish', 'prove'], perfOn ? ['loops'] : [], ['joins']);
+	const perfOn = process.env.EEAT_PERFECT !== '0', egOn = process.env.EEAT_ENDGAME !== '0' && process.env.EEAT_ENDGAME_S !== '0';
+	const want = ['parse', 'model', 'bounds', 'plan', 'moves', 'verify'].concat(perfOn ? ['perfect'] : [], ['polish', 'prove'], perfOn ? ['loops'] : [], ['joins'], egOn ? ['endgame'] : []);
 	check(`POST: 200 running; then the stage lines ${want.join(', ')} (each {name, ms, text}), stage "done", a result {runTicks, time, lb, gap, legs}`,
 		!!x.post && x.post.status === 200 && x.post.running === true && JSON.stringify(names) === JSON.stringify(want) && d.stage === 'done' &&
 		!!d.result && d.result.runTicks > 0 && /^\d+:\d\d\.\d\d$/.test(d.result.time) && d.result.lb > 0 && d.result.gap === d.result.runTicks - d.result.lb && Array.isArray(d.result.legs),
