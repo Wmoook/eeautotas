@@ -1088,3 +1088,29 @@ ways in.
   gate with the default (60 s): exit 0, compiled 15 vs the baseline's 11, worse 1 (First Person Maze, the base's own).
   Tests that require src/plan/strategy.js directly read the environment (test/planstrategy.js's mock T-STALL fails with
   `EEAT_BW_LEVEL=1`: the child solves the real toy file).
+- **Bad EE Level 9's mini walls: the deep rung and the warm rung** (B7 lane b9, cycle 2, 2026-09-30, branch n5-b7-b9;
+  strategy.js, both OPT-IN, off = the compile byte for byte): `EEAT_RUNG_DEEP=<ms>` = one more rung of that many ms after
+  the 45-s one (the facts block an (edge, node class) after 5 failures instead of 4; the executor runs it at its top tier,
+  level 3, with the longer window; the relay start goes on from rung 3's closest); `EEAT_RUNG_WARM=1` = an edge that failed
+  rung r by its BUDGET from one node class starts at rung r from the next (never onto a triple already run in its epoch;
+  cleared at a deepening, as the facts are; a find at a lower rung lowers it). WHY: the 54-switch chain stops at minis whose
+  leg needs one long window. Mini 5 (switch 5 (227,264), a ladder maze between spike columns) from its own entrance
+  (tools/cmp/legab.js, box 7 at load 150-190, 6 knob arms x 3 reps: n5-plan's defaults, without the portfolio / the cover /
+  the field memo + corridor fields, with none, + EEAT_Q_CELL): 18 / 18 found, ALL at rung 3 (34-45 s, skel+leg /
+  skel+portfolio, 585-866 ticks), 0 at rungs 1-2 (closest 35.6 / 30.8 tiles in every rep): no knob matters, the WINDOW
+  does; in the compile the 45-s rung is the edge: switch 5's rung-3 steps over 9 runs of 900 s found it 3 of 61 (cycle 1's
+  c4X 0 of 23), its rung-0-2 steps ~0 of 200 (each new node class climbs rungs 0-2 again: 1.5 + 5 + 15 s spent before its
+  one 45-s window). MEASURED (box 7, 900 s, W3, cycle 1's best config FX_CELL + TRANSPLANT + FX_FIELD=0 + FX_STATE=0, one
+  run an arm): with `EEAT_RUNG_DEEP=135000` the 135-s steps on switch 5 found it **5 of 7** (c6D1 2 / 3, c6D2 2 / 3, +WARM
+  c7W2 1 / 1; at 298-427 s), where the same runs' 45-s steps found it 0 of 17; the deep rung took the next walls too: mini 7
+  (5,140) (a blue-spike course, closest (15,114) 39 tiles: 0 of ~50 steps at rungs 0-3, 2 of 7 at rung 4, at 856 / 859 s),
+  mini 13 (225,119) (closest (218,137) 20.8 since cycle 1: 1 of 2 at rung 4, 863 s), switch 10 2 of 2; the two runs'
+  rung-4 steps 9 of 18 found (mini 12 (73,99) 0 of 1). Chain ids (of 54, one anchor) at 900 s 11 (1-11: wave 3 entered) /
+  10 (1-10) vs the base config's 17 / 16 / 6 in cycle 1 (box 7 at load ~100-150) and 4 this cycle (load 160-190; c5C,
+  below): at the compile level no gain shown yet (one run an arm, a 2.5-x spread; a class's deep window comes only after its
+  66 s of short rungs, hence the warm rung). SEEN ON THE WAY (not fixed): with
+  that config one run's main thread planned 3.6-11 s before every step from 56 s on (every plan 'budget: the most gain',
+  856 of 900 s planning; median 0.3 s in the 6 other runs of the config: c5C, 4 ids) and a rung-2 step of it held a worker
+  305 s on its 15-s budget (exec.reach 840 k sims: waiting, not searching); the warm rung's first version repeated a
+  bumped triple (79 transplant steps at rung 1 with no news: c7W1) until the guard above. The landmark rejoin of cycle 1
+  (`EEAT_PLAN_REJOIN=1`, the same branch) found no gain (15-44 hits a run, all on hub checkpoints and solved minis).
