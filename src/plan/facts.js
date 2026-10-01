@@ -1,72 +1,74 @@
 'use strict';
-// THE CEGAR FACT STORE (n4plan, part 'planner': the compiler's REFINE memory). Every executed plan step leaves a fact;
-// the planner reads them so that a failed step always changes the next plan (NO STALLING: the same (edge, nodeClass, rung)
-// triple is never proposed twice) and a succeeded one prices its edge by what it really cost.
+// THE CEGAR FACT STORE (n4plan, part 'planner'): what the executor taught the planner. A step that failed within its
+// budget is a counterexample: its (edge, nodeClass) moves up one rung (the next try gets the next budget and the plan
+// pays double for it); past the last rung, or on a proof, the edge is blocked for that node class. A success records the
+// measured ticks (the planner's cost from then on). 'needs' names a door feature an edge waits for (the executor's
+// blockedBy: a shut gate near its closest approach); 'enable' lets the planner try the physics effects first.
 //
-// createFacts(o) -> {version(), add(fact), reset({keepProofs}), toJSON(), rungOf(edge, nodeClass), blocked(edge, nodeClass,
-//   sKey), okTicks(edge, nodeClass), needsOf(edge, nodeClass), list()}
-// Fact kinds (plain JSON):
-//   {kind: 'ok', edge, nodeClass, ticks, lb}        the step reached its waypoint in `ticks`: the edge's estimate
-//   {kind: 'fail', edge, nodeClass, rung, why, closest, blockedBy}   a failed rung (the next plan asks the next rung)
-//   {kind: 'needs', edge, nodeClass, feat, value}   a shut gate near the closest approach: the edge needs that value first
-//   {kind: 'proof', edge, sKey}                     an RCH3 -1 from that abstract state: never tried from it again
-//   {kind: 'block', edge, nodeClass}                RUNG_MAX failures: the edge is out for that node class
-// o.rungMax (or o.rungs, the strategy's budget rungs; default 3). The version counts every add (and every reset).
-const RUNG_MAX = 3;
-const KINDS = new Set(['ok', 'fail', 'needs', 'proof', 'block']);
+// createFacts({rungs: 4}) -> {record(fact), rung(edge, nodeClass), penalty(edge, nodeClass, unmet), blocked(edge,
+//   nodeClass), measured(edge, nodeClass) -> ticks | null, needs(trigId) -> Set(feat), enabled(nodeClass), version,
+//   toJSON(), reset({keepProofs, boost}), scale, stats()}
+// Fact kinds: {kind:'ok', edge, nodeClass, ticks} | {kind:'fail', edge, nodeClass, rung, why} | {kind:'proof', edge,
+//   nodeClass} | {kind:'needs', trig, feat} | {kind:'side', edge, touched} | {kind:'enable', nodeClass}
+// nodeClass = S.key + '@' + regionId (the planner's); edge = nodeClass + '>' + <trigId | trophy | die | expire:<feat> |
+// explore:<tile>>.
 
-function createFacts(o = {}) {
-	// (o.rungs: the strategy's number of budget rungs, e.g. 4 = 1.5 / 5 / 15 / 45 s: the block after that many failures)
-	const rungMax = o.rungMax || o.rungs || RUNG_MAX;
-	let ver = 0, facts = [];
-	let fails = new Map(), blocks = new Set(), proofs = new Set(), needs = new Map(), oks = new Map();
-	const ek = (edge, cls) => `${edge}\u0001${cls}`;
-	function index(f) {
-		switch (f.kind) {
-			case 'ok': { const k = ek(f.edge, f.nodeClass), had = oks.get(k); oks.set(k, had === undefined ? f.ticks : Math.min(had, f.ticks)); break; }
-			case 'fail': { const k = ek(f.edge, f.nodeClass); fails.set(k, Math.max(fails.get(k) || 0, (f.rung | 0) + 1)); break; }
-			case 'needs': { const k = ek(f.edge, f.nodeClass); if (!needs.has(k)) needs.set(k, []); const l = needs.get(k); if (!l.some((x) => x.feat === f.feat && x.value === f.value)) l.push({ feat: f.feat, value: f.value }); break; }
-			case 'proof': proofs.add(ek(f.edge, f.sKey)); break;
-			case 'block': blocks.add(ek(f.edge, f.nodeClass)); break;
-			default: break;
-		}
-	}
-	const api = {
-		RUNG_MAX: rungMax,
-		version: () => ver,
-		/** add(fact) -> the fact (a copy, JSON only); bumps the version */
-		add(f) {
-			if (!f || !KINDS.has(f.kind)) throw new Error(`facts.add: bad fact ${JSON.stringify(f)}`);
-			const c = JSON.parse(JSON.stringify(f));
-			facts.push(c); index(c); ver++;
-			return c;
+function createFacts(opts = {}) {
+	const RUNGS = opts.rungs || 4;
+	const E = new Map();   // edge|nodeClass -> {rung, proof, ticks, fails, oks}
+	const needs = new Map();   // trigId -> Set(feat)
+	const enabled = new Set();   // nodeClasses allowed the effects' enabler edges
+	const sides = [];
+	let version = 0, scale = 1, deepenings = 0;
+	const k = (edge, nodeClass) => `${edge}|${nodeClass}`;
+	const get = (edge, nodeClass) => E.get(k(edge, nodeClass));
+	const ent = (edge, nodeClass) => { const key = k(edge, nodeClass); let e = E.get(key); if (!e) { e = { edge, nodeClass, rung: 0, proof: false, ticks: null, fails: 0, oks: 0, why: null }; E.set(key, e); } return e; };
+	const F = {
+		/** record one fact (returns it) */
+		record(f) {
+			if (!f || !f.kind) return f;
+			version++;
+			switch (f.kind) {
+				case 'ok': { const e = ent(f.edge, f.nodeClass); e.oks++; if (Number.isFinite(f.ticks)) e.ticks = e.ticks === null ? f.ticks : Math.min(e.ticks, f.ticks); e.rung = 0; break; }
+				case 'fail': { const e = ent(f.edge, f.nodeClass); e.fails++; e.why = f.why || null; e.rung = Math.max(e.rung, (f.rung | 0) + 1); break; }
+				case 'proof': { const e = ent(f.edge, f.nodeClass); e.proof = true; e.why = 'proof'; break; }
+				case 'needs': { const t = String(f.trig); if (!needs.has(t)) needs.set(t, new Set()); needs.get(t).add(f.feat); break; }
+				case 'side': sides.push(f); if (sides.length > 1000) sides.shift(); break;
+				case 'enable': enabled.add(f.nodeClass); break;
+			}
+			return f;
 		},
-		/** the rung the next try of (edge, nodeClass) is at: the failures so far */
-		rungOf: (edge, cls) => fails.get(ek(edge, cls)) || 0,
-		/** 'block' | 'proof' | null: the edge is out from that node class / abstract state */
-		blocked(edge, cls, sKey) {
-			if (sKey !== undefined && proofs.has(ek(edge, sKey))) return 'proof';
-			if (blocks.has(ek(edge, cls))) return 'block';
-			if ((fails.get(ek(edge, cls)) || 0) >= rungMax) return 'block';
-			return null;
+		/** the rung the next try of this edge from this class gets (0..rungs-1; >= rungs: blocked) */
+		rung(edge, nodeClass) { const e = get(edge, nodeClass); return e ? e.rung : 0; },
+		/** the plan's cost factor: 2^rung, x4 per unmet need (the caller counts the needs whose gates are shut in S) */
+		penalty(edge, nodeClass, unmet = 0) { const e = get(edge, nodeClass); return (e && e.ticks !== null && e.rung === 0 ? 1 : Math.pow(2, e ? e.rung : 0)) * Math.pow(4, unmet); },
+		/** blocked: a proof, or failed past the last rung */
+		blocked(edge, nodeClass) { const e = get(edge, nodeClass); return !!e && (e.proof || e.rung >= RUNGS); },
+		/** the measured ticks of a success (null: none) */
+		measured(edge, nodeClass) { const e = get(edge, nodeClass); return e && e.ticks !== null ? e.ticks : null; },
+		/** the door features a trigger was found to need */
+		needs(trig) { return needs.get(String(trig)) || new Set(); },
+		/** the class may try the effects (enabler edges) */
+		enabled(nodeClass) { return enabled.has(nodeClass); },
+		get version() { return version; },
+		/** the budget scale (x2 per global deepening) */
+		get scale() { return scale; },
+		get deepenings() { return deepenings; },
+		get rungs() { return RUNGS; },
+		/** the global deepening: every rung back to 0 (the proofs kept unless keepProofs false), budgets x boost */
+		reset(o = {}) {
+			const keepProofs = o.keepProofs !== false;
+			for (const [key, e] of E) { e.rung = 0; if (!keepProofs) e.proof = false; if (!e.proof && e.ticks === null && e.oks === 0 && !keepProofs) E.delete(key); }
+			scale *= o.boost || 2;
+			deepenings++;
+			version++;
 		},
-		/** the learned ticks of the edge from that node class (undefined: none) */
-		okTicks: (edge, cls) => oks.get(ek(edge, cls)),
-		/** [{feat, value}] the edge needs first (from 'needs' facts) */
-		needsOf: (edge, cls) => needs.get(ek(edge, cls)) || [],
-		list: () => facts.slice(),
-		/** reset({keepProofs}): forget the rungs, blocks, needs and estimates (the strategy's deepening); proofs stay on
-		 *  request; the version still bumps */
-		reset(ro = {}) {
-			const keep = ro.keepProofs ? facts.filter((f) => f.kind === 'proof') : [];
-			facts = []; fails = new Map(); blocks = new Set(); proofs = new Set(); needs = new Map(); oks = new Map();
-			for (const f of keep) { facts.push(f); index(f); }
-			ver++;
-		},
-		toJSON: () => ({ version: ver, rungMax, facts: facts.slice() }),
+		/** every edge this store knows (tests, logs) */
+		entries() { return [...E.values()]; },
+		stats() { let blocked = 0, proofs = 0, fails = 0, oks = 0; for (const e of E.values()) { if (e.proof) proofs++; if (e.proof || e.rung >= RUNGS) blocked++; fails += e.fails; oks += e.oks; } return { edges: E.size, blocked, proofs, fails, oks, needs: needs.size, enabled: enabled.size, version, scale, deepenings }; },
+		toJSON() { return { rungs: RUNGS, scale, deepenings, version, edges: [...E.values()], needs: [...needs].map(([t, s]) => [t, [...s]]), enabled: [...enabled] }; },
 	};
-	if (o.facts) for (const f of o.facts) api.add(f);
-	return api;
+	return F;
 }
 
-module.exports = { createFacts, RUNG_MAX };
+module.exports = { createFacts };

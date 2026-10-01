@@ -1,761 +1,349 @@
 'use strict';
-// THE ABSTRACT PLANNER (n4plan, part 'planner': the compiler's PLAN stage and the CEGAR loop's planning side).
-// createPlanner(model, facts, {bounds, seed}) -> {plan, learn, lowerBound, costOf, explain, stats}.
+// THE ABSTRACT PLANNER (n4plan, part 'planner'): A* over (abstract state S, entry tile) of the level model (model.js) to
+// the trophy. An edge is a trigger the region walk of (S, entry) reaches whose touch changes S (the next node: S' at the
+// trigger's tile), a key running out ('expire'), a death (the respawn at S's checkpoint or the next spawn: 'die'), a
+// checkpoint (where a death could follow), or, once the facts allow it for a node class, a static effect ('enabler').
+// Costs: the facts' measured ticks, else the RCH3 physics fields (lazily: only for the edges of the plans about to be
+// returned, LazySP style: an edge with no physics way is repriced and A* runs again), else the walk; each times the
+// facts' penalty (2^rung, x4 per unmet need). k plans, diverse by their first triggers. Receding horizon: the strategy
+// executes steps[0] and plans again from the real arrival.
 //
-// The abstract graph: a node = (S, position): S the model's abstract state (the features some gate reads, the coin tiles
-// taken, the checkpoint where a death moves the ball), the position the tiles of the last trigger touched (or the
-// anchor's tile; the respawn after a death step). Edges: "touch trigger X next" for every relevant trigger whose touch
-// changes S and that the lb walk relaxation under S reaches from the position (the walk BFS: killers and one-ways
-// passable, keys sticky, portal hops, the death shortcut: its INF is a proof for the relaxation, so no edge is dropped
-// without one); the trophy edge; a death step where only a death reaches a target (est).
-//   - est (the plans' ranking): facts.okTicks when learned, else max(lb, est walk steps x the pace (the median of the
-//     learned ticks / steps, 4 at first)); the est walk walls killers unless protected and the CEGAR cuts; an edge only
-//     the relaxation reaches, or that RCH3 calls impossible from the position at rest or rising (verifyPath), a heavy
-//     penalty (never a drop; RCH3's -1 from the anchor's REAL state: a proof, dropped). The plans: weighted A* on est
-//     (k-best, diverse by the first step), greedy on the level's LANDMARKS in a puzzle (3+ left: LAMA's greedy best
-//     first), a one-step partial plan at least whatever the budget.
-//   - lb: ADMISSIBLE ticks (model.pairLb: ceil(16 (D - 1) / 16.25) of the lb walk steps D, a portal hop's entry step
-//     free, the death shortcut to the respawn the state holds; o.bounds.pair where no death can shortcut and no coin
-//     gate, the larger of both). A touch that shuts a gate the ball overlaps is DEFERRED by the engine: the next leg
-//     starts from its deferral region (posOf). lowerBound(anchor): A* on lb, h = the same bound on the level with every
-//     gate open (admissible; nodes re-opened on a better g), the optimum when it completes, else the least f on the open
-//     list; an anchor with a change still queued is bounded from the state it will be (model.pendingOf).
-//   - B&B: plan(anchor, {depth}) drops every node whose lb to the trophy puts it at depth or past.
-// Waypoints (types.js): a trigger -> {kind 'trigger', tiles (a coin trigger's untaken tiles), trig, expect, label}; the
-// trophy -> {kind 'trophy'}; a key followed by its door -> a region step past the door (beforeTickFrom 'prev+500', or
-// beforeTick when the key is the anchor's own); a death step -> {kind 'region', tiles: the respawn tiles, expect deaths +
-// 1, allowDeath}.
-// learn(step, result, anchor) -> Fact[] (>= 1, the version bumped, whenever !result.ok): fail -> the next rung; the
-// facts' rungs -> block; why 'proof' -> proof (never from that S again); blockedBy -> needs (the gate's feature first);
-// a failure at its second rung or exhausted with a closest approach -> a CUT of the est walk just past it (the next plans
-// go another way: Cold World's pool); ok -> ok (the edge's ticks, the pace).
-const E = require('../eesim.js');
+// createPlanner(model, facts, opts) -> {plan(anchor, {k, ms, maxNodes}) -> Plan[] (plans.why), learn(step, stepResult)
+//   -> Fact[], explain(plan) -> string, stats()}
+// anchor = {arrival (types Arrival), S (model.stateOf; computed from the arrival when missing)}
+// Plan = {id, steps: Step[], cost, partial, why}; Step = {n, edge, nodeClass, from, to, waypoint, estTicks, rung,
+//   deadline?, kind, fromTick (step 0)}; step.S / step.S2 (non-enumerable): the model states before / after.
 const T = require('./types.js');
-const { lbOfSteps, INF, DEAD_TICKS } = require('./model.js');
 
-const PACE0 = 4;              // est ticks per walk step before any learned leg
-const EST_W = 1.5;            // the plan search's heuristic weight (est only; the lb search is plain A*)
-const PENALTY = 1e6;          // est of an edge only the relaxation reaches (no est walk) or RCH3 calls impossible
-const LM_W = 60;              // ticks of the plan search's f per landmark not yet achieved (src/landmarks.js, LAMA's count)
-const GAIN_BONUS = 3;         // walk steps of the plan search's f per unit of gain (the relevant triggers achieved)
-const KEY_TICKS = 500;
-const COLOURS = ['red', 'green', 'blue', 'cyan', 'magenta', 'yellow'];
+const TICKS_PER_FIFTH = 0.6;   // ~3 ticks per tile (5 fifths)
+const WALK_FACTOR = 1.5;   // the walk is gravity-blind: its estimate x 1.5
+const DIE_TICKS = 54;
+const PHYS_NONE_PEN = 20;   // an edge with no physics way at rest (it may need speed): x 20, not removed
+const COIN_BRANCH = 3;
 
-/** a heap on f (then g) */
-class Heap {
-	constructor() { this.a = []; }
-	get size() { return this.a.length; }
-	push(x) { const a = this.a; a.push(x); let i = a.length - 1; while (i > 0) { const p = (i - 1) >> 1; if (Heap.lt(a[i], a[p])) { [a[i], a[p]] = [a[p], a[i]]; i = p; } else break; } }
-	pop() { const a = this.a; const top = a[0], last = a.pop(); if (a.length) { a[0] = last; let i = 0; for (;;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < a.length && Heap.lt(a[l], a[m])) m = l; if (r < a.length && Heap.lt(a[r], a[m])) m = r; if (m === i) break; [a[i], a[m]] = [a[m], a[i]]; i = m; } } return top; }
-	peek() { return this.a[0]; }
-	static lt(x, y) { return x.f < y.f || (x.f === y.f && (x.g > y.g || (x.g === y.g && x.seq < y.seq))); }
-}
-
-function createPlanner(model, facts, o = {}) {
-	const L = model.L, W = model.W, H = model.H;
-	const bounds = o.bounds && typeof o.bounds.pair === 'function' ? o.bounds : null;
-	const ST = { rchChecks: 0, plans: 0, planMs: 0, expands: 0, lbCalls: 0, lbMs: 0, lbExpands: 0, learned: 0, costOf: 0 };
-	const paceSamples = [];
-	let lastPlans = [], lastWhy = '';
-	const relevant = model.triggers.filter((X) => X.relevant && X.kind !== 'trophy');
-	const trophyTiles = model.trophyTiles;
-	const openS = { key: '__open__', dkey: '__open__', vals: [], feats: {} };
-	// ---------------------------------------------------------------- positions
-	const posOfTrig = new Map();
-	/**
-	 * the position after touching X in state S1 (the state before) giving S2. The engine DEFERS a change that would shut a
-	 * door on the ball (a purple press in _tileQueue, a key / crown / orange switch in its queue, a team change retried)
-	 * while the ball's box overlaps it, so the change's event can come later and elsewhere (The Flighty Slighty's switch
-	 * column: each press shuts the door the ball falls through; First Person Maze: a press deferred through a portal hop).
-	 * tiles: X's (the plan's waypoint, the est walk); grace: the shut gate components next to X, passable for the next leg;
-	 * lbTiles (the lb's sources): X's tiles, and where the touch shuts a gate, the DEFERRAL REGION: the tiles within a tile
-	 * of a gate it shuts reachable from X under S1 (portal hops included) and the tiles next to them (where the ball stops
-	 * overlapping): every place the event can happen, so the next leg's bound stays sound
-	 */
-	const graceMemo = new Map();
-	/** deferral(tiles, S1, S2) -> {grace, lbTiles, nShut} | null: the grace gates next to the tiles and the deferral region
-	 *  of the change S1 -> S2 made there (null: it shuts no gate) */
-	const shutMemo = new Map();
-	/** the gate components the change S1 -> S2 shuts and the tiles within one of them (by the pass keys; null: none) */
-	function shutOf(S1, S2) {
-		const k = S1.pkey + '>' + S2.pkey;
-		let r = shutMemo.get(k);
-		if (r !== undefined) return r;
-		r = null;
-		for (const g of model.gates) {
-			const j = g.tiles[0];
-			if (!(model.gateOpen(j, S1, 'est', null) && !model.gateOpen(j, S2, 'est', null))) continue;
-			if (!r) r = { near: new Uint8Array(model.N), gates: new Set(), nShut: 0 };
-			r.gates.add(g.id);
-			for (const t of g.tiles) {
-				r.nShut++;
-				const x = t % W, y = (t / W) | 0;
-				for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const nx = x + dx, ny = y + dy; if (nx >= 0 && ny >= 0 && nx < W && ny < H) r.near[ny * W + nx] = 1; }
-			}
-		}
-		if (shutMemo.size > 4096) shutMemo.clear();
-		shutMemo.set(k, r);
-		return r;
+let planSeq = 0;
+function createPlanner(model, facts, opts = {}) {
+	const M = model;
+	const physKnown = new Map();   // doorKey|trig|entry -> fifths (Infinity: none at rest)
+	const anchorEx = new Map();   // anchor hash -> Set(edge): a real state's proof (RCH3 -1 with the doors as now)
+	const st = { plans: 0, astar: 0, nodes: 0, ms: 0, physChecks: 0, reruns: 0, lastMs: 0 };
+	const featGates = new Map();   // feat -> gate type indices
+	M.gtypes.forEach((g, i) => { const k = g.kind === 0 ? g.feat : g.kind >= 4 ? 'deaths' : null; if (k) { if (!featGates.has(k)) featGates.set(k, []); featGates.get(k).push(i); } });
+	const hOf = (t) => (M.hAll[t] >= 0 ? M.hAll[t] : M.hMax + 200) * TICKS_PER_FIFTH;
+	const def = (o, k, v) => Object.defineProperty(o, k, { value: v, enumerable: false, writable: true });
+	/** how many of a trigger's learned needs have every gate shut... any gate of the feat shut under S */
+	function unmetOf(S, trig) {
+		if (trig === undefined || trig === null) return 0;
+		const nd = facts.needs(trig);
+		if (!nd.size) return 0;
+		const o = M.openTypes(S);
+		let u = 0;
+		for (const f of nd) { const gs = featGates.get(f); if (gs && gs.some((g) => o[g] === 0)) u++; }
+		return u;
 	}
-	function deferral(tiles, S1, S2) {
-		const sh = shutOf(S1, S2);
-		if (!sh) return null;
-		const near = sh.near;
-		let grace = null;
-		const gs = new Set();
-		for (const t of tiles) {
-			const x = t % W, y = (t / W) | 0;
-			for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
-				const nx = x + dx, ny = y + dy;
-				if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
-				const g = model.gateOf[ny * W + nx];
-				if (g < 0 || gs.has(g)) continue;
-				gs.add(g);
-				if (sh.gates.has(g)) { if (!grace) grace = []; for (const tt of model.gates[g].tiles) grace.push(tt); }
-			}
+	const edgeName = (nc, via) => `${nc}>${via.kind === 'trig' || via.kind === 'cp' || via.kind === 'fx' ? via.id : via.kind === 'expire' ? 'expire:' + via.feat : via.kind === 'explore' ? 'explore:' + via.tile : via.kind}`;
+	/** the estimated ticks of an edge: measured, else physics, else the walk */
+	function estOf(S, entry, nc, via) {
+		const en = edgeName(nc, via);
+		const m = facts.measured(en, nc);
+		if (m !== null) return m;
+		if (via.kind === 'expire') return 0;
+		if (via.kind === 'die') return DIE_TICKS + via.walk * TICKS_PER_FIFTH * WALK_FACTOR;
+		if (via.kind === 'trig' || via.kind === 'trophy' || via.kind === 'cp' || via.kind === 'fx') {
+			const pk = physKnown.get(`${M.doorKey(S)}|${via.kind === 'trophy' ? 'trophy' : via.id}|${entry}`);
+			if (pk !== undefined) return Number.isFinite(pk) ? Math.max(1, pk * TICKS_PER_FIFTH) : Math.max(1, via.walk * TICKS_PER_FIFTH * WALK_FACTOR) * PHYS_NONE_PEN;
 		}
-		// the deferral region: a flood over the passable tiles (S1, lb) within one of a shut gate, seeded by the tiles and
-		// the tiles next to them (the ball's box over them overlaps those, and it moves on while the change waits; First
-		// Person Maze's press takes effect one portal hop later); out: the region and the tiles next to it (sparse sets)
-		const m1 = model.passMask(S1, 'lb', null);
-		const inR = new Set(), out = new Set(tiles), q = [];
-		const ok = (j) => m1[j] || model.A.cls[j] === 3;
-		for (const t of tiles) {
-			if (near[t] && !inR.has(t)) { inR.add(t); q.push(t); }
-			const x = t % W, y = (t / W) | 0;
-			for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
-				const nx = x + dx, ny = y + dy;
-				if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
-				const j = ny * W + nx;
-				if (!ok(j)) continue;
-				out.add(j);
-				if (near[j] && !inR.has(j)) { inR.add(j); q.push(j); }
-			}
-		}
-		while (q.length) {
-			const c = q.pop(), x = c % W, y = (c / W) | 0;
-			const visit = (j) => { if (!ok(j)) return; out.add(j); if (near[j] && !inR.has(j)) { inR.add(j); q.push(j); } };
-			for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const nx = x + dx, ny = y + dy; if ((dx || dy) && nx >= 0 && ny >= 0 && nx < W && ny < H) visit(ny * W + nx); }
-			const ex = model.A.portalExits.get(c);
-			if (ex) for (const e of ex) visit(e);
-		}
-		const lbTiles = [...out].sort((p, q2) => p - q2);
-		return { grace, lbTiles: lbTiles.length > tiles.length ? lbTiles : null, nShut: sh.nShut };
+		return Math.max(1, via.walk * TICKS_PER_FIFTH * WALK_FACTOR);
 	}
-	const posOf = (X, S1, S2) => {
-		let rec = null;
-		if (S1 && S2 && S1.pkey !== S2.pkey) {
-			const gk = X.id + '|' + S1.pkey + '|' + S2.pkey;
-			rec = graceMemo.get(gk);
-			if (rec === undefined) {
-				rec = deferral(X.tiles, S1, S2);
-				if (graceMemo.size > 100000) graceMemo.clear();
-				graceMemo.set(gk, rec);
-			}
+	// ---------------------------------------------------------------- one A* run
+	function astar(root, ctx) {
+		st.astar++;
+		const t0 = Date.now();
+		const heap = [];
+		const less = (a, b) => a.f < b.f || (a.f === b.f && a.h < b.h);
+		const push = (n) => { heap.push(n); let i = heap.length - 1; while (i > 0) { const p = (i - 1) >> 1; if (!less(heap[i], heap[p])) break; [heap[p], heap[i]] = [heap[i], heap[p]]; i = p; } };
+		const pop = () => { const top = heap[0], last = heap.pop(); if (heap.length) { heap[0] = last; let i = 0; for (;;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < heap.length && less(heap[l], heap[m])) m = l; if (r < heap.length && less(heap[r], heap[m])) m = r; if (m === i) break; [heap[m], heap[i]] = [heap[i], heap[m]]; i = m; } } return top; };
+		const closed = new Map();
+		push(root);
+		let best = null, goal = null, popped = 0, rootEdges = 0;
+		while (heap.length) {
+			if (popped >= ctx.maxNodes || Date.now() - t0 > ctx.ms) { ctx.cut = popped >= ctx.maxNodes ? 'nodes' : 'time'; break; }
+			const n = pop();
+			if (n.goal) { goal = n; break; }
+			const R = M.region(n.S, n.entry);
+			n.R = R;
+			n.nc = n.S.key + '@' + R.regionId;
+			const dk = n.S.keyNoCoin + '@' + R.regionId;
+			const had = closed.get(dk);
+			if (had !== undefined && had <= n.g) continue;
+			closed.set(dk, n.g);
+			popped++;
+			if (n !== root && (!best || n.h < best.h || (n.h === best.h && n.g < best.g))) best = n;
+			const kids = expand(n, ctx, n === root);
+			if (n === root) rootEdges = kids.length;
+			for (const k of kids) push(k);
 		}
-		const grace = rec ? rec.grace : null, lbTiles = rec ? rec.lbTiles : null;
-		const id = 't' + X.id + (grace ? '~' + grace[0] + ':' + grace.length : '') + (lbTiles ? '^' + lbTiles[0] + ':' + lbTiles.length + ':' + lbTiles[lbTiles.length - 1] : '');
-		let p = posOfTrig.get(id);
-		if (!p) { p = { id, tiles: X.tiles, trig: X.id, extra: 0, grace, lbTiles }; posOfTrig.set(id, p); }
-		return p;
-	};
-	const respawnPos = { id: 'respawn', tiles: model.respawn, extra: DEAD_TICKS };
-	const idlePos = { id: 'idle', tiles: model.idleTiles, extra: 0 };
-	// the fully open level (every tile but the static walls): the heuristics
-	let openMask = null;
-	const openDist = new Map();
-	function hSteps(pos) {
-		let d = openDist.get(pos.id);
-		if (!d) {
-			if (!openMask) { openMask = new Uint8Array(model.N); for (let i = 0; i < model.N; i++) openMask[i] = model.A.cls[i] !== 0 ? 1 : 0; }
-			d = model.bfs(openMask, pos.tiles);
-			openDist.set(pos.id, d);
-		}
-		let b = INF;
-		for (const t of trophyTiles) if (d[t] < b) b = d[t];
-		return b;
+		st.nodes += popped;
+		return { goal, best, popped, rootEdges, ms: Date.now() - t0 };
 	}
-	let openResp = null;
-	const hMemo = new Map();
-	/** the admissible ticks from pos to the trophy on the open level (the death shortcut included) */
-	function hLb(pos) {
-		const had = hMemo.get(pos.id);
-		if (had !== undefined) return had;
-		let best = lbOfSteps(hSteps(pos));
-		if (model.canDie) {
-			const d = openDist.get(pos.id);
-			let dk = INF;
-			for (let i = 0; i < model.N; i++) if (model.dieTile[i] && d[i] < dk) dk = d[i];
-			if (dk < INF) {
-				if (openResp === null) openResp = hSteps(respawnPos);
-				if (openResp < INF) best = Math.min(best, lbOfSteps(dk) + DEAD_TICKS + lbOfSteps(openResp));
-			}
-		}
-		best += pos.extra || 0;
-		hMemo.set(pos.id, best);
-		return best;
-	}
-	// ---------------------------------------------------------------- landmarks (the plan search's guide)
-	// the level's landmarks (src/landmarks.js: the relaxed planning graph over its triggers from the start; a fact every
-	// relaxed plan needs): the plan search's f counts the ones the state does not hold (ordering only, est; the lb and the
-	// proofs never read them)
-	let LMS = null;
-	function landmarks() {
-		if (LMS) return LMS;
-		LMS = [];
-		try {
-			const lm = require('../landmarks.js').landmarksOf(L, { maxMs: o.lmMs || 1500 });
-			for (const l of lm.landmarks) {
-				const fct = l.f;
-				if (fct.startsWith('coins>=')) LMS.push((S) => (S.feats.coins !== undefined ? S.feats.coins >= +fct.slice(7) : true));
-				else if (fct.startsWith('bcoins>=')) LMS.push((S) => (S.feats.bcoins !== undefined ? S.feats.bcoins >= +fct.slice(8) : true));
-				else if (fct.startsWith('team=')) LMS.push((S) => S.feats.team === undefined || S.feats.team === +fct.slice(5));
-				else if (fct === 'crown') LMS.push((S) => S.feats.crown === undefined || S.feats.crown === 1);
-				else LMS.push((S) => S.feats[fct] === undefined || S.feats[fct] === 1);
-			}
-			ST.landmarks = LMS.length;
-		} catch (e) { LMS = []; }
-		return LMS;
-	}
-	const lmMemo = new Map();
-	function hLM(S) {
-		let h = lmMemo.get(S.key);
-		if (h !== undefined) return h;
-		h = 0;
-		for (const t of landmarks()) if (!t(S)) h++;
-		if (lmMemo.size > 200000) lmMemo.clear();
-		lmMemo.set(S.key, h);
-		return h;
-	}
-	const pace = () => {
-		if (!paceSamples.length) return PACE0;
-		const s = paceSamples.slice().sort((a, b) => a - b);
-		return Math.max(1, s[s.length >> 1]);
-	};
-	// ---------------------------------------------------------------- the anchor
-	function anchorOf(anchor) {
-		anchor = anchor || {};
-		const arr = anchor.arrival || null;
-		// (the anchor's real state: its snapshot when it restores to the arrival's own state hash (the same level object),
-		// else a replay of its masks)
-		let sim = null;
-		if (arr && arr.masks && arr.masks.length) {
-			if (arr.snap) { try { const s1 = new E.EESim(L); s1.reset(); s1.restore(arr.snap); if (arr.hash === undefined || s1.stateHash() === arr.hash) sim = s1; } catch (e) { sim = null; } }
-			if (!sim) sim = T.playTo(L, arr.masks, { allowDeath: true }).sim;
-		} else { sim = new E.EESim(L); sim.reset(); }
-		let S = anchor.S || model.stateOf(sim);
-		const masks = arr && arr.masks ? arr.masks : new Uint8Array(0);
-		let idle = true;
-		for (let i = 0; i < masks.length; i++) if (masks[i] & 31) { idle = false; break; }
-		const tile = arr && arr.tile !== undefined ? arr.tile : model.startTile;
-		let pos = idle ? idlePos : { id: 'a' + tile, tiles: [tile], extra: 0 };
-		// (a change the engine still holds in a queue: the state it will be, the gates it shuts passable until then and
-		// the deferral region as the lb's sources: the anchor's lb stays sound right after a deferred press)
-		const Sp = sim ? model.pendingOf(sim, S) : null;
-		if (Sp && Sp.key !== S.key) {
-			const rec = deferral(pos.tiles, S, Sp);
-			pos = { id: pos.id + 'p' + Sp.dkey.length + ':' + (rec && rec.lbTiles ? rec.lbTiles.length : 0), tiles: pos.tiles, extra: 0, grace: rec ? rec.grace : null, lbTiles: rec ? rec.lbTiles : null };
-			S = Sp;
-		}
-		const cls = arr ? `${Math.round(arr.vx || 0)},${arr.onGround ? 1 : 0}` : '0,1';
-		const base = { coins: S.feats.coins !== undefined ? S.feats.coins : 0, bcoins: S.feats.bcoins !== undefined ? S.feats.bcoins : 0 };
-		return { S, pos, tick: arr ? arr.tick || 0 : 0, idle, cls, base, sim, arr };
-	}
-	// ---------------------------------------------------------------- edges
-	const hasCG = model.hasCoinGate.coins || model.hasCoinGate.bcoins;
-	const useBounds = !!bounds && !model.canDie && !hasCG;
-	/** the physics check's memo: (door key, position, edge) -> true when RCH3 is -1 from every tile of the position at
-	 *  rest and rising at the most (a heavy est penalty in the plan search, never a drop: an abstract position is no real
-	 *  state); 'proof' from the anchor's real state (then the edge is dropped at the root: an exact proof) */
-	const rchBad = new Map();
-	const rchKey = (S, pos, edge) => S.pkey + '|' + pos.id + '|' + edge;
-	/**
-	 * the edges of node (S, pos): [{X (null: the trophy), S2, pos2, expect, lb, est, steps, viaDeath, edge, live}]. The
-	 * lb reachability (the walk relaxation: killers passable, keys sticky, the death shortcut) keeps an edge; mode 'plan'
-	 * prices it by the est walk (killers walls unless protected; a death step where only a death reaches it; a heavy
-	 * penalty where only the relaxation reaches it) and applies the facts (blocks, proofs, needs, learned ticks)
-	 */
-	function edgesOf(S, pos, base, mode, root, rootCls) {
-		const out = [];
-		const P = pace();
-		const extra = pos.extra || 0;
-		const dL = model.dist(S, pos, 'lb', base), dvL = model.deathVia(S, pos, 'lb', base);
-		const wantEst = mode === 'plan';
-		const dE = wantEst ? model.dist(S, pos, 'est', base) : null, dvE = wantEst ? model.deathVia(S, pos, 'est', base) : null;
-		const cls = root ? rootCls : S.key + '|*';
-		const leg = (tiles) => {
-			let sL = INF, rL = INF, sE = INF, rE = INF;
-			const drL = dvL ? dvL.dr : null, drE = dvE ? dvE.dr : null;
-			for (const t of tiles) {
-				if (dL[t] < sL) sL = dL[t];
-				if (drL && drL[t] < rL) rL = drL[t];
-				if (dE) { if (dE[t] < sE) sE = dE[t]; if (drE && drE[t] < rE) rE = drE[t]; }
-			}
-			let lb = lbOfSteps(sL);
-			if (drL && rL < INF) lb = Math.min(lb, lbOfSteps(dvL.dk) + DEAD_TICKS + lbOfSteps(rL));
-			if (!Number.isFinite(lb)) return null;
-			lb += extra;
-			if (useBounds) { try { const bb = bounds.pair(pos.tiles, tiles, model.levelOf(S)); if (Number.isFinite(bb)) lb = Math.max(lb, bb + extra); } catch (e) { /* the tier-0 bound */ } }
-			let est = lb, steps = sL, viaDeath = false, relaxOnly = false;
-			if (wantEst) {
-				if (sE < INF) { est = sE * P + extra; steps = sE; }
-				else if (drE && rE < INF) { est = (dvE.dk + rE) * P + DEAD_TICKS + extra; steps = dvE.dk + rE; viaDeath = true; }
-				else { est = sL * P * 3 + PENALTY + extra; relaxOnly = true; }
-				est = Math.max(lb, est);
-			}
-			return { lb, est, steps, viaDeath, relaxOnly };
+	/** the successors of node n */
+	function expand(n, ctx, isRoot) {
+		const S = n.S, R = n.R, nc = n.nc, out = [];
+		const ex = isRoot ? ctx.ex : null;
+		const add = (via, S2, entry2, goal) => {
+			const en = edgeName(nc, via);
+			if (facts.blocked(en, nc)) return;
+			if (ex && ex.has(en)) return;
+			const est = estOf(S, n.entry, nc, via);
+			const trig = via.kind === 'trig' || via.kind === 'cp' || via.kind === 'fx' ? via.id : undefined;
+			const pen = facts.penalty(en, nc, unmetOf(S, trig)) * (ctx.div.get(nc + '>' + (trig !== undefined ? trig : via.kind)) || 1);
+			const g = n.g + Math.max(0, est) * pen;
+			const kid = { S: S2, entry: entry2, g, h: goal ? 0 : hOf(entry2), parent: n, via: Object.assign(via, { est, edge: en, nc }), goal: !!goal, depth: n.depth + 1 };
+			kid.f = kid.g + kid.h;
+			out.push(kid);
 		};
-		const finish = (X, tiles, edge, tr) => {
-			const g = leg(tiles);
-			if (!g) return;
-			if (wantEst) {
-				if (facts) {
-					if (facts.blocked(edge, cls, S.key)) return;
-					if (facts.needsOf(edge, cls).some((n) => S.feats[n.feat] !== n.value)) return;
-					const ok = facts.okTicks(edge, cls);
-					if (ok !== undefined) g.est = Math.max(g.lb, ok);
-				}
-				const bad = rchBad.get(rchKey(S, pos, edge));
-				if (bad === 'proof' && root) return;
-				if (bad) g.est += PENALTY;
+		if (R.trophy) add({ kind: 'trophy', tile: R.trophy.tile, walk: R.trophy.dist }, S, R.trophy.tile, true);
+		const dk = M.doorKey(S);
+		const coinsSeen = { coins: 0, bcoins: 0 };
+		for (const e of R.edges) {
+			const tr = M.triggers[e.id];
+			if (tr.kind === 'coins' || tr.kind === 'bcoins') { if (coinsSeen[tr.kind] >= COIN_BRANCH) continue; }
+			const S2 = M.apply(S, e.id);
+			if (!S2) continue;
+			if (M.doorKey(S2) === dk) {
+				// (no door changes: only a count below its highest threshold is progress)
+				const prog = (tr.kind === 'coins' || tr.kind === 'bcoins') && tr.fi >= 0 && S.a[tr.fi] < M.capOf[tr.fi];
+				if (!prog) continue;
 			}
-			out.push({ X, S2: tr ? tr.S2 : S, pos2: X ? posOf(X, S, tr ? tr.S2 : S) : null, expect: tr ? tr.expect : null, lb: g.lb, est: g.est, steps: g.steps, viaDeath: g.viaDeath, relaxOnly: g.relaxOnly, edge, live: tiles });
-		};
-		for (const X of relevant) {
-			if (pos.trig === X.id && !(X.kind === 'psw' || X.kind === 'osw')) continue;
-			const live = model.liveTiles(S, X);
-			if (!live.length) continue;
-			// (reachable first: the touch builds a state)
-			let sL = INF;
-			for (const t of live) if (dL[t] < sL) sL = dL[t];
-			if (sL >= INF && !dvL) continue;
-			const tr = model.touch(S, X);
-			if (!tr.changed) continue;
-			finish(X, live, 'trig:' + X.id, tr);
+			if (tr.kind === 'coins' || tr.kind === 'bcoins') coinsSeen[tr.kind]++;
+			add({ kind: 'trig', id: e.id, tile: e.tile, walk: e.dist }, S2, e.tile);
 		}
-		finish(null, trophyTiles, 'trophy', null);
+		// (a death: the respawn at S's checkpoint or the next spawn; the death count a death door / gate reads)
+		if (M.dieOK && R.killer && !(M.featIdx.has('prot') && S.a[M.featIdx.get('prot')] === 1)) {
+			const d = M.die(S);
+			const progress = M.deathDoors > 0 && S.deaths < M.deathCap;
+			const moved = d.tile !== n.entry && !(R.tiles.length && regionHas(R, d.tile));
+			if (progress || moved) add({ kind: 'die', tile: d.tile, walk: R.killer.dist, killer: R.killer.tile }, d.S, d.tile);
+		}
+		for (const [feat, S2] of M.expire(S)) add({ kind: 'expire', feat, walk: 0, tile: n.entry }, S2, n.entry);
+		// (checkpoints where a death can follow: the 2 nearest and the one nearest the trophy)
+		if (M.cpTracked && R.cps.length && R.killer) {
+			const pick = R.cps.slice(0, 2);
+			let bh = null;
+			for (const c of R.cps) if (!bh || hOf(c.tile) < hOf(bh.tile)) bh = c;
+			if (bh && !pick.includes(bh)) pick.push(bh);
+			for (const c of pick) { const S2 = M.apply(S, c.id); if (S2) add({ kind: 'cp', id: c.id, tile: c.tile, walk: c.dist }, S2, c.tile); }
+		}
+		// (the effects, once a failure without a named door let this class try them)
+		if (M.fxTracked && R.fxs.length && facts.enabled(nc)) {
+			for (const c of R.fxs.slice(0, 3)) { const S2 = M.apply(S, c.id); if (S2) add({ kind: 'fx', id: c.id, tile: c.tile, walk: c.dist }, S2, c.tile); }
+		}
 		return out;
 	}
-	/** the lb of a leg (costOf): the tier-0 bound under the lb relaxation, the primitives' where sound too, the larger */
-	function legLb(S, pos, tiles, base) {
-		let lb = model.pairLb(S, pos, tiles, 'lb', base);
-		if (useBounds && Number.isFinite(lb)) { try { const bb = bounds.pair(pos.tiles, tiles, model.levelOf(S)); if (Number.isFinite(bb)) lb = Math.max(lb, bb + (pos.extra || 0)); } catch (e) { /* tier-0 */ } }
-		return lb;
+	function regionHas(R, t) {
+		if (!R._set) { const s = new Set(); for (const x of R.tiles) s.add(x); def(R, '_set', s); }
+		return R._set.has(t);
 	}
-	/** the RCH3 check of the edges on a plan's path; returns the number of edges newly found bad */
-	function verifyPath(a, node, deadline) {
-		let newBad = 0;
-		const path = [];
-		for (let n = node; n && n.e; n = n.parent) path.push(n);
-		path.reverse();
-		for (const n of path) {
-			if (Date.now() > deadline) break;
-			const from = n.parent, e = n.e;
-			const k = rchKey(from.S, from.pos, e.edge);
-			if (rchBad.has(k)) continue;
-			ST.rchChecks++;
-			let r;
-			const isRoot = !from.parent;
-			if (isRoot && a.sim) r = model.reachable(from.S, a.sim, e.live);
-			else r = model.reachable(from.S, from.pos.tiles, e.live, { rising: true });
-			const bad = r.proof ? (isRoot && a.sim ? 'proof' : true) : false;
-			rchBad.set(k, bad);
-			if (bad) newBad++;
-		}
-		return newBad;
-	}
-	// ---------------------------------------------------------------- the lower bound
-	/**
-	 * lowerBound(anchor, o) -> {ticks, complete, expanded, ms}: the admissible ticks from the anchor's state to the trophy
-	 * (the run timer's: an anchor before any input gets its idle trajectory free and 2 ticks off for the first input's
-	 * tick). o.ms (1500), o.maxExpand (200000).
-	 */
-	function lowerBound(anchor, lo = {}) {
-		const t0 = Date.now();
-		ST.lbCalls++;
-		const a = anchorOf(anchor);
-		const ms = lo.ms !== undefined ? lo.ms : 1500, maxExpand = lo.maxExpand || 200000;
-		const open = new Heap(), best = new Map();
-		let seq = 0, expanded = 0, goal = Infinity, complete = false;
-		// (nodes merged over the coins' identities: one node per (feature values, checkpoint, position) with the least g
-		// and the INTERSECTION of the coin tiles taken: an over-approximation of every state merged into it (more coins
-		// left, the counts the same), so the bound stays admissible and the coin orders collapse)
-		const mkey = (S, pos) => S.dkey + '|c' + S.cp + '#' + pos.id;
-		const andBits = (x, y) => { if (!x) return x; const o2 = new Uint8Array(x.length); for (let i = 0; i < x.length; i++) o2[i] = x[i] & y[i]; return o2; };
-		const sameBits = (x, y) => { if (!x) return true; for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return false; return true; };
-		best.set(mkey(a.S, a.pos), { g: 0, S: a.S });
-		open.push({ S: a.S, pos: a.pos, g: 0, f: hLb(a.pos), seq: seq++, goal: false });
-		while (open.size) {
-			const n = open.pop();
-			if (n.goal) { goal = n.g; complete = true; break; }
-			const rec = best.get(mkey(n.S, n.pos));
-			if (rec && (rec.g < n.g || rec.S !== n.S)) continue;
-			if (expanded >= maxExpand || Date.now() - t0 > ms) { open.push(n); break; }
-			expanded++;
-			for (const e of edgesOf(n.S, n.pos, a.base, 'lb', false, null)) {
-				const g2 = n.g + e.lb;
-				if (!e.X) { open.push({ S: n.S, pos: null, g: g2, f: g2, seq: seq++, goal: true }); continue; }
-				const k2 = mkey(e.S2, e.pos2);
-				const had = best.get(k2);
-				let S2 = e.S2, gm = g2;
-				if (had) {
-					const tk = andBits(had.S.taken, S2.taken), btk = andBits(had.S.btaken, S2.btaken);
-					const wider = !sameBits(tk, had.S.taken) || !sameBits(btk, had.S.btaken);
-					if (!wider && had.g <= g2) continue;
-					gm = Math.min(had.g, g2);
-					S2 = wider ? model.mkState(S2.vals, tk, btk, S2.cp) : S2;
-					if (!wider && had.g > g2) S2 = model.mkState(S2.vals, tk, btk, S2.cp);
-				}
-				best.set(k2, { g: gm, S: S2 });
-				open.push({ S: S2, pos: e.pos2, g: gm, f: gm + hLb(e.pos2), seq: seq++, goal: false });
+	// ---------------------------------------------------------------- plans from A* results
+	function waypointOf(n, via) {
+		const S = n.S;
+		const label = (s) => s;
+		switch (via.kind) {
+			case 'trophy': return { kind: 'trophy', label: 'trophy' };
+			case 'trig': case 'cp': case 'fx': {
+				const tr = M.triggers[via.id];
+				const S2 = M.apply(S, via.id) || S;
+				return { kind: 'trigger', tiles: tr.tiles.slice(), trig: via.id, expect: M.expectOf(S, via.id, S2), label: label(M.trigLabel(via.id)) };
 			}
+			case 'die': return { kind: 'region', tiles: [via.tile], expect: { feat: 'deaths', value: S.deaths + 1 }, allowDeath: true, label: `die (killer @${M.xy(via.killer)}), respawn @${M.xy(via.tile)}` };
+			case 'expire': return { kind: 'region', tiles: Array.from(n.R.tiles), expect: { feat: via.feat, value: 0 }, label: `wait: ${via.feat} runs out` };
+			case 'explore': return { kind: 'region', tiles: via.tiles, expect: null, label: via.label };
 		}
-		let ticks;
-		if (complete) ticks = goal;
-		else if (!open.size) { ticks = Infinity; complete = true; }
-		else { ticks = Infinity; for (const n of open.a) if (n.f < ticks) ticks = n.f; }
-		if (a.idle && Number.isFinite(ticks)) ticks = Math.max(0, ticks - 2);
-		ST.lbExpands += expanded; ST.lbMs += Date.now() - t0;
-		return { ticks, complete, expanded, ms: Date.now() - t0 };
+		return null;
 	}
-	// ---------------------------------------------------------------- the plan search
-	function search(a, po, exclude) {
-		const t0 = Date.now();
-		const ms = po.ms, maxExpand = po.maxExpand;
-		const budget = po.depth > 0 ? po.depth - a.tick : Infinity;
-		const open = new Heap(), best = new Map();
-		let seq = 0, expanded = 0, found = null, pruned = 0;
-		const P = pace();
-		const root = { S: a.S, pos: a.pos, g: 0, gl: 0, parent: null, e: null, depth: 0, seq: seq++ };
-		// (a puzzle, 3+ landmarks left: greedy on the heuristic, g a tie-break (LAMA's greedy best-first); else weighted A*)
-		const gw = hLM(a.S) >= 3 ? 0.1 : 1;
-		const fOf = (g, S, pos) => gw * g + EST_W * hSteps(pos) * P + LM_W * hLM(S) - GAIN_BONUS * P * S.gain;
-		root.f = fOf(0, a.S, a.pos);
-		open.push(root);
-		best.set(a.S.key + '#' + a.pos.id, 0);
-		let bestPartial = root;
-		// (the partial plan's end: the fewest landmarks left, then the most gain, then the least f)
-		const better = (x, y) => { const hx = hLM(x.S), hy = hLM(y.S); return hx < hy || (hx === hy && (x.S.gain > y.S.gain || (x.S.gain === y.S.gain && x.f < y.f))); };
-		let rootEdges = 0, bestRootChild = null;
-		while (open.size) {
-			const n = open.pop();
-			if (n.goal) { found = n; break; }
-			const k = n.S.key + '#' + n.pos.id;
-			if (best.get(k) < n.g) continue;
-			// (the root is always expanded: a plan of one step at least, whatever the budget)
-			if (expanded > 0 && (expanded >= maxExpand || Date.now() - t0 > ms)) break;
-			expanded++;
-			if (better(n, bestPartial)) bestPartial = n;
-			const isRoot = n === root;
-			const es = edgesOf(n.S, n.pos, a.base, 'plan', isRoot, a.S.key + '|' + a.cls);
-			if (isRoot) rootEdges = es.length;
-			// (the landmarks this node reaches only through killers (the est walk walls them unprotected): protection on
-			// counts as one more landmark here, so the search takes it first; Bad EE Level 9's switch 7 past the spikes)
-			let protBoost = false;
-			if (model.featSet.has('prot') && n.S.feats.prot === 0) {
-				const h0 = hLM(n.S);
-				let est = false, relax = false;
-				for (const e of es) if (e.X && hLM(e.S2) < h0) { if (e.relaxOnly) relax = true; else est = true; }
-				protBoost = relax && !est;
-			}
-			for (const e of es) {
-				if (isRoot && exclude.has(e.edge)) continue;
-				const g2 = n.g + e.est, gl2 = n.gl + e.lb;
-				if (!e.X) {
-					if (gl2 >= budget) { pruned++; continue; }
-					open.push({ S: n.S, pos: null, g: g2, gl: gl2, f: gw < 1 ? -1e12 + g2 : g2, parent: n, e, depth: n.depth + 1, seq: seq++, goal: true });
+	function planOf(end, root, anchor, partial, why) {
+		const chain = [];
+		for (let n = end; n && n !== root; n = n.parent) chain.push(n);
+		chain.reverse();
+		const steps = [];
+		let elapsed = 0;
+		const keyAt = new Map();   // key feat -> elapsed at pickup
+		chain.forEach((kid, i) => {
+			const n = kid.parent, via = kid.via;
+			const step = {
+				n: i, kind: via.kind, edge: via.edge, nodeClass: via.nc,
+				from: { key: n.S.key, tile: n.entry, region: n.R.regionId, desc: M.describe(n.S) },
+				to: { key: kid.S.key, tile: kid.entry, desc: M.describe(kid.S) },
+				waypoint: waypointOf(n, via), estTicks: Math.round(via.est), rung: facts.rung(via.edge, via.nc),
+			};
+			if (i === 0) step.fromTick = anchor.arrival ? anchor.arrival.tick : 0;
+			// (a key taken: the steps after it that still hold it have a deadline: it runs out after 500 ticks)
+			for (const [feat, at] of keyAt) { const fi = M.featIdx.get(feat); if (fi !== undefined && n.S.a[fi] === 1) step.deadline = Math.max(50, Math.min(step.deadline || 1e9, 450 - (elapsed - at))); else keyAt.delete(feat); }
+			elapsed += Math.max(0, via.est);
+			if (via.kind === 'trig' && M.triggers[via.id].kind === 'key') keyAt.set('key' + M.triggers[via.id].param, elapsed);
+			def(step, 'S', n.S); def(step, 'S2', kid.S); def(step, 'R', n.R);
+			steps.push(step);
+		});
+		return { id: ++planSeq, steps, cost: Math.round(end.g), partial: !!partial, why: why || (partial ? 'partial' : 'trophy') };
+	}
+	/** the explore step when the root has no usable trigger: the region's tiles farthest by walk (then those nearest the
+	 *  trophy, the highest, the lowest), the first group whose edge is not blocked */
+	function explorePlan(root, anchor, ctx) {
+		const R = root.R || M.region(root.S, root.entry);
+		root.R = R; root.nc = root.S.key + '@' + R.regionId;
+		const n = R.tiles.length;
+		if (n <= 1) return null;
+		const idx = Array.from({ length: n }, (_, i) => i);
+		const W = M.W;
+		const groups = [];
+		const take = (order, label) => { const k = Math.max(1, Math.min(64, Math.ceil(n * 0.05))); groups.push({ tiles: order.slice(0, k).map((i) => R.tiles[i]), label }); };
+		take(idx.slice().sort((a, b) => R.d[b] - R.d[a] || R.tiles[a] - R.tiles[b]), 'explore: the farthest tiles by walk');
+		take(idx.slice().sort((a, b) => hOf(R.tiles[a]) - hOf(R.tiles[b]) || R.tiles[a] - R.tiles[b]), 'explore: the tiles nearest the trophy');
+		take(idx.slice().sort((a, b) => ((R.tiles[a] / W) | 0) - ((R.tiles[b] / W) | 0) || R.tiles[a] - R.tiles[b]), 'explore: the highest tiles');
+		take(idx.slice().sort((a, b) => ((R.tiles[b] / W) | 0) - ((R.tiles[a] / W) | 0) || R.tiles[a] - R.tiles[b]), 'explore: the lowest tiles');
+		const seen = new Set();
+		for (const g of groups) {
+			const key = g.tiles.slice().sort((a, b) => a - b).join(',');
+			if (seen.has(key) || (g.tiles.length === 1 && g.tiles[0] === root.entry)) continue;
+			seen.add(key);
+			const via = { kind: 'explore', tile: Math.min(...g.tiles), tiles: g.tiles, label: g.label, walk: 0 };
+			const en = edgeName(root.nc, via);
+			if (facts.blocked(en, root.nc) || ctx.ex.has(en)) continue;
+			via.est = 300; via.edge = en; via.nc = root.nc;
+			const kid = { S: root.S, entry: via.tile, g: 300 * facts.penalty(en, root.nc), h: 0, parent: root, via, goal: false, depth: 1 };
+			return planOf(kid, root, anchor, true, 'no trigger');
+		}
+		return null;
+	}
+	// ---------------------------------------------------------------- physics checks of the plans' first edges
+	function physCheck(plans, root, anchor, ctx) {
+		let changed = false;
+		for (const p of plans) {
+			for (const s of p.steps.slice(0, ctx.physSteps)) {
+				if (Date.now() > ctx.physDeadline) return changed;
+				if (s.kind !== 'trig' && s.kind !== 'trophy' && s.kind !== 'cp' && s.kind !== 'fx') continue;
+				const trig = s.kind === 'trophy' ? 'trophy' : s.waypoint.trig;
+				const pk = `${M.doorKey(s.S)}|${trig}|${s.from.tile}`;
+				if (s.n === 0 && ctx.sim && !ctx.checked.has(s.edge)) {
+					// (from the REAL state: the doors as they stand now; -1 is a proof for this state)
+					ctx.checked.add(s.edge);
+					st.physChecks++;
+					const tiles = trig === 'trophy' ? M.trophies : M.triggers[trig].tiles;
+					const v = M.anchorCost(ctx.sim, tiles);
+					if (v < 0) { ctx.ex.add(s.edge); changed = true; continue; }
+					if (!physKnown.has(pk)) { physKnown.set(pk, v * 5); changed = changed || Math.abs(v * 5 * TICKS_PER_FIFTH - s.estTicks) > 0.25 * s.estTicks + 10; }
 					continue;
 				}
-				const hl = hLb(e.pos2);
-				if (gl2 + hl >= budget) { pruned++; continue; }
-				const k2 = e.S2.key + '#' + e.pos2.id;
-				const had = best.get(k2);
-				if (had !== undefined && had <= g2) continue;
-				best.set(k2, g2);
-				const child = { S: e.S2, pos: e.pos2, g: g2, gl: gl2, f: fOf(g2, e.S2, e.pos2) - (protBoost && e.X.kind === 'prot' && e.X.param === 1 ? LM_W : 0), parent: n, e, depth: n.depth + 1, seq: seq++, goal: false };
-				open.push(child);
-				if (isRoot && (!bestRootChild || child.f < bestRootChild.f)) bestRootChild = child;
+				if (physKnown.has(pk)) continue;
+				st.physChecks++;
+				const v = M.edgeCost(s.S, trig, s.from.tile);
+				physKnown.set(pk, v);
+				if (!Number.isFinite(v) || Math.abs(v * TICKS_PER_FIFTH - s.estTicks) > 0.25 * s.estTicks + 10) changed = true;
 			}
 		}
-		ST.expands += expanded;
-		// (the budget out before any child was expanded: the root's best child, a one-step partial plan)
-		if (bestPartial === root && bestRootChild) bestPartial = bestRootChild;
-		return { found, bestPartial: bestPartial === root ? null : bestPartial, expanded, ms: Date.now() - t0, pruned, rootEdges, exhausted: !open.size && !found };
+		return changed;
 	}
-	/** the path of a search node -> the plan's steps (with the key-door passages and death steps inserted) */
-	function stepsOf(a, node) {
-		const path = [];
-		for (let n = node; n && n.e; n = n.parent) path.push({ e: n.e, from: n.parent });
-		path.reverse();
-		const steps = [];
-		let deathsNow = null;
-		const push = (st) => { st.n = steps.length; steps.push(st); };
-		for (let i = 0; i < path.length; i++) {
-			const { e, from } = path[i];
-			const isRoot = i === 0;
-			const cls = isRoot ? a.S.key + '|' + a.cls : from.S.key + '|*';
-			// a death first where only a death reaches the target
-			if (e.viaDeath) {
-				if (deathsNow === null) deathsNow = a.sim ? a.sim.deaths : 0;
-				const edge = `death:${deathsNow}`;
-				push({ edge, nodeClass: cls, rung: facts ? facts.rungOf(edge, cls) : 0, estTicks: DEAD_TICKS, lb: DEAD_TICKS,
-					waypoint: { kind: 'region', tiles: model.respawnOf(from.S).tiles.slice(), expect: { feat: 'deaths', value: deathsNow + 1 }, allowDeath: true, label: `die, back at a respawn (deaths ${deathsNow + 1})` } });
-				deathsNow++;
-			}
-			// the anchor's own active key: its door first, before the key runs out
-			if (isRoot && a.sim && (!e.X || e.X.kind !== 'key')) {
-				const pass = keyPassage(a.S, a.pos, e, a.base);
-				// (once done from this anchor's class its arrivals past the door are the anchor's own (the same model state):
-				// the passage is not proposed again, the plan goes on from them)
-				if (pass && !(facts && facts.okTicks(`region:key${pass.colour}-door`, cls) !== undefined)) {
-					const c = pass.colour, left = KEY_TICKS - (a.sim._ticks - a.sim._kt[c]);
-					if (left > 0) push({ edge: `region:key${c}-door`, nodeClass: cls, rung: facts ? facts.rungOf(`region:key${c}-door`, cls) : 0, estTicks: 0, lb: 0,
-						waypoint: { kind: 'region', tiles: pass.tiles, expect: null, beforeTick: a.tick + left - 1, label: `past the ${COLOURS[c] || c} key door` } });
-				}
-			}
-			const X = e.X;
-			const wp = X ? { kind: 'trigger', tiles: e.live.slice(), trig: X.id, expect: e.expect, label: X.label } : { kind: 'trophy', label: 'trophy' };
-			push({ edge: e.edge, nodeClass: cls, rung: facts ? facts.rungOf(e.edge, cls) : 0, waypoint: wp, estTicks: Math.round(e.est), lb: e.lb });
-			// a key followed by its door: the passage while the key is on
-			if (X && X.kind === 'key' && i + 1 < path.length) {
-				const next = path[i + 1].e;
-				const pass = keyPassage(e.S2, e.pos2, next, a.base, X.param);
-				if (pass) push({ edge: `region:key${X.param}-door`, nodeClass: e.S2.key + '|*', rung: facts ? facts.rungOf(`region:key${X.param}-door`, e.S2.key + '|*') : 0, estTicks: 0, lb: 0,
-					waypoint: { kind: 'region', tiles: pass.tiles, expect: null, beforeTickFrom: 'prev+500', label: `past the ${COLOURS[X.param] || X.param} key door` } });
-			}
-		}
-		return steps;
-	}
-	/** the tiles just past a key door that the next edge needs (null: it needs none): the tiles next to a door of that
-	 *  colour that the key-off state cannot reach from the position but the key-on state can */
-	function keyPassage(S, pos, next, base, colour) {
-		const cols = colour !== undefined ? [colour] : [0, 1, 2, 3, 4, 5].filter((c) => S.feats['key' + c] === 1);
-		for (const c of cols) {
-			const f = 'key' + c;
-			if (S.feats[f] !== 1) continue;
-			const vals = S.vals.slice(); vals[model.fIdx.get(f)] = 0;
-			const Soff = model.mkState(vals, S.taken, S.btaken);
-			const dOff = model.dist(Soff, pos, 'est', base), dOn = model.dist(S, pos, 'est', base);
-			const tgt = next.live || trophyTiles;
-			let off = INF, on = INF;
-			for (const t of tgt) { if (dOff[t] < off) off = dOff[t]; if (dOn[t] < on) on = dOn[t]; }
-			if (off < INF && off <= on + 2) continue;
-			// the tiles next to a door of colour c, reachable with the key on, not with it off
-			const tiles = [];
-			for (let i = 0; i < model.N; i++) {
-				if (dOff[i] < INF || dOn[i] >= INF || model.A.cls[i] === 0 || model.A.cls[i] === 3) continue;
-				const x = i % W, y = (i / W) | 0;
-				let near = false;
-				for (let yy = Math.max(0, y - 1); yy <= Math.min(H - 1, y + 1) && !near; yy++) for (let xx = Math.max(0, x - 1); xx <= Math.min(W - 1, x + 1); xx++) {
-					const j = yy * W + xx;
-					if (model.A.cls[j] === 3 && model.A.gateFeat[j] === f && model.A.gatePol[j] === 1) { near = true; break; }
-				}
-				if (near) tiles.push(i);
-			}
-			if (tiles.length) return { colour: c, tiles };
-		}
-		return null;
-	}
-	/** the est walls from the failures: a failed step's closest approach (at its second rung, or exhausted there) walls
-	 *  its 3 x 3 in the est walk (ordering only: the lb and the proofs never read them), so the next plans go another
-	 *  way where there is one; rebuilt when the facts' version moves */
-	let wallsVer = -1;
-	function syncWalls() {
-		if (!facts || facts.version() === wallsVer) return;
-		wallsVer = facts.version();
-		let mask = null, n = 0;
-		for (const fct of facts.list()) {
-			if (fct.kind === 'fail' && fct.cut) for (const j of fct.cut) { if (!mask) mask = new Uint8Array(model.N); if (!mask[j]) { mask[j] = 1; n++; } }
-			if (fct.kind !== 'fail' || !fct.closest || fct.closest.tile === undefined || fct.closest.tile === null) continue;
-			if (!((fct.rung | 0) >= 1 || fct.why === 'exhausted')) continue;
-			const t = fct.closest.tile, x = t % W, y = (t / W) | 0;
-			for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
-				const nx = x + dx, ny = y + dy;
-				if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
-				const j = ny * W + nx;
-				if (model.trigOf[j] >= 0) continue;
-				if (!mask) mask = new Uint8Array(model.N);
-				if (!mask[j]) { mask[j] = 1; n++; }
-			}
-		}
-		model.setEstWalls(mask);
-		ST.estWalls = n;
-	}
-	/**
-	 * plan(anchor, {k, depth, epoch, ms, maxExpand}) -> Plan[] (with .why when empty: 'exhausted' | 'proof')
-	 */
-	function plan(anchor, po = {}) {
-		landmarks();   // (once, outside the budget)
+	// ---------------------------------------------------------------- plan()
+	function plan(anchor, o = {}) {
 		const t0 = Date.now();
-		ST.plans++;
-		syncWalls();
-		const a = anchorOf(anchor);
-		const k = po.k || 3;
-		const first = ST.plans === 1;
-		const so = { ms: po.ms || (first ? 2000 : 300), maxExpand: po.maxExpand || 200000, depth: po.depth || 0 };
-		const plans = [], exclude = new Set();
-		let why = '', rootEdges = -1, anyExhausted = false;
-		const deadline = t0 + so.ms;
-		for (let r = 0; r < k; r++) {
-			let res = search(a, Object.assign({}, so, { ms: Math.max(50, (deadline - Date.now()) / Math.max(1, k - r)) }), exclude);
-			for (let v = 0; v < 6 && res.found && Date.now() < deadline + so.ms / 2; v++) {
-				if (!verifyPath(a, res.found, deadline + so.ms / 2)) break;
-				res = search(a, Object.assign({}, so, { ms: Math.max(50, (deadline - Date.now()) / Math.max(1, k - r)) }), exclude);
+		st.plans++;
+		const k = o.k || 3, ms = o.ms || opts.ms || 3000, maxNodes = o.maxNodes || opts.maxNodes || 100000;
+		const arrival = anchor.arrival || { tile: M.startTile, tick: 0, masks: new Uint8Array(0) };
+		let S = anchor.S;
+		let sim = null;
+		const wantPhys = o.physics !== undefined ? o.physics : opts.physics !== false;
+		if (!S || wantPhys) { try { sim = M.simAt(arrival); } catch (e) { sim = null; } }
+		if (!S) { S = sim ? M.stateOf(sim) : M.startState(); anchor.S = S; }
+		if (arrival.finished) { const out = [{ id: ++planSeq, steps: [], cost: 0, partial: false, why: 'finished' }]; out.why = 'finished'; return out; }
+		const ahash = arrival.hash !== undefined ? String(arrival.hash) + ':' + arrival.tick : 'start';
+		if (!anchorEx.has(ahash)) anchorEx.set(ahash, new Set());
+		const ctx = { ex: anchorEx.get(ahash), div: new Map(), maxNodes, ms, sim: wantPhys ? sim : null, checked: new Set(), physSteps: o.physSteps || opts.physSteps || 3,
+			physDeadline: t0 + (o.physMs !== undefined ? o.physMs : opts.physMs !== undefined ? opts.physMs : 2000) };
+		const mkRoot = () => ({ S, entry: arrival.tile, g: 0, h: hOf(arrival.tile), f: hOf(arrival.tile), parent: null, via: null, goal: false, depth: 0 });
+		let plans = [], why = null;
+		for (let round = 0; round < (wantPhys ? 4 : 1); round++) {
+			plans = []; ctx.div = new Map();
+			const sigs = new Set();
+			let rootEdgesAny = 0;
+			for (let attempt = 0; attempt < k * 3 && plans.length < k; attempt++) {
+				const left = ms - (Date.now() - t0);
+				ctx.ms = attempt === 0 ? Math.max(200, left * 0.6) : Math.max(100, left / (k * 3 - attempt));
+				if (attempt > 0 && left < 100) break;
+				const root = mkRoot();
+				const r = astar(root, ctx);
+				rootEdgesAny += r.rootEdges;
+				let p = null;
+				if (r.goal) p = planOf(r.goal, root, anchor, false, 'trophy');
+				else if (r.best) p = planOf(r.best, root, anchor, true, `partial (${ctx.cut || 'no trophy in the model'}): the node nearest the trophy`);
+				if (!p) break;
+				const sig = p.steps.slice(0, 3).map((s) => s.edge.split('>').pop()).join(' ');
+				if (!sigs.has(sig)) { sigs.add(sig); plans.push(p); }
+				for (const s of p.steps) { const key = s.nodeClass + '>' + (s.waypoint && s.waypoint.trig !== undefined ? s.waypoint.trig : s.kind); ctx.div.set(key, (ctx.div.get(key) || 1) * 2); }
+				if (!r.goal && !r.best) break;
 			}
-			if (rootEdges < 0) rootEdges = res.rootEdges;
-			const node = res.found || res.bestPartial;
-			if (!node) { anyExhausted = anyExhausted || res.exhausted; break; }
-			const steps = stepsOf(a, node);
-			if (!steps.length) break;
-			const lbTail = res.found ? 0 : hLb(node.pos);
-			plans.push({ id: `p${ST.plans}.${r}`, steps, cost: Math.round(node.g + (res.found ? 0 : pace() * hSteps(node.pos))), lb: node.gl + lbTail, partial: !res.found, why: res.found ? 'trophy' : 'budget: the most gain', expanded: res.expanded });
-			exclude.add(steps[0].edge);
-			// (the first step's own edge: a death or passage step was inserted before the real first edge)
-			let n = node; while (n.parent && n.parent.parent) n = n.parent;
-			if (n.e) exclude.add(n.e.edge);
+			if (!plans.length) {
+				const root = mkRoot();
+				const p = explorePlan(root, anchor, ctx);
+				if (p) plans = [p]; else why = 'exhausted';
+				break;
+			}
+			if (!wantPhys || Date.now() > ctx.physDeadline) break;
+			if (!physCheck(plans, null, anchor, ctx)) break;
+			st.reruns++;
 		}
-		if (!plans.length) {
-			why = rootEdges === 0 && !(facts && facts.list().length) ? 'proof' : 'exhausted';
-			// (no edge at the root because the facts took them all: exhausted; none at all without facts: a walk proof)
-			if (rootEdges === 0 && facts && facts.list().length) {
-				const raw = edgesOf(a.S, a.pos, a.base, 'lb', false, null);
-				why = raw.length ? 'exhausted' : 'proof';
-			}
+		// (the plans in cost order; a plan whose first edge a proof from this state removed is gone by the re-run)
+		plans = plans.filter((p) => !(p.steps.length && ctx.ex.has(p.steps[0].edge)));
+		if (!plans.length && !why) {
+			const root = mkRoot();
+			const p = explorePlan(root, anchor, ctx);
+			if (p) plans = [p]; else why = 'exhausted';
 		}
-		lastPlans = plans; lastWhy = why;
-		ST.planMs += Date.now() - t0;
-		const out = plans;
-		out.why = why;
-		out.plans = plans;
-		return out;
+		plans.sort((a, b) => (a.partial ? 1 : 0) - (b.partial ? 1 : 0) || a.cost - b.cost);
+		plans.why = why || (plans.length ? plans[0].why : 'exhausted');
+		st.lastMs = Date.now() - t0; st.ms += st.lastMs;
+		return plans;
 	}
-	// ---------------------------------------------------------------- CEGAR
-	/** the value of the feature gate tile i reads that opens it */
-	function openValue(i, S) {
-		const A = model.A, k = A.gateFeat[i], pol = A.gatePol[i], p = A.gateParam[i];
-		if (!k || k === 'open' || k === 'time' || k === 'static') return null;
-		if (k.startsWith('key') || k.startsWith('psw') || k.startsWith('osw') || k === 'crown') return pol === 1 ? 1 : 0;
-		if (k === 'team') return pol === 1 ? p : null;
-		if (k === 'coins' || k === 'bcoins') return pol === 1 ? p : null;
-		return null;
-	}
-	/** the est walk's path from pos to the tiles under S (tiles, the start first; null: none) */
-	function estPath(S, pos, tiles, base) {
-		const d = model.dist(S, pos, 'est', base);
-		const m = model.passMask(S, 'est', base);
-		let v = -1, best = INF;
-		for (const t of tiles) if (d[t] < best) { best = d[t]; v = t; }
-		if (v < 0) return null;
-		const srcOf = new Map();
-		for (const [p, ex] of model.A.portalExits) for (const e of ex) { if (!srcOf.has(e)) srcOf.set(e, []); srcOf.get(e).push(p); }
-		const path = [v];
-		for (let k = 0; k < 100000 && d[v] > 0; k++) {
-			let u = -1;
-			for (const p of srcOf.get(v) || []) {
-				const x = p % W, y = (p / W) | 0;
-				for (let dy = -1; dy <= 1 && u < 0; dy++) for (let dx = -1; dx <= 1 && u < 0; dx++) {
-					const nx = x + dx, ny = y + dy;
-					if ((dx || dy) && nx >= 0 && ny >= 0 && nx < W && ny < H && d[ny * W + nx] === d[v]) u = ny * W + nx;
-				}
-				if (u >= 0) { path.push(p); break; }
-			}
-			if (u < 0) {
-				const x = v % W, y = (v / W) | 0;
-				for (let dy = -1; dy <= 1 && u < 0; dy++) for (let dx = -1; dx <= 1 && u < 0; dx++) {
-					const nx = x + dx, ny = y + dy;
-					if ((dx || dy) && nx >= 0 && ny >= 0 && nx < W && ny < H && m[ny * W + nx] && d[ny * W + nx] === d[v] - 1) u = ny * W + nx;
-				}
-			}
-			if (u < 0) break;
-			path.push(u); v = u;
-		}
-		return path.reverse();
-	}
-	/** the est path's tiles just past the point nearest the closest approach c (4 tiles, no trigger): the cut */
-	function cutPast(S, pos, tiles, base, c) {
-		const path = estPath(S, pos, tiles, base);
-		if (!path || path.length < 3) return null;
-		const cx = c % W, cy = (c / W) | 0;
-		let bi = 0, bd = Infinity;
-		path.forEach((t, i) => { const dd = Math.max(Math.abs(t % W - cx), Math.abs(((t / W) | 0) - cy)); if (dd < bd) { bd = dd; bi = i; } });
-		const cut = [];
-		for (let i = bi + 1; i < path.length - 1 && cut.length < 4; i++) if (model.trigOf[path[i]] < 0) cut.push(path[i]);
-		return cut.length ? cut : null;
-	}
-	/**
-	 * learn(step, result, anchor) -> Fact[]: at least one whenever !result.ok (the facts' version bumps with each).
-	 */
-	function learn(step, result, anchor) {
-		ST.learned++;
+	// ---------------------------------------------------------------- learn(): CEGAR
+	function learn(step, res) {
 		const out = [];
-		if (!facts) return out;
-		const edge = step.edge, cls = step.nodeClass;
-		const a = anchor ? anchorOf(anchor) : null;
-		if (result && result.ok) {
-			const arr = result.arrivals && result.arrivals[0];
-			const ticks = arr && a ? Math.max(0, arr.tick - a.tick) : (result.ticks || 0);
-			out.push(facts.add({ kind: 'ok', edge, nodeClass: cls, ticks, lb: step.lb || 0 }));
-			if (a && step.waypoint && step.waypoint.tiles) {
-				const d = model.pairSteps(a.S, a.pos, step.waypoint.tiles, 'est', a.base);
-				if (d > 0 && d < INF && ticks > 0) paceSamples.push(ticks / d);
-			}
+		const rec = (f) => { facts.record(f); out.push(f); };
+		if (!step) return out;
+		if (res && res.ok) {
+			let ticks = null;
+			if (res.arrivals && res.arrivals.length && Number.isFinite(step.fromTick)) ticks = Math.min(...res.arrivals.map((a) => a.tick)) - step.fromTick;
+			rec({ kind: 'ok', edge: step.edge, nodeClass: step.nodeClass, ticks });
 			return out;
 		}
-		const fail = (result && result.fail) || { why: 'budget' };
-		const sKey = a ? a.S.key : (cls || '').split('|')[0];
-		if (fail.why === 'proof') out.push(facts.add({ kind: 'proof', edge, sKey }));
+		const fail = (res && res.fail) || { why: 'budget' };
+		if (fail.why === 'stopped') return out;
+		if (fail.why === 'proof') rec({ kind: 'proof', edge: step.edge, nodeClass: step.nodeClass });
+		else rec({ kind: 'fail', edge: step.edge, nodeClass: step.nodeClass, rung: step.rung | 0, why: fail.why });
+		const S = step.S;
+		let named = 0;
 		for (const b of fail.blockedBy || []) {
-			if (!a || b.tile === undefined) continue;
-			const f = b.feat || model.A.gateFeat[b.tile];
-			const v = openValue(b.tile, a.S);
-			if (!f || v === null || v === undefined || a.S.feats[f] === v) continue;
-			out.push(facts.add({ kind: 'needs', edge, nodeClass: cls, feat: f, value: v }));
+			let feat = b.feat;
+			if (!feat && b.tile >= 0 && M.gtype[b.tile] >= 0) { const g = M.gtypes[M.gtype[b.tile]]; feat = g.kind === 0 ? g.feat : g.kind >= 4 ? 'deaths' : null; }
+			if (!feat) continue;
+			// (a need only where its gate is shut in the step's state)
+			let shut = true;
+			if (S && b.tile >= 0 && M.gtype[b.tile] >= 0) shut = M.openTypes(S)[M.gtype[b.tile]] === 0;
+			else if (S) { const gs = featGates.get(feat); shut = !!gs && gs.some((g) => M.openTypes(S)[g] === 0); }
+			if (!shut) continue;
+			const trig = step.waypoint && step.waypoint.trig !== undefined ? step.waypoint.trig : step.kind;
+			rec({ kind: 'needs', trig, feat });
+			named++;
 		}
-		const rung = facts.rungOf(edge, cls);
-		// (the est walk's path to the waypoint, cut just past the point nearest the closest approach: the next plans'
-		// est walk goes another way there, CEGAR's generalization over every edge through that corridor)
-		let cut = null;
-		if (a && fail.closest && fail.closest.tile !== undefined && fail.closest.tile !== null && (rung + 1 >= 2 || fail.why === 'exhausted')) {
-			const tiles = step.waypoint && step.waypoint.kind !== 'trophy' && step.waypoint.tiles ? step.waypoint.tiles : trophyTiles;
-			cut = cutPast(a.S, a.pos, tiles, a.base, fail.closest.tile);
-		}
-		out.push(facts.add({ kind: 'fail', edge, nodeClass: cls, rung, why: fail.why || 'budget', closest: fail.closest ? { tile: fail.closest.tile, dist: fail.closest.dist } : null, blockedBy: fail.blockedBy || [], cut }));
-		if (rung + 1 >= facts.RUNG_MAX) out.push(facts.add({ kind: 'block', edge, nodeClass: cls }));
+		if (fail.touched && fail.touched.length) rec({ kind: 'side', edge: step.edge, touched: fail.touched });
+		if ((step.rung | 0) >= 1 && !named && M.fxTracked) rec({ kind: 'enable', nodeClass: step.nodeClass });
 		return out;
 	}
-	// ---------------------------------------------------------------- the truth checker's price of an order
-	/**
-	 * costOf(order, anchor) -> {lb, est, feasible, why, legs}: the order's legs priced like the plans' (lb: sound for
-	 * any real route that touches the triggers in this order, the trophy last). order: trigger ids (or 'trig:<id>').
-	 */
-	function costOf(order, anchor) {
-		ST.costOf++;
-		const a = anchorOf(anchor);
-		let S = a.S, pos = a.pos, lb = 0, est = 0, feasible = true, why = 'ok';
-		const legs = [];
-		const P = pace();
-		const ids = order.map((x) => (typeof x === 'string' ? +String(x).replace(/^trig:/, '') : +x));
-		for (let i = 0; i <= ids.length; i++) {
-			const X = i < ids.length ? model.triggers[ids[i]] : null;
-			if (i < ids.length && !X) { feasible = false; why = `no trigger ${ids[i]}`; break; }
-			const tiles = X ? X.tiles : trophyTiles;
-			const l = legLb(S, pos, tiles, a.base);
-			const steps = model.pairInfo(S, pos, tiles, 'est', a.base).steps;
-			if (!Number.isFinite(l)) { feasible = false; why = `leg ${i} to ${X ? X.label : 'the trophy'} unreachable in the model`; legs.push({ to: X ? X.id : 'trophy', lb: Infinity }); break; }
-			lb += l; est += Math.max(l, steps < INF ? steps * P : l);
-			legs.push({ to: X ? X.id : 'trophy', lb: l });
-			if (X) { const tr = model.touch(S, X); pos = posOf(X, S, tr.S2); S = tr.S2; }
-		}
-		if (a.idle && feasible) lb = Math.max(0, lb - 2);
-		return { lb, est: Math.round(est), feasible, why, legs };
+	function explain(p) {
+		if (!p) return '(no plan)';
+		const head = `${p.partial ? 'PARTIAL ' : ''}plan ${p.id} cost ${p.cost} (${p.why}), ${p.steps.length} steps: `;
+		return head + p.steps.map((s) => `${s.n + 1}. ${s.waypoint ? s.waypoint.label : s.kind} [${s.to.desc}] ~${s.estTicks}t r${s.rung}${s.deadline ? ' by ' + s.deadline : ''}`).join(' -> ');
 	}
-	function explain() {
-		if (!lastPlans.length) return `no plan (${lastWhy || 'none yet'})`;
-		const p = lastPlans[0];
-		return `${p.partial ? 'PARTIAL ' : ''}plan ${p.id}: est ${p.cost} ticks, lb ${p.lb}: ` + p.steps.map((s) => s.waypoint.label + (s.rung ? `[r${s.rung}]` : '')).join(' -> ');
-	}
-	const stats = () => Object.assign({}, ST, { pace: pace(), model: model.stats() });
-	return { plan, learn, lowerBound, costOf, explain, stats, _edgesOf: edgesOf, _hLb: hLb, _anchorOf: anchorOf };
+	function stats() { return Object.assign({}, st, { model: Object.assign({}, M.stats), facts: facts.stats ? facts.stats() : null }); }
+	return { plan, learn, explain, stats, _physKnown: physKnown, _anchorEx: anchorEx };
 }
 
-module.exports = { createPlanner, PACE0 };
+module.exports = { createPlanner, TICKS_PER_FIFTH };

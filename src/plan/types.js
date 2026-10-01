@@ -5,42 +5,9 @@
 // WAYPOINT's goal test, the ARRIVAL record, the diverse pick of arrivals, the level "as the doors stand now" and the goal
 // field on it. Nothing here searches or prunes; every route is still replayed by the engine (common.js evaluate).
 //
-// CONTRACT v2: THE COMPILER (the architect, 2026-09-29 20:45; the user: "it shouldnt search at all, no heatmap or any gpu
-// burst ... just a program that compiles .eelvl into .eetas" and "it should be able to find the OPTIMAL ALWAYS").
-//   .eelvl -> parse -> MODEL -> BOUNDS -> PLAN -> MOVES -> VERIFY -> POLISH -> .eetas + a report (run ticks, the
-//   admissible lower bound, the gap, per leg: ticks / bound / proven / tool). No part calls goexplore.js, bursts.js,
-//   heat.js or an eegpu tool (explore / beam / roll / search). Every emitted piece is masks replayed by the engine.
-// Files (one owner each; this file and truthset.js change only at the integration):
-//   planner    src/plan/model.js facts.js planner.js; test/planmodel.js test/planplanner.js
-//   executor   src/plan/executor.js exact.js legs.js polish.js execworker.js; test/planexec.js
-//   primitives src/plan/bounds.js prims.js navgraph.js tables.js primworker.js; test/planbounds.js test/planprims.js
-//   strategy   src/plan/strategy.js truth.js, src/plan.js, src/compile.js, the hunks of src/editor.js, src/server.js,
-//              src/app/editor.html (Find a route's 'plan' behind EEAT_PLAN=1 / body plan: true; the COMPILE action);
-//              test/planstrategy.js test/planmock.js test/plancompile.js
-// Interfaces (a missing optional part is skipped with a warning, never a crash):
-//   model   = await compileModel(L, {file}) -> {W, H, N, A (steer.js analyze(L)), feats: string[] (Expect keys some gate
-//             reads), init {feat: value}, triggers [{id, kind, tiles, feat, param, label}], gates [{id, tiles, feat, pol,
-//             param}], stateOf(sim) -> S {key, feats, gain}, levelOf(S) -> Lc (gates as S holds them), regionOf(S, tile),
-//             reachable(S, fromTile | sim, tiles) -> {cost (tiles, -1 = RCH3 proof), proof}}
-//   facts   = createFacts(o) -> {version(), add(fact), reset({keepProofs}), toJSON()}
-//   planner = createPlanner(model, facts, {bounds}) -> {plan(anchor, {k, depth, epoch}) -> Plan[] (.why when empty),
-//             learn(step, result, anchor) -> Fact[] (>= 1 whenever !result.ok), lowerBound(anchor) -> {ticks, complete},
-//             costOf(order, anchor) -> {lb, est, feasible, why}, explain(), stats()}
-//             anchor {arrival, arrivals, S, key}; Plan {id, steps, cost (est ticks), lb (admissible ticks to the trophy),
-//             partial, why}; Step {n, edge, nodeClass, rung, waypoint, estTicks, lb}
-//   bounds  = createBounds(L, {model}) -> {vmax, field(goalTiles, Lc?) -> Float32Array(N) ticks (Infinity: no way),
-//             at(field, sim) -> ticks, pair(fromTiles, toTiles, Lc?) -> ticks, leg(sim, goal) -> ticks}: ADMISSIBLE
-//   prims   = await createPrims(L, {file, bounds, model, workers}) -> {support(sim), expand(arrival, o) -> Edge[],
-//             route(starts, goal, budget, o) -> NavResult, learn(fromArrival, masks, toArrival), stats(), close()}
-//             Edge {macro, masks, ticks, to: Arrival, event}; NavResult {ok, arrivals, best {masks, ticks} | null, lb,
-//             proven, expanded, sims, why, closest}
-//   exec    = await createExecutor(L, {file, workers, prims, bounds, model, RM, emit}) -> {reach(starts, wp, budget) ->
-//             Promise<StepResult>, polish(masks, o) -> Promise<{masks, runTicks, saved, legs}>, close()}
-//   compile = await require('./strategy.js').compile(L, opts, emit) -> {ok, masks, runTicks, lb, gap, legs, stages, why}
-// v2 additions to the shapes below: Waypoint.beforeTick (optional: the goal counts only at a tick <= it, e.g. a key's
-//   door within KEY_TICKS 500); StepResult.legs [{start (index into starts), ticks, lb, proven, tool}], StepResult.lb;
-//   StepResult.tool 'prims' | 'exact' | 'leg' | null in the compiler; Budget.deadline (epoch ms). The ground truth for
-//   every part's offline checks: src/plan/truthset.js (known routes, their trigger order).
+// Files of the planner (one owner each): src/plan/model.js, planner.js, facts.js (part 'planner'); executor.js, legs.js
+// (part 'executor'); prims.js, navgraph.js, primworker.js (part 'primitives'); strategy.js, truth.js, src/plan.js and the
+// editor.js / page hunks behind EEAT_PLAN=1 (part 'strategy').
 //
 // SHAPES (plain objects; tiles are indices y * W + x of the level's grid, W = L.width)
 //   Masks: Uint8Array of input masks (1 jump, 2 left, 4 right, 8 up, 16 down), from the level start (sim.reset()).
@@ -71,7 +38,7 @@
 const E = require('../eesim.js');
 const RF = require('../reach.js');
 
-const VERSION = 2;
+const VERSION = 1;
 const F_SOLID = 1, F_DOOR = 16;
 // doors whose state the clock (time doors), the death count (death doors / gates) or a key's expiry can change without
 // a touch: levelNow keeps their door block (open in the reach field: the optimistic side)
