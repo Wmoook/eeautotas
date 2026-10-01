@@ -3,7 +3,8 @@
 // rung ladder calls it; the success rate, the ticks and the worker time per find of a hard leg (a mini's switch, a room)
 // under the current EEAT_* knobs. Two arms (knob off / on) from the SAME start file = a paired measurement of a finder or
 // field change on the leg that stops a compile, far less noisy than whole compiles.
-//   node tools/cmp/legab.js <level.eelvl> --start=<file.eetas> "<label>" [--rungs=1,2] [--reps=6] [--seed=1]
+//   node tools/cmp/legab.js <level.eelvl> --start=<file.eetas> "<label>" [--rungs=1,2] [--reps=6] [--seed=1] [--ms=<window>]
+//   node tools/cmp/legab.js <level.eelvl> --dump=<anchors.jsonl> --anchor=<id> [--only=0,2] "<label>" ...: an anchor's arrivals as the starts
 //   node tools/cmp/legab.js <level.eelvl> --make=<file.eetas> --path="<label>;<label>;..." [--from=<file.eetas>]
 // --make: builds a start: from the level start (or --from's state) the executor reaches each label of --path in turn
 //   (rungs 1..3, the first arrival kept) and writes the inputs to the file (an .eetas: exact, replayable).
@@ -13,6 +14,9 @@
 // summary JSON line to stdout {found, reps, ms per find, ticks, closests}.
 const path = require('path');
 const root = path.join(__dirname, '..', '..');
+// (--defaults=1: the compiler's default knobs (src/plan/defaults.js) set before the parts read the environment, as
+// src/compile.js does: the executor's tiers as a compile runs them)
+if (process.argv.includes('--defaults=1')) require(path.join(root, 'src/plan/defaults.js')).apply();
 const T = require(path.join(root, 'src/plan/types.js'));
 const EX = require(path.join(root, 'src/plan/executor.js'));
 const BM = require(path.join(root, 'src/plan/bounds.js'));
@@ -58,21 +62,37 @@ const pos = argv.filter((s) => !s.startsWith('--'));
 		process.exit(0);
 	}
 	const label = pos[1];
-	const start = C.readEetas(opt('start', ''));
+	// (the starts: --start=<file.eetas>, or --dump=<anchors.jsonl> --anchor=<id>: that anchor's arrivals as the compile
+	// keeps them (strategy.js EEAT_ANCHOR_DUMP), every one (the compile's call) or --only=<i,j,..> of them; --ms=<ms> a
+	// window of its own for every rung listed)
+	let startStrs;
+	if (opt('dump', '')) {
+		const A = require('fs').readFileSync(opt('dump', ''), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).find((x) => String(x.id) === String(opt('anchor', '')));
+		if (!A) throw new Error('no anchor ' + opt('anchor', '') + ' in the dump');
+		const only = opt('only', '') ? String(opt('only', '')).split(',').map(Number) : null;
+		startStrs = A.masks.filter((m, i) => !only || only.includes(i));
+	} else startStrs = [T.strOf(C.readEetas(opt('start', '')))];
+	const start = { length: Math.min(...startStrs.map((s) => s.length)) };
 	const rungs = String(opt('rungs', '1,2')).split(',').filter(Boolean).map(Number);
 	const reps = +opt('reps', 6) || 6;
+	const wMs = +opt('ms', 0) || 0;
 	const wp = wpOf(label);
-	const out = { level: path.basename(file), label, startTick: start.length, rungs, reps, found: 0, ms: 0, ticks: [], okRung: [], closest: [] };
+	const out = { level: path.basename(file), label, starts: startStrs.length, startTick: start.length, rungs, reps, found: 0, ms: 0, ticks: [], okRung: [], closest: [] };
 	for (let rep = 0; rep < reps; rep++) {
 		const ex = await fresh();
 		for (const r of rungs) {
 			const t0 = Date.now();
-			const res = await ex.reach([T.strOf(start)], wp, { ms: RUNG_MS[Math.max(0, Math.min(3, r))], level: r, k: 4 });
+			const res = await ex.reach(startStrs.slice(), wp, { ms: wMs || RUNG_MS[Math.max(0, Math.min(3, r))], level: Math.min(3, r), k: 4 });
 			const ms = Date.now() - t0;
 			out.ms += ms;
 			const row = { rep, rung: r, ok: res.ok, ms, tool: res.tool, ticks: res.ok ? res.arrivals[0].tick - start.length : null, why: res.fail ? res.fail.why : null, closest: cl(res) };
 			console.error(JSON.stringify(row));
-			if (res.ok) { out.found++; out.ticks.push(row.ticks); out.okRung.push(r); break; }
+			if (res.ok) {
+				out.found++; out.ticks.push(row.ticks); out.okRung.push(r);
+				// (--save=<file.eetas>: the first find's whole run, the start's inputs + the leg)
+				if (opt('save', '') && out.found === 1) { const a = res.arrivals[0].masks; C.writeEetas(opt('save', ''), typeof a === 'string' ? T.masksOf(a) : Uint8Array.from(a)); }
+				break;
+			}
 			out.closest.push(row.closest && row.closest.join(':'));
 		}
 		await ex.close();
