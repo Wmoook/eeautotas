@@ -337,7 +337,7 @@ function bounceTurnRooms() {
 			const off = R.costAt(R.reachField(L, { bounceTurn: false }), startSim(L, 0));
 			const fOn = R.reachField(L, { bounceTurn: true, check: true }), on = R.costAt(fOn, startSim(L, 0));
 			const ok = got ? on >= 0 : (k === 8 ? on < 0 && off >= 0 : true);
-			check(`bounce turn: a ${h}-row up-arrow column, the trophy ${k} rows over it: the engine ${got ? 'gets there' : 'does not'}, the field ${got ? 'finite' : 'cut off (the pump without the turn finite)'}`,
+			check(`bounce turn: a ${h}-row up-arrow column, the trophy ${k} rows over it: the engine ${got ? 'gets there' : 'does not'}, the field ${got ? 'finite' : k === 8 ? 'cut off (the pump without the turn finite)' : 'either'}`,
 				ok && fOn.mismatches === 0, `engine ${got ? 'yes' : 'no'}, off ${fmt(off)}, on ${fmt(on)}`);
 		}
 	}
