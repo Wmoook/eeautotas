@@ -546,6 +546,29 @@ ways in.
   Christmas Eve 4 vs 5, Helix Reborn 3 vs 5; DEEPER 11 vs 8; Into Magma Panic 0, Tower Domination 2, Forgotten Helix 4 the
   same), all within the C5 / c6 runs' own range (SMB3 6-13,
   Evolution 0-9, Christmas Eve 2-5, Helix Reborn 0-5): the late rule may demote cursed anchors the base went on from.
+  BLOCK 2 (C6 push 3 lane 3): THE TIMER AT THE START (`EEAT_PLAN_TIMER_START`, on inside the knob, =0 off): an anchor
+  with no timer running whose est walk (no CEGAR walls) reaches nothing the plan wants without a timed killer's starter
+  tile gets the deadline plan of the killer it will carry (the doorway starter's est arrival + its duration, eesim.js
+  effectDuration): One Minute Descent's start plan "team 6 -> trophy in the coming timer (6,064 ticks)"; the executor
+  then fails the team-6 leg (a 330-row fall) at rungs 0-2 and the coin plans take over: no route either way (box 5,
+  300 s, 2 runs an arm: gain 9 / 10 vs 10 / 10). THE A/B as a default candidate (box 5, the first 24 of the 36 timed
+  levels, 300 s, W3, one run an arm side by side): routed 3 = 3, all 3 SLOWER with the knob (10,139 vs 14,742 run
+  ticks), unrouted progress less on 12 / more on 2 (VVVVVV 16 -> 7, Fizio1 5 -> 1, Christmas Eve 5 -> 2): NEGATIVE, not
+  a default; its 'timer' plans appeared on One Minute Descent alone, so elsewhere it acts by the late rule and the
+  deadline search's clock: `EEAT_PLAN_TIMER_LATE=0` (inside the knob) drops the late rule, for its own measure.
+  **The boost's way** (model.js, OPT-IN `EEAT_EST_BOOSTDIR=1`, off = byte for byte; test/planboost.js): the est / estNW
+  walks take no step out of a boost tile against its push (the engine sets 16 px/tick along it every tick the centre is
+  in it), a diagonal being its two orthogonal legs through its side tiles; the lb, the proofs and the regions untouched
+  (their memo keys apart). Daybreak's NEAR switch 44 ('1 tile' inside the right boost (294,218)) is out of the est walk
+  from that side; the compile (300 s, one pair) the same gain 17: the planner's relax-only fallback still picks the step
+  (its lb walk keeps the boost's wrong way, as a relaxation must). **The known-route test of TPs The Horror** (krt.js):
+  its trophy and coin (48,31) are found from the known route's previous-trigger states (rungs 1 / 2), its third stuck
+  waypoint coin (1,3) is off the route: from the start the plan is "coin (1,3) -> trophy", cost 160, lb 39 (the known
+  route 4,598): the est walk AND the RCH3 field go up to the top-left portal (1,1) (a 1-tile hole over a pocket whose
+  floor is a 22-coin door) and from its pair (15,86) down a dot tunnel to the trophy; the pocket is entered only from
+  the floor 4 rows below, where the jump's 63.42 px leaves the box 0.6 px over the door's top edge: a false near of both
+  relaxations (the centre-tile models), which the CEGAR's 3 x 3 walls at the executor's closest tile never refute. Notes:
+  `src/out/n5/lanes/c6_lane3_b2.md`.
 - **Fields in chains** (C6 push 3 lane 2, STUCK-FIELD; `src/out/n5/lanes/c6_lane2_b1.md`): THE KNOWN-ROUTE TEST of 16
   STUCK-FIELD levels' stuck waypoints (tools/cmp/krt.js, box 5): 5 of 13 are not on the known route at all (the plan's
   off-route targets), 4 of the 8 on it are found from the route's previous-trigger state (the compile's anchor there holds
