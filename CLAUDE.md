@@ -546,10 +546,16 @@ ways in.
   vs 1,451 / 1,472, simulated ticks -3% / +4%). 300 s, two A/Bs (box 6 6f04001; box 5 767e305 = + the stale kill): 38 vs
   39 and 31 vs 33 (the loaded box 5), pooled 69 vs 72 of 96; Stone Ruin Speedrun (3,707) and Gravity's Rainbow (2,022, under
   the best known 2,197) 2 of 2 vs 0 of 2 (the child's whole-level routes); lost Tutorial 3, Buuwuu, Christmas Town, Late
-  christmas once each (the base 2 / 2 / 2 / 1 of 2); both compiled run ticks geo-mean 0.979 / 0.960. ALL FOUR POOLED: 112 vs
-  117 of 192 level runs; every run with it and none without: Stone Ruin, Gravity's Rainbow, INVASION, (The Blank Page 4 / 4 vs
-  1 / 4); none the other way round. The 41 ONE-LEG levels n5-plan 3d52987's 300-s full compile (44 / 230) failed, the solver
-  on (box 6, 300 s): the child's own routes Just One More Time 2,899, Stone Ruin 3,707, Gravity's Rainbow 2,022. Per
+  christmas once each (the base 2 / 2 / 2 / 1 of 2); both compiled run ticks geo-mean 0.979 / 0.960. A fifth A/B (120 s,
+  box 5, c98d21c = + nice, three arms): base 27, the solver 28, the short plan's request alone (`EEAT_ST_GENERAL=0`) 28 (both:
+  + Stone Ruin, + The Blank Page, + Gravity's Rainbow). ALL FIVE POOLED (240 level runs): base 139 vs 145; by level Stone
+  Ruin 0 -> 3 / 5, Gravity's Rainbow 0 -> 3 / 5, The Blank Page 1 -> 5 / 5, INVASION 3 -> 5 / 5, Accident Prone 4 -> 5, Tutorial
+  2 3 -> 4, Snow Jumping 1 -> 2; WATCH Tutorial 3 3 -> 1 / 5 and Buuwuu's Stronghold 3 -> 1 / 5 (the executor's own work the
+  same in both arms there: steps and simulated ticks), INFINITE, Crypts, Presto, K Underground, the precision puzzle 1 run
+  fewer each. The 41 ONE-LEG levels n5-plan 3d52987's 300-s full compile (44 / 230) failed, the solver on (box 6, 300 s): the
+  child's own routes Just One More Time 2,899, Stone Ruin 3,707, Gravity's Rainbow 2,022; the 36 left again with THE REST OF
+  THE CLOCK (the child's variants in the time a solve leaves: a longer relay, finer x speeds; `EEAT_ST_VARIANTS=0` off): the
+  child's clock used to the end (240-270 s), no further route. Per
   stretch (the lab's krt data, box 5): from the known route's previous trigger the executor's rungs 1-2 (5 + 15-s windows)
   30 / 49, one continuous 30-s backward clock 34 / 49, either 36 / 49; every start kind 89 / 129 -> 105 / 129 (69% -> 81%).
   The child runs at nice +10 over the compile (`EEAT_ST_NICE`; 0: the same priority); `EEAT_ST_GENERAL=0`: the short plan's
