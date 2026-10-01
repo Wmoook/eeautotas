@@ -1103,3 +1103,22 @@ ways in.
   Switch Labyrinth 9 / 27 (the portal keeps the speed, the fields do not), celeste 87 / 235, NC Naos 49 / 111, My level
   fef0 4 / 59) and each tick of slack multiplies the states 3-5x: no whole level proven; the proven lbs it reached are the
   B7 proof ORCHESTRATOR lines. The order tier: Ruins lb 64 vs 52 at the same time.
+- **THE WHOLE-LEVEL PROOF IN PARALLEL** (box 7 lane 'proof' cycle 2, 2026-09-30; `tools/perfect/wholepar.js`,
+  `test/wholepar.js` 30/0; a tool): `node tools/perfect/wholepar.js <level> [--route=<a.eetas>,..] [--U=] [--threads=8]
+  [--seconds=1800] [--from=<a proven lb>] [--tiers=kin,rel,gate] [--shared=1] [--ttBits=23] [--split=3] [--out=<faster.eetas>]
+  [--probe=1]`: levelproof.js's depth-first search (n5-p4-perfect, merged into n5-b7-proof) by C contours from the start's
+  bound (each C one complete search; a closed C PROVES every route takes >= C run ticks; the first finish = THE OPTIMUM,
+  replayed, `FASTER` and written to `--out` when below the routes given, `PROVEN` when C reaches their ticks) under the max of
+  the admissible tiers: `kin` (endgame.lowerBound), `rel` / `gate` (wholeproof.js's bounds.js fields), `reach` (opt-in:
+  RCH3's -1), `togo` (opt-in: routelb.js togoFor, NOT admissible: 2 ticks before the crown it reads 2.137 on NC Naos d3c6 and
+  the precision puzzle, 2.098 on celeste: the route check refuses it there); every route given is checked first (`--check=0`
+  off). THE SHARED TABLE (`--shared=1`): one transposition table for every worker (Int32 slots by Atomics, 16 bytes a slot,
+  2^ttBits slots, cleared before each C; a state is pruned only when some worker entered it at a layer <= this one under the
+  same C: sound under any interleaving) where levelproof.js's per-worker tables searched 2.6x the nodes (Switch Labyrinth C 21:
+  16.1 M nodes on 16 workers vs 6.2 M on one, 5.6 M shared on 4). Switch Labyrinth (box 7, 19 threads, load ~180, U 27 = the
+  best known): C 24 closed in 239 s (164 M nodes): every route takes >= 24 run ticks; each C ~3.4x the last (C 27 ~2 h on 19
+  threads). WHERE THE NODES GO (`src/out/b7proof/nodemap.js`, C 21): 99.99% with the centre in the pocket under the down boost
+  (96, 25), a team-1 ball through the team door (96, 26), where the bounds read ~10 ticks to the trophy and an exhaustive
+  search finds no crown within 60 ticks (4.4 M states): the bounds' walks go up through the down boost. NEXT: the boost's push
+  in the bound (a tick that starts in a boost sets that speed to 16 along it, and the centre moves at most 16 px a tick, so it
+  never crosses a boost tile against its push without a tick starting in it; teleports aside).
