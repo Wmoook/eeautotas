@@ -2345,6 +2345,7 @@ async function createExecutor(L, opts) {
 	const RUNUP_DMIN = +process.env.EEAT_RUNUP_DMIN > 0 ? +process.env.EEAT_RUNUP_DMIN : 8;
 	const RUNUP_K = +process.env.EEAT_RUNUP_K > 0 ? +process.env.EEAT_RUNUP_K : 2;
 	const RUNUP_SHARE = +process.env.EEAT_RUNUP_SHARE > 0 ? Math.min(0.95, +process.env.EEAT_RUNUP_SHARE) : 0.6;
+	const RUNUP_GAP = +process.env.EEAT_RUNUP_GAP > 0 ? +process.env.EEAT_RUNUP_GAP | 0 : 0;
 	let runsMemo = null;
 	function runsOf() {
 		if (runsMemo) return runsMemo;
@@ -2357,13 +2358,23 @@ async function createExecutor(L, opts) {
 			const below = y + 1 < Hl ? (fl[fg[t + Wl]] | 0) : 1;
 			return (below & (1 | 2 | 4 | 8)) !== 0;
 		};
+		// (EEAT_RUNUP_GAP: a run goes on over gaps of at most that many open (not solid) tiles: a running ball hops them)
+		const open = (x, y) => ((fl[fg[y * Wl + x]] | 0) & (1 | 16)) === 0;
 		for (let y = 0; y < Hl; y++) {
 			let x = 0;
 			while (x < Wl) {
 				if (!ok(x, y)) { x++; continue; }
 				const x0 = x;
-				while (x < Wl && ok(x, y)) x++;
-				if (x - x0 >= RUNUP_MIN) runs.push({ y, x0, x1: x - 1 });
+				let xe = x;
+				while (x < Wl) {
+					if (ok(x, y)) { xe = x; x++; continue; }
+					let g = 0;
+					while (RUNUP_GAP > 0 && x + g < Wl && g <= RUNUP_GAP && !ok(x + g, y) && open(x + g, y)) g++;
+					if (g > 0 && g <= RUNUP_GAP && x + g < Wl && ok(x + g, y)) { x += g; continue; }
+					break;
+				}
+				if (xe - x0 + 1 >= RUNUP_MIN) runs.push({ y, x0, x1: xe });
+				x = Math.max(x, xe + 1);
 			}
 		}
 		runsMemo = runs;
