@@ -2173,6 +2173,37 @@ async function compile(L, opts = {}, emit = () => {}) {
 		stage('joins', Date.now() - tm, text);
 	}
 
+	// ---- THE ENDGAME (C6 lane 5 block 3; OPT-IN opts.endgameS (compile.js EEAT_ENDGAME_S / --endgame=<s>), 0 / unset: off,
+	// the compile byte for byte): the exact endgame ladder of src/endgame.js on the finished route: from the route's own state
+	// K = 8, 16, .. 64 ticks before its finish EVERY input sequence (stateHash merge, the admissible trophy bound's cut), the
+	// first finish the fastest from that state, a give-up / an exhausted search a proof that none is faster from there;
+	// kept only when the engine replays it faster with no more deaths and no lower chance. Its own clock after the joins.
+	// (celeste x2: the route's last 34 ticks where the best known takes 16; the ladder 239 -> 238, no faster finish within
+	// the last 31 ticks proven)
+	let endgameInfo = null;
+	if (best && opts.endgameS > 0 && !stopped) {
+		tm = Date.now();
+		let text = '';
+		try {
+			const EG = require('../endgame.js');
+			const r = EG.ladder(L, [{ name: 'route', masks: best.masks }], { K: { max: +process.env.EEAT_ENDGAME_K || 64 }, seconds: opts.endgameS });
+			let provedK = 0;
+			for (const p of r.proofs || []) if (!p.rejected && p.start === 'route') provedK = Math.max(provedK, p.K);
+			endgameInfo = { before: best.runTicks, found: (r.found || []).length, proofs: (r.proofs || []).length, provedK, searches: r.searches, ms: Date.now() - tm };
+			const ev = r.masks ? C.evaluate(L, r.masks) : null;
+			if (ev && ev.deaths <= best.deaths && ev.chance >= best.chance - 1e-9 && ev.runTicks < best.runTicks) {
+				const saved = best.runTicks - ev.runTicks;
+				best = { masks: ev.ms, ticks: ev.complete, runTicks: ev.runTicks, deaths: ev.deaths, chance: ev.chance, legs: best.legs, how: `${best.how} + endgame` };
+				endgameInfo.after = ev.runTicks;
+				say({ ev: 'result', kind: 'finish', ticks: ev.complete, runTicks: ev.runTicks, deaths: ev.deaths, chance: ev.chance, how: best.how, endgame: saved, lb: LB, gap: gapOf(ev.runTicks), inputs: T.strOf(ev.ms) });
+				if (out) { try { C.writeEetas(path.join(out, 'route.eetas'), ev.ms); } catch (e) { /* read-only */ } }
+				text = `-${num(saved)} ticks`;
+			} else text = 'no gain';
+			text += `; ${endgameInfo.proofs} proofs${endgameInfo.provedK ? `, no faster finish within the last ${endgameInfo.provedK} ticks` : ''}`;
+		} catch (e) { bug('endgame', { error: e.message }); text = `failed: ${e.message}`; }
+		stage('endgame', Date.now() - tm, text);
+	}
+
 	// ---- the bound again (the planner's facts may have raised it), the report
 	// (a proof of optimality: the route is one exact leg from the level start, proven the fewest ticks, and the start is
 	// static: no route has fewer run ticks)
@@ -2205,7 +2236,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		bugs, deepenings, stalls, bnbPlans, bnbArrivals, layers: Math.max(0, ...[...anchors.values()].map((A) => A.firstTick)), ...(why ? { why } : {}) });
 	saveFiles();
 	return { ok: !!best, masks: best ? best.masks : null, route: best ? best.masks : null, runTicks: best ? best.runTicks : null, ticks: best ? best.ticks : null, deaths: best ? best.deaths : null, chance: best ? best.chance : null,
-		lb: LB, lbComplete, lbProof, gap: best ? gapOf(best.runTicks) : null, legs: best ? best.legs : [], stages, known, why, end, anchors: anchors.size, steps, okSteps, bugs, deepenings, stalls, bnbPlans, bnbArrivals, relayRuns, relaySet, relayDrop, ...(ST_ON ? { stretch: stStats } : {}), exec: execStats, perfect: perfectInfo, joins: joinsInfo,
+		lb: LB, lbComplete, lbProof, gap: best ? gapOf(best.runTicks) : null, legs: best ? best.legs : [], stages, known, why, end, anchors: anchors.size, steps, okSteps, bugs, deepenings, stalls, bnbPlans, bnbArrivals, relayRuns, relaySet, relayDrop, ...(ST_ON ? { stretch: stStats } : {}), exec: execStats, perfect: perfectInfo, joins: joinsInfo, ...(endgameInfo ? { endgame: endgameInfo } : {}),
 		...(OS_ON ? { oneshot: os || osw ? Object.assign(os ? os.stats() : Object.assign({}, osStats || {}), { thread: !!osw, readyMs: osReady ? osReady.ms : null, error: osErr || null, gate: osw && OS_GATE ? (osOpen ? 'open' : 'shut') : null, released: osReleased, held: osPending.size, anchorsGiven: osAnchors, injected: osInjected, routeTicks: Number.isFinite(osBestT) ? osBestT : null, how: best ? best.how : null }) : null } : {}) };
 }
 

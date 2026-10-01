@@ -138,12 +138,15 @@ async function main() {
 	// (n5-perfect LOOPS: the polish's loop pass alone after the budget, strategy.js; --loops=<s> / EEAT_LOOPS_S, default a
 	// sixth of the budget, at most LOOPS_MAX_S; EEAT_POLISH_LOOPS=0 / EEAT_PERFECT=0: off)
 	const loopsS = process.env.EEAT_POLISH_LOOPS === '0' || process.env.EEAT_PERFECT === '0' ? 0 : a.loops !== undefined ? Math.max(0, +a.loops || 0) : process.env.EEAT_LOOPS_S !== undefined && process.env.EEAT_LOOPS_S !== '' && +process.env.EEAT_LOOPS_S >= 0 ? +process.env.EEAT_LOOPS_S : Math.min(LOOPS_MAX_S, seconds / 6);
-	const wdS = +process.env.EEAT_COMPILE_WATCHDOG_S > 0 ? +process.env.EEAT_COMPILE_WATCHDOG_S : seconds + Math.max(WATCHDOG_MIN_S, WATCHDOG_F * seconds) + joinsS + loopsS;
+	// (C6 lane 5 THE ENDGAME, strategy.js: the exact endgame ladder on the finished route after the joins, its own clock;
+	// --endgame=<s> / EEAT_ENDGAME_S, OPT-IN: unset / 0 off, the compile byte for byte)
+	const endgameS = a.endgame !== undefined ? Math.max(0, +a.endgame || 0) : Math.max(0, +process.env.EEAT_ENDGAME_S || 0);
+	const wdS = +process.env.EEAT_COMPILE_WATCHDOG_S > 0 ? +process.env.EEAT_COMPILE_WATCHDOG_S : seconds + Math.max(WATCHDOG_MIN_S, WATCHDOG_F * seconds) + joinsS + loopsS + endgameS;
 	const wd = watchdog(wdS * 1000, json);
 	const emit0 = emit;
 	const emitW = (ev) => { if (ev.ev === 'stage' || ev.ev === 'step' || ev.ev === 'plan') wd.note(ev); emit0(ev); };
 	const opts = { file: lv.file || undefined, md5: lv.md5 || undefined, seconds, workers, seed: Number.isFinite(+a.seed) ? +a.seed : 1, first: a.first === '1', polish: a.polish !== '0',
-		stallS: +a.stallS || 0, parseMs, known: a.known === '0' ? false : undefined, joinsS, loopsS };
+		stallS: +a.stallS || 0, parseMs, known: a.known === '0' ? false : undefined, joinsS, loopsS, ...(endgameS > 0 ? { endgameS } : {}) };
 	if (a.inflight) opts.inflight = +a.inflight;
 	if (a.parts) opts.parts = path.resolve(a.parts);
 	if (a.runOut) opts.out = path.resolve(a.runOut);
