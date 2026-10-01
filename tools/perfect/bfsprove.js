@@ -452,7 +452,9 @@ async function main() {
 			if (found !== null) break;
 			if (stopped) { out.why = stopped; break; }
 			if (states === 0) break;
-			if (seen > 0.7 * 2 ** ttBits) { out.why = 'table'; break; }
+			// (--fill: the table's load where the run stops, default 0.7; past it the probe runs grow, and a full run keeps
+			// its state unmerged: never unsound)
+			if (seen > (+args.fill || 0.7) * 2 ** ttBits) { out.why = 'table'; break; }
 			if (rebal > 0 && threads > 1 && states > threads * rebMin && maxW > rebal * states / threads && C - d > 3) await reroot();
 		}
 		out.rebalances = rebalances; out.rebalanceS = rebalMs / 1000;
