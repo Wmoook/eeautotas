@@ -769,13 +769,13 @@ ways in.
   plans 6 of 8 were relax-only (est >= 1,000,000). (Block 3 also wrote that the executor's `fail.closest.masks` do not pass
   the reported closest tile: FALSE, block 4 below: tools/cmp/nearkrt.js's `String()` of a Uint8Array.) Notes:
   `src/out/n5/lanes/c6_lane3_b3.md`.
-  BLOCK 4 (C6 push 3 lane 3; `src/out/n5/lanes/c6_lane3_b4.md`): **THE CLOSEST MASKS** (b769c5b): reach() hands
+  BLOCK 4 (C6 push 3 lane 3; `src/out/n5/lanes/c6_lane3_b4.md`): **THE CLOSEST MASKS** (b3b731d): reach() hands
   `fail.closest.masks` back as a Uint8Array (executor.js turns failResult's string into masks; skelClosest's are masks
   already) and `String()` of one is its comma-joined numbers: read as masks the closest replays from the level start to the
   reported tile, px and py exactly (box 5, block 3's anchor dumps: Two coin (187,90) r2 (184,90) at tick 1,804; Ice Cream
   Expedition trophy r2 (5,175) at tick 5,807); the strategy's relays read both forms: never wrong. nearkrt.js T.strOf;
   tools/cmp/clmask.js (a reach from an anchor dump, its closest replayed); test/planexec.js T-EXEC-FAIL replays every
-  closest (20/20). **THE TROPHY AS RANKED COMPONENTS** (43b0599, planner.js OPT-IN `EEAT_TROPHY_COMP=1`; facts.js 'tdrop';
+  closest (20/20). **THE TROPHY AS RANKED COMPONENTS** (f78dd17, planner.js OPT-IN `EEAT_TROPHY_COMP=1`; facts.js 'tdrop';
   types.js goalOf with a trophy waypoint's tiles; test/plantcomp.js 10/0): 26 of the 230 levels have 2+ trophy components
   (Ice Cream Expedition 6, MoonBase 8, Fish Gods 6, KOcrew 5, First Person Maze 3, DEEPER, Santa's Workshop, INFINITE, TEZ,
   Your Decision, SPOT, Fizio1, Desolate Helix, Beat the Spikes 2, Technological Terror, The Tower Domination, Stupid Fox
@@ -783,7 +783,7 @@ ways in.
   (`EEAT_TROPHY_COMP_NEAR`) of one component, another still a target, drops that component for the anchor's abstract
   state (kept by the facts' reset): the trophy edge 'trophy~t<ids>' (its own rungs from 0) to the others' tiles, the test
   the crown on any tile; ordering only (the lb / proofs every trophy tile); off byte for byte. A component dropped from 2 abstract states
-  (`EEAT_TROPHY_COMP_GLOBAL`, 0 = per state only) is dropped from every state (6ef0c0c: a decoy's seal does not depend on
+  (`EEAT_TROPHY_COMP_GLOBAL`, 0 = per state only) is dropped from every state (558e37a: a decoy's seal does not depend on
   the coins held). THE A/B (box 5, 300 s, W3, par 3 an arm side by side, one run an arm, 9 multi-trophy levels; per state
   only): no route gained or lost (INFINITE 3,978 / 4,413 and Santa's Workshop 2,134 / 2,072 with no drop: the same code
   path), the knob acted only where a decoy was near-missed and too late: Ice Cream Expedition 7 drops, each its coin
@@ -791,14 +791,22 @@ ways in.
   at 174.5 s (g4 vs g9: the arms' code identical before it, the spread); with the global drop (one run each, 300 s) Ice
   Cream 3 drops, 9 trophy steps, g12, its anchors down to the checkpoint (85,313) at 293 s (the real trophies at
   (80 / 95,339)), DEEPER g4, 1 drop: no route; OPT-IN. **THE DEATH DOOR'S
-  NEED** (c3439a8, OPT-IN `EEAT_NEEDS_DEATHS=1`, executor.js blockedOnWay + planner.js openValue): a death door (1011) is an
+  NEED** (ad34137, OPT-IN `EEAT_NEEDS_DEATHS=1`, executor.js blockedOnWay + planner.js openValue): a death door (1011) is an
   'open' gate to steer.js, so no failure ever named it and the CEGAR never learned that a step behind one needs deaths
   first: Tutorial 2's stuck step 'purple switch 0 (319,15)' (the known route dies once between its checkpoint and the
   switch for the door (264,28); a box-5 compile tried the switch from deaths-0 anchors at rungs 0-3, closest 61.2 at the
   door, ~90 worker-s); with the knob the shut door on the way is feature 'deaths' and its number the needed value: from the
   route's checkpoint state blockedBy [deaths (264,28)], the fact 'needs deaths=1', the next plans 'die -> trophy' first and
   no switch 0 (without: blockedBy [] and switch 0 again at r1); 10 levels hold death doors (Tutorial 2, Hildren's Farm,
-  TEZ, Summer Bee, The Ten Commandments, First Person Maze, Frolic, Nightmare Relics, TEIN SMC 228, DEEPER). DD_AB.
+  TEZ, Summer Bee, The Ten Commandments, First Person Maze, Frolic, Nightmare Relics, TEIN SMC 228, DEEPER). In the
+  compiles the executor's blockedBy stayed EMPTY (failResult's blockedOnWay needs the all-open goal field, which a step
+  whose window is used up does not build), so b508f9b the PLANNER side: a shut death door within 2 tiles of the closest tile
+  in the anchor's state gives the fact without the field. THE A/B (box 5, 300 s, W3, par 3 an arm side by side, one run an
+  arm, the executor side only): 6 death-door levels, no compile gained or lost (Tutorial 2 5,380 / 6,038 and The Ten
+  Commandments 852 / 666 with no needs fact in the on arm: the same code path; Frolic g1 / g3 with 2 / 8 needs facts,
+  Nightmare Relics g5 / g0, Hildren's Farm g2 / g3, TEZ g0 / g0); with the planner side Tutorial 2 (one run): 22 needs
+  facts, the first route at 84.8 s (the arms above 299.1 / 176.7 s; a fourth run of the base: no route in 300 s), 4,889
+  run ticks (5,380 / 6,038; best known 2,947). OPT-IN: one run.
   From the known route's own states Tutorial 2's switch 0 is a LONG leg: from the respawn after the death (590 route
   ticks) rung 1 fails, rung 2 finds 704 ticks (tools/cmp/krt.js).
 - **Fields in chains** (C6 push 3 lane 2, STUCK-FIELD; `src/out/n5/lanes/c6_lane2_b1.md`): THE KNOWN-ROUTE TEST of 16
