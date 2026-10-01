@@ -1273,6 +1273,33 @@ ways in.
   now found (9 of 18, the flag in the compile), 17 anchors, 384 steps, the chapter-2 blue coin 24 attempts from 9 anchors
   (best 19.8 tiles at the pump column), the stretch child 30 requests / 1 leg; F2 0 triggers (the 3,700-tick chapter-1 leg
   not found under load).
+- **THE SIDEWAYS-KEPT RISE as an ordering price, and the blue coin's shaft** (B7 lane cold, cycle 3, 2026-10-01; branch
+  n5-b7-cold; `src/out/b7cold3/` in its worktree: sc.js, map.js). reach.js `EEAT_SIDE_CAP=<q>` / `opts.sideCap` (OPT-IN,
+  GOAL FIELDS only, off = the field byte for byte): an R(q) state moved sideways between two normal tiles kept its apex
+  level, so a chain of sideways moves in one row carried a jump's rise any number of tiles; a goal field is merged with a
+  second field whose sideways NORM -> NORM moves keep at most R(q) (`_sideCapQ`): the capped cost where finite, the plain
+  cost + `SIDE_CAP_PEN` (2,500 tiles) where only the plain model reaches the goal, CUT where the plain field cuts: the -1
+  set (the proof, the executor's heap cut, legs.js distOf's 1e9) is the plain field's byte for byte; ordering only (the
+  capped model alone is not sound: a real jump crosses a tile sideways at its full apex; the sound form is a per-row
+  crossing counter in the label search: after k same-direction crossings in one row the rise per tick u has (k - 3) u < 16
+  and the apex is at most the rise from u, ~12 count types a direction: not built). test/reach.js K (16 random levels: the
+  -1 set the plain one's, every finite cost at least the plain one, the capped model's own Bellman self-check, sideCap 0 =
+  no option). Cold World's blue coin field (the compiler's defaults + the cycle-2 knobs, q 4): the bottom-corridor false
+  near (114,231) 45.8 -> 116.2 tiles; along the known route (100,215) 116 -> (124,208) 93.6 -> (134,210) 86.6 ->
+  (126,197) 67.8 -> (118,197) 59.8 -> (91,196) 14.4 (plain 34 -> 65 -> 75 -> 67 -> 59 -> 14: a +41 hill). THE LEG
+  (coinexec, rung 3, 150 s, box 7 at load ~140): from route ticks 3000 / 3500 the closest moves from (114,231) to
+  (123-124, 208) with q 4 / 6 (and with the unsound cap on every field: the same), from the spawn (109,231) at 141-143 by
+  the priced field: NO leg; from route ticks 4000 / 4500 found in 53 s with and without it (841 / 715 vs 841 / 720 ticks):
+  the price does not break the later route; from route ticks 3700 / 3850 ((107,210) / (106,204), 150 ticks before
+  (133,206)) NOT found either way (plain: closest (114,231) 45.8; q 4: (124,208) 92). THE NEXT BREAK is that 150-tick
+  stretch: the route runs east along the row-206 corridor (110,206) -> (125,207) at 5.4 px/tick, dips under the wall
+  block (126-130, 206-207) through rows 208-210 and rises on its far side to (133,206) at tick 4000, then climbs the
+  column (131-134, 199-207); the search reaches (124,208) and never the far side. THE SHAFT: the blue coin
+  (98,207) sits in a 1-wide shaft over a checkpoint (98,208), entered from above through a BLUE COIN GATE at 1 (98,205) (214:
+  open while no blue coin is held) from the pocket (93-98, 202-204); the known route reaches that pocket after deaths on
+  the spikes (90,203). THE COMPILE (1,000 s, W3, box 7 idle at the start, load ~145 from ~3 min): H1 (the cycle-1 knobs) and
+  H2 (+ the cycle-2 reach knobs) 0 triggers, 198 / 200 steps all failed (purple switch 1's closest 144.8 tiles at
+  (226,191): chapter 1 is not entered under load); the stretch child 22 requests, 0 legs.
 - **THE ENDGAME and THE AIRBORNE ARRIVAL** (C6 push 3 lane 5 block 3; `src/out/n5/lanes/c6_lane5_b3.md`). THE ENDGAME
   (strategy.js after JOINS, its own clock; OPT-IN `--endgame=<s>` / `EEAT_ENDGAME_S`, unset / 0 = the compile byte for byte;
   `EEAT_ENDGAME_K` the ladder's largest K, 64; `report.endgame`): the optimizer's exact endgame ladder (`src/endgame.js`
