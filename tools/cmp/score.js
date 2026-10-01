@@ -79,7 +79,7 @@ for (const s of ['campaign', 'hard', 'd4', 'all']) {
 	L.push(`| ${s} | ${a.filter((r) => r.ok).length} / ${a.length} | ${a.filter((r) => r.ok && r.at60 !== null).length} | ${a.filter((r) => r.ok && r.at180 !== null).length} |` + bases.map((b) => ` ${a.filter((r) => r[b.name] !== null).length} |`).join(''));
 }
 L.push('');
-L.push(`First route: median ${med(ok.map((r) => r.first))} s. Peak RSS a compile: median ${med(rows.map((r) => r.peakRssMB))} MB, max ${Math.max(0, ...rows.map((r) => r.peakRssMB || 0))} MB.`, '');
+L.push(`First route: median ${r3(med(ok.map((r) => r.first)))} s. Peak RSS a compile: median ${med(rows.map((r) => r.peakRssMB))} MB, max ${Math.max(0, ...rows.map((r) => r.peakRssMB || 0))} MB.`, '');
 // TAS quality
 const rat = ok.filter((r) => r.ratio !== null);
 L.push('## TAS quality', '');
