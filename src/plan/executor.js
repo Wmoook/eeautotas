@@ -2062,10 +2062,34 @@ async function createExecutor(L, opts) {
 	// Its arrivals are real engine states from the same first start (only the arrivals prefixed by one of this call's starts
 	// are kept: the final legs are prefixed by it as every resumed level's); a seeded level whose next sub-leg fails twice is
 	// popped (the resumed level's rule) and not seeded again for this waypoint. Ordering / time use only, no claim.
+	// ---- THE SETS' OWN MEASURE (n5-b8-big cycle 4, OPT-IN EEAT_SKEL_REMEAS=1; unset = byte for byte): a skeleton call's
+	// level c is costAt (the ball's own state on the field), its sub-level sets are tileMin (any state at the tile) of the
+	// same field, and after a sub-leg the level is set to the target c, not to where the arrivals stand. On an effect-state
+	// field (reach.js costAt with f.fx) a state the physics part has no way for is priced walk + FX_FAR (4,000 tiles), so on
+	// Phina and the Rose every waypoint's c0 was 4,100-4,600 where its tiles measure 180-600: each call walked ~4,000 phantom
+	// tiles in ~90 trivial sub-legs (48-83 ms each, the arrivals already in every set: rung 2 of blue coin (145,7) went 4,181
+	// -> 2,453 in its 15 s), 17 waypoints a level, and every new wall set re-measured it back up. With the knob the call's
+	// start, a walls refresh and every found sub-leg take the least of that and the arrivals' tiles on the set's own tileMin
+	// (they stand in the set, so at or below c): the next level from where they are. Ordering / time use only, no claim.
+	const SKEL_REMEAS = process.env.EEAT_SKEL_REMEAS === '1';
+	/** the least tileMin (tiles) over the arrivals' tiles (Infinity: none) */
+	const tileCOf = (strs, m) => {
+		let best = Infinity;
+		for (const s of strs) {
+			let e;
+			try { e = core.startOf(String(s)); } catch (x) { continue; }
+			if (!e || e.dead) continue;
+			vsim.restore(e.snap);
+			const t = T.tileOf(vsim, L.width, L.height);
+			const v = t >= 0 && t < m.length ? m[t] : RF.CUT;
+			if (v < RF.CUT && v / 5 < best) best = v / 5;
+		}
+		return best;
+	};
 	const SKEL_XLV = process.env.EEAT_SKEL_XLV === '1';
 	const XLV_F = +process.env.EEAT_SKEL_XLV_F > 0 ? Math.min(0.95, +process.env.EEAT_SKEL_XLV_F) : 0.7;
 	const XLV_TRY = +process.env.EEAT_SKEL_XLV_TRY > 0 ? +process.env.EEAT_SKEL_XLV_TRY | 0 : 6;
-	const XLV_CAP = 512, XLV_MS = 1200;
+	const XLV_CAP = 512, XLV_MS = 1200, XLV_DBG = process.env.EEAT_SKEL_XLV_DBG > 0 ? +process.env.EEAT_SKEL_XLV_DBG | 0 : 0;
 	const skelXL = new Map();      // the first start's string -> [{id, label, tile, cur}] (the levels of every waypoint's skeleton)
 	const skelXLBad = new Set();   // skelKey + '#' + id: a seeded level that failed for that waypoint
 	let skelXLId = 0;
@@ -2611,8 +2635,20 @@ async function createExecutor(L, opts) {
 			}
 			cand.sort((a, b) => a.v - b.v || b.lv.id - a.lv.id);
 			let bestL = null, tries = 0;
-			for (const { lv } of cand) {
-				if (tries >= XLV_TRY || Date.now() - tX > XLV_MS) break;
+			// (EEAT_SKEL_XLV_DBG=1, a diagnosis: XLV_DBG candidates measured, each logged with its rank value; slower)
+			const dbg = XLV_DBG > 0 ? [] : null;
+			// (the diagnosis: half the best by the rank, half a stride over the rest)
+			const half = XLV_DBG >> 1, restC = dbg ? cand.slice(half) : null, strideC = dbg ? Math.max(1, Math.floor(restC.length / Math.max(1, half))) : 1;
+			const order = dbg ? cand.slice(0, half).concat(restC.filter((x, i) => i % strideC === 0)) : cand;
+			for (const { lv, v } of order) {
+				if (dbg) {
+					if (tries >= XLV_DBG || Date.now() - tX > 8000) break;
+					const own = lv.cur.filter((s) => startStrs.some((p) => s.length >= p.length && s.startsWith(p)));
+					let fc = null;
+					try { const fw = own.length ? fieldAt(own[0], goal, wp.allowDeath, wArr) : null; fc = fw && fw.f && fw.c >= 0 ? Math.round(fw.c) : null; } catch (e) { fc = 'err'; }
+					dbg.push([Number.isFinite(v) && v < 1e9 ? Math.round(v / 5) : null, fc, lv.label, lv.tile % L.width, (lv.tile / L.width) | 0]);
+				}
+				if (tries >= (dbg ? XLV_DBG : XLV_TRY) || Date.now() - tX > (dbg ? 8000 : XLV_MS)) break;
 				const own = lv.cur.filter((s) => startStrs.some((p) => s.length >= p.length && s.startsWith(p)));
 				if (!own.length) continue;
 				if (DEAD_ON && deadEnds.size && own.every((s) => deadEnds.has(hashOf(s)))) continue;
@@ -2630,6 +2666,7 @@ async function createExecutor(L, opts) {
 				S.xlv = (S.xlv || 0) + 1;
 			}
 			if (emit) emit({ ev: 'exec.xlv', label: lab, c0: Math.round(c0), top: Math.round(xlTop), c: bestL ? Math.round(bestL.c) : null, from: bestL ? bestL.from : null, pool: cand.length, tries, ms: Date.now() - tX });
+			if (emit && dbg) emit({ ev: 'exec.xlvdbg', label: lab, top: Math.round(xlTop), cands: dbg });
 		}
 		const memo = skelMemo.get(key);
 		// (a memo level no deeper than the starts' own cost is not resumed: a relay start (the strategy's nearest state of the
@@ -2638,6 +2675,8 @@ async function createExecutor(L, opts) {
 		const top0 = memo && memo.length ? memo[memo.length - 1] : null;
 		const top = top0 && (!DEAD_ON || top0.c < c0 - 0.5) ? top0 : null;
 		let cur = top ? top.cur.slice() : startStrs, cCur = top ? top.c : c0;
+		// (EEAT_SKEL_REMEAS=1: the call starts at its arrivals' own level by the sets' measure, above)
+		if (SKEL_REMEAS && !top && f0) { const cm = tileCOf(cur, tileMin(f0)); if (cm < cCur) { S.remeasStart = (S.remeasStart || 0) + 1; S.remeasTiles = (S.remeasTiles || 0) + Math.round(cCur - cm); cCur = cm; } }
 		const levels = [];
 		// (the step adapts: a sub-leg found in under a third of its share doubles it (fast motion: fewer legs, fewer goal
 		// fields to build), a failed one halves it for its retry)
@@ -2653,6 +2692,7 @@ async function createExecutor(L, opts) {
 				// the new field, not a fresh start: every failed sub-leg learns walls, so the fresh start never let the call
 				// end stuck and it spent the rest of its time on the same failing target, 1.5-3 s a try)
 				cCur = fw.c; key = skelKey(goal, wp, startStrs, wN);
+				if (SKEL_REMEAS) { const cm = tileCOf(cur, tileMin(fw.f)); if (cm < cCur) { S.remeasWalls = (S.remeasWalls || 0) + 1; S.remeasTiles = (S.remeasTiles || 0) + Math.round(cCur - cm); cCur = cm; } }
 				if (STEP_HOLD && retried) step = Math.max(SKEL_STEP / 2, Math.min(step, SKEL_STEP));
 				else { step = SKEL_STEP; retried = false; }
 			}
@@ -2737,6 +2777,8 @@ async function createExecutor(L, opts) {
 			if (r.ms < share / 3 && (!STEP_HOLD || okRun >= 2)) step = Math.min(SKEL_STEP * 4, step * 2);
 			cur = r.arrivals.map((a) => T.strOf(a.masks));
 			cCur = c;
+			// (EEAT_SKEL_REMEAS=1: the arrivals' own level by the set's measure: they stand at or below c, often far below)
+			if (SKEL_REMEAS) { const cm = tileCOf(cur, m); if (cm < cCur) { S.remeasOk = (S.remeasOk || 0) + 1; S.remeasTiles = (S.remeasTiles || 0) + Math.round(cCur - cm); cCur = Math.max(SKEL_STEP / 2, cm); } }
 			if (!skelMemo.has(key)) skelMemo.set(key, []);
 			skelMemo.get(key).push({ c: cCur, cur: cur.slice() });
 			skelBasePush(key, cur);
