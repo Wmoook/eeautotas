@@ -37,7 +37,7 @@ function parse(argv) {
 // The hard watchdog (a worker thread: it runs while this thread is blocked in a part's synchronous call). Past its
 // limit it prints why (the budget, the last stage and step this thread passed it) and ends the process (exit 1).
 const WATCHDOG_MIN_S = 30, WATCHDOG_F = 0.5;
-const JOINS_MAX_S = 60, JOINS_F = 0.5, LOOPS_MAX_S = 10;
+const JOINS_MAX_S = 60, JOINS_F = 0.5, LOOPS_MAX_S = 10, ENDGAME_MAX_S = 60, ENDGAME_F = 0.2;
 // (the watchdog thread's code: its own isolate, so it runs while the compile's thread is blocked)
 function watchdogThread() {
 	const { parentPort, workerData } = require('worker_threads');
@@ -139,8 +139,11 @@ async function main() {
 	// sixth of the budget, at most LOOPS_MAX_S; EEAT_POLISH_LOOPS=0 / EEAT_PERFECT=0: off)
 	const loopsS = process.env.EEAT_POLISH_LOOPS === '0' || process.env.EEAT_PERFECT === '0' ? 0 : a.loops !== undefined ? Math.max(0, +a.loops || 0) : process.env.EEAT_LOOPS_S !== undefined && process.env.EEAT_LOOPS_S !== '' && +process.env.EEAT_LOOPS_S >= 0 ? +process.env.EEAT_LOOPS_S : Math.min(LOOPS_MAX_S, seconds / 6);
 	// (C6 lane 5 THE ENDGAME, strategy.js: the exact endgame ladder on the finished route after the joins, its own clock;
-	// --endgame=<s> / EEAT_ENDGAME_S, OPT-IN: unset / 0 off, the compile byte for byte)
-	const endgameS = a.endgame !== undefined ? Math.max(0, +a.endgame || 0) : Math.max(0, +process.env.EEAT_ENDGAME_S || 0);
+	// DEFAULT ON since C6 lane 5 block 4: a fifth of the budget, at most ENDGAME_MAX_S (60 s at 300 s); --endgame=<s> /
+	// EEAT_ENDGAME_S=<s> its clock; EEAT_ENDGAME=0, --endgame=0 or EEAT_ENDGAME_S=0: off, the compile byte for byte as
+	// before. It runs only on a found route, after the budget, and its route is kept only when the engine replays it faster
+	// with no more deaths and no lower chance: it cannot lose a compile or slow a route)
+	const endgameS = process.env.EEAT_ENDGAME === '0' ? 0 : a.endgame !== undefined ? Math.max(0, +a.endgame || 0) : process.env.EEAT_ENDGAME_S !== undefined && process.env.EEAT_ENDGAME_S !== '' ? Math.max(0, +process.env.EEAT_ENDGAME_S || 0) : Math.min(ENDGAME_MAX_S, ENDGAME_F * seconds);
 	const wdS = +process.env.EEAT_COMPILE_WATCHDOG_S > 0 ? +process.env.EEAT_COMPILE_WATCHDOG_S : seconds + Math.max(WATCHDOG_MIN_S, WATCHDOG_F * seconds) + joinsS + loopsS + endgameS;
 	const wd = watchdog(wdS * 1000, json);
 	const emit0 = emit;

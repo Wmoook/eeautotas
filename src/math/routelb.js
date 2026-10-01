@@ -209,7 +209,7 @@ function capsOf(L, copt = {}) {
 	};
 	// the fixpoint over (cell, phase) (a worklist, values rise from below; the tick's movement speed U = drag x (V + push))
 	const aMax = (2 * gmax + SM) / MULT + 0.01;
-	const PH2 = (16 + aMax) / 2 + 0.01;
+	const PH2 = (16 + 0.4 + aMax) / 2 + 0.01;   // (+ 0.4: the auto-align moves up to 0.2 px a tick below 1 px/tick)
 	const solve = (U, a2, own, jSrc, boost) => {
 		const a1 = r1max(own);
 		const V = new Float32Array(3 * N), Uq = new Float32Array(3 * N);
@@ -311,7 +311,8 @@ function capsOf(L, copt = {}) {
 					}
 				}
 				cap[i] = Math.max(mx, out);
-				sin = out;
+				// (a run that starts in this line (a jump, a teleport) may start at its far edge: the next line gets that speed)
+				sin = Math.max(out, startAt(i));
 			}
 			return cap;
 		};
@@ -382,7 +383,8 @@ function capsOf(L, copt = {}) {
 					}
 				}
 				cap[y] = Math.max(mx, out);
-				sin = out;
+				// (a jump or a teleport in this row may start at its top edge: the row above gets that speed)
+				sin = Math.max(out, jRow[y], exitRow[y]);
 			}
 			for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const c = y * W + x; if (cap[y] < Uup[c]) Uup[c] = cap[y]; }
 		}
@@ -453,7 +455,26 @@ function createRouteLB(L, o = {}) {
 		}
 	}
 	// ---- the tile mask -> the node mask
-	/** nodeBlockedOf(m) -> Uint8Array(NL): node (i, j) blocked iff a tile in cols(i) x rows(j) has m[t] === 0 */
+	// THE HALF BLOCKS (eesim.js _ovSlow: an F_HALF tile of lookup rotation 0 / 1 / 2 / 3 is solid only in its right / lower /
+	// left / upper half; any other rotation the whole tile): the model's classes make rotations 2 / 3 walls (the centre is
+	// never in such a TILE) and 0 / 1 open, but a whole-tile obstacle blocks lattice nodes the ball's centre does reach (On
+	// And On And On: the centre at (2242.8, 1456) next to a left / upper half block, the bound Infinity). Here each one
+	// blocks exactly the nodes in its own obstacle: the half rect [rx, rx + w) x [ry, ry + h) seen by the centre is
+	// [rx - 7, rx + w + 8) x [ry - 7, ry + h + 8) (the engine's integer box test), ends at multiples of 8, so flooring
+	// still keeps a free point free; its tile is no whole-tile wall in the mask test below
+	const halfRot = new Int8Array(N).fill(-1);
+	const halfList = [];
+	{
+		let gfl = null;
+		try { gfl = require('../reach.js').guideFlags(L); } catch (e) { gfl = null; }
+		const lk = L.lookup0;
+		if (gfl && lk) for (let t = 0; t < N; t++) {
+			const id = L.fg[t];
+			if (id >= 0 && id < gfl.length && (gfl[id] & 8) !== 0) { const r = lk[t]; if (r >= 0 && r <= 3) { halfRot[t] = r; halfList.push(t); } }
+		}
+	}
+	/** nodeBlockedOf(m) -> Uint8Array(NL): node (i, j) blocked iff a tile in cols(i) x rows(j) has m[t] === 0 (not a half
+	 *  block), or (i, j) is in a half block's own obstacle */
 	const nbMemo = new Map();
 	function nodeBlockedOf(m, key) {
 		const had = key ? nbMemo.get(key) : null;
@@ -466,10 +487,17 @@ function createRouteLB(L, o = {}) {
 				let b = 0;
 				for (let ry = r0; ry <= r1 && !b; ry++) {
 					if (ry < 0 || ry >= H) continue;
-					for (let cx = c0; cx <= c1; cx++) { if (cx < 0 || cx >= W) continue; if (m[ry * W + cx] === 0) { b = 1; break; } }
+					for (let cx = c0; cx <= c1; cx++) { if (cx < 0 || cx >= W) continue; const t = ry * W + cx; if (m[t] === 0 && halfRot[t] < 0) { b = 1; break; } }
 				}
 				nb[j * LW + i] = b;
 			}
+		}
+		for (const t of halfList) {
+			const a = t % W, bb = (t - a) / W, r = halfRot[t];
+			// (x nodes: full [2a, 2a + 2], left half (2) [2a, 2a + 1], right half (0) [2a + 1, 2a + 2]; y likewise: upper (3), lower (1))
+			const i0 = r === 0 ? 2 * a + 1 : 2 * a, i1 = r === 2 ? 2 * a + 1 : 2 * a + 2;
+			const j0 = r === 1 ? 2 * bb + 1 : 2 * bb, j1 = r === 3 ? 2 * bb + 1 : 2 * bb + 2;
+			for (let j = j0; j <= j1; j++) { if (j < 0 || j >= LH) continue; for (let i = i0; i <= i1; i++) { if (i < 0 || i >= LW) continue; nb[j * LW + i] = 1; } }
 		}
 		if (key) { nbMemo.set(key, nb); if (nbMemo.size > 64) nbMemo.delete(nbMemo.keys().next().value); }
 		return nb;
@@ -481,7 +509,13 @@ function createRouteLB(L, o = {}) {
 		const out = new Set();
 		for (const t0 of tiles) for (const t of touchersOf(t0)) {
 			const x = t % W, y = (t - x) / W;
-			for (let dj = 0; dj < 2; dj++) for (let di = 0; di < 2; di++) out.add((2 * y + dj) * LW + 2 * x + di);
+			// (3 x 3 nodes: the tile's own 2 x 2 and the next column / row. A path that enters the tile from the right / below
+			// is at x >= 16 X + 16 (y >= 16 Y + 16) just before: that point floors to node 2X + 2 (2Y + 2), while its first point
+			// inside floors to 2X + 1, 8 px further: with 2 x 2 regions a leftward / upward arrival paid up to 8 px more than it
+			// moved (T-ROUTELB-ADMISSIBLE dense: 2.137 two ticks before the crown, the precision puzzle / NC Naos d3c6). As a
+			// start region the next column / row covers a departure rightward / downward from anywhere in the tile (its floor
+			// node lies up to 8 px behind)
+			for (let dj = 0; dj < 3; dj++) for (let di = 0; di < 3; di++) { const nx = 2 * x + di, ny = 2 * y + dj; if (nx < LW && ny < LH) out.add(ny * LW + nx); }
 		}
 		return Int32Array.from(out);
 	}
@@ -526,7 +560,8 @@ function createRouteLB(L, o = {}) {
 		dist.fill(Infinity);
 		const lx = lam, ly = 1 - lam;
 		heap.clear();
-		for (const g of goalNodes) { if (dist[g] > 0) { dist[g] = 0; heap.push(0, g); } }
+		// (a blocked goal node is never the floor of a point on a path: skipped)
+		for (const g of goalNodes) { if (nb[g]) continue; if (dist[g] > 0) { dist[g] = 0; heap.push(0, g); } }
 		const fired = new Uint8Array(ports.length);
 		let dieFired = !resp || !dieNodes;
 		const respSet = resp ? resp.set : null;
@@ -540,13 +575,13 @@ function createRouteLB(L, o = {}) {
 					if (fired[k]) continue;
 					fired[k] = 1;
 					const v = d + 1;
-					for (const e of ports[k].entry) if (v < dist[e]) { dist[e] = v; heap.push(v, e); }
+					for (const e of ports[k].entry) if (!nb[e] && v < dist[e]) { dist[e] = v; heap.push(v, e); }
 				}
 			}
 			if (!dieFired && respSet.has(m)) {
 				dieFired = true;
 				const v = d + DEATH_MIN;
-				for (const e of dieNodes) if (v < dist[e]) { dist[e] = v; heap.push(v, e); }
+				for (const e of dieNodes) if (!nb[e] && v < dist[e]) { dist[e] = v; heap.push(v, e); }
 			}
 			// lattice moves into m from its 4 neighbours n (n -> m forward), n free
 			const i = m % LW, j = (m - i) / LW;
@@ -571,7 +606,11 @@ function createRouteLB(L, o = {}) {
 	 *  nodes reachable through blocked ones of the moves' cost + the field there (a local Dijkstra, <= 4096 nodes; past
 	 *  that 0: no claim) */
 	const escHeap = new Heap(256);
+	let openNbRef = null;   // (the nodes the static walls block: set below with the open level's mask)
 	function escape(dist, nb, start, lam) {
+		// (a node a STATIC wall blocks holds no ball: no value; the escape goes only through nodes a gate blocks: the
+		// ball overlapping a gate its touch shut, which the engine keeps open until it has left it)
+		if (openNbRef[start]) return Infinity;
 		st.escapes++;
 		const lx = lam, ly = 1 - lam;
 		const seen = new Map();
@@ -584,6 +623,7 @@ function createRouteLB(L, o = {}) {
 			if (d > seen.get(n)) continue;
 			if (++pops > 4096) return 0;
 			if (!nb[n]) { const v = d + dist[n]; if (v < best) best = v; continue; }
+			if (openNbRef[n]) continue;
 			const i = n % LW, j = (n - i) / LW;
 			const step = (m, w) => { const v = d + w; const s = seen.get(m); if (s === undefined || v < s) { seen.set(m, v); escHeap.push(v, m); } };
 			if (i + 1 < LW) step(n + 1, lx * hx[n]);
@@ -611,6 +651,7 @@ function createRouteLB(L, o = {}) {
 	}
 	const respKey = (S) => { const r = respawnNodes(S); r.key = r.key || ('r' + model.respawnOf(S, 'lb').id); return r; };
 	// the endgame's kinematic bound contexts per goal (trophy: its own; a trigger: its tiles)
+	let primB = null;   // (the primitives' bounds, made on the first start leg)
 	const egMemo = new Map();
 	function egCtx(goalKey, tiles) {
 		let c = egMemo.get(goalKey);
@@ -620,6 +661,7 @@ function createRouteLB(L, o = {}) {
 	// the open level (every gate open: static walls only): the A* heuristic to the trophy
 	const openMask = (() => { const m = new Uint8Array(N); for (let i = 0; i < N; i++) m[i] = model.A.cls[i] === 0 ? 0 : 1; return m; })();
 	const openNb = nodeBlockedOf(openMask, 'open');
+	openNbRef = openNb;
 	// (the open level's respawns: every respawn tile, the relaxation's)
 	const respAll = (() => { const t = model.respawn || []; const nodes = regionNodes(t); return { nodes, set: new Set(nodes), key: 'rall' }; })();
 	function hOpen(nodes, startCorr) {
@@ -676,7 +718,7 @@ function createRouteLB(L, o = {}) {
 			const r = model.respawnOf(S, 'lb');
 			let best = Infinity;
 			for (const t of r.tiles) {
-				const v = boundFromNodes(S, regionNodes([t]), null, bo).lb;
+				const v = boundFromNodes(S, regionNodes([t]), null, Object.assign({}, bo, { walkTiles: [t] })).lb;
 				if (v < best) best = v;
 			}
 			return { lb: best === Infinity ? Infinity : best + left, complete: true, expanded: 0, order: [], ms: Date.now() - tq, dead: true };
@@ -686,7 +728,7 @@ function createRouteLB(L, o = {}) {
 		const c0 = Math.max(0, Math.min(W - 1, i0 >> 1)) + W * Math.max(0, Math.min(H - 1, j0 >> 1));
 		const startCorr = (lam) => lam * dx / caps.Wx[c0] + (1 - lam) * dy / caps.Wdn[c0];
 		const nodes = Int32Array.of(j0 * LW + i0);
-		const bo2 = Object.assign({}, bo, { startSim: sim });
+		const bo2 = Object.assign({}, bo, { startSim: sim, walkTiles: [T.tileOf(sim, W, H)] });
 		const r1 = boundFromNodes(S, nodes, startCorr, bo2);
 		if (pend) {
 			const r2 = boundFromNodes(pend, nodes, startCorr, bo2);
@@ -706,7 +748,7 @@ function createRouteLB(L, o = {}) {
 		const mkey = (S, pos) => S.dkey + '|c' + S.cp + '#' + pos;
 		const h0 = hOpen(startNodes, startCorr);
 		if (h0 === Infinity) return { lb: Infinity, complete: true, expanded: 0, order: [], why: 'no way to the trophy on the open level' };
-		hpush({ f: h0, g: 0, S: S0, pos: -1, nodes: startNodes, corr: startCorr, path: null, goal: false });
+		hpush({ f: h0, g: 0, S: S0, pos: -1, nodes: startNodes, corr: startCorr, path: null, goal: false, wpos: bo.walkTiles ? { id: 'rlw' + bo.walkTiles.join(','), tiles: bo.walkTiles } : null });
 		best.set(mkey(S0, -1), { g: 0, S: S0 });
 		let expanded = 0, goal = null, cut = false;
 		while (open.length) {
@@ -738,16 +780,23 @@ function createRouteLB(L, o = {}) {
 					}
 					if (DEATH_MIN + alt < eg) eg = DEATH_MIN + alt;
 				}
-				return Math.max(fieldLeg, eg);
+				// (and the primitives' bound from the exact state (bounds.js leg: the doors as the state holds them, which a leg does
+				// not change; its plain layer and its own endgame part), the larger)
+				let bl = 0;
+				try { if (!primB) primB = B.createBounds(L, { model }); const v = primB.leg(sim0, goalKey === 'trophy' ? { kind: 'trophy', tiles: goalTiles } : { kind: 'trigger', tiles: Array.from(goalTiles) }); if (Number.isFinite(v)) bl = goalKey === 'trophy' ? v - 1 : v; } catch (e) { bl = 0; }
+				return Math.max(fieldLeg, eg, bl);
 			};
+			// (the planner's walk bound of the same leg: the 8-way tile walk at 16.25 px/tick, the death shortcut to the state's
+			// respawn (model.pairLb, 'lb' mode): a sound relaxation of its own; the leg is the larger)
+			const walk = (goalTiles) => { if (!n.wpos) return 0; try { const v = model.pairLb(n.S, n.wpos, goalTiles, 'lb', null); return Number.isFinite(v) || v === Infinity ? v : 0; } catch (e) { return 0; } };
 			// the trophy
-			const lt = kin(legCost(n.S, nbInfo, n.nodes, trophyNodes, 'trophy', n.corr), trophyTiles, 'trophy', trophyNodes);
+			const lt = Math.max(kin(legCost(n.S, nbInfo, n.nodes, trophyNodes, 'trophy', n.corr), trophyTiles, 'trophy', trophyNodes), walk(trophyTiles));
 			if (lt < Infinity) hpush({ f: n.g + lt + 1, g: n.g + lt + 1, S: n.S, pos: -2, nodes: null, path: { X: 'trophy', prev: n.path, g: n.g + lt + 1 }, goal: true });
 			for (const X of trig) {
 				const r = model.touch(n.S, X);
 				if (!r.changed) continue;
 				const tn = trigNodes.get(X.id);
-				const leg = kin(legCost(n.S, nbInfo, n.nodes, tn, 't' + X.id, n.corr), X.tiles, 't' + X.id, tn);
+				const leg = Math.max(kin(legCost(n.S, nbInfo, n.nodes, tn, 't' + X.id, n.corr), X.tiles, 't' + X.id, tn), walk(X.tiles));
 				if (leg === Infinity) continue;
 				const g2 = n.g + leg;
 				const k2 = mkey(r.S2, X.id);
@@ -763,7 +812,7 @@ function createRouteLB(L, o = {}) {
 				best.set(k2, { g: gm, S: S2 });
 				const h = hOpen(tn, null);
 				if (h === Infinity) continue;
-				hpush({ f: gm + h, g: gm, S: S2, pos: X.id, nodes: tn, corr: null, path: { X: X.label, prev: n.path, g: gm }, goal: false });
+				hpush({ f: gm + h, g: gm, S: S2, pos: X.id, nodes: tn, corr: null, path: { X: X.label, prev: n.path, g: gm }, goal: false, wpos: walkPosOf(X) });
 			}
 		}
 		st.expanded += expanded;
@@ -783,27 +832,76 @@ function createRouteLB(L, o = {}) {
 		const idleMax = bo.idleMax || 3000;
 		const sim = new E.EESim(L), inp = new E.EEInput();
 		sim.reset(); E.applyMask(inp, 0);
-		let h = sim.stateHash(), rests = -1;
+		// THE IDLE STARTS (the run timer starts at the end of the first tick with an input: idle ticks before it are free):
+		// the idle ball's states until its FULL state hash repeats (equal hashes behave identically from then on: every later
+		// idle state is one already seen; a resting ball repeats at once, a bobbing one after its period, a time-door level's
+		// within the doors' phase). Before, the walk stopped at the first CLOCK-BLIND repeat, which a ball resting on a time
+		// door repeats while the door is shut, and gave 0 where the ball never rests (Level 1 Overworld bobs in water: its
+		// full state repeats at 1,642 of 1,570)
+		const seen = new Set(), blind = new Map();
+		let n = -1;
 		for (let k = 0; k <= idleMax; k++) {
 			if (sim.has_silver_crown) return { lb: 0, why: 'the idle ball finishes', idle: k };
+			const hf = sim.stateHash();
+			if (seen.has(hf)) { n = k; break; }
+			seen.add(hf);
+			const hb = sim.stateHashClockBlind();
+			if (!blind.has(hb)) blind.set(hb, k);
 			sim.tick(inp);
-			const h2 = sim.stateHash();
-			if (h2 === h && !sim.is_dead) { rests = k; break; }
-			h = h2;
 		}
-		if (rests < 0) return { lb: 0, why: `the idle ball does not rest within ${idleMax} ticks`, idle: -1 };
+		if (n < 0) return { lb: 0, why: 'the idle ball\'s state does not repeat within ' + idleMax + ' ticks', idle: -1 };
+		// (the bound reads no clock: one bound per clock-blind state; past MANY_IDLE of them (a long bob) one per abstract state
+		// and lattice node, from the node with the largest floor offsets of its states and no kinematic first leg: at most
+		// every one of its states' bounds)
+		const MANY_IDLE = 64;
+		const many = blind.size > MANY_IDLE;
+		const groups = new Map();
 		sim.reset();
-		let lb = Infinity, at = -1, starts = 0, last = null, lastKey = '';
-		for (let k = 0; k <= rests; k++) {
-			// (consecutive idle states in one abstract state at one lattice node give the same bound but the offset: computed)
-			const r = bound(sim, bo);
+		let lb = Infinity, at = -1, starts = 0, last = null;
+		const done = new Set(), direct = [];
+		for (let k = 0; k < n; k++) {
+			const hb = sim.stateHashClockBlind();
+			if (!done.has(hb)) {
+				done.add(hb);
+				const S = model.stateOf(sim);
+				const pend = model.pendingOf ? model.pendingOf(sim, S) : null;
+				if (!many) {
+					const r = bound(sim, bo);
+					starts++;
+					const v = r.lb === Infinity ? Infinity : r.lb - 1;
+					if (v < lb) { lb = v; at = k; last = r; }
+				} else if (sim.is_dead || pend) {
+					direct.push({ snap: sim.snapshot(), k });
+				} else {
+					const cx = sim.px + 8, cy = sim.py + 8;
+					const i0 = Math.max(0, Math.min(LW - 1, Math.floor(cx / 8))), j0 = Math.max(0, Math.min(LH - 1, Math.floor(cy / 8)));
+					const gk = S.key + '|' + i0 + ',' + j0;
+					let g = groups.get(gk);
+					if (!g) { g = { S, i0, j0, dx: 0, dy: 0, k }; groups.set(gk, g); }
+					g.dx = Math.max(g.dx, cx - 8 * i0); g.dy = Math.max(g.dy, cy - 8 * j0);
+				}
+			}
+			if (k + 1 < n) sim.tick(inp);
+		}
+		// (the many starts share 4 x the start's budget, at least 250 ms each: a search the clock ends is still a bound)
+		const jobs = groups.size + direct.length;
+		const bo3 = jobs ? Object.assign({}, bo, { ms: Math.max(250, Math.floor(4 * (bo.ms !== undefined ? bo.ms : 5000) / jobs)) }) : bo;
+		for (const j of direct) {
+			sim.restore(j.snap);
+			const r = bound(sim, bo3);
 			starts++;
 			const v = r.lb === Infinity ? Infinity : r.lb - 1;
-			if (v < lb) { lb = v; at = k; last = r; }
-			void lastKey;
-			if (k < rests) sim.tick(inp);
+			if (v < lb) { lb = v; at = j.k; last = r; }
 		}
-		return { lb: lb === Infinity ? Infinity : Math.max(0, Math.ceil(lb - 1e-6)), lbRaw: lb, at, starts, idle: rests, order: last ? last.order : [], complete: last ? last.complete : false };
+		for (const g of groups.values()) {
+			const c0 = Math.max(0, Math.min(W - 1, g.i0 >> 1)) + W * Math.max(0, Math.min(H - 1, g.j0 >> 1));
+			const startCorr = (lam) => lam * g.dx / caps.Wx[c0] + (1 - lam) * g.dy / caps.Wdn[c0];
+			const r = boundFromNodes(g.S, Int32Array.of(g.j0 * LW + g.i0), startCorr, bo3);
+			starts++;
+			const v = r.lb === Infinity ? Infinity : r.lb - 1;
+			if (v < lb) { lb = v; at = g.k; last = r; }
+		}
+		return { lb: lb === Infinity ? Infinity : Math.max(0, Math.ceil(lb - 1e-6)), lbRaw: lb, at, starts, idle: n, idleStates: blind.size, grouped: groups.size, order: last ? last.order : [], complete: last ? last.complete : false };
 	}
 	// ---- the cost-to-go field per abstract state (the exact search's heuristic)
 	/**
@@ -815,7 +913,7 @@ function createRouteLB(L, o = {}) {
 		dist.fill(Infinity);
 		const lx = lam, ly = 1 - lam;
 		heap.clear();
-		for (const s of sources) for (const g of s.nodes) if (s.v < dist[g]) { dist[g] = s.v; heap.push(s.v, g); }
+		for (const s of sources) for (const g of s.nodes) if (!nb[g] && s.v < dist[g]) { dist[g] = s.v; heap.push(s.v, g); }
 		const fired = new Uint8Array(ports.length);
 		let dieFired = !resp || !dieNodes;
 		const respSet = resp ? resp.set : null;
@@ -824,9 +922,9 @@ function createRouteLB(L, o = {}) {
 			if (d > dist[m]) continue;
 			if (ports.length) {
 				const l = exitOf.get(m);
-				if (l) for (const k of l) { if (fired[k]) continue; fired[k] = 1; const v = d + 1; for (const e of ports[k].entry) if (v < dist[e]) { dist[e] = v; heap.push(v, e); } }
+				if (l) for (const k of l) { if (fired[k]) continue; fired[k] = 1; const v = d + 1; for (const e of ports[k].entry) if (!nb[e] && v < dist[e]) { dist[e] = v; heap.push(v, e); } }
 			}
-			if (!dieFired && respSet.has(m)) { dieFired = true; const v = d + DEATH_MIN; for (const e of dieNodes) if (v < dist[e]) { dist[e] = v; heap.push(v, e); } }
+			if (!dieFired && respSet.has(m)) { dieFired = true; const v = d + DEATH_MIN; for (const e of dieNodes) if (!nb[e] && v < dist[e]) { dist[e] = v; heap.push(v, e); } }
 			const i = m % LW, j = (m - i) / LW;
 			if (i > 0) { const n = m - 1; if (!nb[n]) { const v = d + lx * hx[n]; if (v < dist[n]) { dist[n] = v; heap.push(v, n); } } }
 			if (i + 1 < LW) { const n = m + 1; if (!nb[n]) { const v = d + lx * hx[m]; if (v < dist[n]) { dist[n] = v; heap.push(v, n); } } }
@@ -838,6 +936,8 @@ function createRouteLB(L, o = {}) {
 		st.fields++;
 		return out;
 	}
+	const walkPos = new Map();
+	function walkPosOf(X) { let p = walkPos.get(X.id); if (!p) { p = { id: 'rlx' + X.id, tiles: X.tiles }; walkPos.set(X.id, p); } return p; }
 	const togoMemo = new Map();
 	const vMemo = new Map();
 	const constS = model.feats.length === 0 && !model.coinTiles.length && !model.bcoinTiles.length && !model.cpTracked ? model.S0 : null;
@@ -845,7 +945,12 @@ function createRouteLB(L, o = {}) {
 	function vOf(S, X) {
 		const k = S.key + '#' + X.id;
 		let v = vMemo.get(k);
-		if (v === undefined) { v = boundFromNodes(S, trigNodes.get(X.id), null, { ms: 3000 }).lb; vMemo.set(k, v); }
+		if (v === undefined) {
+			// (o.togoCheap: the open level's field from X's region + 1 (every gate open: a relaxation of every state after the
+			// touch), one lookup instead of an order search: the proofs' heuristic, called on every new abstract state)
+			v = o.togoCheap ? hOpen(trigNodes.get(X.id), null) : boundFromNodes(S, trigNodes.get(X.id), null, { ms: 3000, walkTiles: X.tiles }).lb;
+			vMemo.set(k, v);
+		}
 		return v;
 	}
 	/** the cost-to-go fields of an abstract state: per lam min(the trophy + 1, the next relevant trigger + its V) */

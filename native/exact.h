@@ -23,6 +23,7 @@
 #pragma once
 #include "eecore.h"
 #include "search.h"
+#include "beam.h"   // (ReachField, reachFifths: the kin tier's reach cut, levelproof.js contextOf)
 
 namespace ee {
 
@@ -78,6 +79,9 @@ struct GpuH {
 	// the misses of a layer (the host reads them, computes their fields when piped, and clears them)
 	u32* missBits; u32 missBitMask; u32* missList; u32* nMiss; u32 missCap; u32 missSalt;
 	KinB K;
+	// THE REACH FIELD'S PROOF (levelproof.js contextOf, n5-b7-proof cycle 6): the RCH3 field (src/reach.js, physics mode)
+	// gpuh.js writes into the tables' file; a live ball it calls cut off (-1) has h Infinity (R.on 0: none)
+	ReachField R;
 };
 
 // ---------------------------------------------------------------- the kin tier (src/endgame.js, line for line)
@@ -392,8 +396,9 @@ EE_HD double xhMine(const GpuH& G, Sim<TW>& sim, i32* gst) {
 
 /** h(state, lim): the admissible ticks until has_silver_crown (Infinity: never), tools/perfect/wholepar.js makeCtx(L,
  *  {kin, rel, gate}).h(sim, lim) line for line: the kin tier (levelproof.js contextOf: a dead ball's ticks left + hResp + 1,
- *  else endgame.lowerBound + 1 capped at DEATH_MIN + 1 + hResp where it can die; above lim it is the answer: only
- *  "above lim" matters then), then the max with createH's (xhMine). gst: xhMine's. */
+ *  else Infinity where the reach field calls the ball cut off, else endgame.lowerBound + 1 capped at DEATH_MIN + 1 + hResp
+ *  where it can die; above lim it is the answer: only "above lim" matters then), then the max with createH's (xhMine).
+ *  gst: xhMine's (4: cut by the reach field). */
 template <int TW>
 EE_HD double xhOf(const GpuH& G, const Level& L, Sim<TW>& sim, i32 lim, i32* gst) {
 	const State<TW>& s = sim.s;
@@ -406,6 +411,8 @@ EE_HD double xhOf(const GpuH& G, const Level& L, Sim<TW>& sim, i32 lim, i32* gst
 			if (left < 0) left = 0;
 			v = left + G.hResp + 1.0;
 		} else {
+			// (reach.js costAt(f, sim) < 0 <=> fifthsAt(f, px, py, speed_y, _q0, _q1, _slippery) == -1 = beam.h reachFifths)
+			if (G.R.on && reachFifths(G.R, s.px, s.py, s.speed_y, s.q0, s.q1, s.slippery) < 0) { if (gst) *gst = 4; return xhInf(); }
 			v = xkLowerBound<TW>(G.K, L, s, lim) + 1.0;
 			if (G.K.canDie && v > 54.0 + 1.0 + G.hResp) v = 54.0 + 1.0 + G.hResp;
 		}

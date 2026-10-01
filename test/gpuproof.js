@@ -92,34 +92,58 @@ const WPAR = path.join(__dirname, '..', 'tools', 'perfect', 'wholepar.js');
 		// the ladder from the start's bound
 		const r3 = await XG.run(file, Object.assign({ C: String(opt + 6), ladder: '1', tool, work, seconds: '120', htBits: '22' }, extra), quiet);
 		check(`${name} GPU ladder to C=${opt + 6}: the optimum`, r3.verdict === 'FOUND' && r3.opt === opt, `${r3.verdict} ${r3.opt}, contours ${r3.Cs ? r3.Cs.map((c) => c.Cl + ':' + c.status).join(' ') : '-'}`);
-		// the GPU's h = the JS h along the found route, never above the ticks left (the door states of the route known)
+		// the GPU's h = the JS h along the found route and along random runs (off the route: deaths, the reach field's cut,
+		// other door states; every run's door states in the tables), = the CPU prover's h (wholepar.js makeCtx), and never
+		// above the ticks left along the route
 		if (fs.existsSync(outF)) {
 			const ms = C.readEetas(outF);
 			const tb = GH.createTables(L, {});
-			const sigs = GH.sigsAlong(L, tb, ms);
+			// random runs: sticky inputs (one of the 18 options, kept with p 0.85), seeded
+			let seed = 0x9e3779b9 ^ name.length * 7919;
+			const rnd = () => { seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+			const runs = [{ label: 'the route', ms, file: outF }];
+			for (let r = 0; r < 4; r++) {
+				const rm = new Uint8Array(300);
+				let m = 0;
+				for (let t = 0; t < rm.length; t++) { if (t === 0 || rnd() > 0.85) m = [0, 2, 4][(rnd() * 3) | 0] | [0, 8, 16][(rnd() * 3) | 0] | (rnd() < 0.5 ? 1 : 0); rm[t] = m; }
+				const rf = path.join(work, `rand${r}.eetas`);
+				C.writeEetas(rf, Array.from(rm));
+				runs.push({ label: `random run ${r}`, ms: rm, file: rf });
+			}
+			const sigs = new Set();
+			for (const r of runs) for (const k of GH.sigsAlong(L, tb, r.ms)) sigs.add(k);
 			const hF = path.join(work, 'hroute.bin');
 			tb.write(hF, Array.from(sigs));
 			const LIM = 40;
 			const ctx = require('../tools/perfect/wholepar.js').makeCtx(L, new Set(['kin', 'rel', 'gate']));
-			const sim = new E.EESim(L), inp = new E.EEInput();
-			sim.reset();
-			const js = [tb.hOf(sim, { lim: LIM })], cpuH = [ctx.h(sim, LIM)];
-			for (let t = 0; t < ms.length; t++) {
-				E.applyMask(inp, ms[t]); sim.tick(inp);
-				js.push(tb.hOf(sim, { lim: LIM })); cpuH.push(ctx.h(sim, LIM));
-				if (sim.has_silver_crown) break;
+			let nStates = 0, nInf = 0, nDead = 0, bad = { cpu: null, gpu: null, hcpu: null };
+			for (const r of runs) {
+				const sim = new E.EESim(L), inp = new E.EEInput();
+				sim.reset();
+				const js = [tb.hOf(sim, { lim: LIM })], cpuH = [ctx.h(sim, LIM)];
+				for (let t = 0; t < r.ms.length; t++) {
+					E.applyMask(inp, r.ms[t]); sim.tick(inp);
+					js.push(tb.hOf(sim, { lim: LIM })); cpuH.push(ctx.h(sim, LIM));
+					if (sim.is_dead) nDead++;
+					if (sim.has_silver_crown) break;
+				}
+				nStates += js.length;
+				nInf += js.filter((v) => v === Infinity).length;
+				const dj = js.findIndex((v, i) => v !== cpuH[i]);
+				if (dj >= 0 && !bad.hcpu) bad.hcpu = `${r.label} tick ${dj}: ${js[dj]} vs ${cpuH[dj]}`;
+				for (const mode of ['gpu', 'cpu']) {
+					const a = ['exacth', path.join(work, 'level.bin'), r.file, `--h=${hF}`, `--lim=${LIM}`];
+					if (mode === 'cpu') a.push('--cpu=1');
+					if (args.cachedir) a.push(`--cachedir=${args.cachedir}`);
+					const o = JSON.parse(cp.execFileSync(tool, a, { encoding: 'utf8' }).trim().split('\n').pop());
+					const jsv = js.map((v) => (v === Infinity ? -1 : v));
+					const diff = o.h ? o.h.findIndex((v, i) => v !== jsv[i]) : 0;
+					if ((!o.h || o.h.length !== jsv.length || diff >= 0) && !bad[mode]) bad[mode] = o.h ? `${r.label} tick ${diff}: ${o.h[diff]} vs ${jsv[diff]} (n ${o.h.length} vs ${jsv.length})` : `${r.label}: ${JSON.stringify(o).slice(0, 200)}`;
+				}
 			}
-			const dj = js.findIndex((v, i) => v !== cpuH[i]);
-			check(`${name} gpuh.js's h = the CPU prover's h (makeCtx kin,rel,gate) at every tick`, dj < 0, dj >= 0 ? `tick ${dj}: ${js[dj]} vs ${cpuH[dj]}` : `${js.length} ticks`);
-			for (const mode of ['gpu', 'cpu']) {
-				const a = ['exacth', path.join(work, 'level.bin'), outF, `--h=${hF}`, `--lim=${LIM}`];
-				if (mode === 'cpu') a.push('--cpu=1');
-				if (args.cachedir) a.push(`--cachedir=${args.cachedir}`);
-				const o = JSON.parse(cp.execFileSync(tool, a, { encoding: 'utf8' }).trim().split('\n').pop());
-				const jsv = js.map((v) => (v === Infinity ? -1 : v));
-				const diff = o.h ? o.h.findIndex((v, i) => v !== jsv[i]) : 0;
-				check(`${name} eegpu exacth (${mode}) = gpuh.js's h at every tick`, !!o.h && o.h.length === jsv.length && diff < 0, diff >= 0 ? `tick ${diff}: ${o.h[diff]} vs ${jsv[diff]}` : `${jsv.length} ticks`);
-			}
+			const what = `${runs.length} runs, ${nStates} states, ${nDead} dead, ${nInf} with h Infinity, reach tier ${tb.info.reach ? 'on' : 'off'}`;
+			check(`${name} gpuh.js's h = the CPU prover's h (makeCtx kin,rel,gate) at every tick`, !bad.hcpu, bad.hcpu || what);
+			for (const mode of ['gpu', 'cpu']) check(`${name} eegpu exacth (${mode}) = gpuh.js's h at every tick`, !bad[mode], bad[mode] || what);
 			const ck = require('../tools/perfect/wholeproof.js').checkRoute(L, ms, { h: (s) => tb.hOf(s) });
 			check(`${name} h <= the ticks left along the route`, ck.ok, `${ck.checked} ticks, min slack ${ck.minSlack}`);
 		}

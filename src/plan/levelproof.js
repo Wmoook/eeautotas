@@ -58,10 +58,20 @@ function contextOf(L, o = {}) {
 			if (v < hResp) hResp = v;
 		}
 		if (!Number.isFinite(hResp)) hResp = 0;
+		// o.hResp: a sound bound from every respawn tile to a trophy given by the caller (wholepar.js: the rel field's least
+		// value over the respawn tiles, bounds.js at()'s own death way): the larger kept; absent = as before
+		if (o.hResp !== undefined && Number.isFinite(o.hResp) && o.hResp > hResp) hResp = o.hResp;
 	}
 	// the field part: per abstract state key the order-aware cost-to-go field over the 8-px lattice (routelb.togo)
-	const RL = o.field ? require('../math/routelb.js').createRouteLB(L, {}) : null;
+	const RL = o.field ? require('../math/routelb.js').createRouteLB(L, { togoCheap: o.field !== 'full' }) : null;
 	const togo = RL ? RL.togoFor : null;
+	// THE REACH FIELD'S PROOF (src/reach.js, RCH3, physics mode only): -1 = no input sequence takes the ball from that
+	// state to a trophy (the whole level, doors relaxed: passable and floors; deaths as its edges where the level has
+	// them): a state there is cut whatever its layer (the editor's and the searches' prune; o.reach === false: off)
+	let rf = null;
+	if (o.reach !== false) {
+		try { const RF = require('../reach.js'); const f = RF.reachField(L); if (f && f.mode !== 'walk') rf = { f, costAt: RF.costAt }; } catch (e) { rf = null; }
+	}
 	/** h(sim, lim): the admissible ticks until has_silver_crown (> lim: only that it is above lim) */
 	function h(sim, lim) {
 		if (sim.has_silver_crown) return 0;
@@ -69,6 +79,7 @@ function contextOf(L, o = {}) {
 			const left = Math.max(0, Math.floor((16.0 - sim._dead_offset) / 0.3 - 1e-9));
 			return left + hResp + 1;
 		}
+		if (rf !== null && rf.costAt(rf.f, sim) < 0) return Infinity;
 		let v = EG.lowerBound(egB, sim, lim) + 1;
 		if (canDie && v > DEATH_MIN + 1 + hResp) v = DEATH_MIN + 1 + hResp;
 		if (togo !== null && v <= lim) {
@@ -77,7 +88,7 @@ function contextOf(L, o = {}) {
 		}
 		return v;
 	}
-	return { egB, canDie, h, hResp };
+	return { egB, canDie, h, hResp, reach: !!rf };
 }
 
 /** the idle sources: [snapshot] until the ball rests (-1: it never does within maxIdle, or it dies idling) */
@@ -116,6 +127,8 @@ function makeTT(bits) {
 			full++;
 			return false;
 		},
+		/** forget every entry (a task that ended early left entries of states whose subtrees it did not finish) */
+		clear() { K.fill(0); n = 0; },
 		stats: () => ({ entries: n, full, size }),
 	};
 }
@@ -128,12 +141,12 @@ function makeSearcher(L, ctx, ttBits) {
 	const firstMasks = Array.from(MS[3]).filter((m) => m !== 0);
 	const stack = [];
 	const path = new Uint8Array(4096);
-	let C = Infinity, nodes = 0, cut = 0, merged = 0, stopAt = Infinity, stopped = false, found = null;
+	let C = Infinity, nodes = 0, cut = 0, merged = 0, stopAt = Infinity, stopped = false, found = null, nodeCap = Infinity, splitMe = false;
 	/** search from the current sim state at layer d (the inputs path[0..d) from its source); first = this is a source */
 	function dfs(d, first) {
 		if (stopped || found) return;
 		nodes++;
-		if ((nodes & 0x3fff) === 0 && Date.now() > stopAt) { stopped = true; return; }
+		if ((nodes & 0x3fff) === 0) { if (Date.now() > stopAt) { stopped = true; return; } if (nodes > nodeCap) { stopped = true; splitMe = true; return; } }
 		if (sim.has_silver_crown) { if (d <= C) found = { layer: d, path: Array.from(path.subarray(0, d)) }; return; }
 		const lim = C - d;
 		if (lim < 1) return;
@@ -158,14 +171,17 @@ function makeSearcher(L, ctx, ttBits) {
 		tt, sim,
 		setC(c) { C = c; },
 		/** run one task: the state = source snapshot + the prefix inputs; returns {found, nodes, stopped} */
-		run(srcSnap, prefix, deadline) {
-			found = null; stopped = false; stopAt = deadline;
+		run(srcSnap, prefix, deadline, maxNodes) {
+			found = null; stopped = false; splitMe = false; stopAt = deadline;
 			const n0 = nodes;
+			nodeCap = maxNodes > 0 ? n0 + maxNodes : Infinity;
 			sim.restore(srcSnap);
 			for (let i = 0; i < prefix.length; i++) { E.applyMask(inp, prefix[i]); sim.tick(inp); path[i] = prefix[i]; }
 			if (sim.is_dead && !ctx.canDie) return { found: null, nodes: 0, stopped: false };
 			dfs(prefix.length, prefix.length === 0);
-			return { found, nodes: nodes - n0, stopped };
+			// (a task that ended early (a find, a split, the deadline) leaves entries of unfinished subtrees: forgotten)
+			if (found || stopped) tt.clear();
+			return { found, nodes: nodes - n0, stopped: stopped && !splitMe, split: splitMe };
 		},
 		stats: () => ({ nodes, cut, merged, tt: tt.stats() }),
 	};
@@ -174,15 +190,15 @@ function makeSearcher(L, ctx, ttBits) {
 // ---------------------------------------------------------------- the worker
 if (!isMainThread && workerData && workerData.levelproof) {
 	const L = loadLevel(workerData.spec);
-	const ctx = contextOf(L, { field: !!workerData.field });
+	const ctx = contextOf(L, { field: workerData.field || false });
 	const { sources } = sourcesOf(L, workerData.maxIdle);
 	const S = makeSearcher(L, ctx, workerData.ttBits);
 	S.setC(workerData.C);
 	parentPort.on('message', (m) => {
 		if (m.type === 'C') { S.setC(m.C); return; }
 		if (m.type === 'task') {
-			const r = S.run(sources[m.src], Uint8Array.from(m.prefix), m.deadline);
-			parentPort.postMessage({ type: 'done', id: m.id, found: r.found ? { layer: r.found.layer, path: r.found.path, src: m.src } : null, nodes: r.nodes, stopped: r.stopped, stats: S.stats() });
+			const r = S.run(sources[m.src], Uint8Array.from(m.prefix), m.deadline, m.maxNodes || 0);
+			parentPort.postMessage({ type: 'done', id: m.id, found: r.found ? { layer: r.found.layer, path: r.found.path, src: m.src } : null, nodes: r.nodes, stopped: r.stopped, split: r.split, stats: S.stats() });
 			return;
 		}
 		if (m.type === 'quit') process.exit(0);
@@ -199,7 +215,7 @@ if (!isMainThread && workerData && workerData.levelproof) {
 async function proveLevel(spec, o = {}) {
 	const t0 = Date.now();
 	const L = loadLevel(spec);
-	const ctx = contextOf(L, { field: !!o.field });
+	const ctx = contextOf(L, { field: o.field || false });
 	const maxIdle = o.maxIdle || 3000;
 	const src = sourcesOf(L, maxIdle);
 	if (src.rests < 0) return { status: 'unsupported', why: src.why, ms: Date.now() - t0 };
@@ -231,43 +247,54 @@ async function proveLevel(spec, o = {}) {
 		}
 		return null;
 	};
-	for (let k = 0; k < sources.length; k++) {
-		let layer = [{ prefix: [] }];
-		for (let d = 0; d < split && layer.length; d++) {
+	/** expand a task's state `layers` layers breadth first (merged by state hash within this expansion, cut by h): the
+	 *  subtasks (the frontier) and the finishes seen on the way */
+	const expand = (k, prefix0, layers, seen) => {
+		let layer = [{ prefix: prefix0 }];
+		for (let d = 0; d < layers && layer.length; d++) {
 			const next = [];
 			for (const node of layer) {
 				sim.restore(sources[k]);
 				for (const m of node.prefix) { E.applyMask(inp, m); sim.tick(inp); }
+				const depth = node.prefix.length;
 				const snap = sim.snapshot();
-				const masks = d === 0 ? firstMasks : EG.probeMasks(sim, inp, snap);
+				const masks = depth === 0 ? firstMasks : EG.probeMasks(sim, inp, snap);
 				for (let q = 0; q < masks.length; q++) {
 					const m = masks[q];
-					if (d === 0 || q > 0) { sim.restore(snap); E.applyMask(inp, m); sim.tick(inp); }
+					if (depth === 0 || q > 0) { sim.restore(snap); E.applyMask(inp, m); sim.tick(inp); }
 					expandedMain++;
 					const prefix = node.prefix.concat([m]);
-					const fin = check(d + 1, prefix, k);
-					if (fin) { const ev = require('../common.js').evaluate(L, fin, false); if (ev && ev.runTicks < bestRun) { best = ev.ms; bestRun = ev.runTicks; C = Math.min(C, d + 1 - 1); } continue; }
+					const fin = check(depth + 1, prefix, k);
+					if (fin) { const ev = require('../common.js').evaluate(L, fin, false); if (ev && ev.runTicks < bestRun) { best = ev.ms; bestRun = ev.runTicks; C = Math.min(C, depth + 1 - 1); say({ ev: 'found', runTicks: ev.runTicks, layer: depth + 1, C, ms: Date.now() - t0, where: 'split' }); } continue; }
 					if (sim.is_dead && !ctx.canDie) continue;
-					const lim = C - (d + 1);
-					if (lim < 1 || ctx.h(sim, lim) > lim) continue;
+					const lim = C - (depth + 1);
+					if (lim < 1) continue;
+					const hv = ctx.h(sim, lim);
+					if (hv > lim) continue;
 					const hs = sim.stateHash();
 					const had = seen.get(hs);
-					if (had !== undefined && had <= d + 1) continue;
-					seen.set(hs, d + 1);
-					next.push({ prefix, slack: lim - ctx.h(sim, lim) });
+					if (had !== undefined && had <= depth + 1) continue;
+					seen.set(hs, depth + 1);
+					next.push({ prefix, slack: lim - hv });
 				}
 			}
 			layer = next;
 		}
-		for (const node of layer) tasks.push({ src: k, prefix: node.prefix, slack: node.slack || 0 });
-	}
+		return layer.map((node) => ({ src: k, prefix: node.prefix, slack: node.slack || 0 }));
+	};
+	const seen0 = new Map();
+	for (let k = 0; k < sources.length; k++) for (const t of expand(k, [], split, seen0)) tasks.push(t);
 	// the largest slack first (the largest subtrees: the workers' load balance)
 	tasks.sort((a, b) => b.slack - a.slack);
 	say({ ev: 'tasks', tasks: tasks.length, starts: sources.length, rests: src.rests, C, ms: Date.now() - t0 });
 	const threads = Math.max(1, o.threads || 4);
 	const ttBits = o.ttBits || 22;
-	let nodes = 0, done = 0, stoppedTasks = 0;
+	// a task past taskNodes nodes is handed back and split taskSplit layers further (the subtasks first in the queue)
+	const taskNodes = o.taskNodes > 0 ? o.taskNodes : 20e6, taskSplit = o.taskSplit > 0 ? o.taskSplit : 2;
+	let nodes = 0, done = 0, stoppedTasks = 0, splits = 0, lastSay = 0;
 	const wk = [];
+	const byId = new Map();
+	let idSeq = 0;
 	await new Promise((resolve) => {
 		let next = 0, live = 0, finished = false;
 		const finish = () => { if (finished) return; finished = true; for (const w of wk) { try { w.postMessage({ type: 'quit' }); } catch (e) { /* gone */ } } resolve(); };
@@ -275,17 +302,38 @@ async function proveLevel(spec, o = {}) {
 			if (Date.now() > deadline) { if (live === 0) finish(); return; }
 			if (next >= tasks.length) { if (live === 0) finish(); return; }
 			const t = tasks[next++];
+			const id = idSeq++;
+			byId.set(id, t);
 			live++;
-			w.postMessage({ type: 'task', id: next - 1, src: t.src, prefix: t.prefix, deadline });
+			w.postMessage({ type: 'task', id, src: t.src, prefix: t.prefix, deadline, maxNodes: taskNodes });
 		};
 		for (let i = 0; i < threads; i++) {
-			const w = new Worker(__filename, { workerData: { levelproof: true, spec, C, ttBits, maxIdle, field: !!o.field } });
+			const w = new Worker(__filename, { workerData: { levelproof: true, spec, C, ttBits, maxIdle, field: o.field || false } });
 			wk.push(w);
 			w.on('message', (m) => {
-				if (m.type === 'ready') { give(w); give(w); live = Math.max(0, live); return; }
+				if (m.type === 'ready') { give(w); give(w); return; }
 				if (m.type === 'done') {
-					live--; done++; nodes += m.nodes;
-					if (m.stopped) stoppedTasks++;
+					live--; nodes += m.nodes;
+					const t = byId.get(m.id);
+					byId.delete(m.id);
+					// (a given task sits before `next`: taking it out of the list moves `next` back by one)
+					const drop = (x) => { const i = tasks.indexOf(x); if (i >= 0) { tasks.splice(i, 1); if (i < next) next--; } };
+					if (m.split && t) {
+						// (the heavy task, split further: its subtasks next in the queue; it does not count as done)
+						splits++;
+						drop(t);
+						const subs = expand(t.src, t.prefix, taskSplit, new Map());
+						subs.sort((a, b) => b.slack - a.slack);
+						tasks.splice(next, 0, ...subs);
+						say({ ev: 'split', depth: t.prefix.length, subtasks: subs.length, tasks: tasks.length, done, nodes, ms: Date.now() - t0 });
+					} else if (m.found && t) {
+						// (the task that found a route stopped at its find: searched again with the new bound, at the end)
+						drop(t);
+						tasks.push({ src: t.src, prefix: t.prefix, slack: 0 });
+					} else {
+						done++;
+						if (m.stopped) stoppedTasks++;
+					}
 					if (m.found) {
 						const masks = new Uint8Array(m.found.src + m.found.path.length);
 						masks.set(m.found.path, m.found.src);
@@ -297,10 +345,8 @@ async function proveLevel(spec, o = {}) {
 							for (const x of wk) x.postMessage({ type: 'C', C });
 							say({ ev: 'found', runTicks: ev.runTicks, layer: m.found.layer, C, ms: Date.now() - t0 });
 						}
-						// (the task that found it stopped at its find: searched again with the new bound)
-						tasks.push({ src: tasks[m.id].src, prefix: tasks[m.id].prefix, slack: 0 });
 					}
-					if ((done & 63) === 0) say({ ev: 'progress', done, tasks: tasks.length, nodes, ms: Date.now() - t0 });
+					if (Date.now() - lastSay > 30000) { lastSay = Date.now(); say({ ev: 'progress', done, tasks: tasks.length, next, live, splits, nodes, ms: Date.now() - t0 }); }
 					give(w);
 				}
 			});

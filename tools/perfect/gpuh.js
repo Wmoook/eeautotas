@@ -4,7 +4,9 @@
 // (tools/perfect/wholepar.js makeCtx(L, {kin, rel, gate}), the default of the CPU prover; exact.h xhOf = makeCtx's h
 // line for line):
 //   'kin'   levelproof.js contextOf: endgame.lowerBound + 1 (the kinematic envelope, walls ignored, portals through its
-//           portal field) capped at DEATH_MIN + 1 + hResp where the ball can die, a dead ball's ticks left + hResp + 1:
+//           portal field) capped at DEATH_MIN + 1 + hResp where the ball can die, a dead ball's ticks left + hResp + 1
+//           (hResp with wholepar.js's death way: the rel field's least respawn value), Infinity where contextOf's RCH3
+//           reach field calls a live ball cut off (the field's bytes in the file, beam.h reachFifths on the GPU):
 //           endgame.js boundContext exported (its targets, tame tables, 2D prefix sums, portal field, riseTable per jump
 //           effect) and lowerBound ported to the GPU (exact.h xkLowerBound, the same double operations);
 //   'rel'   bounds.js at(the trophy field, every door open) without its endgame part (wholepar.js's noEndgame): the tile
@@ -52,11 +54,30 @@ function createTables(L, o = {}) {
 	let deadRel = Infinity;
 	for (const r of S.respawn) if (fRel[r] < deadRel) deadRel = fRel[r];
 	deadRel = Math.max(1, deadRel);
-	// THE KIN TIER: levelproof.js contextOf (the same object wholepar.js makeCtx makes)
+	// THE KIN TIER: levelproof.js contextOf (the same object wholepar.js makeCtx makes: with a rel / gate tier THE DEATH WAY'S
+	// RESPAWN BOUND, o.hResp = the rel field's least value over the respawn tiles (EEAT_WP_RESPFIELD=0: off, as there), and
+	// contextOf's own REACH FIELD'S PROOF: a live ball the RCH3 field calls cut off has h Infinity (the GPU: the same RCH3
+	// bytes and beam.h reachFifths, which equals reach.js fifthsAt; the field's file goes into the tables' file)
 	const kin = tiers.has('kin');
-	const lp = kin ? require('../../src/plan/levelproof.js').contextOf(L, { field: false }) : null;
+	const lpOpts = { field: false };
+	if (kin && (tiers.has('rel') || tiers.has('gate')) && process.env.EEAT_WP_RESPFIELD !== '0') {
+		let r = Infinity;
+		for (const t of S.respawn) if (fRel[t] < r) r = fRel[t];
+		if (Number.isFinite(r)) lpOpts.hResp = r;
+	}
+	const lp = kin ? require('../../src/plan/levelproof.js').contextOf(L, lpOpts) : null;
 	const B = lp ? lp.egB : null;
 	const hResp = lp ? lp.hResp : 0;
+	// the RCH3 field contextOf cuts by (lp.reach: a physics-mode field); a field the file cannot hold (an effect-state or
+	// plain-ball field: knobs of the compiler's process) leaves the GPU without the cut: weaker, still admissible
+	let reachBytes = null, reachWhy = null;
+	if (lp && lp.reach) {
+		const RF = require('../../src/reach.js');
+		const f = RF.reachField(L);
+		if (!f || f.mode === 'walk') reachWhy = 'no physics field';
+		else if (f.fx || f.plainFx) reachWhy = 'an effect-state / plain-ball field (not in RCH3)';
+		else reachBytes = RF.reachFileBytes(f, null);
+	}
 	// riseTable(B, jv) for the three jump multipliers of the tame physics (endgame.js, the same operations)
 	const BD = E.constants.BASE_DRAG, MULT = E.constants.MULT;
 	const stepY = (v) => { let sy = v + B.modY; sy *= BD; if (sy > 16) sy = 16; else if (sy < -16) sy = -16; else if (sy < 0.0001 && sy > -0.0001) sy = 0; return sy; };
@@ -190,7 +211,7 @@ function createTables(L, o = {}) {
 		b.writeInt32LE(2, 4);
 		const ints = [W, H, N, S.nF, useIso ? 1 : 0, useAxis ? 1 : 0, usePlain ? 1 : 0, gate ? 1 : 0, B ? 1 : 0, gate ? cls.length : 0, sigWords, nGate,
 			B ? B.cells.length : 0, B && B.tameLevel ? 1 : 0, B ? B.halves : 0, lp && lp.canDie ? 1 : 0, B && B.hasRun ? 1 : 0, B && B.hasFly ? 1 : 0,
-			B && B.hasJump ? 1 : 0, B && B.hasFlip ? 1 : 0, B && B.portal ? 1 : 0, B ? B.nF : 0, 0, 0];
+			B && B.hasJump ? 1 : 0, B && B.hasFlip ? 1 : 0, B && B.portal ? 1 : 0, B ? B.nF : 0, reachBytes ? 1 : 0, 0];
 		ints.forEach((v, k) => b.writeInt32LE(v, 8 + 4 * k));
 		const dbl = [vmax.xp, vmax.xn, vmax.yp, vmax.yn, vp.xp, vp.xn, vp.yp, vp.yn, deadRel, hResp,
 			B ? B.wgm : 0, B ? B.modY : 0, B ? B.alignY : 0, B ? B.mory0 : 0, B ? B.gmaxG : 0, riseJv[0], riseJv[1], riseJv[2], 0, 0, 0, 0, 0, 0];
@@ -222,6 +243,8 @@ function createTables(L, o = {}) {
 			w.typed(r);
 		}
 		for (const k of keys) { w.typed(sigParse(k)); for (const p of fieldParts(gateField(sigParse(k)))) w.typed(p); }
+		// (the RCH3 field last, after the gate fields: its byte count (int64), its bytes; header int 22 = 1)
+		if (reachBytes) { w.typed(BigInt64Array.from([BigInt(reachBytes.length)])); w.typed(new Uint8Array(reachBytes.buffer, reachBytes.byteOffset, reachBytes.length)); }
 		fs.writeFileSync(file, w.done());
 		return keys.length;
 	}
@@ -238,7 +261,8 @@ function createTables(L, o = {}) {
 		return keys.length;
 	}
 	const info = { tiers: Array.from(tiers), useIso, useAxis, usePlain, gate, doorClasses: cls.length, doorTiles: doorTiles.length, sigWords, kin: !!B,
-		canDie: lp ? lp.canDie : null, hResp, deadRel, gateGoals: gateGoals.length, kinTargets: B ? B.cells.length : 0, tame: B ? !!B.tameLevel : null, portals: B ? !!B.portal : null };
+		canDie: lp ? lp.canDie : null, hResp, deadRel, gateGoals: gateGoals.length, kinTargets: B ? B.cells.length : 0, tame: B ? !!B.tameLevel : null, portals: B ? !!B.portal : null,
+		reach: !!reachBytes, reachWhy, reachMB: reachBytes ? +(reachBytes.length / 1e6).toFixed(1) : 0 };
 	return { hOf, sigOf, sigKey, sigParse, write, writeAdd, gateField, info, bounds, fRel, canDie: lp ? lp.canDie : true };
 }
 

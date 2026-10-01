@@ -103,6 +103,15 @@ struct XhTables {
 			sigs.push_back(std::vector<uint32_t>(s, s + H.sigWords));
 			hostGate.push_back(readField(*f));
 		}
+		// the RCH3 field (header int 22): the kin tier's reach cut (levelproof.js contextOf), host pointers into the file
+		if (in[22] == 1) {
+			const uint8_t* np = f->take(8);
+			int64_t n = 0;
+			if (np) memcpy(&n, np, 8);
+			const uint8_t* rb = n > 0 ? f->take((size_t)n) : nullptr;
+			if (!rb || !rfParseBytes(rb, (size_t)n, L, H.R, err)) { if (err.empty()) err = "bad bound tables (the reach field)"; err += ": " + path; return false; }
+			if (H.R.mode != 0) { err = "the reach field in the bound tables is not a physics field: " + path; return false; }
+		}
 		if (f->bad) { err = "bad bound tables (truncated): " + path; return false; }
 		files.push_back(std::move(f));
 		return true;
@@ -186,6 +195,8 @@ struct XhTables {
 			K.boostPS = rebase(Q.boostPS); K.gxPS = rebase(Q.gxPS); K.gyPS = rebase(Q.gyPS); K.jxPS = rebase(Q.jxPS); K.jyPS = rebase(Q.jyPS);
 			K.portal = rebase(Q.portal); K.trigQ = rebase(Q.trigQ); K.trigPS = rebase(Q.trigPS); K.rise = rebase(Q.rise);
 		}
+		// (the reach field's bytes are inside the main file: its device copy, the same offsets)
+		if (H.R.on) D.R = rfRebase(H.R, files[0]->raw.data(), dev[0].second->p);
 		D.sigKeys = (const u32*)(uintptr_t)dSigKeys.p; D.sigField = (const i32*)(uintptr_t)dSigField.p; D.gateF = (const HField*)(uintptr_t)dGateF.p;
 		D.missBits = (u32*)(uintptr_t)dMissBits.p; D.missBitMask = ((u32)1 << MISS_BITS_LOG2) - 1; D.missList = (u32*)(uintptr_t)dMissList.p;
 		D.nMiss = (u32*)(uintptr_t)dNMiss.p; D.missCap = MISS_CAP;
@@ -357,8 +368,8 @@ static int runExact(int argc, char** argv, const LevelBlob& B) {
 	up = dDepth.alloc(4ull * dfsWant) && dTask.alloc(4ull * dfsWant) && dTaskNext.alloc(4) && dIdle.alloc(4) && dStop.alloc(4) && dFPath.alloc(4 * 4096);
 	if (!up) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
 	g.ready(tStart);
-	printf("{\"ev\":\"start\",\"C\":%d,\"sources\":%zu,\"h0\":%.0f,\"tw\":%d,\"stateBytes\":%zu,\"tableSlots\":%llu,\"arena\":%llu,\"spill\":%d,\"dfs\":%d,\"dfsThreads\":%u,\"gate\":%d,\"kin\":%d,\"doorClasses\":%d,\"doorStates\":%zu,\"gpu\":%s}\n",
-		C, src.size(), h0, TW, SB, (unsigned long long)slots, (unsigned long long)arena, spill ? 1 : 0, dfsOn ? 1 : 0, dfsWant, X.H.gate, X.H.K.on, X.H.nCls, X.sigs.size(), g.json().c_str());
+	printf("{\"ev\":\"start\",\"C\":%d,\"sources\":%zu,\"h0\":%.0f,\"tw\":%d,\"stateBytes\":%zu,\"tableSlots\":%llu,\"arena\":%llu,\"spill\":%d,\"dfs\":%d,\"dfsThreads\":%u,\"gate\":%d,\"kin\":%d,\"reach\":%d,\"doorClasses\":%d,\"doorStates\":%zu,\"gpu\":%s}\n",
+		C, src.size(), h0, TW, SB, (unsigned long long)slots, (unsigned long long)arena, spill ? 1 : 0, dfsOn ? 1 : 0, dfsWant, X.H.gate, X.H.K.on, X.H.R.on, X.H.nCls, X.sigs.size(), g.json().c_str());
 	fflush(stdout);
 
 	unsigned long long tot[XS_NSTATS] = {};
