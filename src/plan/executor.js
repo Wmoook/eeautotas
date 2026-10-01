@@ -1863,10 +1863,18 @@ function fingerprint(L) {
 }
 
 // ================================================================ the main thread's executor
-/** the Waypoint as plain data (it crosses threads) */
-const wpData = (wp) => ({ kind: wp.kind, tiles: wp.tiles ? Array.from(wp.tiles) : [], trig: wp.trig, expect: wp.expect ? { feat: wp.expect.feat, value: wp.expect.value } : null,
+/** the Waypoint as plain data (it crosses threads)
+ *  THE DEATH STEP'S FLAG (B7 cold, OPT-IN EEAT_WP_DIEFIELD=1; off = the data before byte for byte): the planner's death step
+ *  (planner.js dieField: "die, back at a respawn") carries `dieField`, which the reach behind this copy reads (legBest's
+ *  `dieStep`: the dead ball and the ball at a kill cell's door first, legs.js diePri; the proof pre-check's "an ordering
+ *  field, no proof"; the math / settle / backward tiers' skip), but this copy dropped it: every death step ran its best-first
+ *  search without the death priority, and its dive stopped on the killer's doorstep (Cold World: from the 4 anchors at
+ *  chapter 1's end the step failed 30 rungs of 1.5-45 s, 9-14 M sims each; legBest alone with dieStep finds it in 0.1 s) */
+const WP_DIEFIELD = () => process.env.EEAT_WP_DIEFIELD === '1';
+const wpData = (wp) => Object.assign({ kind: wp.kind, tiles: wp.tiles ? Array.from(wp.tiles) : [], trig: wp.trig, expect: wp.expect ? { feat: wp.expect.feat, value: wp.expect.value } : null,
 	label: wp.label || '', allowDeath: !!wp.allowDeath, beforeTick: wp.beforeTick >= 0 ? wp.beforeTick : -1,
-	fieldTiles: wp.fieldTiles ? Array.from(wp.fieldTiles) : null, fieldTouch: !!wp.fieldTouch, wallsOn: !!wp.wallsOn });
+	fieldTiles: wp.fieldTiles ? Array.from(wp.fieldTiles) : null, fieldTouch: !!wp.fieldTouch, wallsOn: !!wp.wallsOn },
+	WP_DIEFIELD() && wp.dieField ? { dieField: true } : null);
 
 async function createExecutor(L, opts) {
 	opts = opts || {};
