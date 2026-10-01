@@ -28,18 +28,27 @@ const T = require('../../src/plan/types.js');
 const LP = require('../../src/plan/levelproof.js');
 const WP = require('./wholeproof.js');
 
+const TOGO_EPS = +(process.env.EEAT_TOGO_EPS || 0.01);
+
 /** the max of the chosen admissible tiers: {h(sim, lim) (> lim: only that it is above lim), canDie} */
 function makeCtx(L, tiers) {
 	const useTogo = tiers.has('togo');
 	const useKin = useTogo || tiers.has('kin');
 	const lp = LP.contextOf(L, { field: useTogo });
 	const mine = (tiers.has('rel') || tiers.has('gate')) ? WP.createH(L, { gate: tiers.has('gate') }) : null;
+	// 'reach': reach.js's field (RCH3, the searches' prune field: every rule errs toward reachable, its -1 a proof in physics
+	// mode, deaths as edges where a death can move the ball) cuts a state it calls cut off (h = Infinity); walk mode: no tier
+	let RF = null;
+	if (tiers.has('reach')) { const f = require('../../src/reach.js').reachField(L, {}); if (f && f.mode !== 'walk') RF = f; }
+	const costAt = RF ? require('../../src/reach.js').costAt : null;
 	function h(sim, lim) {
 		if (sim.has_silver_crown) return 0;
+		if (RF !== null && !sim.is_dead && costAt(RF, sim) < 0) return Infinity;
 		let v = 0;
 		if (useKin) {
 			v = lp.h(sim, lim);
-			if (v !== Math.floor(v)) v = Math.ceil(v - 1e-7);
+			// (routelb's fields are sums of float steps: a value a hair above a whole tick is that tick, not the next)
+			if (v !== Math.floor(v)) v = Math.ceil(v - TOGO_EPS);
 			if (v > lim) return v;
 		}
 		if (mine !== null) { const a = mine.h(sim); if (a > v) v = a; }
@@ -48,14 +57,107 @@ function makeCtx(L, tiers) {
 	return { h, canDie: lp.canDie };
 }
 
+// ---------------------------------------------------------------- the shared transposition table (--shared=1)
+// ONE table for every worker (levelproof.js's are per worker: 16 workers searched 2.6x the nodes of one on Switch
+// Labyrinth's C 21). A slot = 4 int32: the key's low word (0 = empty; a key whose low word is 0 is stored as 1), its high
+// word, the least layer it was entered at (MAXD = none yet), a pad. Sound under any interleaving: a state is pruned only
+// when some worker has ENTERED it at a layer <= this one with the same C (it searches it fully, or the C stops as 'time');
+// a slot claimed but not yet complete reads as another key or as MAXD: no prune, at most a state searched twice.
+const MAXD = 0x7fffffff;
+function sharedTT(sab, bits) {
+	const K = new Int32Array(sab), mask = (1 << bits) - 1;
+	let n = 0, full = 0;
+	const claim = (b, d) => {
+		for (;;) {
+			const cur = Atomics.load(K, b + 2);
+			if (cur <= d) return true;
+			if (Atomics.compareExchange(K, b + 2, cur, d) === cur) return false;
+		}
+	};
+	return {
+		seen(hs, d) {
+			let lo = (hs % 4294967296) | 0;
+			const hi = Math.floor(hs / 4294967296) | 0;
+			if (lo === 0) lo = 1;
+			let i = (lo >>> 0) & mask;
+			for (let p = 0; p < 16; p++) {
+				const b = i << 2;
+				let v = Atomics.load(K, b);
+				if (v === 0) {
+					const old = Atomics.compareExchange(K, b, 0, lo);
+					if (old === 0) { Atomics.store(K, b + 1, hi); n++; return claim(b, d); }
+					v = old;
+				}
+				if (v === lo && Atomics.load(K, b + 1) === hi) return claim(b, d);
+				i = (i + 1) & mask;
+			}
+			full++;
+			return false;
+		},
+		stats: () => ({ entries: n, full, size: mask + 1, shared: true }),
+	};
+}
+function clearShared(sab) {
+	const K = new Int32Array(sab);
+	K.fill(0);
+	for (let b = 2; b < K.length; b += 4) K[b] = MAXD;
+}
+
+/** levelproof.js makeSearcher's depth-first search with a given table (the same rules, its code line for line) */
+function makeSearcherTT(L, ctx, tt) {
+	const sim = new E.EESim(L), inp = new E.EEInput();
+	const firstMasks = Array.from(EG.MASK_SETS[3]).filter((m) => m !== 0);
+	const stack = [];
+	const path = new Uint8Array(4096);
+	let C = Infinity, nodes = 0, cut = 0, merged = 0, stopAt = Infinity, stopped = false, found = null;
+	function dfs(d, first) {
+		if (stopped || found) return;
+		nodes++;
+		if ((nodes & 0x3fff) === 0 && Date.now() > stopAt) { stopped = true; return; }
+		if (sim.has_silver_crown) { if (d <= C) found = { layer: d, path: Array.from(path.subarray(0, d)) }; return; }
+		const lim = C - d;
+		if (lim < 1) return;
+		const hv = ctx.h(sim, lim);
+		if (hv > lim) { cut++; return; }
+		if (!first && tt.seen(sim.stateHash(), d)) { merged++; return; }
+		const snap = stack[d] = sim.snapshot(stack[d]);
+		const masks = first ? firstMasks : EG.probeMasks(sim, inp, snap);
+		let noJump = 0;
+		for (let k = 0; k < masks.length; k++) {
+			const m = masks[k];
+			if ((m & 1) && (noJump & (1 << (m & 30))) !== 0) continue;
+			if (first || k > 0) { sim.restore(snap); E.applyMask(inp, m); sim.tick(inp); }
+			if (!(m & 1) && sim.run_ticks !== 0 && !sim.has_levitation && sim.jump_count >= sim.max_jumps) noJump |= 1 << (m & 30);
+			if (sim.is_dead && !ctx.canDie) continue;
+			path[d] = m;
+			dfs(d + 1, false);
+			if (stopped || found) return;
+		}
+	}
+	return {
+		setC(c) { C = c; },
+		run(srcSnap, prefix, deadline) {
+			found = null; stopped = false; stopAt = deadline;
+			const n0 = nodes;
+			sim.restore(srcSnap);
+			for (let i = 0; i < prefix.length; i++) { E.applyMask(inp, prefix[i]); sim.tick(inp); path[i] = prefix[i]; }
+			if (sim.is_dead && !ctx.canDie) return { found: null, nodes: 0, stopped: false };
+			dfs(prefix.length, prefix.length === 0);
+			return { found, nodes: nodes - n0, stopped };
+		},
+		stats: () => ({ nodes, cut, merged, tt: tt.stats() }),
+	};
+}
+
 // ---------------------------------------------------------------- the worker
 if (!isMainThread && workerData && workerData.wholepar) {
 	const L = T.loadLevelFile(workerData.file);
 	const ctx = makeCtx(L, new Set(workerData.tiers));
 	const { sources } = LP.sourcesOf(L, workerData.maxIdle);
 	let S = null;
+	const stt = workerData.sab ? sharedTT(workerData.sab, workerData.ttBits) : null;
 	parentPort.on('message', (m) => {
-		if (m.type === 'C') { S = LP.makeSearcher(L, ctx, workerData.ttBits); S.setC(m.C); parentPort.postMessage({ type: 'ready' }); return; }
+		if (m.type === 'C') { S = stt ? makeSearcherTT(L, ctx, stt) : LP.makeSearcher(L, ctx, workerData.ttBits); S.setC(m.C); parentPort.postMessage({ type: 'ready' }); return; }
 		if (m.type === 'task') {
 			const r = S.run(sources[m.src], Uint8Array.from(m.prefix), m.deadline);
 			parentPort.postMessage({ type: 'done', id: m.id, found: r.found ? { layer: r.found.layer, path: r.found.path, src: m.src } : null, nodes: r.nodes, stopped: r.stopped });
@@ -118,7 +220,9 @@ async function main() {
 	const say = (o) => console.log(JSON.stringify(o));
 	const t0 = Date.now();
 	const L = T.loadLevelFile(file);
-	const tiers = (args.tiers || 'kin,togo,rel,gate').split(',').filter(Boolean);
+	// (the default: the tiers checked on the 219 known routes; 'togo' is opt-in: above the ticks left at the finish on 4 of
+	// the 10 small levels' routes, 2026-09-30; 'reach' opt-in)
+	const tiers = (args.tiers || 'kin,rel,gate').split(',').filter(Boolean);
 	const ctx = makeCtx(L, new Set(tiers));
 	const maxIdle = 3000;
 	const src = LP.sourcesOf(L, maxIdle);
@@ -148,8 +252,11 @@ async function main() {
 	const threads = Math.max(1, +args.threads || 8), ttBits = +args.ttBits || 23, split = args.split !== undefined ? +args.split : 3;
 	const deadline = t0 + (+args.seconds || 1800) * 1000;
 	const wk = [];
+	// --shared=1: one table for every worker (16 bytes a slot: 2^ttBits slots), cleared before each C
+	const sab = args.shared === '1' ? new SharedArrayBuffer(16 * (1 << ttBits)) : null;
+	out.shared = !!sab;
 	await Promise.all(Array.from({ length: threads }, () => new Promise((res) => {
-		const w = new Worker(__filename, { workerData: { wholepar: true, file, tiers, ttBits, maxIdle } });
+		const w = new Worker(__filename, { workerData: { wholepar: true, file, tiers, ttBits, maxIdle, sab } });
 		wk.push(w);
 		w.once('message', () => res());
 	})));
@@ -172,6 +279,8 @@ async function main() {
 				live++;
 				w.postMessage({ type: 'task', id: next - 1, src: t.src, prefix: t.prefix, deadline });
 			};
+			// (every worker is idle here: the last C's tasks all came back)
+			if (sab) clearShared(sab);
 			for (const w of wk) {
 				w.on('message', (m) => {
 					if (m.type === 'ready') { give(w); give(w); return; }
@@ -201,7 +310,7 @@ async function main() {
 		out.opt = opt;
 		if (ev) {
 			out.optReplay = ev.runTicks;
-			if (ev.runTicks < U) {
+			if (Number.isFinite(U) && ev.runTicks < U) {
 				out.verdict = 'FASTER';
 				if (args.out) { Cm.writeEetas(path.resolve(args.out), ev.ms); out.written = args.out; }
 			} else out.verdict = 'PROVEN';
@@ -216,4 +325,4 @@ async function main() {
 }
 
 if (isMainThread && require.main === module) main().then(() => process.exit(0)).catch((e) => { console.error(e.stack || e.message); process.exit(1); });
-module.exports = { makeCtx, tasksFor };
+module.exports = { makeCtx, tasksFor, sharedTT, clearShared, makeSearcherTT };
