@@ -18,7 +18,7 @@
 // ours when below it (replayed, written to --out); C = U (our route's run ticks) closing = OUR ROUTE IS PROVEN OPTIMAL.
 //   node tools/perfect/wholepar.js <level.eelvl> [--route=<a.eetas>[,<b.eetas>]] [--U=<run ticks>] [--threads=8]
 //        [--seconds=1800] [--split=3] [--ttBits=23] [--tiers=kin,togo,rel,gate] [--from=<C>] [--out=<faster.eetas>]
-//        [--check=1]
+//        [--check=1] [--log=<tasks.jsonl>] [--resume=<tasks.jsonl>]
 // Prints JSON lines ({ev 'check' | 'C' | 'found' | 'result'}).
 const path = require('path');
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
@@ -251,6 +251,28 @@ async function main() {
 	if (args.probe === '1') { Object.assign(out, { verdict: 'probe', lb, gap: Number.isFinite(U) ? U - lb : null, seconds: (Date.now() - t0) / 1000 }); say(out); return; }
 	const threads = Math.max(1, +args.threads || 8), ttBits = +args.ttBits || 23, split = args.split !== undefined ? +args.split : 3;
 	const deadline = t0 + (+args.seconds || 1800) * 1000;
+	// THE TASK LOG (--log=<file>, cycle 3): one line per task searched to the end ({C, k: its key}), so a C that runs out
+	// of time is RESUMED by a later run (--resume=<the same file>, --from=<the proven lb below that C>): the tasks of a C
+	// are a pure function of the level, the tiers, the sources, C and --split (tasksFor), and a logged task is skipped.
+	// Sound with the shared table: a logged task pruned a state only where some task of ITS run entered it at a layer <=;
+	// that task was logged too (searched in full) or is not logged and is searched again from its root by the run that
+	// completes the C (its subtree holds that state at that layer, or a state some completed task of that run covers).
+	const fs = require('fs');
+	const taskKey = (t) => t.src + ':' + t.prefix.join(',');
+	const doneBefore = new Map();   // C -> Set(task keys)
+	if (args.resume) {
+		let txt = '';
+		try { txt = fs.readFileSync(path.resolve(args.resume), 'utf8'); } catch (e) { txt = ''; }
+		for (const line of txt.split('\n')) {
+			if (!line.trim()) continue;
+			let o = null;
+			try { o = JSON.parse(line); } catch (e) { continue; }   // (a line cut by a kill)
+			if (!o || o.ev !== 'task' || typeof o.k !== 'string') continue;
+			if (!doneBefore.has(o.C)) doneBefore.set(o.C, new Set());
+			doneBefore.get(o.C).add(o.k);
+		}
+	}
+	const logFd = args.log ? fs.openSync(path.resolve(args.log), 'a') : null;
 	const wk = [];
 	// --shared=1: one table for every worker (16 bytes a slot: 2^ttBits slots), cleared before each C
 	const sab = args.shared === '1' ? new SharedArrayBuffer(16 * (1 << ttBits)) : null;
@@ -268,8 +290,13 @@ async function main() {
 		const tc = Date.now();
 		const tk = tasksFor(L, ctx, sources, C, split);
 		if (tk.found) { found = tk.found; Cs.push({ C, status: 'found', nodes: tk.nodes }); break; }
-		const tasks = tk.tasks;
-		let nodes = tk.nodes, done = 0, stopped = 0, hit = null;
+		const all = tk.tasks;
+		// (a task searched to the end by an earlier run of this C: skipped, counted done)
+		const before = doneBefore.get(C);
+		const tasks = before ? all.filter((t) => !before.has(taskKey(t))) : all;
+		const resumed = all.length - tasks.length;
+		let nodes = tk.nodes, done = resumed, stopped = 0, hit = null;
+		if (resumed) say({ ev: 'resume', C, tasks: all.length, skipped: resumed });
 		await new Promise((resolve) => {
 			let next = 0, live = 0, fin = false;
 			const finish = () => { if (fin) return; fin = true; for (const w of wk) w.removeAllListeners('message'); resolve(); };
@@ -287,6 +314,7 @@ async function main() {
 					if (m.type === 'done') {
 						live--; done++; nodes += m.nodes;
 						if (m.stopped) stopped++;
+						else if (logFd !== null && !m.found) fs.writeSync(logFd, JSON.stringify({ ev: 'task', C, k: taskKey(tasks[m.id]), nodes: m.nodes }) + '\n');
 						if (m.found && (hit === null || m.found.layer < hit.layer)) hit = m.found;
 						give(w);
 					}
@@ -295,9 +323,10 @@ async function main() {
 			}
 			if (tasks.length === 0) finish();
 		});
-		const rec = { C, tasks: tasks.length, done, stopped, nodes, s: (Date.now() - tc) / 1000 };
+		const rec = { C, tasks: all.length, done, stopped, nodes, s: (Date.now() - tc) / 1000 };
+		if (resumed) rec.resumed = resumed;
 		if (hit !== null) { found = hit; rec.status = 'found'; Cs.push(rec); say(Object.assign({ ev: 'C' }, rec)); break; }
-		if (done < tasks.length || stopped > 0) { rec.status = 'time'; Cs.push(rec); say(Object.assign({ ev: 'C' }, rec)); break; }
+		if (done < all.length || stopped > 0) { rec.status = 'time'; Cs.push(rec); say(Object.assign({ ev: 'C' }, rec)); break; }
 		rec.status = 'closed'; lb = C;
 		Cs.push(rec); say(Object.assign({ ev: 'C', lb }, rec));
 	}

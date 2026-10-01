@@ -55,6 +55,25 @@ for (const [name, rows] of Object.entries(ROOMS)) {
 			check(`${tag} the written route replays`, !!ev && ev.runTicks === ref, ev ? ev.runTicks : 'no finish');
 			const r2 = run([file, '--threads=2', '--seconds=60', '--split=2', `--shared=${shared}`, '--ttBits=18', `--route=${outEetas}`]);
 			check(`${tag} the optimum as a route is PROVEN`, r2.verdict === 'PROVEN' && r2.lb === ref && r2.gap === 0, `${r2.verdict} lb ${r2.lb} gap ${r2.gap}`);
+			// THE TASK LOG (--log / --resume): C = ref from lb ref - 1 logged; resumed from half of its tasks, and from all
+			const log = path.join(dir, `${name}_${shared}.tasks.jsonl`);
+			const base = [file, '--threads=2', '--seconds=60', '--split=2', `--shared=${shared}`, '--ttBits=18', `--route=${outEetas}`, `--from=${ref - 1}`];
+			const r4 = run([...base, `--log=${log}`]);
+			const lines = fs.readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((o) => o.C === ref);
+			const nTasks = r4.Cs && r4.Cs[0] ? r4.Cs[0].tasks : -1;
+			check(`${tag} the log holds every task of the closed C`, r4.verdict === 'PROVEN' && lines.length === nTasks && nTasks > 1, `${r4.verdict} ${lines.length} of ${nTasks}`);
+			const half = path.join(dir, `${name}_${shared}.half.jsonl`);
+			const keep = lines.slice(0, Math.floor(lines.length / 2));
+			fs.writeFileSync(half, keep.map((o) => JSON.stringify(o)).join('\n') + '\n');
+			const out5 = cp.execFileSync(process.execPath, [TOOL, ...base, `--resume=${half}`], { encoding: 'utf8', timeout: 120000 }).trim().split('\n').map((l) => JSON.parse(l));
+			const rs = out5.find((l) => l.ev === 'resume'), r5 = out5.find((l) => l.ev === 'result');
+			check(`${tag} resumed from half the tasks: the same verdict`, !!rs && rs.skipped === keep.length && r5.verdict === 'PROVEN' && r5.lb === ref && r5.Cs[0].resumed === keep.length, `${rs ? rs.skipped : '-'} skipped, ${r5.verdict} lb ${r5.lb}`);
+			const r6 = run([...base, `--resume=${log}`]);
+			check(`${tag} resumed from every task: closed with no search`, r6.verdict === 'PROVEN' && r6.Cs[0].resumed === nTasks, `${r6.verdict} resumed ${r6.Cs[0].resumed}`);
+			// (a log line cut by a kill is skipped)
+			fs.appendFileSync(half, '{"ev":"task","C":');
+			const r7 = run([...base, `--resume=${half}`]);
+			check(`${tag} a cut last line is ignored`, r7.verdict === 'PROVEN' && r7.Cs[0].resumed === keep.length, `${r7.verdict} ${r7.Cs[0].resumed}`);
 		}
 	}
 }
