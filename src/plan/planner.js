@@ -112,6 +112,22 @@ const FLOOR_LAYERS = +process.env.EEAT_PLAN_FLOOR_LAYERS || 32;
 // 40 layers, 255 physics fields, no floor found; Dreamland 40 s, VVVVVV 37 s), where the floors it finds took 1.9-6.3 s
 // (Tropical Trials' coins >= 20: 25-30 s on the loaded box, so the cap is 30 s)
 const FLOOR_HARD_MS = +process.env.EEAT_PLAN_FLOOR_HARD_MS || 30000;
+// THE LONG PLAN CALL (C6 push 3 block 4 lane 1; OPT-IN EEAT_PLAN_LONG=<ms>, 0 / unset = off: the planner as before, byte for
+// byte): a plan call is 0.3 s (2 s the first), so on a switch level the plan search's budget ends before any trophy plan is
+// generated and the strategy gets only PARTIAL "most gain" plans: First Person Maze (best known 832 run ticks) after its
+// 31-switch column (gain 33-34) planned only switches 36 / 37, deaths and team 1, rung after rung, while a 30-s plan call from
+// the known route's own state there finds a whole trophy plan (est 808), one that toggles the column's switches back OFF:
+// the GAIN BONUS (every switch on lowers f) keeps such a search on the high-gain states (src/out/n5/lanes/c6_lane1_b3.md
+// (4)). The rule: when every plan of a plan call is partial (or priced by the PENALTY), one LONG search from that anchor's
+// abstract state (once a state, at most LONG_MAX a compile, at most a quarter of the compile's time left), with NO gain
+// bonus (a switch state may go DOWN at no price; EEAT_PLAN_LONG_GAIN=1 keeps the bonus); a trophy plan found along est walks
+// (its g below the PENALTY) goes first, and its path is kept: an anchor later in a state on that path gets the path's REST
+// (a search guided along its edges, cheap) when its own plans are all partial again. Ordering only: no edge dropped, the lb
+// and the proofs untouched.
+const LONG_MS = process.env.EEAT_PLAN_LONG !== undefined ? Math.max(0, +process.env.EEAT_PLAN_LONG || 0) : 0;
+const LONG_MAX = +process.env.EEAT_PLAN_LONG_MAX > 0 ? +process.env.EEAT_PLAN_LONG_MAX | 0 : 4;
+const LONG_GAIN = process.env.EEAT_PLAN_LONG_GAIN === '1';
+const LONG_EXPAND = +process.env.EEAT_PLAN_LONG_EXPAND > 0 ? +process.env.EEAT_PLAN_LONG_EXPAND : 3000000;
 const COUNT_GATES = new Set([165, 214]);
 const COLOURS = ['red', 'green', 'blue', 'cyan', 'magenta', 'yellow'];
 
@@ -1026,7 +1042,9 @@ function createPlanner(model, facts, o = {}) {
 		// (the timer's deadline search: the fewest landmarks left first (LAMA's greedy order: the open level's walk is blind to
 		// the doors a landmark opens), then A* on the est; no gain bonus: the trophy in time, not the most gain)
 		const gw = tLeft < Infinity ? 1 : hLM(a.S) >= 3 ? 0.1 : 1;
-		const gainB = tLeft < Infinity ? 0 : GAIN_BONUS, lmW = tLeft < Infinity ? 1e7 : LM_W;
+		const gainB = tLeft < Infinity || po.noGain ? 0 : GAIN_BONUS, lmW = tLeft < Infinity ? 1e7 : LM_W;
+		// (THE LONG PLAN CALL's rest: only the guide's edge at each depth)
+		const guide = Array.isArray(po.guide) ? po.guide : null;
 		const fOf = (g, S, pos) => gw * g + EST_W * hSteps(pos) * P + lmW * hLM(S) - gainB * P * S.gain;
 		root.f = fOf(0, a.S, a.pos);
 		open.push(root);
@@ -1067,6 +1085,7 @@ function createPlanner(model, facts, o = {}) {
 			for (const e of es) {
 				if (isRoot && exclude.has(e.edge)) continue;
 				if (ban && ban.has(e.edge)) continue;
+				if (guide && guide[n.depth] !== e.edge) continue;
 				if (UNTOGGLE && untoggles(e, n.S, n.e && n.e.X ? n.e.X : isRoot ? a.viaX : null)) { ST.untoggled = (ST.untoggled || 0) + 1; continue; }
 				const g2 = n.g + e.est, gl2 = n.gl + e.lb;
 				if (!e.X) {
@@ -1395,6 +1414,10 @@ function createPlanner(model, facts, o = {}) {
 			let n = node; while (n.parent && n.parent.parent) n = n.parent;
 			if (n.e) exclude.add(n.e.edge);
 		}
+		// (THE LONG PLAN CALL, EEAT_PLAN_LONG=<ms>: every plan partial: one long search from this abstract state, first)
+		if (LONG_MS > 0 && plans.length && plans.every((p) => p.partial || !(p.cost < PENALTY))) {
+			try { const lp = longPlan(a, so, po); if (lp) plans.unshift(lp); } catch (e) { if (process.env.EEAT_LONG_DBG === '1') console.error('longPlan', e.stack); }
+		}
 		// (THE BYPASS, EEAT_PLAN_BYPASS=R: the trophy without the triggers whose legs failed R rungs from this class, first)
 		if (BYPASS > 0 && facts && plans.length) {
 			try { const bp = bypassPlan(a, plans, so, deadline); if (bp) plans.unshift(bp); } catch (e) { if (process.env.EEAT_BYPASS_DBG === '1') console.error('bypassPlan', e.stack); }
@@ -1566,6 +1589,43 @@ function createPlanner(model, facts, o = {}) {
 	// (327,39), The 7 Depths of Hell's coins (76,279) / (78,228) / (64,176) and switch 3, Ice Slide Ride's coins and
 	// checkpoint, Octorage's switch 69 and coins, Fall of Zeal's key groups, UT Eternal Galaxy's checkpoint (166,107), The
 	// Memory Game's coin (179,188)), climbing rung after rung (45-s windows) in every plan call.
+	const longTried = new Set(), longPaths = [];
+	let longCalls = 0;
+	/** THE LONG PLAN CALL (EEAT_PLAN_LONG): a kept path's rest from this state, else one long search (once a state) */
+	function longPlan(a, so, po) {
+		const sk = a.S.key;
+		const mk = (node, why) => {
+			const steps = stepsOf(a, node);
+			if (!steps.length) return null;
+			return { id: `p${ST.plans}.L`, steps, cost: Math.round(node.g), lb: node.gl, partial: false, why, long: true };
+		};
+		// (a path kept from an earlier long call through this abstract state: its rest, along its own edges)
+		for (const lp of longPaths) {
+			const i = lp.keys.indexOf(sk);
+			if (i < 0 || i >= lp.edges.length) continue;
+			const res = search(a, Object.assign({}, so, { ms: 300, maxExpand: 20000, guide: lp.edges.slice(i) }), new Set(), null);
+			if (res.found && res.found.g < PENALTY) { ST.longRest = (ST.longRest || 0) + 1; return mk(res.found, `long: the rest of a long plan (step ${i + 1} of ${lp.edges.length})`); }
+		}
+		if (longTried.has(sk) || longCalls >= LONG_MAX) return null;
+		// (a quarter of the compile's time left at most: po.left, the strategy's)
+		const room = Number.isFinite(+po.left) ? +po.left / 4 : LONG_MS;
+		const ms = Math.min(LONG_MS, room);
+		if (!(ms >= 1000)) return null;
+		longTried.add(sk); longCalls++;
+		ST.longCalls = longCalls;
+		const t0 = Date.now();
+		const res = search(a, Object.assign({}, so, { ms, maxExpand: LONG_EXPAND, noGain: !LONG_GAIN }), new Set(), null);
+		ST.longMs = (ST.longMs || 0) + (Date.now() - t0);
+		const node = res.found;
+		if (process.env.EEAT_LONG_DBG === '1') console.error(`[long] ${sk.slice(0, 40)} ms ${Date.now() - t0} expanded ${res.expanded} found ${node ? Math.round(node.g) : '-'}`);
+		if (!node || !(node.g < PENALTY)) { ST.longNone = (ST.longNone || 0) + 1; return null; }
+		const path = [];
+		for (let n = node; n && n.e; n = n.parent) path.push(n);
+		path.reverse();
+		longPaths.push({ keys: [a.S.key].concat(path.map((n) => n.S.key)), edges: path.map((n) => n.e.edge) });
+		ST.longFound = (ST.longFound || 0) + 1;
+		return mk(node, `long: a trophy plan from a ${(ms / 1000).toFixed(0)}-s search (${res.expanded} nodes${LONG_GAIN ? '' : ', no gain bonus'})`);
+	}
 	const BYPASS = process.env.EEAT_PLAN_BYPASS !== undefined ? Math.max(0, +process.env.EEAT_PLAN_BYPASS | 0) : 0;
 	const BYPASS_MAX = +process.env.EEAT_BYPASS_MAX || 4;
 	function bypassPlan(a, plans, so, deadline) {
