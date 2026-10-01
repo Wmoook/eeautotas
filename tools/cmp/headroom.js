@@ -4,6 +4,7 @@
 // progress (triggers reached, the progress events) at each budget, the peak RSS, and ONE headroom class:
 //   BY-<a1>      a verified route by the first budget (the short scoreboard's own budget: its run missed it; a flip)
 //   BY-<ak>      a verified route first between the budget before and ak (speed work: the compiler CAN, just slowly)
+// The last --at budget is the compile's end (its final route, its last progress event).
 //   RISING       no route; the triggers at the end above those at the budget before the last + max(2, 20%) (more
 //                time is still buying progress)
 //   FLAT         no route; progress stopped before the budget before the last (solver work: time does not help)
@@ -40,6 +41,10 @@ for (const [rel, ix] of idx) {
 		first: res.length ? res[0].t : null, firstTicks: res.length ? res[0].runTicks : null, best: k.best || null, refCls: k.cls || '' };
 	for (const T0 of at) { r['at' + T0] = bestAt(T0); r['g' + T0] = gainAt(T0); }
 	r.gEnd = gainAt(1e9);
+	// the last budget = the compile's end (its polish / loops / report events come a few seconds past it)
+	const last = at[at.length - 1];
+	r['g' + last] = r.gEnd;
+	if (r.ok) r['at' + last] = r.runTicks;
 	r.gap = r.ok && r.best ? Math.round((r.runTicks / r.best) * 1000) / 1000 : null;
 	if (r.ok && r.first !== null) { const a = at.find((T0) => r.first <= T0); r.cls = 'BY-' + (a === undefined ? 'END' : a); }
 	else if (ix.code === null && !rep) r.cls = 'KILLED';
