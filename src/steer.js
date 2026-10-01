@@ -671,8 +671,8 @@ function layeredPlan(PH, sim, maxLegs = 200) {
 	const A = PH.A, M = PH.M;
 	let s = M.layerOf(sim);
 	let f = PH.fields[s];
-	const tiles = [];
-	if (!f || !f._m) return { tiles };
+	const tiles = [], legs = [];
+	if (!f || !f._m) return { tiles, legs };
 	const st = RF.stateOf(f, sim.px, sim.py, sim.speed_y, sim._q0, sim._q1, sim._slippery);
 	let cur = null;
 	if (st) for (const [ty, l] of [...(st.base ? [st.base] : []), ...(st.rise || [])]) { const c = f._m.costOf(st.t, ty, l); if (c !== CUT && (!cur || c < cur.c)) cur = { t: st.t, ty, l, c }; }
@@ -690,11 +690,12 @@ function layeredPlan(PH, sim, maxLegs = 200) {
 			if (c0 < CUT && (!best || c0 < best.c)) best = { s2, c: c0 };
 		}
 		if (!best) break;
+		legs.push({ s, t: end.t, s2: best.s2, kind: A.special[k][1], param: A.special[k][2] });
 		s = best.s2; f = PH.fields[s];
 		if (f.mode === 'walk' || !f._m) break;
 		cur = { t: end.t, ty: RF.F_, l: 0, c: best.c };
 	}
-	return { tiles };
+	return { tiles, legs };
 }
 
 // ------------------------------------------------------------------ distinct coins: legs, the DP
@@ -784,7 +785,7 @@ function buildSteer(level, opts) {
 	const maxLayers = Math.max(1, Math.min(opts.maxLayers || 4096, Math.floor(maxBytes / bodyBytes / (A.feats.has('fx') ? 2 : 1))));
 	let over = null;
 	const mb = `${(maxBytes / 1048576).toFixed(maxBytes < 10 << 20 ? 1 : 0)} MB of fields`, secs = `the build's time (${maxMs / 1000} s)`;
-	let B, PH;
+	let B, PH, legs = [];
 	for (let it = 0; it < (opts.maxIters || 12); it++) {
 		B = walkBuild(level, A, { features: [...modeled], maxLayers, deadline: t0 + maxMs / 2 });
 		if (B.capped && !over) over = `${B.capped.feat}: ${B.capped.why === 'time' ? secs : `over ${maxLayers} layers (${mb})`}`;
@@ -792,6 +793,7 @@ function buildSteer(level, opts) {
 		PH = buildPhysics(B, { staticCoins: true, debug: true });
 		const sim = new E.EESim(level); sim.reset();
 		const pl = layeredPlan(PH, sim);
+		legs = pl.legs;
 		const path = [];
 		for (const t of pl.tiles) {
 			if (path.length && path[path.length - 1].t === t) continue;
@@ -818,24 +820,26 @@ function buildSteer(level, opts) {
 		bodies.push(stripField(f)); goals.push(goal);
 		return bodies.length - 1;
 	};
-	const layerBody = new Int32Array(M.S).fill(-1);
-	for (let s = 0; s < M.S; s++) if (PH.fields[s]) layerBody[s] = addBody(PH.fields[s], PH.goals[s]);
 	// the coin DP
 	let dp = null;
+	const nLayerFields = PH.fields.filter(Boolean).length;
 	let cp = opts.noDP ? null : coinPlan(B);
-	if (cp && ((bodies.length + cp.coins.length) * bodyBytes > maxBytes || Date.now() - t0 > maxMs)) {
-		over = over || `the coin DP: ${(bodies.length + cp.coins.length) * bodyBytes > maxBytes ? `over ${mb}` : secs}`;
+	if (cp && ((nLayerFields + cp.coins.length) * bodyBytes > maxBytes || Date.now() - t0 > maxMs)) {
+		over = over || `the coin DP: ${(nLayerFields + cp.coins.length) * bodyBytes > maxBytes ? `over ${mb}` : secs}`;
 		cp = null;
 	}
+	let CL = null, D = null;
 	if (cp) {
-		const CL = coinLegsPhys(B, PH, cp);
-		const D = coinDP(CL);
-		if (D) {
-			const none = new Uint8Array(N);
-			const bit = Int32Array.from(CL.coins, (q) => level.coinBit[q]);
-			const leg = Int32Array.from(CL.coins, (q) => addBody(CL.fields.get(q), none));
-			dp = { n: D.n, T: D.T, bit, leg, h: D.h };
-		}
+		CL = coinLegsPhys(B, PH, cp);
+		D = coinDP(CL);
+	}
+	const layerBody = new Int32Array(M.S).fill(-1);
+	for (let s = 0; s < M.S; s++) if (PH.fields[s]) layerBody[s] = addBody(PH.fields[s], PH.goals[s]);
+	if (D) {
+		const none = new Uint8Array(N);
+		const bit = Int32Array.from(CL.coins, (q) => level.coinBit[q]);
+		const leg = Int32Array.from(CL.coins, (q) => addBody(CL.fields.get(q), none));
+		dp = { n: D.n, T: D.T, bit, leg, h: D.h };
 	}
 	const feats = M.feats.map((f, n) => {
 		const k = f.key;
@@ -848,7 +852,9 @@ function buildSteer(level, opts) {
 	steer.prioShift = prioShiftOf(steer);
 	const sim0 = new E.EESim(level); sim0.reset();
 	steer.info = { features: M.names, layers: PH.layers, bodies: bodies.length, builds: PH.builds, kappa: Math.round(PH.kappa * 1000) / 1000, cegar,
-		dp: dp ? { n: dp.n, T: dp.T } : null, start: steerAt(steer, sim0), ms: Date.now() - t0, over };
+		dp: dp ? { n: dp.n, T: dp.T } : null, start: steerAt(steer, sim0), ms: Date.now() - t0, over,
+		// (the layered physics plan from the start: its layer changes, {s, x, y, s2, kind, param})
+		plan: legs.map((g) => ({ s: g.s, x: g.t % A.W, y: Math.floor(g.t / A.W), s2: g.s2, kind: g.kind, param: g.param })) };
 	return steer;
 }
 /** the lookup's fields of a reach field (the debug closures and the build's extras dropped) */
