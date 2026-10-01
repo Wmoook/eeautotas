@@ -1122,4 +1122,6 @@ ways in.
   (box 7 at load ~170, gate20, 60 s, par 2, vs gate_c6b2.json): exit 1, 13 vs 14, worse 3 (Level 1 Overworld progress
   45 -> 41, The Blank Page and Fish Gods not compiled: the 60-s flips the list's header names) / better 6, but NO death step
   ran in any of the 20 logs: the flag never acted, so the gate does not measure it; its A/B is the death-step set
-  (`src/out/b7cold/deathlv.txt`: the 16 levels with death steps in the scoreboard logs).
+  (`src/out/b7cold/deathlv.txt`: the 16 levels with death steps in the scoreboard logs). A first pair (box 7 at load ~170,
+  180 s, W3, off vs on side by side, one run each): Trail Blazer death steps 19 (8 ok, 81 s) vs 12 (10 ok, 23 s), triggers
+  12 vs 15, ok steps 31 vs 41; Katwalk 5 (2 ok, 28 s) vs 1 (1 ok, 1 s), triggers 2 = 2; no route either way.
