@@ -12,6 +12,7 @@
 //   tree) and queued again at the end (the box never runs out of RAM; a compile's RSS grows with its budget).
 //   --parfile=<file>: the parallelism read again from that file (one integer) before each start (a running full
 //   compile made wider or narrower by the RSS it measures).
+//   --order=list (with --list): the compiles start in the list file's order (default: the paths' sorted order).
 const fs = require('fs'), path = require('path'), cp = require('child_process'), os = require('os');
 const [, , code, lvDir, out, ...rest] = process.argv;
 const opt = (k, d) => { const a = rest.find((s) => s.startsWith('--' + k + '=')); return a ? a.split('=')[1] : d; };
@@ -25,6 +26,9 @@ walk(lvDir);
 all.sort();
 let todo = all;
 if (list) { const want = new Set(fs.readFileSync(list, 'utf8').split('\n').map((s) => s.replace(/#.*/, '').trim()).filter(Boolean)); todo = all.filter((p) => want.has(path.relative(lvDir, p))); }
+// --order=list (with --list): the compiles start in the list file's order (a priority order: the levels most likely to
+// finish first), not the paths' sorted order
+if (list && opt('order', '') === 'list') { const rank = new Map([...new Set(fs.readFileSync(list, 'utf8').split('\n').map((s) => s.replace(/#.*/, '').trim()).filter(Boolean))].map((s, i) => [s, i])); todo.sort((a, b) => rank.get(path.relative(lvDir, a)) - rank.get(path.relative(lvDir, b))); }
 let next = 0, running = 0, done = 0;
 const t0 = Date.now();
 const live = new Map();   // pid -> {id, f, ts, peak (kB), requeue}
