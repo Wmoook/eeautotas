@@ -2036,6 +2036,17 @@ async function createExecutor(L, opts) {
 	const canDieL = !!(opts.model && opts.model.canDie);
 	const skelKey = (goal, wp, startStrs, wn) => `${goal.kind}|${Array.from(goal.tiles).slice(0, 64).join(',')}|${goal.tiles.length}|${wp.expect ? wp.expect.feat + '=' + wp.expect.value : ''}|${startStrs[0].length}:${startStrs[0].slice(-64)}|w${wn | 0}`;
 	const skelMemo = new Map();   // key (goal, first start, walls) -> [{c, cur: [mask strings]}] (the levels reached, deepest last)
+	// (THE FAR WAYPOINT'S WHOLE-LEG SHARES, B8 big cycle 3, OPT-IN EEAT_SKEL_FAR=<tiles>, unset / 0 = off, byte for byte:
+	// the skeleton call's whole-leg tries (the direct leg first, its redirect on a bigger rung, the coverage finder's stuck
+	// slot from the step's starts, the rest-direct leg from the deepest level) take the same SHARE of the call whatever the
+	// way's length, and none of them can cover a way of thousands of tiles inside a rung window: on 20 big failing levels
+	// (box 8, 300 s) the waypoints with c0 >= 1,000 tiles spent 2,291 of their 4,397 worker-s of steps in such legs, 0 of
+	// 452 found (c0 >= 300: 4,714 s, 2 of 1,038), while their skeletons' sub-legs went 4,083 ok of 4,762. With the knob a
+	// whole-leg try over a way of c > F tiles (by the field: c0 from the starts, cCur from the deepest level) gets its
+	// share x F / c, and one under 100 ms is not made; the time goes to the skeleton (the direct leg's) or back to the
+	// strategy (the stuck slot's, the rest-direct's). Ordering of the call's time only: every arrival as before.)
+	const SKEL_FAR = +process.env.EEAT_SKEL_FAR > 0 ? +process.env.EEAT_SKEL_FAR : 0;
+	const farF = (c) => (SKEL_FAR > 0 && Number.isFinite(c) && c > SKEL_FAR ? SKEL_FAR / c : 1);
 	const SKEL_REDIRECT = process.env.EEAT_SKEL_REDIRECT !== '0';   // (DEFAULT ON since n5 lane 6 block 1; =0: off)
 	const REDIRECT_F = +process.env.EEAT_SKEL_REDIRECT_F > 1 ? +process.env.EEAT_SKEL_REDIRECT_F : 2;
 	const skelDirectMs = new Map();   // skelKey -> the largest direct-leg share tried (EEAT_SKEL_REDIRECT)
@@ -2512,9 +2523,12 @@ async function createExecutor(L, opts) {
 			if (rv.ok || (rv.fail && (rv.fail.why === 'proof' || rv.fail.why === 'stopped' || rv.fail.why === 'dies'))) return rv;
 		}
 		const sk0 = skelKey(goal, wp, startStrs, wN);
-		const dMs0 = SKEL_DIRECT * (deadline - Date.now());
+		const fF0 = SKEL_FAR > 0 ? farF(c0) : 1;
+		const dMs0 = SKEL_DIRECT * fF0 * (deadline - Date.now());
 		const redirect = SKEL_REDIRECT && skelMemo.has(sk0) && dMs0 >= REDIRECT_F * (skelDirectMs.get(sk0) || Infinity);
-		if (SKEL_DIRECT > 0 && (!skelMemo.has(sk0) || redirect)) {
+		if (fF0 < 1 && dMs0 < 100) S.farDirectSkip = (S.farDirectSkip || 0) + 1;
+		if (SKEL_DIRECT > 0 && (!skelMemo.has(sk0) || redirect) && !(fF0 < 1 && dMs0 < 100)) {
+			if (fF0 < 1) S.farDirect = (S.farDirect || 0) + 1;
 			const dMs = dMs0;
 			if (SKEL_REDIRECT) { skelDirectMs.set(sk0, Math.max(skelDirectMs.get(sk0) || 0, dMs)); if (redirect) S.redirects = (S.redirects || 0) + 1; }
 			const r0 = await reachLeg(starts, wp, { ms: dMs, level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline: Math.min(deadline, Date.now() + dMs), stop: budget.stop, next: budget.next || null, cover: coverSlot || slotV2 ? 2 : 0 });
@@ -2660,8 +2674,10 @@ async function createExecutor(L, opts) {
 		if (emit) emit({ ev: 'exec.skel', label: wp.label || '', c0: Math.round(c0), c: Math.round(cCur), resumed: !!memo, levels, walls: wN });
 		// (COVER V3: the skeleton stuck, before the first route: the coverage finder alone on the whole leg from the step's
 		// starts with COVER_STUCK of what is left; the rest of the call as before)
-		if (COVER_V3() && stuck && !!budget.fast && (budget.level | 0) >= COVER_RUNG && deadline - Date.now() > 300) {
-			const vMs = COVER_STUCK * (deadline - Date.now());
+		const fFs = SKEL_FAR > 0 ? farF(c0) : 1;
+		if (fFs < 1 && COVER_V3() && stuck && !!budget.fast && (budget.level | 0) >= COVER_RUNG && COVER_STUCK * fFs * (deadline - Date.now()) < 100) S.farCoverSkip = (S.farCoverSkip || 0) + 1;
+		else if (COVER_V3() && stuck && !!budget.fast && (budget.level | 0) >= COVER_RUNG && deadline - Date.now() > 300) {
+			const vMs = COVER_STUCK * fFs * (deadline - Date.now());
 			const rv = await reachLeg(starts, wp, { ms: vMs, level: budget.level | 0, fast: true, k: budget.k, deadline: Math.min(deadline, Date.now() + vMs), stop: budget.stop, next: budget.next || null, cover: 1 });
 			S.coverStuck = (S.coverStuck || 0) + 1;
 			if (rv.ok || (rv.fail && (rv.fail.why === 'stopped' || rv.fail.why === 'dies'))) { if (rv.ok) S.coverStuckOk = (S.coverStuckOk || 0) + 1; return rv; }
@@ -2671,7 +2687,8 @@ async function createExecutor(L, opts) {
 		// leg reached route tick ~1,000 of 1,821 in 5 s where the skeleton sat at ~350), instead of returning the time unused)
 		let restDirect = false;
 		const cur0 = cur;
-		if (DEAD_ON && stuck && cur !== startStrs && deadline - Date.now() > DEAD_REST * ms) { cur = cur.concat(startStrs.filter((s) => !cur.includes(s))); stuck = false; restDirect = true; S.deadDirect = (S.deadDirect || 0) + 1; }
+		if (DEAD_ON && stuck && cur !== startStrs && SKEL_FAR > 0 && farF(cCur) < 1 && deadline - Date.now() > DEAD_REST * ms) S.farRestSkip = (S.farRestSkip || 0) + 1;
+		else if (DEAD_ON && stuck && cur !== startStrs && deadline - Date.now() > DEAD_REST * ms) { cur = cur.concat(startStrs.filter((s) => !cur.includes(s))); stuck = false; restDirect = true; S.deadDirect = (S.deadDirect || 0) + 1; }
 		if (Date.now() >= deadline - 100 || (stuck && cur !== startStrs)) {
 			const fail = (lastFail && lastFail.fail) || { why: 'budget', closest: null, touched: [], blockedBy: [], level: budget.level | 0, note: 'skeleton: out of time' };
 			const cl = skelClosest(fail.closest, cur !== startStrs ? cur : [], f0);
