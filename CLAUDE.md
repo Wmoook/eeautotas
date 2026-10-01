@@ -1322,6 +1322,19 @@ ways in.
   `--spill` is off by default, the depth-first stage bounds the memory); GPU: the table 30% of the free memory, the two
   arenas the rest. NOT YET: the newer CPU tiers (cycles 5-6: the death way's respawn bound o.hResp, the reach field's -1 in
   levelproof contextOf) are not in the GPU's h (still admissible, weaker on those levels).
+  **VALIDATED vs the CPU prover** (LH gpuproof, 2026-10-01, branch n5-lh-gpuproof; `src/out/n5/lasthour/gpuproof/gpu.md`):
+  the per-layer state counts first did NOT match `tools/perfect/layercensus.js` (Switch Labyrinth layer 1: 63 vs 21): the
+  idle starts were not in the visited set (a child equal to the next idle start kept as new) and xsInsert's race (a key
+  whose second word was not written yet probed on and was kept again): sound, ~2x the states. FIXED (9e70b96): the sources
+  seeded at layer 0; the first word a 62-bit key (`xsKeyA`: the 53-bit stateHash + 9 bits of hash2), a match whose second
+  word is still 0 merged. After it, layer for layer EQUAL to the census (`tools/gpuproof/cmplayers.js`; the census's --C
+  is the LAYER bound = Cl = exact.js --C + 1): Switch Labyrinth 12 / 12 layers, celeste 31c0 11 / 11, NC Naos d3c6 23 / 23;
+  NC Naos d3c6 Cl 58 closed with 84,207,777 states over 49 layers = bfsprove's 84.2 M (2.76 s vs 320.8 s); Switch
+  Labyrinth Cl 26 6.98 s (1.056 G nodes) vs wholepar's 2,159 s, Cl 27 closed + FOUND 27: the GPU's tick-perfect proof;
+  NC Naos d3c6 Cl 59 closed breadth first (`--spill=1 --hostGB=40 --htBits=30`: 2^28 slots filled at 256 M states) with
+  403,378,101 states over 50 layers = bfsprove's C 59 (403 M), 231 s vs 426 s on 45 CPU workers (the spill's re-simulation
+  is the GPU's cost there). The depth-first stage's TAIL: once its tasks are all taken the last deep subtrees run one
+  thread each (NC Naos Cl 59: 41 k nodes/s): breadth first with the spill where the table holds the contour.
 - **THE ENDGAME and THE AIRBORNE ARRIVAL** (C6 push 3 lane 5 block 3; `src/out/n5/lanes/c6_lane5_b3.md`). THE ENDGAME
   (strategy.js after JOINS, its own clock; OPT-IN `--endgame=<s>` / `EEAT_ENDGAME_S`, unset / 0 = the compile byte for byte;
   `EEAT_ENDGAME_K` the ladder's largest K, 64; `report.endgame`): the optimizer's exact endgame ladder (`src/endgame.js`
