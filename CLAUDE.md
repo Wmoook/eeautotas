@@ -540,7 +540,7 @@ ways in.
   better 6, worse 2, 14 / 14 replayed; the two rerun side by side with the knob off (`gateW`): NC Naos d3c6 no route in
   either arm (at 60 s the precision child gets 13 s, the rest is the post-route stages' reserve, and its coasted pass
   found nothing in 13 s at that load: the same code path in both arms), Level 1 Overworld 77 vs 58 anchors (a known 60-s
-  flip): no loss of the knob's; T-MODEL-EXACT 219 routes 0 unsound, T-PLAN-ORACLE 2 / 0, msolve --quick 50 / 0,
+  flip): no loss of the knob's; T-MODEL-EXACT 0 unsound (218 routes, 1 stale), T-PLAN-ORACLE 2 / 0, msolve --quick 50 / 0,
   planstrategy 27 / 0, plancompile 31 / 0 (with the default). NEXT: the precision child's clock at short budgets
   (13 s of a 60-s compile on the levels whose only route source it is).
   `EEAT_PREC_ASYNC=1` (OPT-IN, not kept): the child in the background and started again at once with the nearer states
