@@ -36,6 +36,9 @@ const LEVELS = {
 	sf: ['stupid-fox-oc-a93a88', 'stupid-fox-lictor-da5517'],
 	ip: ['infinity-pain-kiraninja-pwe7zf-v-b42e94', 'infinity-pain-kiraninja-pwe7zf-v-38843e'],
 	ice: ['ice-level-oc-850ef2'],
+	// Are You A God (no known TAS: our AutoTAS's best, 5,375): its gate "coins=13" -> "key:blue coins=13" is the U (x 98-127,
+	// rows 30-77), where the coarse cells' earliest states held Find a route 17.7 min (src/out/night/newlv_areyouagod.md)
+	ayg: ['autotas-are-you-a-god-from-the-l-537419', 'autotas-are-you-a-god-from-the-l-9fc05c'],
 };
 
 const argv = process.argv.slice(2);
@@ -52,8 +55,12 @@ function build() {
 	const jobsDir = opt.jobs ? path.resolve(opt.jobs) : J.JOBS;
 	fs.mkdirSync(path.join(DATA, 'levels'), { recursive: true });
 	fs.mkdirSync(path.join(DATA, 'prefix'), { recursive: true });
-	const out = { built: new Date().toISOString(), levels: {} };
+	// (--levels=a,b: only those levels, merged into the gates.json there: the other levels' gates stay as they were built)
+	const only = opt.levels ? new Set(opt.levels.split(',')) : null;
+	const gj = path.join(DATA, 'gates.json');
+	const out = only && fs.existsSync(gj) ? JSON.parse(fs.readFileSync(gj, 'utf8')) : { built: new Date().toISOString(), levels: {} };
 	for (const [alias, ids] of Object.entries(LEVELS)) {
+		if (only && !only.has(alias)) continue;
 		const id = ids.find((x) => fs.existsSync(path.join(jobsDir, x, 'best.eetas')));
 		if (!id) { console.log(`${alias}: no job on this machine (${ids.join(', ')})`); continue; }
 		const lj = J.levelJsonOf(id);
