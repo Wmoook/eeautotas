@@ -461,7 +461,38 @@ const STRATEGIES = {
 	// the precision stage (src/precision.js, see PREC_WAIT_S): exact landings from the nearest attempts once the search stalls
 	precision: { label: 'exact landings', cpu: true, precision: true, args: (f, o, q) => [f.eelvl, `--attempts=${q.attemptsFile}`, `--seconds=${q.seconds}`, `--workers=${q.workers}`,
 		`--after=${PREC_AFTER_S}`, '--stdin=1', ...(q.depth ? [`--depth=${q.depth}`] : [])] },
+	// the planner (n4plan, OPT-IN: EEAT_PLAN=1 or the body's plan: true; src/plan.js, src/plan/strategy.js): the level model,
+	// a plan of triggers to the trophy, each step reached from real states by the executor, a failed step a fact; its new
+	// model states go into the one search's archive (its 'source' events), the one search's rooms come back (stdin "import")
+	plan: { label: 'the planner (understand, plan, execute)', cpu: true, args: (f, o, q) => [f.eelvl, `--seconds=${q.seconds}`, `--workers=${o.planWorkers}`, `--seed=${o.seed}`, '--stdin=1',
+		`--work=${q.planWork}`, ...(f.steerCpu ? [`--steer=${f.steerCpu}`] : []), ...(q.tool ? ['--gpu=1', `--tool=${q.tool}`, `--pausefile=${q.pauseFile}`, ...G.cacheArgs()] : [])] },
 };
+// the planner's reverse feed (EEAT_PLAN): another strategy's new room that opens territory (addSource) to the planner's
+// stdin as "import <inputs>" (its first arrival there), at most one line per PLAN_FEED_MS, the newest PLAN_FEED_Q waiting
+const PLAN_FEED_MS = 1000, PLAN_FEED_Q = 32;
+let planFeed = { S: null, q: [], rooms: new Set(), at: 0, timer: null };
+function planImport(o) {
+	const k = S && S.strategies ? S.strategies.findIndex((q) => q.key === 'plan') : -1;
+	if (k < 0 || !cur || !(o.gain > 0) || S.strategies[k].label === o.from) return;
+	if (planFeed.S !== S) planFeed = { S, q: [], rooms: new Set(), at: 0, timer: null };
+	if (planFeed.rooms.has(o.room)) return;
+	const inputs = String(o.inputs || '').slice(0, o.arrival > 0 ? o.arrival : undefined);
+	if (!/^[0-O]+$/.test(inputs)) return;
+	planFeed.rooms.add(o.room);
+	planFeed.q.push(inputs);
+	if (planFeed.q.length > PLAN_FEED_Q) planFeed.q.shift();
+	const F = planFeed;
+	const flush = () => {
+		F.timer = null;
+		if (S !== F.S || !S.running || !F.q.length) return;
+		const ch = kids[k];
+		if (!alive(ch) || !ch.stdin || ch.stdin.destroyed) { F.q = []; return; }
+		try { ch.stdin.write(`import ${F.q.pop()}\n`); S.strategies[k].imported = (S.strategies[k].imported || 0) + 1; } catch (e) { /* gone */ }
+		F.at = Date.now();
+		if (F.q.length) { F.timer = setTimeout(flush, PLAN_FEED_MS); if (F.timer.unref) F.timer.unref(); }
+	};
+	if (!F.timer) { const w = Math.max(0, PLAN_FEED_MS - (Date.now() - F.at)); F.timer = setTimeout(flush, w); if (F.timer.unref) F.timer.unref(); }
+}
 // The precision stage (strategy 'precision', "exact landings", CPU; src/precision.js): a route that needs one exact
 // sub-pixel position (the user's pocket behind a spike corner: the ball must drop in with x == 5720.0 exactly, one double
 // on a grid of 2^-40 px) is lost by every search that keeps one state per cell or samples random runs (the diagnosis:
@@ -852,6 +883,8 @@ function addSource(o) {
 	publishSources();
 	// (the rank: a room better by the rank than the nearest attempt's gives it its attempt; closer() decides its own)
 	if (rr && !o.noPromote) rankPromote(s);
+	// (the planner, EEAT_PLAN: another strategy's new room to its stdin; nothing without a plan strategy)
+	planImport(o);
 }
 /** the source for the relay plan's step ('new' or 'gain'); c: the nearest attempt (its own step, not again here) */
 function pickSource(step, c) {
@@ -2416,6 +2449,16 @@ function start(b, gpu, test) {
 	// test.skips === true)
 	const lw = cpu && b.skips !== false && process.env.EEAT_SKIPS !== '0' && (test ? test.skips === true : GX.cellsFor(ins.level) === 'coarse') ? laneWorkersOf(workers, b.skipWorkers) : { lane: 0, workers };
 	if (lw.lane > 0) { which.push('skips'); workers = lw.workers; }
+	// (the planner, n4plan, OPT-IN: the body's plan: true or EEAT_PLAN=1 (tests: test.plan === true): a CPU strategy after
+	// the CPU search, max(1, workers / 4) threads taken from the CPU search's when it has more than 2; off: none of this)
+	const plan = cpu && (b.plan === true || process.env.EEAT_PLAN === '1') && (!test || test.plan === true);
+	let planWorkers = 0;
+	if (plan) {
+		planWorkers = Math.max(1, Math.floor(workers / 4));
+		if (workers > 2) workers -= planWorkers;
+		const kg = which.indexOf('goexplore');
+		which.splice(kg >= 0 ? kg + 1 : which.length, 0, 'plan');
+	}
 	const seed = Number.isInteger(+b.seed) && +b.seed >= 0 ? +b.seed : 1;
 	// the most salt tries the exploration runs side by side (eegpu explore --lanes=auto --lanesMax): LANES by default
 	const lanes = Number.isInteger(+b.lanes) && +b.lanes >= 1 ? Math.min(64, +b.lanes) : LANES;
@@ -2433,7 +2476,7 @@ function start(b, gpu, test) {
 		physics: null, cpuOnly: noGpu ? cpuOnlyText(noGpu, workers, guide) : '',
 		strategies: which.map((k) => ({ key: k, label: k === 'goexplore' && one ? ONE_LABEL : STRATEGIES[k].label, cpu: !!STRATEGIES[k].cpu, rolls: !!STRATEGIES[k].rolls, ...(STRATEGIES[k].precision ? { precision: true } : {}),
 			...(STRATEGIES[k].lane ? { lane: true } : {}),
-			...((k === 'goexplore' || k === 'escape') && one ? { gpuShare: true } : {}), state: 'starting', layer: 0, deepest: 0, states: 0, ticksPerSec: 0,
+			...((k === 'goexplore' || k === 'escape') && one ? { gpuShare: true } : {}), ...(k === 'plan' && !noGpu ? { gpuShare: true } : {}), state: 'starting', layer: 0, deepest: 0, states: 0, ticksPerSec: 0,
 			found: null, error: null, live: false, pass: k === 'explore' && (!test || test.probe) ? PASS_MAX : PASS_START, probe: k === 'explore' && (!test || test.probe) ? 'running' : '',
 			passes: 1, ends: {}, share: 0, depthCap: 0, detail: '', salt: 0, tries: 0, lanes: 1, saltNoted: 0,
 			launchedAt: 0, readyAt: 0, usedMs: 0, prepSec: 0 })) };
@@ -2459,7 +2502,7 @@ function start(b, gpu, test) {
 		// (the plan past its count: `b.pastPlan === false` off)
 		pastPlan: b.pastPlan !== false && !(test && test.pastPlan === false),
 		// (past the plan, wq-watch: after a trophy round that brought nothing, the untaken coins; `b.breakPast === false`: off)
-		breakPast: b.breakPast !== false && !(test && test.breakPast === false) },
+		breakPast: b.breakPast !== false && !(test && test.breakPast === false), ...(plan ? { planWorkers } : {}) },
 		cpuCmd: test && Array.isArray(test.cpu) ? test.cpu : [process.execPath, path.join(__dirname, 'goexplore.js')],
 		cpuNice: !(test && Array.isArray(test.cpu)),   // (goexplore.js takes --nice; a test's stand-in need not)
 		// (the stall escape: goexplore.js itself, also next to a test's stand-in CPU search; tests: test.escapeCmd)
@@ -2468,6 +2511,8 @@ function start(b, gpu, test) {
 		laneCmd: test && Array.isArray(test.laneCmd) ? test.laneCmd : [process.execPath, path.join(__dirname, 'skipfind.js')],
 		laneNice: !(test && Array.isArray(test.laneCmd)),
 		precisionCmd: test && Array.isArray(test.precisionCmd) ? test.precisionCmd : [process.execPath, path.join(__dirname, 'precision.js')],
+		// (the planner, EEAT_PLAN: src/plan.js; tests: test.planCmd)
+		...(plan ? { planCmd: test && Array.isArray(test.planCmd) ? test.planCmd : [process.execPath, path.join(__dirname, 'plan.js')] } : {}),
 		rollsCmd: test && Array.isArray(test.rollsCmd) ? test.rollsCmd : [process.execPath, path.join(__dirname, 'goexplore.js')],
 		// the proof (eegpu prove: CPU only, so also without an NVIDIA GPU, whenever the native tool is there; EEAT_PROOF=0: none)
 		prover: test && test.prover !== undefined ? (Array.isArray(test.prover) ? test.prover : null) : process.env.EEAT_PROOF === '0' ? null : G.nativeTool() ? [G.nativeTool()] : null,
@@ -3028,6 +3073,8 @@ function launch(n) {
 	// (the GPU random runs started again by the rotation, rollsTurn: its configuration's flags, a seed of their own)
 	if (V.rolls && V.rollRuns) { q.rollFlags = V.rollFlags || []; q.rollSeed = ((cur.opts.seed || 1) + 1000 * V.rollRuns) >>> 0; }
 	if (V.key === 'precision') { q.attemptsFile = V.prec.file; q.seconds = V.prec.seconds; q.workers = V.prec.workers; q.depth = S.result ? Math.max(1, boundTicks() - 1) : 0; }
+	// (the planner, EEAT_PLAN: its work folder; with the GPU share (gpuShare above) the tool and its pause file)
+	if (V.key === 'plan') q.planWork = path.join(dir(), 'plan');
 	if (V.key === 'breaker') {
 		q.prefixFile = V.brk.file; q.cells = V.brk.cells; q.cellLog = V.brk.cellLog; q.region = V.brk.region; q.reserve = V.brk.reserve; q.gateReach = V.brk.gateReach;
 		q.seconds = V.share = V.brk.seconds;
@@ -3060,7 +3107,7 @@ function launch(n) {
 	// process was reniced, so its main thread and the one search's GPU bursts (its eegpu children inherit the main
 	// thread's value) ran at nice 10 too: below every normal process of a shared machine (the cycle 7 test's A100).)
 	const niceCpu = cpu && !S.cpuOnly && process.platform === 'linux' && !V.precision && (V.lane ? cur.laneNice : V.key === 'escape' ? cur.escapeNice : cur.cpuNice);
-	const cmd = cpu ? [...(V.precision ? cur.precisionCmd : V.lane ? cur.laneCmd : V.key === 'escape' ? cur.escapeCmd : cur.cpuCmd), ...args, ...(niceCpu ? ['--nice=10'] : [])] : [...(rolls ? cur.rollsCmd : [cur.tool, ...cur.toolArgs]), ...args, ...G.cacheArgs(), `--stopfile=${stopFile}`, `--pausefile=${pauseFile}`,
+	const cmd = cpu ? [...(V.precision ? cur.precisionCmd : V.lane ? cur.laneCmd : V.key === 'escape' ? cur.escapeCmd : V.key === 'plan' ? cur.planCmd : cur.cpuCmd), ...args, ...(niceCpu ? ['--nice=10'] : [])] : [...(rolls ? cur.rollsCmd : [cur.tool, ...cur.toolArgs]), ...args, ...G.cacheArgs(), `--stopfile=${stopFile}`, `--pausefile=${pauseFile}`,
 		`--parent=${process.pid}`];
 	// (the CPU search sizes its workers' heaps from its memory budget: no heap flag for it, which would cap them all; the
 	// GPU random runs are one thread, their cells' states outside the V8 heap)
@@ -3178,6 +3225,8 @@ function launch(n) {
 							`${ev.gpu.oom ? `, ${ev.gpu.oom} out of GPU memory${ev.gpu.small ? `, ${ev.gpu.small} to the small sizing` : ''}` : ''})` : '') : '') +
 					(ev.fed ? `, ${ev.fed} GPU random runs taken in` : '') + (Number.isFinite(ev.bestCost) && !V.found ? `, nearest ${ev.bestCost.toFixed(1)} tiles from the trophy` : '') +
 					(V.found ? ', looking for a faster route' : '');
+				// (the planner, EEAT_PLAN: its own status line, e.g. "plan 3 steps: key red -> psw:4 -> trophy · step 2 (rung 1, leg) · 7 states · 41 facts")
+				if (V.key === 'plan' && typeof ev.detail === 'string') V.detail = ev.detail.slice(0, 300);
 			}
 			if (!S.result && S.stage !== 'error') S.stage = 'searching';
 			totals();
@@ -3245,6 +3294,12 @@ function launch(n) {
 			if (ev.why === 'full') note(`${V.label}: ${ev.from} tries side by side filled the table at tick ${ev.layers}; ${ev.lanes > 1 ? `${ev.lanes} at a time` : 'one at a time'} now`);
 		} else if (ev.ev === 'warning') {
 			note(`${V.label}: ${ev.text}`);
+		} else if (V.key === 'plan' && (ev.ev === 'stall' || ev.ev === 'bug' || ev.ev === 'deepen')) {
+			// (the planner, EEAT_PLAN: its watchdog and its parts' bugs in the notes, at most one a PLAN_NOTE_MS)
+			if (!V.noteAt || Date.now() - V.noteAt >= PLAN_NOTE_MS) {
+				V.noteAt = Date.now();
+				note(`${V.label}: ${ev.ev === 'stall' ? `stall ${ev.n || ''}: ${ev.why || ''}` : ev.ev === 'deepen' ? `deeper (${ev.why || ''}, budgets x${ev.mult || 2})` : `a part's bug (${ev.what || '?'}${ev.label ? `: ${ev.label}` : ''}${ev.error ? `: ${ev.error}` : ''})`}`);
+			}
 		} else if (ev.ev === 'heat') {
 			// (where it has been: the page's exploration view)
 			exploreHeat(ev);
@@ -3271,7 +3326,8 @@ function launch(n) {
 				// (the page's trails: a room reached, an attempt of this strategy)
 				exploreAttempt(n, inputs, 's');
 				// (the GPU random runs' and the stall escape's first arrival in a room: into the one search's archive)
-				if ((rolls || V.key === 'escape') && ev.kind === 'room') feedOne(inputs, true, V.key === 'escape');
+				// (the planner's new model states too, EEAT_PLAN; without the one search as seeds, like the escape's)
+				if ((rolls || V.key === 'escape' || V.key === 'plan') && ev.kind === 'room') feedOne(inputs, true, V.key === 'escape' || V.key === 'plan');
 				// (the path skips' targets before any route, by the rooms reached too: a new room's first arrival that opens
 				// territory, one per strategy (on Octorage and Forgotten Veil the nearest attempt by the steer field sat in a
 				// dead end by the start, 271 / 690 ticks, for the whole search))
