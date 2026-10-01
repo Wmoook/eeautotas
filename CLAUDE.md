@@ -1202,13 +1202,16 @@ ways in.
   REPORT of b7 score cycle 4's 43 routes (n5-plan 04ecf95, 300 s; gaprep.js + the exhaustive lbs): PROVEN 1 (Switch
   Labyrinth 27); routelb raises the compile's lb on 25 of 43; the gap median 88.5% of the route; the least celeste x2
   59.8% (lb 96 / 239), NC Naos d3c6 62.7% (57 / 153), the precision puzzle 63.4%, Bygone Tutorial 65.7% (633 / 1,847),
-  Tutorial 1 66.1%, Ruins 70.5%, fef0 73.3% (16 / 60), Rosa dei Venti 74.1%, 730c 77.3% (22 / 97). fef0's C 17 resumed
-  on 8 threads: 873 of 1,875 tasks by 1,339 s (the rest are the pocket's big tasks), not closed. The reach tier (RCH3's
+  Tutorial 1 66.1%, Ruins 70.5%, fef0 71.7% (17 / 60), Rosa dei Venti 74.1%, 730c 77.3% (22 / 97). fef0's C 17 resumed
+  on 8 threads (cycle 4's log, 797 tasks skipped): **fef0 C 17 CLOSED (4.38 B nodes in all, 2,020 s): fef0 lb 17**; C 18
+  798 of 1,938 tasks logged in `~/b7_proof_out/c4/fef0.tasks.jsonl` (code6 = the tiers before the respawn bound, the same
+  values on fef0: its deaths respawn at the spawn); celeste x2 C 97 97 / 79 of 1,053 tasks logged (code7). The reach tier (RCH3's
   -1) cuts nothing more: the census of celeste 31c0 at C 97 and of NC Naos d3c6 at C 58 the same states and cuts at every
   layer with and without it. **THE BREADTH-FIRST CENSUS IS A CHEAPER PROVER WHERE THE DFS THRASHES**: NC Naos d3c6 at C 58
   (layercensus.js: every state once, full stateHash dedup across layers, the same cut; a front that empties with no crown
   = C closed, the same claim as wholepar's): 7.0 M distinct states by layer 20, the layers 1.5 M and growing 1.34 / 1.28 /
-  1.23 / 1.20 / 1.17x (falling as the cut bites), 4 min on one thread, where wholepar's DFS spent 6.09 B nodes on 61 of
+  1.23 / 1.20 / 1.17x (falling as the cut bites), 4 min on one thread (a longer run: layer 26 2.80 M states at 1.07x, 20.8
+  M seen, 9.1 GB, 604 s, stopped at the cycle's end), where wholepar's DFS spent 6.09 B nodes on 61 of
   C 58's 171 tasks (its 2^24-slot shared table cleared every C, the tasks' prefixes searched again); Switch Labyrinth C 20
   closed by the census in 30 s (420 K states). The census's seen set is now 64 V8 Sets by the hash's low bits (one Set
   holds at most 2^24 entries). NEXT: THE BFS PROVER: the census's layers expanded by worker threads (chunks of the front,
