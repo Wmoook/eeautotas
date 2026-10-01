@@ -28,7 +28,7 @@ const file = path.resolve(process.argv.slice(2).find((a) => !a.startsWith('--'))
 	for (let C = from; C <= to; C++) {
 		const left = total - (Date.now() - t0);
 		if (left < 5000) break;
-		const r = await LP.proveLevel({ file }, { C, threads: +args.threads || 8, seconds: Math.floor(left / 1000), split: args.split !== undefined ? +args.split : 3, ttBits: +args.ttBits || 22, taskNodes: +args.taskNodes || 20e6 });
+		const r = await LP.proveLevel({ file }, { C, threads: +args.threads || 8, seconds: Math.floor(left / 1000), split: args.split !== undefined ? +args.split : 3, ttBits: +args.ttBits || 22, taskNodes: +args.taskNodes || 20e6, field: args.field === 'full' ? 'full' : args.field === '1' });
 		const step = { C, status: r.status, nodes: r.nodes, ms: r.ms, tasks: r.tasks, bestRun: Number.isFinite(r.bestRun) ? r.bestRun : null, collisionP: r.collisionP };
 		out.steps.push(step);
 		console.log(JSON.stringify(Object.assign({ ev: 'step' }, step)));

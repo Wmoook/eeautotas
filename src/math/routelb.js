@@ -865,7 +865,12 @@ function createRouteLB(L, o = {}) {
 	function vOf(S, X) {
 		const k = S.key + '#' + X.id;
 		let v = vMemo.get(k);
-		if (v === undefined) { v = boundFromNodes(S, trigNodes.get(X.id), null, { ms: 3000, walkTiles: X.tiles }).lb; vMemo.set(k, v); }
+		if (v === undefined) {
+			// (o.togoCheap: the open level's field from X's region + 1 (every gate open: a relaxation of every state after the
+			// touch), one lookup instead of an order search: the proofs' heuristic, called on every new abstract state)
+			v = o.togoCheap ? hOpen(trigNodes.get(X.id), null) : boundFromNodes(S, trigNodes.get(X.id), null, { ms: 3000, walkTiles: X.tiles }).lb;
+			vMemo.set(k, v);
+		}
 		return v;
 	}
 	/** the cost-to-go fields of an abstract state: per lam min(the trophy + 1, the next relevant trigger + its V) */

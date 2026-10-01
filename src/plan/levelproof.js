@@ -60,7 +60,7 @@ function contextOf(L, o = {}) {
 		if (!Number.isFinite(hResp)) hResp = 0;
 	}
 	// the field part: per abstract state key the order-aware cost-to-go field over the 8-px lattice (routelb.togo)
-	const RL = o.field ? require('../math/routelb.js').createRouteLB(L, {}) : null;
+	const RL = o.field ? require('../math/routelb.js').createRouteLB(L, { togoCheap: o.field !== 'full' }) : null;
 	const togo = RL ? RL.togoFor : null;
 	// THE REACH FIELD'S PROOF (src/reach.js, RCH3, physics mode only): -1 = no input sequence takes the ball from that
 	// state to a trophy (the whole level, doors relaxed: passable and floors; deaths as its edges where the level has
@@ -187,7 +187,7 @@ function makeSearcher(L, ctx, ttBits) {
 // ---------------------------------------------------------------- the worker
 if (!isMainThread && workerData && workerData.levelproof) {
 	const L = loadLevel(workerData.spec);
-	const ctx = contextOf(L, { field: !!workerData.field });
+	const ctx = contextOf(L, { field: workerData.field || false });
 	const { sources } = sourcesOf(L, workerData.maxIdle);
 	const S = makeSearcher(L, ctx, workerData.ttBits);
 	S.setC(workerData.C);
@@ -212,7 +212,7 @@ if (!isMainThread && workerData && workerData.levelproof) {
 async function proveLevel(spec, o = {}) {
 	const t0 = Date.now();
 	const L = loadLevel(spec);
-	const ctx = contextOf(L, { field: !!o.field });
+	const ctx = contextOf(L, { field: o.field || false });
 	const maxIdle = o.maxIdle || 3000;
 	const src = sourcesOf(L, maxIdle);
 	if (src.rests < 0) return { status: 'unsupported', why: src.why, ms: Date.now() - t0 };
@@ -305,7 +305,7 @@ async function proveLevel(spec, o = {}) {
 			w.postMessage({ type: 'task', id, src: t.src, prefix: t.prefix, deadline, maxNodes: taskNodes });
 		};
 		for (let i = 0; i < threads; i++) {
-			const w = new Worker(__filename, { workerData: { levelproof: true, spec, C, ttBits, maxIdle, field: !!o.field } });
+			const w = new Worker(__filename, { workerData: { levelproof: true, spec, C, ttBits, maxIdle, field: o.field || false } });
 			wk.push(w);
 			w.on('message', (m) => {
 				if (m.type === 'ready') { give(w); give(w); return; }
