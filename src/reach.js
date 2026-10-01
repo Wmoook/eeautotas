@@ -299,6 +299,20 @@ const vOfC = (c) => (c >= NL - 1 ? 16 : c / 8);
 // bounce; onto a floor: speed 0, the bounce of v = 0; into a killer: dead). So the bounce at t is the old formula's at
 // min(v, VTURN) (the formula grows with v): SOUND (only a turn the engine cannot make is removed)
 const BOUNCE_TURN = process.env.EEAT_BOUNCE_TURN === '1';
+// THE SIDEWAYS-KEPT RISE, an ORDERING price (OPT-IN EEAT_SIDE_CAP=<q> / opts.sideCap, goal fields only; off = the field byte
+// for byte): an R(q) state moved sideways between two normal tiles keeps its apex level q (fwd: dy 0 -> enterR(P2, e)), so
+// a chain of sideways moves in one row carries a jump's rise any number of tiles; the engine cannot: a ball rising with
+// its apex e px above a row's top edge stays in the row (16 px tall) only while it rises less than 16 px, and each tile of
+// sideways travel takes at least 16 / 16.25 ticks, so after k same-row crossings its rise per tick u satisfies roughly
+// (k - 3) u < 16 and its apex above the row is at most the rise from u (Cold World's chapter-2 blue coin: the goal field's
+// false near, the bottom corridor (105-117, 227-231) at 40-49 tiles, is R7 carried 12 tiles along row 211 into the coin's
+// shaft from below). A sound count needs a per-row crossing counter in the label search (~12 count types a direction);
+// this knob is the ORDERING part only: a second field whose sideways NORM -> NORM moves keep at most R(q) (`_sideCapQ`),
+// and the goal field's cost of a state is that field's where it is finite, the plain field's + SIDE_CAP_PEN (2,500 tiles)
+// where only the plain model reaches the goal (a way through a long sideways rise ranks behind every other way), CUT where
+// the plain field cuts it: the -1 set (the proof, the executor's heap cut) is the plain field's byte for byte.
+const SIDE_CAP = Math.max(0, Math.min(40, +process.env.EEAT_SIDE_CAP | 0));
+const SIDE_CAP_PEN = 12500;
 const VTURN = (() => {
 	const ND = E.constants.NO_MOD_DRAG;
 	const dStop = (v) => {
@@ -315,6 +329,7 @@ const VTURN = (() => {
 function reachField(level, opts) {
 	opts = opts || {};
 	const t0 = Date.now();
+	const sideCapQ = opts._sideCapQ | 0;   // (the sideways-kept rise's capped model: SIDE_CAP above; 0 = the plain model)
 	const W = level.width, H = level.height, N = W * H;
 	const fg = level.fg, flags = guideFlags(level), nFlags = flags.length, gF = level.gFlags, gMox = level.gMox, gMoy = level.gMoy, lk = level.lookup0, xfl = level.xflags;
 	const fl = (id) => (id >= 0 && id < nFlags ? flags[id] : 0);
@@ -822,7 +837,7 @@ function reachField(level, opts) {
 			// R(q)
 			const e = 8 * l - TOL;
 			if (dy === -1) { if (l >= 1) enterR(P2, e - 16, emit, true); }
-			else if (dy === 0) enterR(P2, e, emit, false);
+			else if (dy === 0) enterR(P2, sideCapQ > 0 && src === NORM && dst === NORM ? Math.min(e, 8 * sideCapQ - TOL) : e, emit, false);
 			else { const kb = kOfX(e + 16); enterDown(P2, kb, emit); ljump(P, P2, kb, emit); }
 			return;
 		}
@@ -1027,8 +1042,34 @@ function reachField(level, opts) {
 		field.explain = { row: best, trophyRow, startRow: st ? (st.t / W) | 0 : -1 };
 	}
 	if (opts.debug) Object.defineProperty(field, '_m', { value: { fwd, prof, pid, J, lj, ceilJ, KJD, DIRS, stopC, bounceC, portalExits, respawn, passable, lowWall, segOf, edgesOf, costOf, rcT, rpT } });
+	// (OPT-IN EEAT_SIDE_CAP / opts.sideCap: the sideways-kept rise's ordering price, goal fields only: SIDE_CAP above)
+	const scq = opts.sideCap !== undefined ? Math.max(0, Math.min(40, opts.sideCap | 0)) : SIDE_CAP;
+	if (scq > 0 && !sideCapQ && goalF && !opts.check && !opts.debug) {
+		const capped = reachField(level, Object.assign({}, opts, { _sideCapQ: scq, explain: false }));
+		sideCapMerge(field, capped, scq);
+	}
 	field.ms = Date.now() - t0;
 	return field;
+}
+/** the sideways-kept rise's ordering merge (SIDE_CAP): every finite cost of the plain field f becomes the capped field g's
+ *  cost there (at least f's), or f's + SIDE_CAP_PEN where g cuts the state; f's CUT and FAR stay: the same -1 set */
+function sideCapMerge(f, g, q) {
+	const pairs = [[f.costR, g.costR], [f.costF, g.costF], [f.costL, g.costL], [f.costC, g.costC], [f.costX, g.costX]];
+	let changed = 0, pen = 0, mx = 0;
+	for (const [a, b] of pairs) {
+		if (!a || !b || a.length !== b.length) continue;
+		for (let i = 0; i < a.length; i++) {
+			const x = a[i];
+			if (x === CUT || x === FAR) continue;
+			const y = b[i];
+			const v = y === CUT ? Math.min(FAR, x + SIDE_CAP_PEN) : y === FAR ? FAR : Math.max(x, y);
+			if (y === CUT) pen++;
+			if (v !== x) { a[i] = v; changed++; }
+			if (v < FAR && v > mx) mx = v;
+		}
+	}
+	f.prioShift = Math.max(f.prioShift || 0, bitLen(Math.min(mx, FAR)) - 12);
+	f.sideCap = { q, changed, pen, ms: g.ms };
 }
 /**
  * The backward label-setting search (reachField's core, a function of its own so the engine optimizes it): labels
