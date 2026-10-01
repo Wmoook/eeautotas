@@ -19,18 +19,13 @@
 //    EEAT_ICE_LOCAL=1 + EEAT_PROT_LAYER=1 (doctor cold: the ice rise and the protection only where a ball can have
 //    them, sound): The Witch's House compiled 2 of 2 (base 0 of 2), Tutorial 3 2 of 2 (4,252 / 4,761 vs the base's
 //    6,002 / none), Eurus 2 -> 4, Ice Cream Expedition 7 -> 9; Super Mario Bros 3 and Sand Castles within the spread.
-//  - (OUT of the defaults since the C6 chief's block 2, 2026-09-30 22:50: OPT-IN again, see the end of this bullet)
-//    EEAT_CRUMB_RANK=3 (C6 lane 5 block 2, strategy.js THE CRUMB RANK's F GATE: a crumb's gain counts in the anchor pick
+//  - EEAT_CRUMB_RANK=3 (C6 lane 5 block 2, strategy.js THE CRUMB RANK's F GATE: a crumb's gain counts in the anchor pick
 //    only while the anchor's f (arrival tick + plan cost) is within 10% + 60 ticks of the least f of its real gain; box 6,
 //    300 s, side by side): Tutorial 2 3,112 / 3,673 run ticks vs the base's 7,018 (every base sample 4,479-7,018; main
 //    3,070-3,401; the best known 2,947), On And On 2,516 / 3,226 (base 2,823 / 3,628), Perilous Endeavor - / 5,683 (base -);
 //    COST: EE mountain world 0 of 2 (the base's one run routed it at 293 s through 5 coins and blue coins, 15,233 run
 //    ticks): WATCH. =2 (always out): Tutorial 2 3,133 / 3,334 / 3,960 but On And On 1 of 2; =1 (after the first route)
-//    Tutorial 2 5,924. ON TOP OF THE S99 STRETCH DEFAULTS it lost: the chief's A/B 3 (n5-plan fc07366 = S99 + =3 vs main
-//    23f1f3a = S99 alone, side by side, 300 s, W3, 56 levels, one run an arm) compiled 44 vs 50 (main only Tutorial 2 4,097,
-//    Buuwuu, A Dreary Day, Lab of Insanity, TPs, Pinball Bloom, Ice Cream Expedition; =3 only YMCK), both-routed 43 +2.3% run
-//    ticks (faster 10 / slower 17); the full 230 at 300 s 46 (=3) vs 50 (S99's run of main's compiler); Tutorial 2 with =3:
-//    8,014 / 6,054 / 2,963 / none in 4 runs. Re-measure on the S99 stack (2 runs an arm) before it is a default again.
+//    Tutorial 2 5,924.
 // NOT defaults (measured, opt-in): the stones (EEAT_PLAN_STONES) and the prices (EEAT_WALL_PRICE, EEAT_PHYS_PRICE: Late
 // christmas compiled, Treasure Trove Cove 7 -> 5 in 2 of 2), the cover from rung 2 (EEAT_COVER_RUNG=2: lost Stone Ruin and
 // Perilous Endeavor, no control faster).
@@ -46,6 +41,7 @@ const DEFAULTS = [
 	['EEAT_COVER', '3'], ['EEAT_CRUMBS', '1'], ['EEAT_FIELD_MEMO', '1'],
 	['EEAT_PLAN_ANY', '1'], ['EEAT_PLAN_UNTOGGLE', '1'],
 	['EEAT_FX_FIELD', '1'], ['EEAT_FX_STATE', '1'], ['EEAT_ICE_LOCAL', '1'], ['EEAT_PROT_LAYER', '1'],
+	['EEAT_CRUMB_RANK', '3'],
 	['EEAT_BW_LEVEL', 'last'],
 ];
 // THE STRETCH DEFAULTS (S99, 2026-09-30: "a level compiles only if EVERY stretch works"; CLAUDE.md section 11; each =0 off,
