@@ -66,7 +66,49 @@ function seenTable(sab) {
 // queues, shared copy-on-write by the engine), ~25 fields = ~270 B a state. Every state read back is checked: restored,
 // its stateHash must be the one stored at its insert (else the run throws: no claim).
 const FIELDS = Object.keys(new E.EESnapshot());
+// THE BYTE PACKING (cycle 6, resumed; `EEAT_BFS_PACK=0`: the triples above): one byte stream a layer, per differing field
+// its index, its type and only the bytes the type needs: a number that is a whole int32 (not -0) 4 bytes (type 6), any
+// other number a Float64 (type 0), a reference's index 4 bytes (type 5), true / false / null / undefined none (~2x fewer
+// bytes a state: NC Naos d3c6's C 59 front 204 B a state as triples); the read-back hash check stays the guard.
+const PACK = process.env.EEAT_BFS_PACK !== '0';
 function makeStore() {
+	return PACK ? makeByteStore() : makeTripleStore();
+}
+function makeByteStore() {
+	let n = 0, m = 0, off = new Float64Array(1024), hs = new Float64Array(1024), buf = new Uint8Array(1 << 16), dv = new DataView(buf.buffer);
+	const refs = [];
+	const grow = (a, k) => { const b = new a.constructor(Math.max(k, a.length * 2)); b.set(a); return b; };
+	return {
+		get n() { return n; },
+		push(snap, base, h) {
+			if (n + 2 > off.length) { off = grow(off, n + 2); hs = grow(hs, n + 2); }
+			if (m + FIELDS.length * 10 > buf.length) { buf = grow(buf, m + FIELDS.length * 10); dv = new DataView(buf.buffer); }
+			off[n] = m; hs[n] = h;
+			for (let f = 0; f < FIELDS.length; f++) {
+				const k = FIELDS[f], v = snap[k];
+				if (Object.is(v, base[k])) continue;
+				buf[m++] = f;
+				if (typeof v === 'number') {
+					if ((v | 0) === v && !Object.is(v, -0)) { buf[m++] = 6; dv.setInt32(m, v, true); m += 4; } else { buf[m++] = 0; dv.setFloat64(m, v, true); m += 8; }
+				} else if (v === true) buf[m++] = 1; else if (v === false) buf[m++] = 2; else if (v === null) buf[m++] = 3; else if (v === undefined) buf[m++] = 4;
+				else { buf[m++] = 5; dv.setInt32(m, refs.length, true); m += 4; refs.push(v); }
+			}
+			n++; off[n] = m;
+		},
+		get(i, base, out) {
+			for (let f = 0; f < FIELDS.length; f++) out[FIELDS[f]] = base[FIELDS[f]];
+			for (let j = off[i], e = off[i + 1]; j < e;) {
+				const k = FIELDS[buf[j]], t = buf[j + 1];
+				j += 2;
+				if (t === 0) { out[k] = dv.getFloat64(j, true); j += 8; } else if (t === 6) { out[k] = dv.getInt32(j, true); j += 4; } else if (t === 5) { out[k] = refs[dv.getInt32(j, true)]; j += 4; } else out[k] = t === 1 ? true : t === 2 ? false : t === 3 ? null : undefined;
+			}
+			return hs[i];
+		},
+		bytes: () => off.byteLength + hs.byteLength + buf.byteLength,
+		used: () => (n + 1) * 16 + m,
+	};
+}
+function makeTripleStore() {
 	let n = 0, m = 0, off = new Int32Array(1024), hs = new Float64Array(1024), fi = new Uint8Array(16384), ty = new Uint8Array(16384), va = new Float64Array(16384);
 	const refs = [];
 	const grow = (a, k) => { const b = new a.constructor(Math.max(k, a.length * 2)); b.set(a); return b; };
@@ -95,6 +137,7 @@ function makeStore() {
 			return hs[i];
 		},
 		bytes: () => off.byteLength + hs.byteLength + fi.byteLength + ty.byteLength + va.byteLength,
+		used: () => n * 12 + m * 10,
 	};
 }
 
@@ -179,10 +222,10 @@ function workerMain() {
 				for (let k = par.length - 1; k >= 0; k--) { back.push(mk[k][j]); j = par[k][j]; }
 				route = { src: roots.src[j], path: Array.from(roots.masks.subarray(roots.off[j], roots.off[j + 1])).concat(back.reverse()) };
 			}
-			const states = stopped ? 0 : next.n, bytes = next.bytes();
+			const states = stopped ? 0 : next.n, bytes = next.bytes(), used = next.used();
 			front = stopped || crown !== null ? makeStore() : next;
 			if (!stopped && crown === null) { par.push(Int32Array.from(np)); mk.push(Uint8Array.from(nm)); }
-			parentPort.postMessage({ type: 'done', d, states, cut, merged, full, stopped, route, bytes });
+			parentPort.postMessage({ type: 'done', d, states, cut, merged, full, stopped, route, bytes, used });
 		} else if (m.type === 'quit') process.exit(0);
 	});
 }
@@ -301,14 +344,14 @@ async function main() {
 		for (;;) {
 			const rs = await Promise.all(wk.map((w) => ask(w, { type: 'layer', d }, 'done')));
 			d++;
-			let states = 0, cut = 0, merged = 0, full = 0, stopped = false, minW = Infinity, maxW = 0, bytes = 0;
+			let states = 0, cut = 0, merged = 0, full = 0, stopped = false, minW = Infinity, maxW = 0, bytes = 0, used = 0;
 			for (const r of rs) {
-				states += r.states; cut += r.cut; merged += r.merged; full += r.full; stopped = stopped || r.stopped; bytes += r.bytes || 0;
+				states += r.states; cut += r.cut; merged += r.merged; full += r.full; stopped = stopped || r.stopped; bytes += r.bytes || 0; used += r.used || 0;
 				if (r.states < minW) minW = r.states; if (r.states > maxW) maxW = r.states;
 				if (r.route && found === null) found = r.route;
 			}
 			seen += states;
-			say({ ev: 'layer', d, states, cut, merged, full, seen, minW, maxW, frontMB: Math.round(bytes / 1e6), s: Math.round((Date.now() - t0) / 100) / 10, rssGB: Math.round(process.memoryUsage().rss / 1e8) / 10 });
+			say({ ev: 'layer', d, states, cut, merged, full, seen, minW, maxW, frontMB: Math.round(bytes / 1e6), usedMB: Math.round(used / 1e6), s: Math.round((Date.now() - t0) / 100) / 10, rssGB: Math.round(process.memoryUsage().rss / 1e8) / 10 });
 			if (found !== null) break;
 			if (stopped) { out.why = stopped; break; }
 			if (states === 0) break;

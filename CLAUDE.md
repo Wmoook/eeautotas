@@ -1542,7 +1542,32 @@ ways in.
   sub-pixel family near the trophy), all cut at 48; with snapshot objects the run stopped on memory at layer 27 (14 GB).
   Celeste 31c0 C 97 (4 workers, 6 GB): 1.3-1.8x a layer, 9.0 M states at layer 17, 30.7 M seen, stopped on memory at 18;
   Switch Labyrinth C 27 (3 workers, 5 GB): 3x a layer, 9.2 M at layer 14, 17.3 M seen, stopped on memory (the DFS closed it
-  in cycle 3: 2.85 B nodes); My level fef0 C 18 (4 workers): 4.8x a layer (0.88 M at layer 8).
+  in cycle 3: 2.85 B nodes); My level fef0 C 18 (4 workers): 4.6-4.8x a layer (0.88 M at layer 8, 4.05 M at 9).
+- **WHERE THE PROOFS STAND, cycle 6 resumed** (box 7 lane 'proof', 2026-10-01 06:20-07:20 EDT, box 7 at load 70-160).
+  THE TWINS: the loaded level data (fg, flags, portals, spawns and every other array) of the precision puzzle
+  (test_precision_puzzle_21c016aa) and NC Naos d3c6c5c5 are IDENTICAL, as are celeste 31c0 / cd73 (not My level fef0 / 730c
+  / de42: their fg differ; not NC Naos de5f2cef): a proof on one is a proof on the other: the precision puzzle's own BFS C 57
+  closed (219 s, 4 workers, 18.2 M states) where NC Naos's C 58 had, so **both lb 58**, celeste x2 96. NC Naos C 59 (BFS, 14
+  workers, ttBits 29, maxGB 19): stopped on memory at layer 33 (180 M seen; layer 32 26.7 M states, a 5.4 GB front): ~30 GB,
+  past the lane's 25-GB share. THE BYTE PACKING (bfsprove.js `makeByteStore`, default; `EEAT_BFS_PACK=0` the triples): per
+  differing field its index, its type and only the bytes the type needs (a whole int32 4 bytes, other numbers 8, booleans /
+  null / undefined none); test/bfsprove.js 47/0; the layer event's `usedMB` = the fronts' bytes in use (`frontMB` their
+  allocated capacity); NC Naos d3c6 C 58 side by side (8 workers, 90 s, the same layers to 28): 105 vs 139 B a state used
+  (339 vs 451 MB at layer 28; allocated 478 vs 676 MB): 0.75x, which would bring C 59's ~30 GB to ~24 GB (not run: the
+  box's other lanes). THE MATH LEG BOUND AS A TIER: NO GAIN
+  (`tools/perfect/lbcurve.js <level> <route.eetas>,.. [--every=]`: at every run tick of known routes the ticks left, the
+  tiers' h and src/math/lb.js's event-graph bound to a trophy touch, the trophies' bounds.js touchers): 0 violations (lb and
+  lb + 1 against the ticks left) on the 20 known routes of NC Naos d3c6, celeste 31c0, fef0 and Switch Labyrinth, but at
+  most 1 tick above the tiers on NC Naos / celeste (at the start lb 46-64 vs h 49 / 87; along the routes 21.6 vs 22.3, 37 vs
+  47), 4 on fef0 where it is null at 45 of 60 ticks (the chamber's fields), null at Switch Labyrinth's start; 2-40 ms a call:
+  no tier for the provers. THE GAP REPORT of b7 score cycle 6 (origin/n5-plan 5214e62, 49 / 230 at 300 s, `~/b7_score_r6/f300`;
+  gaprep.js 6 shards + `tools/perfect/gapsum.js <gap.jsonl> --ex=<the proven lbs as {"<set>__<name>": lb}>`): **PROVEN 1 / 230
+  (Switch Labyrinth 27)**; routelb raises the compile's lb on 26 of 49; the gap median 89.4% of the route; the least: the
+  precision pair 53.6% (lb 58 / 125: the early brake's route), celeste x2 59.7% (96 / 238), Tutorial 1 62.8% (708 / 1,901),
+  Bygone Tutorial 65.6%, Ruins 70.7%, **My level fef0 71.2% (17 / 59 = the best known: the endgame's)**, Rosa dei Venti 73.4%,
+  730c 76.6% (22 / 94). Every bound reads 4-87 ticks at the start where the routes need 27-238: past Switch Labyrinth no exact
+  search closes the slack (3-8x a layer), and lb.js does not tighten it: the next bound must model the time to BUILD speed
+  (the chamber's up-arrow climb, the precision pair's brake to an exact rest).
 - **THE ENDGAME and THE AIRBORNE ARRIVAL** (C6 push 3 lane 5 block 3; `src/out/n5/lanes/c6_lane5_b3.md`). THE ENDGAME
   (strategy.js after JOINS, its own clock; **DEFAULT ON since lane 5 block 4** (`src/out/n5/lanes/c6_lane5_b4.md`): compile.js
   gives it a fifth of the budget, at most 60 s (`ENDGAME_F`, `ENDGAME_MAX_S`); `--endgame=<s>` / `EEAT_ENDGAME_S=<s>` its
