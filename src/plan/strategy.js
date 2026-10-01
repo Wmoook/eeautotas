@@ -1080,7 +1080,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 					const { anchor: B, isNew } = addArrival(a, S2, q.A, labelOf(g.step), g.step);
 					if (isNew) {
 						stStats.anchors++;
-						say({ ev: 'source', kind: 'room', room: a.room, desc: a.desc, key: B.key, gain: 1, tick: a.tick, inputs: T.strOf(a.masks), anchor: B.id, label: `${labelOf(g.step)} (stretch)` });
+						say({ ev: 'source', kind: 'room', room: a.room, desc: a.desc, key: B.key, gain: 1, again: B.gain, tick: a.tick, inputs: T.strOf(a.masks), anchor: B.id, label: `${labelOf(g.step)} (stretch)` });
 					}
 					next = { A: B, a };
 				}
@@ -1579,7 +1579,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 					if (os) { try { if (os.inject(a.masks, 'exec')) osInjected++; } catch (e) { /* the one shot's own */ } }
 					else if (osw && osInject(a.masks, 'exec')) osInjected++;
 					const d = distOf(sim);
-					say({ ev: 'source', kind: 'room', room: a.room, desc: a.desc, key: B.key, gain: 1, tick: a.tick, ...(d !== undefined ? { dist: Math.round(d * 10) / 10 } : {}), inputs: T.strOf(a.masks), anchor: B.id, label: labelOf(step) });
+					say({ ev: 'source', kind: 'room', room: a.room, desc: a.desc, key: B.key, gain: 1, again: B.gain, tick: a.tick, ...(d !== undefined ? { dist: Math.round(d * 10) / 10 } : {}), inputs: T.strOf(a.masks), anchor: B.id, label: labelOf(step) });
 					if (steer) say({ ev: 'closest', dist: Math.round(distOf(sim) * 10) / 10, tick: a.tick, inputs: T.strOf(a.masks), anchor: B.id });
 				} else if (changed && step.synthetic) lastProgress = Date.now();
 			}
@@ -1823,7 +1823,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		let S2;
 		try { S2 = model.stateOf(r.sim); } catch (e) { return; }
 		const res = addArrival(a, S2, anchors.get(String(S0.key)), 'the one shot');
-		if (res.isNew) { osAnchors++; say({ ev: 'source', kind: 'room', room: a.room, desc: a.desc, key: res.anchor.key, gain: 1, tick: a.tick, inputs: T.strOf(a.masks), anchor: res.anchor.id, label: 'the one shot' }); }
+		if (res.isNew) { osAnchors++; say({ ev: 'source', kind: 'room', room: a.room, desc: a.desc, key: res.anchor.key, gain: 1, again: res.anchor.gain, tick: a.tick, inputs: T.strOf(a.masks), anchor: res.anchor.id, label: 'the one shot' }); }
 	};
 	const osHarvest = () => {
 		if (osw) {
