@@ -20,6 +20,7 @@ const num = (v, d) => (v === undefined ? d : +v);
 const opts = () => ({ ms: num(argv.ms, 60000), F: num(argv.F, 0), M: num(argv.M, 0), A: num(argv.A, 3), span: num(argv.span, 0), legMs: num(argv.legMs, 60), div: num(argv.div, -1),
 	exact: argv.exact === undefined ? undefined : argv.exact !== '0', exShare: num(argv.exShare, -1), exM: num(argv.exM, 0), exSpan: num(argv.exSpan, 0), exCap: num(argv.exCap, 0), exMs: num(argv.exMs, 0),
 	xprove: argv.xprove === undefined ? undefined : argv.xprove !== '0', xSpan: num(argv.xSpan, 0), xCap: num(argv.xCap, 0), xMs: num(argv.xMs, 0), proveMs: num(argv.proveMs, 0),
+	...(argv.redo !== undefined ? { redo: +argv.redo } : {}), ...(argv.redoMs !== undefined ? { redoMs: +argv.redoMs } : {}), prove: argv.prove === '0' ? false : undefined,
 	log: argv.verbose ? (s) => console.error(s) : null });
 
 function one(levelFile, eetasFile) {
@@ -134,5 +135,5 @@ else if (argv.final && WT.isMainThread && +argv.threads > 1) {
 else {
 	const r = one(pos[0], pos[1]);
 	if (argv.json) console.log(JSON.stringify(r));
-	else console.log(`${r.before} -> ${r.runTicks} (saved ${r.saved}, accepted ${r.accepted}), ${r.waypoints} waypoints, legs ${r.legs.length}, proven ${r.proven} (${r.provenTicks} ticks), msolve faster on ${r.fasterLegs}, by ${JSON.stringify(r.provenBy)}, exact asked ${r.xAsked} faster ${r.fasterExact} (${r.fasterExactTicks} ticks), ${r.ms} ms; passes ${JSON.stringify(r.passes.map((p) => [p.gap, p.from, p.to, p.waypoints, p.skips, p.legsUsed, p.ms]))}; stats ${JSON.stringify(r.stats)}${r.replayed !== null ? `; replayed ${r.replayed}` : ''}`);
+	else console.log(`${r.before} -> ${r.runTicks} (saved ${r.saved}, accepted ${r.accepted}), ${r.waypoints} waypoints, legs ${r.legs.length}, proven ${r.proven} (${r.provenTicks} ticks), msolve faster on ${r.fasterLegs}, by ${JSON.stringify(r.provenBy)}, exact asked ${r.xAsked} faster ${r.fasterExact} (${r.fasterExactTicks} ticks), ${r.ms} ms; passes ${JSON.stringify(r.passes.map((p) => [p.gap, p.from, p.to, p.waypoints, p.skips, p.legsUsed, p.ms]))}; stats ${JSON.stringify(r.stats)}${r.replayed !== null ? `; replayed ${r.replayed}` : ''}${r.redo ? `; redo ${JSON.stringify(r.redo)}` : ''}`);
 }

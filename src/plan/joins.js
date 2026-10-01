@@ -65,6 +65,18 @@ const SHIFT0 = process.env.EEAT_JOINS_SHIFT !== undefined ? Math.max(0, +process
 const BRIDGE = process.env.EEAT_JOINS_BRIDGE !== '0';
 const BR_SPAN = 16, BR_MS = +(process.env.EEAT_JOINS_BRIDGE_MS || 300), BR_CAP = 4000, BR_NODES = 2;
 const BR_SHIFTS = [1, -1, 2, -2, 3, -3, 4, -4, 6, -6, 8, -8, 12, -12, 16, -16];
+// THE LEG REDO (C6 lane 5 block 5; OPT-IN EEAT_JOINS_REDO=<K> / o.redo, off = the DP byte for byte): the route's TRIGGER
+// legs (the tick a trigger state is first held -> the tick the next one is: a coin, a key, a switch taken) with the largest
+// gap over a distance bound are re-solved by the lab's backward solver (src/plan/lab/backward.js, the stretch child's
+// solver: a long leg needs its 30-40 s in ONE piece, which the executor's rungs never give) on its own clock a leg
+// (EEAT_JOINS_REDO_MS, default 30 s) from the ROUTE'S OWN STATE at the previous trigger, before the first pass (the DP's
+// clock is not touched). Both trigger ticks are then forced waypoints of the first pass (their arrival: the trigger state
+// alone, any tile, any class) and a redo that arrives sooner is a DP edge between them, so the DP's follows, legs and
+// bridge carry its gain to the finish; the chain is replayed and judged as ever (never slower).
+const REDO_K = Math.max(0, +process.env.EEAT_JOINS_REDO | 0);
+const REDO_MS = +process.env.EEAT_JOINS_REDO_MS > 0 ? +process.env.EEAT_JOINS_REDO_MS : 30000;
+const REDO_MIN = 40;                                    // a leg shorter than this is the DP's own work
+const VMAX = 6.776552880470027;                         // the top running speed (px / tick): the distance bound's speed
 
 /**
  * THE BLIND KEY (VERSUS, default on; EEAT_JOINS_BLIND=0 off): what no later door, gate or respawn of this level / route can
@@ -185,6 +197,13 @@ function waypointsOf(L, masks, o) {
 		const trig = TRIG && !(o && o.triggers === false) && prog[t] !== prog[t - 1] && b !== 'D' && a !== 'D';
 		if (tp[t] || (a === 'D' && b !== 'D') || (b !== a && SUPPORT.has(b)) || trig) bnd.push(t);
 	}
+	// (THE LEG REDO's forced waypoints, o.forceT: a trigger tick (its trigger state first held there, alive) is a boundary
+	// whose arrival is that trigger state alone)
+	const force = o && o.forceT && o.forceT.size ? o.forceT : null;
+	if (force) {
+		for (const t of force) if (t > 0 && t < finish && prog[t] !== prog[t - 1] && cls[t] !== 'D' && !tp[t] && bnd.indexOf(t) < 0) bnd.push(t);
+		bnd.sort((x, y) => x - y);
+	}
 	const wps = [{ t: 0, tile: tile[0], cls: cls[0], tele: false, fixed: false, prog: prog[0] }];
 	const clsT = (c) => (c === 'A' ? 'any' : c);
 	const match = (u, b) => tile[u] === tile[b] && prog[u] === prog[b] && (clsT(cls[b]) === 'any' || cls[u] === cls[b]) && (!tp[b] || tp[u] === 1) && (cls[b] === 'D' || cls[u] !== 'D');
@@ -206,12 +225,14 @@ function waypointsOf(L, masks, o) {
 	};
 	for (const b of bnd) {
 		const a = wps[wps.length - 1].t;
+		const trig = !!(force && force.has(b) && prog[b] !== prog[b - 1] && cls[b] !== 'D' && !tp[b]);
 		let first = true;
-		for (let u = a + 1; u < b; u++) if (match(u, b)) { first = false; break; }
+		for (let u = a + 1; u < b; u++) if (trig ? prog[u] === prog[b] : match(u, b)) { first = false; break; }
 		if (!first) continue;
 		fill(a, b);
 		const fixed = cls[b] === 'D' || cls[b - 1] === 'D';
-		wps.push({ t: b, tile: tile[b], cls: clsT(cls[b]), tele: !!tp[b], fixed, prog: prog[b] });
+		if (trig) wps.push({ t: b, tile: tile[b], cls: 'any', tele: false, fixed, prog: prog[b], trig: true });
+		else wps.push({ t: b, tile: tile[b], cls: clsT(cls[b]), tele: !!tp[b], fixed, prog: prog[b] });
 	}
 	fill(wps[wps.length - 1].t, finish);
 	wps.push({ t: finish, tile: tile[finish], cls: 'any', tele: false, fixed: false, prog: -1, finish: true });
@@ -269,6 +290,7 @@ function joinOnce(L, ev0, o, deadline, S) {
 		if (w.finish) return !!s.has_silver_crown;
 		if (w.cls === 'D') return s.is_dead && tileOfSim(s, W, H) === w.tile;
 		if (s.is_dead) return false;
+		if (w.trig) return progKey(s, o.blind) === w.prog;   // (THE LEG REDO's trigger waypoint: the trigger state alone)
 		if (tileOfSim(s, W, H) !== w.tile) return false;
 		if (w.cls !== 'any' && MS.clsOf(s, L.flags) !== w.cls) return false;
 		if (w.tele && !(Math.abs(s.px - px) > TELEPORT_PX || Math.abs(s.py - py) > TELEPORT_PX)) return false;
@@ -422,8 +444,36 @@ function joinOnce(L, ev0, o, deadline, S) {
 		stats.brExact++;
 		return true;
 	};
+	// THE LEG REDO's edges (o.redoEdges [{from, to, masks}]: route ticks, the solved leg's inputs from the route's state at
+	// `from`): each replayed from the route's state at its forced waypoint to the next trigger's waypoint; one that arrives
+	// sooner than the route is an edge from the route's node there (put when the pass reaches it)
+	const redoAt = new Map();
+	if (Array.isArray(o.redoEdges) && o.redoEdges.length) {
+		const idx = new Map();
+		for (let k = 0; k <= m; k++) idx.set(wps[k].t, k);
+		for (const e of o.redoEdges) {
+			const a = idx.get(e.from), b = idx.get(e.to);
+			stats.redo = (stats.redo || 0) + 1;
+			if (a === undefined || b === undefined || b <= a || !wps[b].trig || !e.masks || !e.masks.length) continue;
+			const h = replayTo(rSnap[a], e.masks, b, 8);
+			if (h <= 0 || h >= wps[b].t - wps[a].t) continue;
+			const ms_ = new Uint8Array(h);
+			for (let t = 0; t < h; t++) ms_[t] = t < e.masks.length ? e.masks[t] : (e.masks[e.masks.length - 1] & 30);
+			if (!redoAt.has(a)) redoAt.set(a, []);
+			redoAt.get(a).push({ b, ms: ms_ });
+			stats.redoOk = (stats.redoOk || 0) + 1;
+			stats.redoGain = (stats.redoGain || 0) + (wps[b].t - wps[a].t - h);
+		}
+	}
 	for (let k = 0; k < m; k++) {
 		if (Date.now() > deadline || (stop && stop())) { timeUp = true; }
+		if (redoAt.has(k)) {
+			const par = front[k].get('route');
+			if (par) for (const e of redoAt.get(k)) {
+				if (replayTo(rSnap[k], e.ms, e.b, 0) !== e.ms.length) continue;
+				put(e.b, child(e.b, par, e.ms, `redo skip ${e.b - k}`, 'backward'));
+			}
+		}
 		// the frontier: the route's state first, then the earliest classes (F in all); once the clock is out, the route's
 		// state and the earliest other one (its gain so far carried to the finish by the route's own inputs, else a leg)
 		const all = Array.from(front[k].values()).sort((x, y) => (y.route - x.route) || x.g - y.g);
@@ -616,13 +666,94 @@ function proveRoute(L, masks, o) {
 }
 
 /**
+ * THE LEG REDO's solves (opt-in, joinRoute o.redo / EEAT_JOINS_REDO): the route's TRIGGER legs (from the first tick of a
+ * trigger state, the start, to the first tick of the next one or the finish; no death inside), the K of at least REDO_MIN
+ * ticks with the largest gap over the distance bound (the leg's ticks less the straight line at the top running speed),
+ * each re-solved by the lab's backward solver from the route's own state at its start to the trigger's tiles (the coins
+ * taken at that tick, else the centre and the touched tile; the finish: the trophies) on legMs (0.4 of it, then the rest,
+ * as the stretch child does). Every leg is replayed by joinOnce before it is an edge.
+ * -> {edges [{from, to, masks}], forceT (Set: the solved legs' trigger ticks), legs [{from, to, ticks, gap, ok, T, why,
+ * ms}], ms}
+ */
+function redoSolve(L, masks, blind, K, legMs, log) {
+	const t0 = Date.now();
+	const W = L.width, H = L.height;
+	const sim = new E.EESim(L), inp = new E.EEInput();
+	const coinOf = (s) => { s._fillKey(); const I = s._keyI, a = new Int32Array(L.coinWords || 0); for (let w = 0; w < a.length; w++) a[w] = I[s._coinOff + w] | 0; return a; };
+	const hasCoins = !!(L.coinTiles && L.coinTiles.length);
+	sim.reset();
+	const trig = [{ t: 0, cx: sim.px + 8, cy: sim.py + 8 }];
+	let p0 = progKey(sim, blind), cb = hasCoins ? coinOf(sim) : null, dead = false;
+	for (let t = 0; t < masks.length; t++) {
+		E.applyMask(inp, masks[t]); sim.tick(inp);
+		if (sim.has_silver_crown) {
+			trig.push({ t: t + 1, tiles: Array.from(require('./types.js').goalOf(L, { kind: 'trophy' }).tiles), bad: dead, finish: true });
+			break;
+		}
+		const p = progKey(sim, blind);
+		if (sim.is_dead) { dead = true; p0 = p; continue; }
+		if (p === p0) continue;
+		const tiles = [];
+		const cb2 = hasCoins ? coinOf(sim) : null;
+		if (cb2) for (let w = 0; w < cb2.length; w++) { const nw = cb2[w] & ~cb[w]; if (nw) for (let b = 0; b < 32; b++) if (nw & (1 << b)) { const k = w * 32 + b; if (k < L.coinTiles.length) tiles.push(L.coinTiles[k]); } }
+		if (!tiles.length) {
+			tiles.push(tileOfSim(sim, W, H));
+			const tt = sim._pastx >= 0 && sim._pasty >= 0 && sim._pastx < W && sim._pasty < H ? sim._pasty * W + sim._pastx : -1;
+			if (tt >= 0 && tt !== tiles[0]) tiles.push(tt);
+		}
+		trig.push({ t: t + 1, tiles, bad: dead, cx: sim.px + 8, cy: sim.py + 8 });
+		p0 = p; cb = cb2; dead = false;
+	}
+	const cand = [];
+	for (let i = 1; i < trig.length; i++) {
+		const a = trig[i - 1], b = trig[i];
+		const ticks = b.t - a.t;
+		if (b.bad || ticks < REDO_MIN || !b.tiles || !b.tiles.length) continue;
+		let d = Infinity;
+		for (const tl of b.tiles) d = Math.min(d, Math.hypot((tl % W) * 16 + 8 - a.cx, ((tl / W) | 0) * 16 + 8 - a.cy));
+		cand.push({ from: a.t, to: b.t, ticks, gap: Math.round(ticks - d / VMAX), tiles: b.tiles });
+	}
+	cand.sort((x, y) => y.gap - x.gap || x.from - y.from);
+	const pick = cand.slice(0, K).sort((x, y) => x.from - y.from);
+	const edges = [], forceT = new Set(), legs = [];
+	if (!pick.length) return { edges, forceT, legs, ms: Date.now() - t0, triggers: trig.length - 1 };
+	// (the route's states at the picked legs' starts)
+	const snaps = new Map();
+	sim.reset();
+	for (let t = 0, i = 0; i < pick.length && t <= masks.length; t++) {
+		while (i < pick.length && pick[i].from === t) { snaps.set(t, sim.snapshot()); i++; }
+		if (t < masks.length) { E.applyMask(inp, masks[t]); sim.tick(inp); }
+	}
+	let B = null;
+	try { B = require('./lab/backward.js').createBackward(L); } catch (e) { return { edges, forceT, legs, ms: Date.now() - t0, why: 'backward: ' + e.message }; }
+	// (the largest gaps first: the clock is per leg)
+	for (const g of pick.slice().sort((x, y) => y.gap - x.gap)) {
+		const snap = snaps.get(g.from);
+		const lt = Date.now();
+		let r = null;
+		for (const f of [0.4, 1]) {
+			const left = legMs - (Date.now() - lt);
+			if (left < 300 || (r && (r.ok || /walk|bug|target/.test(r.why || '')))) break;
+			try { r = B.solve(snap, { tiles: g.tiles }, { ms: f < 1 ? Math.round(legMs * f) : left }); } catch (e) { r = { ok: false, why: 'error: ' + String(e && e.message || e).slice(0, 120) }; }
+		}
+		const lg = { from: g.from, to: g.to, ticks: g.ticks, gap: g.gap, ok: !!(r && r.ok), T: r && r.ok ? r.masks.length : null, why: r && !r.ok ? r.why || '' : '', ms: Date.now() - lt };
+		legs.push(lg);
+		if (typeof log === 'function') log(`redo ${g.from}-${g.to} (${g.ticks} ticks, gap ${g.gap}): ${lg.ok ? `${lg.T} ticks` : `none (${lg.why})`} in ${lg.ms} ms`);
+		if (r && r.ok && r.masks.length) { edges.push({ from: g.from, to: g.to, masks: r.masks }); forceT.add(g.from); forceT.add(g.to); }
+	}
+	B = null;
+	return { edges, forceT, legs, ms: Date.now() - t0, triggers: trig.length - 1 };
+}
+
+/**
  * joinRoute(L, masks, o): passes of the DP (each on the route the last one made: new waypoints, new joins) while they gain
  * and the clock lasts; the gap waypoints (o.gap, default 24) in every other pass; then the proofs of the result's legs.
  */
 function joinRoute(L, masks0, o) {
 	o = o || {};
 	const t0 = Date.now();
-	const ms = o.ms > 0 ? o.ms : 60000, deadline = t0 + ms;
+	const ms = o.ms > 0 ? o.ms : 60000;
+	let deadline = t0 + ms;
 	const ev0 = C.evaluate(L, masks0, true);
 	if (!ev0) return { masks: masks0, runTicks: -1, before: -1, saved: 0, why: 'the route does not finish' };
 	const S = MS.createSolver(L, {});
@@ -634,11 +765,18 @@ function joinRoute(L, masks0, o) {
 		for (let t = 0; t < ev0.ms.length && !sm.has_silver_crown; t++) { E.applyMask(ip, ev0.ms[t]); sm.tick(ip); }
 		o = Object.assign({}, o, { blind: blindOf(L, ev0.deaths, { gold: sm.coins | 0, blue: sm.blue_coins | 0 }) });
 	}
+	// THE LEG REDO (opt-in): its solves first, on their own clock (o.redoMs a leg); the DP's clock starts after them
+	const redoK = o.redo !== undefined ? Math.max(0, o.redo | 0) : REDO_K;
+	let redo = null;
+	if (redoK > 0) {
+		redo = redoSolve(L, ev0.ms, o.blind, redoK, o.redoMs > 0 ? o.redoMs : REDO_MS, o.log);
+		deadline += Date.now() - t0;
+	}
 	const proveShare = o.prove === false ? 0 : Math.min(20000, Math.max(1500, 0.15 * ms));
 	const dEnd = deadline - proveShare;
 	let cur = ev0;
 	const passes = [];
-	const stats = { legs: 0, legOk: 0, cands: 0, arrivals: 0, follow: 0, skips: 0, nodes: 0, pruned: 0, legMs: 0, ex: 0, exFound: 0, exGoals: 0, exBest: 0, exMs: 0, shift: 0, bridge: 0, brShift: 0, brLeg: 0, brExact: 0 };
+	const stats = { legs: 0, legOk: 0, cands: 0, arrivals: 0, follow: 0, skips: 0, nodes: 0, pruned: 0, legMs: 0, ex: 0, exFound: 0, exGoals: 0, exBest: 0, exMs: 0, shift: 0, bridge: 0, brShift: 0, brLeg: 0, brExact: 0, ...(redo ? { redo: 0, redoOk: 0, redoGain: 0 } : {}) };
 	let gainless = 0;
 	for (let p = 0; p < (o.passes > 0 ? o.passes : 8) && Date.now() < dEnd - 500; p++) {
 		// (the pass kinds in turn: tile-entry waypoints every 24 ticks, the supports alone, and with LONG (EEAT_JOINS_LONG=1 /
@@ -650,6 +788,7 @@ function joinRoute(L, masks0, o) {
 		// (a pass gets the rest of the clock, but the first pass at most 2/3 of it (half with the long passes): a second pass on the new route)
 		const pEnd = Date.now() + (p === 0 ? Math.max(1000, left * (kinds === 3 ? 0.5 : 2 / 3)) : (kinds === 3 && p === 1 ? left * 0.5 : left));
 		const po = kind === 2 ? { gap: 0, stride: o.lStride > 1 ? o.lStride : 4, chain: true, span: o.lSpan > 0 ? o.lSpan : 400, M: o.lM > 0 ? o.lM : 3, legMs: o.lLegMs > 0 ? o.lLegMs : 500, exact: false } : { gap };
+		if (p === 0 && redo && redo.edges.length) Object.assign(po, { forceT: redo.forceT, redoEdges: redo.edges });
 		const r = joinOnce(L, cur, Object.assign({}, o, po), pEnd, S);
 		for (const k of Object.keys(stats)) stats[k] += (r.stats && r.stats[k]) || 0;
 		passes.push({ pass: p, gap, kind: kind === 2 ? `stride ${po.stride}` : (gap ? `gap ${gap}` : `supports`), from: cur.runTicks, to: r.ev.runTicks, accepted: r.accepted, waypoints: r.waypoints, chainTicks: r.chainTicks, skips: r.skips, legsUsed: r.legsUsed, timeUp: r.timeUp, ms: r.ms });
@@ -662,6 +801,7 @@ function joinRoute(L, masks0, o) {
 		passes, stats, blind: o.blind ? { gold: o.blind.gold, blue: o.blind.blue, cp: o.blind.cp } : null, legs: pr ? pr.legs : [], proven: pr ? pr.proven : 0, provenTicks: pr ? pr.provenTicks : 0, proveAsked: pr ? pr.asked : 0,
 		lbSum: pr ? pr.lbSum : 0, fasterLegs: pr ? pr.faster : 0, waypoints: pr ? pr.waypoints : 0, provenRoute: false, ms: Date.now() - t0,
 		xAsked: pr ? pr.xAsked : 0, fasterExact: pr ? pr.fasterExact : 0, fasterExactTicks: pr ? pr.fasterExactTicks : 0, provenBy: pr ? pr.provenBy : {},
+		...(redo ? { redo: { legs: redo.legs, edges: redo.edges.length, triggers: redo.triggers, ms: redo.ms, ok: stats.redoOk || 0, gain: stats.redoGain || 0 } } : {}),
 	};
 }
 
