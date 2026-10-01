@@ -1116,8 +1116,8 @@ ways in.
   2^ttBits slots, cleared before each C; a state is pruned only when some worker entered it at a layer <= this one under the
   same C: sound under any interleaving) where levelproof.js's per-worker tables searched 2.6x the nodes (Switch Labyrinth C 21:
   16.1 M nodes on 16 workers vs 6.2 M on one, 5.6 M shared on 4). Switch Labyrinth (box 7, 19 threads, load ~180, U 27 = the
-  best known): C 24 closed in 239 s (164 M nodes): every route takes >= 24 run ticks; each C ~3.4x the last (C 27 ~2 h on 19
-  threads). WHERE THE NODES GO (`src/out/b7proof/nodemap.js`, C 21): 99.99% with the centre in the pocket under the down boost
+  best known): C 24 closed in 239 s (164 M nodes), C 25 in 848 s (491 M nodes): EVERY ROUTE TAKES >= 25 RUN TICKS (the gap
+  2); each C ~3x the nodes of the last (C 26 ~45 min, C 27 ~2-3 h on 19 threads at that load). WHERE THE NODES GO (`src/out/b7proof/nodemap.js`, C 21): 99.99% with the centre in the pocket under the down boost
   (96, 25), a team-1 ball through the team door (96, 26), where the bounds read ~10 ticks to the trophy and an exhaustive
   search finds no crown within 60 ticks (4.4 M states): the bounds' walks go up through the down boost. NEXT: the boost's push
   in the bound (a tick that starts in a boost sets that speed to 16 along it, and the centre moves at most 16 px a tick, so it
