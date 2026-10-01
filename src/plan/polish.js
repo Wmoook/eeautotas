@@ -35,7 +35,12 @@ const SNAP = 32;
 // the loop cuts of the mutation pass (mutatePass, LOOP CUTS)
 const LOOPS_ON = process.env.EEAT_POLISH_LOOPS !== '0' && process.env.EEAT_PERFECT !== '0';
 const COIN_LOOPS = process.env.EEAT_POLISH_COINLOOPS !== '0';
-const LOOP_MIN = 24, LOOP_R = 12, LOOP_V = 1.5, LOOP_K = 3, LOOP_GAP = 8, LOOP_D = [-1, 0, 1], LOOP_SHARE = 0.25;
+const LOOP_MIN = 24, LOOP_GAP = 8, LOOP_D = [-1, 0, 1], LOOP_SHARE = 0.25;
+// (the partners' radius, speed tolerance and count: EEAT_LOOP_R / EEAT_LOOP_V / EEAT_LOOP_K, unset = 12 px / 1.5 / 3 as
+// before; lane 2 block 3's crumb-detour measure: every cut is still the exact (or coin-blind) rejoin of before)
+const envNum = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' && Number.isFinite(+process.env[k]) ? +process.env[k] : d);
+const LOOP_R = envNum('EEAT_LOOP_R', 12), LOOP_V = envNum('EEAT_LOOP_V', 1.5), LOOP_K = envNum('EEAT_LOOP_K', 3);
+const LOOP_WIDE = process.env.EEAT_LOOP_WIDE === '0' ? null : [{ r: 24, v: 4, k: 6 }, { r: 48, v: 8, k: 8 }, { r: 96, v: 16, k: 12 }];
 
 /** the route's replay: per tick its state hash, snapshots every SNAP ticks, the latest tick of each hash */
 function traceRoute(L, masks) {
@@ -95,12 +100,14 @@ function mutatePass(L, masks, o) {
 	// rejoin rule (a state equal to a LATER route state: a proven shortcut) and re-anchoring as every move; the latest
 	// LOOP_K partners of t (the longest cuts first). Only with o.loops (polishRoute's loop pass (a1); EEAT_POLISH_LOOPS=0 / EEAT_PERFECT=0: no such pass).
 	const loopsOn = o.loops === true;
+	// (o.loopR / o.loopV / o.loopK: THE WIDE LOOPS' rungs, polishRoute's loop pass; unset = the constants)
+	const lR = o.loopR > 0 ? o.loopR : LOOP_R, lV = o.loopV > 0 ? o.loopV : LOOP_V, lK = o.loopK > 0 ? o.loopK : LOOP_K;
 	const loopPartners = (t) => {
 		const out = [];
 		if (!loopsOn) return out;
-		for (let b = n - 1; b >= t + LOOP_MIN && out.length < LOOP_K; b--) {
-			if (G[b] !== G[t] || Math.abs(PX[b] - PX[t]) + Math.abs(PY[b] - PY[t]) > LOOP_R) continue;
-			if (Math.abs(VX[b] - VX[t]) + Math.abs(VY[b] - VY[t]) > LOOP_V) continue;
+		for (let b = n - 1; b >= t + LOOP_MIN && out.length < lK; b--) {
+			if (G[b] !== G[t] || Math.abs(PX[b] - PX[t]) + Math.abs(PY[b] - PY[t]) > lR) continue;
+			if (Math.abs(VX[b] - VX[t]) + Math.abs(VY[b] - VY[t]) > lV) continue;
 			// (one partner per LOOP_GAP ticks: the next is another pass, not the same one a tick apart)
 			if (out.length && out[out.length - 1] - b < LOOP_GAP) continue;
 			out.push(b);
@@ -365,16 +372,28 @@ function polishRoute(L, masks0, o) {
 	// time); o.loopsOnly: this pass alone with the whole clock)
 	if (!o.noMutate && !o.noLoops && LOOPS_ON && (o.loopPass || o.loopsOnly)) {
 		const lEnd = o.loopsOnly ? deadline : Math.min(deadline, Date.now() + LOOP_SHARE * (deadline - Date.now()));
-		for (let pass = 0; pass < 8 && Date.now() < lEnd; pass++) {
-			const cur = best.ms;
-			// (coin-blind rejoins where no coin sits on a portal entry: C.coinFreeOk; every combination is replayed by accept)
-			const mp = mutatePass(L, cur, { deadline: lEnd, stop, onlyLoops: true, loops: true, horizon: o.horizon, drift: o.drift, coinBlind: COIN_LOOPS && C.coinFreeOk(L) });
-			if (!mp.shortcuts.length) break;
-			const set = bestShortcutSet(cur.length, mp.shortcuts);
-			const saved = set.reduce((a, c) => a + c.saved, 0);
-			let ok = accept(spliceShortcuts(cur, set), `loops ${set.length} (${saved})`);
-			if (!ok) for (const c of mp.shortcuts.slice().sort((x, y) => y.saved - x.saved).slice(0, 32)) { if (Date.now() > lEnd) break; if (accept(spliceShortcuts(cur, [c]), `loops 1 (${c.saved})`)) { ok = true; break; } }
-			if (!ok || mp.timeUp) break;
+		// THE WIDE LOOPS (C6 push 3 lane 2 block 3; loopsOnly (the LOOPS stage) only; EEAT_LOOP_WIDE=0: off, the pass as
+		// before): once the passes at the constants' radius / speed tolerance end with time left, the same passes again
+		// with wider partners (LOOP_WIDE: 24 px / 4 px/tick / 6, 48 / 8 / 8, 96 / 16 / 12): a revisit at another speed is
+		// still a cut only by the exact (or coin-blind) rejoin of the route's own later inputs, replayed and judged by
+		// accept as before. The first rung is the pass of before with the same clock, so the stage never ends slower than
+		// it did (a wider rung starts only from its result, with the time it left). Why: EX Crew Ice's 300-s route (main
+		// 23f1f3a: 12,916 run ticks, the known 4,579; its route came at 298.7 s, the loops stage then -841 in 1.5 s and
+		// done): from its final route the constants find no cut, the widening rungs alone -162 / -300 / -501 (4 / 7 / 14 s).
+		const rungs = [{}].concat(o.loopsOnly && LOOP_WIDE ? LOOP_WIDE : []);
+		for (const rg of rungs) {
+			if (Date.now() >= lEnd) break;
+			for (let pass = 0; pass < 8 && Date.now() < lEnd; pass++) {
+				const cur = best.ms;
+				// (coin-blind rejoins where no coin sits on a portal entry: C.coinFreeOk; every combination is replayed by accept)
+				const mp = mutatePass(L, cur, { deadline: lEnd, stop, onlyLoops: true, loops: true, horizon: o.horizon, drift: o.drift, coinBlind: COIN_LOOPS && C.coinFreeOk(L), loopR: rg.r, loopV: rg.v, loopK: rg.k });
+				if (!mp.shortcuts.length) break;
+				const set = bestShortcutSet(cur.length, mp.shortcuts);
+				const saved = set.reduce((a, c) => a + c.saved, 0);
+				let ok = accept(spliceShortcuts(cur, set), `loops${rg.r ? ' r' + rg.r : ''} ${set.length} (${saved})`);
+				if (!ok) for (const c of mp.shortcuts.slice().sort((x, y) => y.saved - x.saved).slice(0, 32)) { if (Date.now() > lEnd) break; if (accept(spliceShortcuts(cur, [c]), `loops${rg.r ? ' r' + rg.r : ''} 1 (${c.saved})`)) { ok = true; break; } }
+				if (!ok || mp.timeUp) break;
+			}
 		}
 	}
 	if (o.loopsOnly) return { masks: best.ms, runTicks: best.runTicks, saved: ev0.runTicks - best.runTicks, legs: [], steps, ms: Date.now() - t0 };
