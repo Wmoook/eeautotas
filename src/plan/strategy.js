@@ -139,8 +139,25 @@ const CR_F_SLACK = +process.env.EEAT_CR_F_SLACK || 0.1, CR_F_ABS = +process.env.
 // levels the trophy steps took 25% of the failed time with no success at any rung (the whole level left as one leg)
 const FAR_TROPHY = +process.env.EEAT_FAR_TROPHY > 0 ? +process.env.EEAT_FAR_TROPHY : 0;
 const FAR_TROPHY_RUNG = process.env.EEAT_FAR_TROPHY_RUNG !== undefined ? +process.env.EEAT_FAR_TROPHY_RUNG : 1;
-/** the rung a step's window is sized by: its own, or the far trophy's cap */
-const windowRung = (step) => (FAR_TROPHY > 0 && step && !step.synthetic && (!step.waypoint || step.waypoint.kind === 'trophy') && +step.estTicks > FAR_TROPHY ? Math.min(step.rung | 0, FAR_TROPHY_RUNG) : step.rung);
+// THE FAR WALK (C6 push 3 lane 2 block 3, RATE; OPT-IN EEAT_FAR_WALK=<walk ticks>, unset / 0: off, the compile byte for
+// byte as before): the far trophy's window cap for EVERY waypoint kind, by the step's WALK: its est, or for an est at or
+// past the planner's PENALTY (1e6: an edge only the relaxation reaches, est = 3 x the relaxation's walk x the pace +
+// PENALTY; a floor / zone / rch price adds PENALTY too) the rest past the penalties / 3 (the relaxation's own price is
+// 3x). A step whose walk is longer runs at most at rung EEAT_FAR_WALK_RUNG (1) whatever rung its facts reached; its
+// failures still climb the facts' ladder (the planner moves on as before). A death step (its est the dead ticks, its
+// window the respawn's) and a synthetic step keep their rung. Why (lane 2 block 3, the far-trophy arm's step events, the
+// 18 RATE levels, 300 s, 4,021 steps with their est): '1e6+' is NOT a whole level: 144 of those steps succeeded (33 at
+// the 45-s rung), the rest past the penalty is the relaxation's walk; by the WALK, no step of a plain est >= 3,000 ticks
+// succeeded at any rung (0 of ~470) and 1 of 230 of a penalty est with a rest >= 10,000 (an Inferno coin at rung 3).
+const FAR_WALK = +process.env.EEAT_FAR_WALK > 0 ? +process.env.EEAT_FAR_WALK : 0;
+const FAR_WALK_RUNG = process.env.EEAT_FAR_WALK_RUNG !== undefined ? +process.env.EEAT_FAR_WALK_RUNG : 1;
+const EST_PENALTY = 1e6;   // (planner.js PENALTY)
+/** a step's walk est: its est, or past the planner's penalties the relaxation's walk (the rest / 3) */
+const walkOf = (step) => { const e = +step.estTicks; return !Number.isFinite(e) ? 0 : e >= EST_PENALTY ? (e % EST_PENALTY) / 3 : e; };
+const farWalk = (step) => FAR_WALK > 0 && step && !step.synthetic && !String(step.edge).startsWith('death:') && !(step.waypoint && step.waypoint.allowDeath) && walkOf(step) > FAR_WALK;
+/** the rung a step's window is sized by: its own, or the far trophy's / the far walk's cap */
+const windowRung = (step) => (FAR_TROPHY > 0 && step && !step.synthetic && (!step.waypoint || step.waypoint.kind === 'trophy') && +step.estTicks > FAR_TROPHY ? Math.min(step.rung | 0, FAR_TROPHY_RUNG)
+	: farWalk(step) ? Math.min(step.rung | 0, FAR_WALK_RUNG) : step.rung);
 const ARRIVALS_K = 4, MAX_DEEPEN = 4, STEER_MISS = 6000;
 // the polish's share of the budget once a route is known: min(POLISH_MS, POLISH_F x the budget)
 const POLISH_MS = 15000, POLISH_F = 0.25;
@@ -1523,7 +1540,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const rec = { ev: 'step', n: steps, anchor: A.id, label: labelOf(step), edge: step.edge, nodeClass: step.nodeClass, rung: step.rung, epoch, tool: res.tool || null, ok: !!res.ok, ms, budgetMs: Math.round(budget.ms),
 			why: res.ok ? '' : (fail && fail.why) || '', arrivals: arr.length, news, routes: routes.length };
 		if (fail && fail.closest) rec.closest = { tile: fail.closest.tile, dist: fail.closest.dist };
-		if (FAR_TROPHY > 0) { rec.est = Number.isFinite(+step.estTicks) ? Math.round(+step.estTicks) : null; if (windowRung(step) !== step.rung) rec.farTrophy = windowRung(step); }
+		if (FAR_TROPHY > 0 || FAR_WALK > 0) { rec.est = Number.isFinite(+step.estTicks) ? Math.round(+step.estTicks) : null; if (windowRung(step) !== step.rung) rec.farTrophy = windowRung(step); }
 		// (the executor's exact end search from a near start, when it ran: tier 0b)
 		const nearT = Array.isArray(res.tiers) ? res.tiers.find((x) => x && x.tier === 'near') : null;
 		if (nearT) rec.near = { ok: nearT.ok, runs: nearT.runs, ms: nearT.ms, nearest: nearT.nearest };
