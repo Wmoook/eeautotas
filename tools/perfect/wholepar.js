@@ -18,7 +18,7 @@
 // ours when below it (replayed, written to --out); C = U (our route's run ticks) closing = OUR ROUTE IS PROVEN OPTIMAL.
 //   node tools/perfect/wholepar.js <level.eelvl> [--route=<a.eetas>[,<b.eetas>]] [--U=<run ticks>] [--threads=8]
 //        [--seconds=1800] [--split=3] [--ttBits=23] [--tiers=kin,togo,rel,gate] [--from=<C>] [--out=<faster.eetas>]
-//        [--check=1] [--log=<tasks.jsonl>] [--resume=<tasks.jsonl>] [--reverse=1]
+//        [--check=1] [--log=<tasks.jsonl>] [--resume=<tasks.jsonl>]
 // Prints JSON lines ({ev 'check' | 'C' | 'found' | 'result'}).
 const path = require('path');
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
@@ -257,6 +257,9 @@ async function main() {
 	// Sound with the shared table: a logged task pruned a state only where some task of ITS run entered it at a layer <=;
 	// that task was logged too (searched in full) or is not logged and is searched again from its root by the run that
 	// completes the C (its subtree holds that state at that layer, or a state some completed task of that run covers).
+	// ONE RUN AT A TIME on a log: the runs must be SEQUENTIAL (a task left unfinished by a run is finished by a LATER run).
+	// Two runs writing one log at the same time are NOT a proof by the union of their lines: each can prune on a task the
+	// other finished and itself did not, so a subtree can be searched by neither.
 	const fs = require('fs');
 	const taskKey = (t) => t.src + ':' + t.prefix.join(',');
 	const doneBefore = new Map();   // C -> Set(task keys)
@@ -294,8 +297,6 @@ async function main() {
 		// (a task searched to the end by an earlier run of this C: skipped, counted done)
 		const before = doneBefore.get(C);
 		const tasks = before ? all.filter((t) => !before.has(taskKey(t))) : all.slice();
-		// (--reverse=1: the tasks from the other end: a second run on the same log meets the first in the middle)
-		if (args.reverse === '1') tasks.reverse();
 		const resumed = all.length - tasks.length;
 		let nodes = tk.nodes, done = resumed, stopped = 0, hit = null;
 		if (resumed) say({ ev: 'resume', C, tasks: all.length, skipped: resumed });
