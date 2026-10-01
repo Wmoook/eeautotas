@@ -72,6 +72,18 @@ const RUNG_WARM = process.env.EEAT_RUNG_WARM === '1';
 // Unlike the warm rung (by edge alone, from any place) it lifts only the steps that start where the window was proven
 // too short. Cleared at a deepening (the facts start over).
 const RUNG_PLACE = process.env.EEAT_RUNG_PLACE === '1';
+// THE START JITTER (B7 lane b9, cycle 3; OPT-IN EEAT_START_JITTER=1, off = the steps' starts byte for byte): lineages that
+// reach a place through the same portal arrive in the SAME physical state (Bad EE Level 9: the anchors at mini 5's
+// entrance (262,246) of c6D1 and c11D, different switch sets, px / speed / ground equal), so every new class's try of a hard
+// leg from there is the same search again; and the leg's finders find it in a 45-s window only from some starts
+// (tools/cmp/legab.js, box 7, 3 reps each: from cycle 2's start, jumping at the entrance, 3 / 3 at 42.6 s; from the
+// compile's own arrival 1.4 px left, standing, 0 / 3; the same arrival + a jump tick 0 / 3; cycle 2's start one tick
+// earlier, standing, 0 / 3). With the knob, once an (edge, place) has failed by the budget, each later step of it from
+// that place swaps the anchor's first arrival for that arrival followed by k ticks of one held input (the k-th try's:
+// jump, right + jump, left + jump, right, left, idle, then the same with 3, 5, .. ticks): another start each time, every
+// one a real state replayed from the level start (a death or a finish in the jitter: the arrival as it is).
+const START_JITTER = process.env.EEAT_START_JITTER === '1';
+const JITTER_MASKS = [1, 5, 3, 4, 2, 0];
 // THE ONE SHOT (n5-oneshot part 3, OPT-IN EEAT_ONESHOT=1; off = the loop below byte for byte): the MOVES stage's first
 // tier: src/plan/oneshot/solve.js, ONE A* over (the move graph x the trigger state) from the level start with the
 // planner's plans and the bounds as its heuristic, for OS_SHARE of the time left before the loop; then in the loop's
@@ -1225,6 +1237,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 	const placeRung = new Map();   // (EEAT_RUNG_PLACE: `${edge}|${place}` -> the rung a step from that place starts at)
 	const placeOf = (A) => (A && A.arrivals && A.arrivals[0] && Number.isFinite(A.arrivals[0].tile) ? A.arrivals[0].tile : null);
 	const placeKey = (step, A) => { const p = placeOf(A); return p === null ? null : `${step.edge}|${p}`; };
+	const placeFails = new Map();   // (EEAT_START_JITTER: `${edge}|${place}` -> the budget failures from there; the jitter's turn)
+	let jitterRuns = 0;
 	const localBlock = new Set();   // `${anchor.key}|${edge}|${nodeClass}`: blocked here (a part's bug)
 	let epoch = 0, mult = 1, deepenings = 0, stalls = 0, lastSteps = [], lastFails = [], bugs = 0, nothingSince = -1;
 	const inflight = new Map();   // edgeKey -> {promise, job, started, budgetMs}
@@ -1705,6 +1719,27 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const rl = RELAY ? relays.get(rk) : null;
 		let rlUsed = false;
 		if (rl && !Number.isFinite(runBound()) && rl.arrival.masks.length < tickBound && !starts.some((s) => s.hash === rl.arrival.hash)) { starts.push(rl.arrival); relayRuns++; rlUsed = true; }
+		// (THE START JITTER: the k-th step of an (edge, place) that failed by the budget starts from the first arrival + a
+		// held input instead of the first arrival itself)
+		let jitter = null;
+		if (START_JITTER && !step.synthetic && starts.length && starts[0] === A.arrivals[0]) {
+			const pk = placeKey(step, A), nf = pk === null ? 0 : (placeFails.get(pk) || 0);
+			if (nf > 0) {
+				const k = nf - 1, mk = JITTER_MASKS[k % JITTER_MASKS.length], len = 1 + 2 * Math.floor(k / JITTER_MASKS.length);
+				const a0 = starts[0], m0 = a0.masks instanceof Uint8Array ? a0.masks : T.masksOf(a0.masks);
+				const m = new Uint8Array(m0.length + len); m.set(m0); m.fill(mk, m0.length);
+				try {
+					const r = replay(m, null, false, m0.length);
+					const h = r.sim.stateHash();
+					if (r.dead < 0 && !r.sim.is_dead && r.finished < 0 && !starts.some((x) => x.hash === h)) {
+						const leg = addLeg({ label: `jitter ${labelOf(step)}`, fromTick: m0.length, ticks: len, lb: null, proven: false, tool: 'jitter', prev: a0.leg || null });
+						starts[0] = Object.assign(T.arrivalOf(L, r.sim, m, RM), { run: r.run, leg, jitter: true });
+						jitter = { k, mask: mk, len };
+						jitterRuns++;
+					}
+				} catch (e) { /* the arrival as it is */ }
+			}
+		}
 		const t1 = Date.now();
 		steps++;
 		const verBefore = factsVer(facts), anchorsBefore = anchors.size;
@@ -1789,6 +1824,12 @@ async function compile(L, opts = {}, emit = () => {}) {
 				else if (rec.why === 'budget') { const nx = Math.min(rungMs.length - 1, r + 1); if (!(f >= nx)) placeRung.set(pk, nx); }
 			}
 			if (step.placeFrom !== undefined) { rec.placeFrom = step.placeFrom; delete step.placeFrom; }
+		}
+		// (THE START JITTER: a budget failure from a place makes the next step from there start elsewhere)
+		if (START_JITTER && !step.synthetic) {
+			const pk = placeKey(step, A);
+			if (pk !== null && !res.ok && rec.why === 'budget') placeFails.set(pk, (placeFails.get(pk) || 0) + 1);
+			if (jitter) rec.jitter = jitter;
 		}
 		if (FAR_TROPHY > 0 || FAR_WALK > 0) { rec.est = Number.isFinite(+step.estTicks) ? Math.round(+step.estTicks) : null; if (windowRung(step) !== step.rung) rec.farTrophy = windowRung(step); }
 		// (the executor's exact end search from a near start, when it ran: tier 0b)

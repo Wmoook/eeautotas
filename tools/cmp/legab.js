@@ -14,6 +14,9 @@
 // summary JSON line to stdout {found, reps, ms per find, ticks, closests}.
 const path = require('path');
 const root = path.join(__dirname, '..', '..');
+// (--defaults=1: the compiler's default knobs (src/plan/defaults.js) set before the parts read the environment, as
+// src/compile.js does: the executor's tiers as a compile runs them)
+if (process.argv.includes('--defaults=1')) require(path.join(root, 'src/plan/defaults.js')).apply();
 const T = require(path.join(root, 'src/plan/types.js'));
 const EX = require(path.join(root, 'src/plan/executor.js'));
 const BM = require(path.join(root, 'src/plan/bounds.js'));
