@@ -1281,3 +1281,32 @@ ways in.
   sub-level set (Phina's labels all stop at c 240-460 of 4,100-4,600, the last 20-40 tiles to blue coin (145,7) fail at
   rung 3 with 800 k sims; TEZ at 529-541 of 699), the failed-with-0-sims sub-legs left are the proof tier's first goal-field
   builds per thread and door state (rf; `EEAT_FIELD_SHARE=1` aims at them).
+  CYCLE 3 (box 8, n5-plan 04ecf95 merged): THE TWO KNOBS TOGETHER (`EEAT_SUBLEG_BOUND=1 EEAT_FIELD_SHARE=1` vs neither, one
+  tree, the same 20 levels, 300 s, W3, par 3 an arm side by side, `EEAT_EXEC_PROF=1` both, the box at load 180-240):
+  compiled 0 = 0, triggers 12 vs 8 (Happy Spookaween 4 vs 2, LOEE Aquatic Sanctuary 2 vs 0, Nirthophia 6 = 6), ok steps
+  57 vs 65; the skeleton deeper (its least c / c0 summed 6.58 vs 9.33: TEZ 0.06 vs 0.49, Endless Pain 0.16 vs 0.84,
+  Dreamland 0.18 vs 0.72, Aquatic Sanctuary 0.07 vs 0.52, Demonic Citadel 0.33 vs 0.76, MegaMan Dash 0.23 vs 0.66;
+  shallower on Rotcil Illusions, TTL Spike, Into Magma Panic, Spookaween); goal-field builds 1,599 vs 3,182 (932 vs 1,711
+  worker-s of ~14,530), the exact tier's setup on sub-legs 767 vs 1,685 s, sub-legs failed with 0 sims 566 vs 1,166; peak
+  RSS median 4.82 vs 5.21 GB, max 6.30 vs 7.31. The gate pair rerun (60 s, 2 runs an arm side by side): One Minute
+  Descent no route in all 4 runs (triggers 10 / 11 base, 10 / 9 knobs: cycle 2's loss is the base's own), MIHB's Dream base
+  1 of 2 compiled (10,124) / 39 triggers, knobs 40 / 40: a 60-s flip. WHERE THE FAR WAYPOINTS' TIME GOES
+  (`tools/cmp/skelprog.js`: per waypoint its steps, rungs, c0, least c, sub-legs, and the reaches to the waypoint itself
+  (the direct / last / stuck-cover / rest-direct legs) vs the sub-legs): every waypoint gets the same rung ladder (1.5 + 5
+  + 15 + 45 s) whatever its length, ~16-20 waypoints a level x 66 s > the 900 worker-s of a 300-s W3 compile, so no big
+  level passes rung 3 on any waypoint; on cycle 2's run the waypoints with c0 >= 1,000 tiles spent 2,291 of their 4,397
+  step worker-s in whole-leg tries, 0 of 452 found (c0 >= 300: 4,714 s, 2 of 1,038 found), while their sub-legs went 4,083
+  ok of 4,762 (this cycle's base 1,809 s, 2 of 484; the knobs' arm 2,330 s, 0 of 470). THE FAR WAYPOINT'S WHOLE-LEG SHARES
+  (executor.js reachWp, OPT-IN `EEAT_SKEL_FAR=<tiles>`, unset / 0 = byte for byte): the direct leg (and its redirect), the
+  coverage finder's stuck slot (from the step's starts: by c0) and the rest-direct leg (from the deepest level: by cCur)
+  get their share x F / c over a way of c > F tiles, none under 100 ms; the time goes to the skeleton (the direct leg's
+  share) or back to the strategy (the call returns sooner); stats `farDirect`, `farDirectSkip`, `farCoverSkip`,
+  `farRestSkip`; planexec 14/14, planstrategy 27/0 with it. THE A/B (`EEAT_SKEL_FAR=300` vs off, one tree, the 6
+  far-waypoint levels Phina and the Rose, Hold Jump Challenge, TTL Spike, I Crew Persian Peril, MegaMan Dash, Sentinel
+  Ravines, 300 s, W3, par 3 an arm side by side): the far waypoints' whole-leg tries 502 vs 1,250 worker-s (2 vs 1 found),
+  their sub-legs 2,556 vs 1,564 s, sub-legs ok 3,153 vs 2,830 in all; compiled 0 = 0, triggers 0 = 0, ok steps 48 vs 47,
+  the skeleton's least c / c0 summed 2.40 vs 2.14 (MegaMan Dash 0.65 vs 0.39, whose depth flips 0.23-0.67 between runs of
+  one code; Persian Peril 0.11 vs 0.14; Phina 0.01 both): the freed time goes to the sub-legs, and the skeletons stop at
+  the same hard sub-level sets: NO GAIN SHOWN, opt-in, not merged. NEXT: the hard sub-level set itself (Phina's last 38
+  tiles to blue coin (145,7), TEZ, MegaMan Dash's 887-tile stop), and the time per waypoint by the plan's order rather
+  than a breadth-first ladder over ~17 waypoints.
