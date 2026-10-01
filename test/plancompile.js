@@ -378,7 +378,9 @@ function sectionTruth(TMP) {
 	fs.writeFileSync(path.join(lv, '01_notrophy.eelvl'), eelvlOfRows(NOTROPHY, 'no trophy'));
 	const out = path.join(TMP, 'truthout');
 	const r = spawnSync(process.execPath, [path.join(ROOT, 'src', 'plan', 'truth.js'), '--part=model,compile', '--sets=campaign', '--seconds=8', '--workers=2', `--root=${root}`, `--out=${out}`, `--parts=${path.join(__dirname, 'planmock.js')}`],
-		{ encoding: 'utf8', timeout: 120000, env: Object.assign({}, process.env, { PLANMOCK_MODE: 'normal' }) });
+		// (EEAT_S99_DEFAULTS=0: the mock parts' runs; the stretch / chain children are real solvers the loop waits for, and
+		// under load they took this part past its 120-s timeout once in three runs)
+		{ encoding: 'utf8', timeout: 120000, env: Object.assign({}, process.env, { PLANMOCK_MODE: 'normal', EEAT_S99_DEFAULTS: '0' }) });
 	const rows = fs.existsSync(path.join(out, 'truth.jsonl')) ? fs.readFileSync(path.join(out, 'truth.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
 	const lv0 = rows.find((x) => x.kind === 'level' && x.name === '00_toy'), lv1 = rows.find((x) => x.kind === 'level' && x.name === '01_notrophy');
 	const tot = rows.find((x) => x.kind === 'totals');
