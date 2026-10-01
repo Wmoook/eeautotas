@@ -515,7 +515,10 @@ ways in.
   replayed. PER STRETCH as shipped (box 6, every answer replayed, 0 rejected): THE 1,123 REAL 4-MOVE CHAINS in ONE 40-s
   budget **97.2%** (1,092; the portfolio before the fields pass 95.4%, msolve.chain 47.2% at 5 s), found in 384 ms median
   (p90 1.8 s), 99.7 / 100 / 97.9 / 90.6 / 85.5% by route ticks 0-60 / 60-120 / 120-240 / 240-480 / 480+ (76.8% before),
-  FIELD chains **95.9%** (plain 98.6%, teleports 95.1%); the legs by arm: backward 1,026, corridor 36, profile 25, leg finder 5.
+  FIELD chains **95.9%** (plain 98.6%, teleports 95.1%); the legs by arm: backward 1,026, corridor 36, profile 25, leg finder 5;
+  the lab's 55 stuck known-route trigger legs (30 s) 37 / 55 from the previous trigger, 29 / 32 from 300 route ticks before,
+  39 / 42 from 120: 105 / 129. THE FULL COMPILE (300 s, the S99 stack on d674cb9): **50 / 230** vs 46 / 44 without them (the
+  "Where it stands" bullet; merged into main 23f1f3a).
 - **In the app**: the level editor's **Compile** button (POST / GET `/api/editor/compile`, section 9) runs the CLI in its own
   process in `<data>/editor/compile/`, shows its stage lines, replays the route once more, makes a job `<name> (compiled)`
   (watch it, optimize it like any run) and copies its `/loadtas` line. `src/plan.js` is the headless runner (JSON lines):
@@ -530,13 +533,56 @@ ways in.
   never take a leg's answer away (leg() runs every tier as without them, below a trick's answer: `bres`); they solve
   more of the routes' own moves (tools/tricks/legab.js, fieldlegs.js) but not more compiles (25 vs 25 of 48 at 300 s).
   Mining tools: `tools/tricks/` (mine.js, fieldmine.js, legab.js, fieldlegs.js), `tools/cmp/tricks3.js`, `idleshift.js`.
-- **Where it stands** (the final compile, 2026-09-30, box 3, 60 s, `--workers=3`): **16 / 230 compile at 60 s** (campaign 9 / 203,
-  hard 7 / 25, Bad EE Level 9 and Cold World 0 / 2), **24 / 230 at <= 180 s**; the same code's 60-s runs 13-17 (the run-to-run
-  spread); every .eetas replayed from the level alone; median ticks / best known 1.26, a few at or under the best known
-  (Desolate Caverns 1,619 vs 1,700, My level 730c 98 vs 101, Switch Labyrinth 27 = 27). Every compile spends its budget. THE
-  GOAL (all 230, < 1 min) IS NOT REACHED: the MOVES stage is the wall (long legs through fields, arrivals: from the known route's
-  own state at the previous trigger 31 of 78 stuck legs are found, `tools/cmp/krt.js`). The chief's records: `src/out/n4plan/`
-  (`FINAL.md`, `brief.md`; gitignored).
+- **Where it stands** (2026-09-30 ~21:30, **300 s**, `--workers=3`, one full compile, every .eetas read back to its finish):
+  **50 / 230 with THE STRETCH DEFAULTS** (S99, n5-s99-ship 0e1d64e = n5-plan d674cb9 + the corridor's fields pass + the stretch
+  solver + the gated chain + EEAT_PORTFOLIO / EEAT_CORR_FIELDS / EEAT_STRETCH / EEAT_BW_CHAIN on; boxes 5 + 6, the chief's
+  block-1 split, par 12-22: campaign 42 / 203, hard 8 / 25, Bad EE Level 9 and Cold World 0 / 2; 50 / 50 replayed; a route by
+  60 s 23, by 180 s 43, the first route's median 80.5 s; peak RSS a compile median 5.1 GB (the base 3.3 GB: the stretch /
+  chain children)) vs the same base without them 46 (block 1) / 44 (block 0), 52 in either: NEW (in neither base run) Just
+  One More Time, Stone Ruin Speedrun, Gravity's Rainbow (2,018 < the best known 2,197), Ice Cream Expedition; + Tutorial 2,
+  TPs The Horror, Snow Jumping, Endless Space, Vignettes (8,233 < 10,056), EX Crew Ice (block 0 only); - Aperture, Lab of
+  Insanity, Trail Blazer (block 1 only), Presto Penguins, YMCK Puzzle Parade, Relics Of Athena (both base runs: WATCH). The
+  40 both compiled: 145,198 vs 153,204 run ticks (-5.2%), faster 27 / slower 7 / same 6 (geo-mean 0.947: The Blank Page
+  2,023 vs 3,062, INFINITE 3,099 vs 4,079, Trick Or Treat 2,943 vs 4,181, A Dreary Day 4,070 vs 5,278, EE mountain world
+  9,965 vs 13,238, Tutorial 4 5,231 vs 7,121; slower Tutorial 3 6,066 vs 3,783, On And On 3,310 vs 2,734, Frostbitten 9,814
+  vs 8,172, Buuwuu 7,968 vs 6,883). TAS: ticks / best known median **1.103** (44 levels with one), **11 AT OR UNDER THE BEST
+  KNOWN TAS**: INFINITE 3,099 vs 5,063 (0.612), Christmas Town 4,307 vs 6,340 (0.679), Late christmas 5,927 vs 7,487 (0.792),
+  Ruins 1,211 vs 1,522 (0.796), Vignettes (0.819), Summer Bee 5,956 vs 6,835 (0.871), Desolate Caverns 1,490 vs 1,700
+  (0.876), Gravity's Rainbow (0.919), My level 730c 93 vs 101 (0.921), Crypts Of Anubis 3,270 vs 3,374 (0.969), Switch
+  Labyrinth 27 = 27; the farthest EX Crew Ice 2.82, Tutorial 2 1.63, Tutorial 4 1.49. The records: box 5 / 6
+  `~/s99_ship_out/` (f300, summ_*.json, firsts_*.json). BEFORE THE STRETCH DEFAULTS (the C6
+  chief's block 1, boxes 5 + 6: `src/out/n5/full_c6_b1.md`): **46 / 230** with n5-plan aa4d121 (this merge takes n5-plan
+  d674cb9 = aa4d121 + the portfolio tier and the chain's walk-off nodes, both OPT-IN: the same defaults by the diff;
+  campaign 39 / 203, hard 7 / 25, Bad EE Level 9 and Cold World 0 / 2; a verified route by 60 s 17, by 180 s 36; the first
+  route's median 90 s; 46 / 46 replayed), **the knobs on by default**: the compiler's defaults (`src/plan/defaults.js`, above:
+  EEAT_COVER=3, EEAT_CRUMBS=1, EEAT_FIELD_MEMO, EEAT_PLAN_ANY, EEAT_PLAN_UNTOGGLE, EEAT_FX_FIELD, EEAT_FX_STATE, EEAT_ICE_LOCAL,
+  EEAT_PROT_LAYER), the perfect pass (`EEAT_PERFECT` / `EEAT_PERFECT_PASS`), the braked rests (`EEAT_PREC_FAST`), the loop
+  cuts and the LOOPS stage, JOINS (`EEAT_JOINS`), the `idle` trick; every other knob of this section stays OPT-IN (the one
+  shot, the timer, the lab tiers `EEAT_BACKWARD` / `EEAT_BW_LEVEL` / `EEAT_CORRIDOR` / `EEAT_PROFILE`, `EEAT_CHAIN_PFIELD`,
+  `EEAT_CHAIN_LIFT`, `EEAT_CRUMB_DETOUR`, `EEAT_PORTFOLIO`). The same defaults' two full runs (3d52987, aa4d121): 44 and 46, 38 routed in both, **52 in either**
+  (~6-8 levels are the run-to-run spread). Before it: main 9d2f014 (n5-perfect with the perfect pass default on) **28 / 230**
+  (now +21 / -3: Tutorial 2, Gravity's Rainbow, Endless Space), the C5 compiler d12bb0c 24 / 230, the final compile at 60 s
+  16 / 230. TAS: ticks / best known median **1.115** (39 levels with one; main's 1.116 on 25), **9 AT OR UNDER THE BEST KNOWN
+  TAS**: Christmas Town 5,000 vs 6,340 (0.789), INFINITE 4,079 vs 5,063 (0.806), Late christmas 6,244 vs 7,487 (0.834),
+  Desolate Caverns 1,420 vs 1,700 (0.835), Ruins 1,287 vs 1,522 (0.846), Summer Bee 6,354 vs 6,835 (0.93), My level 730c 97
+  vs 101 (0.96), Frostbitten 8,172 vs 8,417 (0.971), Switch Labyrinth 27 = 27; the farthest Tutorial 4 2.03, Trick Or Treat
+  1.87, A Dreary Day 1.65, The Blank Page 1.60. Proofs: 1,277 of the 5,594 legs, no whole route. Its checks: T-MODEL-EXACT
+  219 routes 0 unsound, T-PLAN-ORACLE 2 / 0, msolve --quick 50 / 0, the unit tests, the shared gate (60 s) exit 0, 15 vs 13.
+  THE GOAL (all 230, < 1 min) IS NOT REACHED: 184 fail at 300 s (148 of them 200 x 200 or larger); the MOVES stage is the
+  wall (168 end PARTIAL on 'budget', 15 on the first leg; classes STUCK-FIELD 71, RATE 55, STUCK-PLAIN 34, ONE-LEG 15,
+  CLAIM-DEATH 5, NEAR 4). A 300-s compile ends at ~360 s (the LOOPS and JOINS stages' own clocks after the budget). The
+  records: `src/out/n4plan/` (`FINAL.md`, `brief.md`), `src/out/n5/` (`full_c6_b1.md` / `.jsonl`, `f300_*`, `idle/`;
+  gitignored).
+- **OPEN ITEM: the routes are +5.9% run ticks on main's old levels** (the merge A/B, main 9d2f014 vs n5-plan side by side,
+  box 5, 300 s, W3, the 29 levels main or C5 routed, two A/Bs pooled: 145,207 vs 137,113 run ticks on the pairs both arms
+  routed; compiled 28 vs 23 and 26 vs 25, only main: none in the second): **Tutorial 2 x1.5-2.0 in every sample, by THE
+  CRUMBS** (`EEAT_CRUMBS`, a default: its route takes 2 blue coins no gate reads, +1,531 ticks; 4,487 of the 8,094-tick
+  excess, without it +2.8%; `EEAT_CRUMBS=0` 3,080 / 2,901 vs the best known 2,947); MIHB's Dream +7 / +12%, Tree Decorating,
+  Frostbitten and Bygone Tutorial slower in both samples. THE FIXES IN PROGRESS: lane 5's crumb detour (`EEAT_CRUMB_DETOUR`,
+  opt-in, planner.js crumbPlan: with `EEAT_CRUMB_AFTER=3` Tutorial 2 3,046 in 1 of 2 runs, but On And On And On and Perilous
+  Endeavor lost, so not a default yet) and the S99 portfolio (`EEAT_PORTFOLIO=1`, THE PORTFOLIO CHAIN SOLVER below, merged
+  OPT-IN: -11.2% run ticks on the 19 levels both arms routed of 48 at 120 s, faster 14 / slower 0). Merged anyway (2026-09-30): far
+  more levels compile and nothing main compiled is lost.
 - **The one shot** (`EEAT_ONESHOT=1`, OPT-IN; section 6's `src/plan/oneshot/*` row): the MOVES stage's first tier, ONE A* over
   (real engine states x the trigger state) with the planner's steps and the bounds as its order, in a thread of its own next
   to the executor from the compile's start: its routes are routes (verified), the executor's anchors and routes go into it
@@ -812,8 +858,8 @@ ways in.
   a level spreads +-40%, no gain shown: both stay opt-in.
 - **Checks**: unit tests `test/plantypes.js`, `planmodel.js`, `planplanner.js`, `planbounds.js`, `planprims.js`,
   `planexec.js --only=unit,fail`, `planstrategy.js`, `plancompile.js` (the CLI and the Compile API with the mock parts
-  `test/planmock.js`), `plantruth.js`, `msolve.js --quick`, `kin.js --quick`, `mathsep.js`. The truth checkers on the known routes
-  (`src/plan/truthset.js`; a worktree sets `EEAT_TRUTH_ROOT` to a checkout with `src/jobs` / `src/out`): T-MODEL-EXACT
+  `test/planmock.js`), `plantruth.js`, `msolve.js --quick`, `kin.js --quick`, `mathsep.js`, `joins.js`, `precision.js`. The truth checkers on
+  the known routes (`src/plan/truthset.js`; a worktree sets `EEAT_TRUTH_ROOT` to a checkout with `src/jobs` / `src/out`): T-MODEL-EXACT
   `tools/n4u/modelexact.js`, T-PLAN-ORACLE `test/planoracle.js`, T-LB-ADMISSIBLE `test/planbounds.js --truth`. A full compile:
   `node tools/cmp/fullc.js <code dir> <levels dir> <out dir> [--par=] [--workers=3] [--seconds=60]`, then `tools/cmp/summ.js`
   (classes), `tools/cmp/verify.js` (every .eetas replayed from the level file) and `tools/cmp/gate.js` (no level worse than a
@@ -847,7 +893,9 @@ ways in.
   then)): compiled 13 vs 16 (Bygone Tutorial, Accident Prone, The Blank Page not routed with it: the base found them at
   32-60 s), on the 13 both routed 15,152 vs 15,372 run ticks, better 4 (Rosa 3,814 vs 4,219, Fish Gods 3,657 vs 3,742),
   worse 4 (Tree Decorating 1,722 vs 1,476: its route came at 59 s), the same 5: the moves stage's run-to-run spread, no
-  gain shown. So OPT-IN: the pass never makes a GIVEN route slower, but in a compile its reserve comes out of the moves.
+  gain shown. So OPT-IN then: the pass never makes a GIVEN route slower, but in a compile its reserve comes out of the moves.
+  At 300 s the reserve (20 s) is small next to the moves' time and the full compile gained (28 vs 24 / 230, median 1.116 vs
+  1.208): DEFAULT ON.
 - **JOINS: the speed carried across the joins, and the leg proofs** (n5-perfect, 2026-09-30; `src/plan/joins.js`, the stage
   `joins` after prove (and after the perfect pass), DEFAULT ON in `src/compile.js` with its own clock AFTER the budget:
   `--joins=<s>` / `EEAT_JOINS_S`, default half the budget, at most 60 s; `EEAT_JOINS=0` / `--joins=0` off, the watchdog's

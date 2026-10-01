@@ -181,8 +181,10 @@ function sectionUnit(TMP) {
 	try { evs = jl.map((l) => JSON.parse(l)); } catch (e) { evs = null; }
 	const kinds = evs ? new Set(evs.map((e) => e.ev)) : new Set();
 	const rep2 = evs ? evs.find((e) => e.ev === 'report') : null;
-	check('--json: every line a JSON event (stage x11 with perfect (the default since the C6 merge), loops and joins, result, progress, done, report last), exit 0; the report\'s inputs finish',
-		r.status === 0 && !!evs && evs.filter((e) => e.ev === 'stage').length === 11 && evs.some((e) => e.ev === 'stage' && e.name === 'perfect') && evs.some((e) => e.ev === 'stage' && e.name === 'loops') && evs.some((e) => e.ev === 'stage' && e.name === 'joins') &&['result', 'progress', 'done', 'report'].every((k) => kinds.has(k)) && evs[evs.length - 1].ev === 'report' && !!rep2 &&
+	// (the perfect pass is on by default: its stage line after verify and the LOOPS stage; EEAT_PERFECT=0: neither)
+	const perfOn = process.env.EEAT_PERFECT !== '0', nStages = perfOn ? 11 : 9;
+	check(`--json: every line a JSON event (stage x${nStages} with ${perfOn ? 'perfect, loops and ' : ''}joins, result, progress, done, report last), exit 0; the report's inputs finish`,
+		r.status === 0 && !!evs && evs.filter((e) => e.ev === 'stage').length === nStages && (!perfOn || (evs.some((e) => e.ev === 'stage' && e.name === 'perfect') && evs.some((e) => e.ev === 'stage' && e.name === 'loops'))) && evs.some((e) => e.ev === 'stage' && e.name === 'joins') &&['result', 'progress', 'done', 'report'].every((k) => kinds.has(k)) && evs[evs.length - 1].ev === 'report' && !!rep2 &&
 		!!C.evaluate(L, T.masksOf(rep2.inputs)), `exit ${r.status}, ${jl.length} lines, ${[...kinds].join(',')}`);
 }
 
@@ -277,8 +279,11 @@ function sectionApi(TMP) {
 	check('GET before any compile: {running: false, stage: none}', !!x.idle && x.idle.running === false && x.idle.stage === 'none', JSON.stringify(x.idle));
 	const d = x.done || {};
 	const names = (d.stages || []).map((s) => s.name);
-	check('POST: 200 running; then the stage lines parse, model, bounds, plan, moves, verify, perfect, polish, prove, loops, joins (each {name, ms, text}), stage "done", a result {runTicks, time, lb, gap, legs}',
-		!!x.post && x.post.status === 200 && x.post.running === true && JSON.stringify(names) === JSON.stringify(['parse', 'model', 'bounds', 'plan', 'moves', 'verify', 'perfect', 'polish', 'prove', 'loops', 'joins']) && d.stage === 'done' &&
+	// (the perfect pass is on by default: its stage after verify and the LOOPS stage; EEAT_PERFECT=0: neither)
+	const perfOn = process.env.EEAT_PERFECT !== '0';
+	const want = ['parse', 'model', 'bounds', 'plan', 'moves', 'verify'].concat(perfOn ? ['perfect'] : [], ['polish', 'prove'], perfOn ? ['loops'] : [], ['joins']);
+	check(`POST: 200 running; then the stage lines ${want.join(', ')} (each {name, ms, text}), stage "done", a result {runTicks, time, lb, gap, legs}`,
+		!!x.post && x.post.status === 200 && x.post.running === true && JSON.stringify(names) === JSON.stringify(want) && d.stage === 'done' &&
 		!!d.result && d.result.runTicks > 0 && /^\d+:\d\d\.\d\d$/.test(d.result.time) && d.result.lb > 0 && d.result.gap === d.result.runTicks - d.result.lb && Array.isArray(d.result.legs),
 		JSON.stringify({ post: x.post, stage: d.stage, names, result: d.result, message: d.message }).slice(0, 600));
 	check('a job made from the route; loadtas = "/loadtas <the job\'s best.eetas>": the file exists under the jobs folder and finishes with the result\'s run ticks',
@@ -373,7 +378,9 @@ function sectionTruth(TMP) {
 	fs.writeFileSync(path.join(lv, '01_notrophy.eelvl'), eelvlOfRows(NOTROPHY, 'no trophy'));
 	const out = path.join(TMP, 'truthout');
 	const r = spawnSync(process.execPath, [path.join(ROOT, 'src', 'plan', 'truth.js'), '--part=model,compile', '--sets=campaign', '--seconds=8', '--workers=2', `--root=${root}`, `--out=${out}`, `--parts=${path.join(__dirname, 'planmock.js')}`],
-		{ encoding: 'utf8', timeout: 120000, env: Object.assign({}, process.env, { PLANMOCK_MODE: 'normal' }) });
+		// (EEAT_S99_DEFAULTS=0: the mock parts' runs; the stretch / chain children are real solvers the loop waits for, and
+		// under load they took this part past its 120-s timeout once in three runs)
+		{ encoding: 'utf8', timeout: 120000, env: Object.assign({}, process.env, { PLANMOCK_MODE: 'normal', EEAT_S99_DEFAULTS: '0' }) });
 	const rows = fs.existsSync(path.join(out, 'truth.jsonl')) ? fs.readFileSync(path.join(out, 'truth.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
 	const lv0 = rows.find((x) => x.kind === 'level' && x.name === '00_toy'), lv1 = rows.find((x) => x.kind === 'level' && x.name === '01_notrophy');
 	const tot = rows.find((x) => x.kind === 'totals');
