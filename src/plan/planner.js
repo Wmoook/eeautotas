@@ -805,6 +805,7 @@ function createPlanner(model, facts, o = {}) {
 	// (EEAT_RESP_RUNGS: the respawn waypoint's steps leave the pick after that many failed rungs (default CRUMB_RUNGS); with
 	// EEAT_RUNG_DEEP 5 lets the 135-s rung run: the held death back at (58,235) was found only there (box 6: 30 s, prims))
 	const RESP_RUNGS = +process.env.EEAT_RESP_RUNGS > 0 ? +process.env.EEAT_RESP_RUNGS | 0 : CRUMB_RUNGS;
+	const RESP_EXEC = RESP_CRUMB && process.env.EEAT_RESP_EXEC === '1';
 	// THE STALL WALLS IN THE PHYSICS PASS (LH cold; OPT-IN EEAT_PHYS_CRUMBWALLS=1, inside PHYS_EST; off = byte for byte): the
 	// crumb field's stall walls of the anchor's class (EEAT_CRUMB_WALLS' crumbWallsOf: the closest approaches of the class's
 	// failed steps, rung >= 1) are solid in the pass's level copy too, so the pass's way (its prices, the crumbs' d1, the
@@ -1418,6 +1419,14 @@ function createPlanner(model, facts, o = {}) {
 		const s = a.sim;
 		const D = RFm.costAt(g, s.px, s.py, s.speed_y, !!s.on_ground);
 		if (RESP_CRUMB && !(D >= 0) && !a._respCrumb) { const r = respCrumb(a, e, cls, S, tgt); if (r) return r; }
+		// (EEAT_RESP_EXEC=1: the trigger by the EXECUTOR's goal field (types.js goalField of levelNow: the protection
+		// layer) when the plain crumb field reads a way: Cold World's (66,230) / (62,219), where the crumb field reads the
+		// coin (73,222) near while the executor's field reads no way ('proof'))
+		else if (RESP_CRUMB && RESP_EXEC && D >= 0 && !a._respCrumb) {
+			let De = 0;
+			try { const gf = T.goalField(T.levelNow(L, s), tgt, {}); De = gf ? RFm.costAt(gf, s.px, s.py, s.speed_y, !!s.on_ground) : 0; } catch (err) { De = 0; }
+			if (!(De >= 0)) { ST.respExec = (ST.respExec || 0) + 1; const r = respCrumb(a, e, cls, S, tgt); if (r) return r; }
+		}
 		if (!(D >= CRUMB_MIN)) return null;
 		const fwd = physFwdOf(a);
 		const dA = fwd ? null : model.dist(S, a.pos, 'now', a.base);
