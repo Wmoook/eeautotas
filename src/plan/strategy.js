@@ -1499,8 +1499,26 @@ async function compile(L, opts = {}, emit = () => {}) {
 	// meets the goal in the engine here (the waypoint's goal test, each tick) and is verified from the level start like any
 	// arrival (`verified`): the physical key only proposes; a wrong door or timer state just fails the replay. Bounded:
 	// RJ_D shifts each way, RJ_K approach ticks, RJ_MS ms a call.
-	const REJOIN = process.env.EEAT_PLAN_REJOIN === '1';
+	// ---- THE FUNNEL (box 7 lane b9, cycle 4, 2026-10-01; OPT-IN EEAT_PLAN_FUNNEL=1, which also turns the rejoin on; off =
+	// as before): a kept leg of a trigger step passes TELEPORTS (a portal's exit puts every ball on one tile), and the
+	// physical states of balls that came through the same exit converge a few ticks later (a landing): Bad EE Level 9's
+	// minis are entered by one arch portal each, and from another lineage's entry state the kept mini leg rejoins in 7-8
+	// ticks (c13J's two switch-5 tails, both ways, 1 ms). The rejoin above serves only starts at or just past such a place;
+	// a lineage whose anchor is elsewhere (the hub) searched the whole mini again (switch 5 found 3 times, 91-130 s each at
+	// the 135-s rung). So every kept leg also keeps its teleports (from its start's last RJ_BACK ticks on: the leg's own
+	// trajectory from each exit, `fnLib`), and a step of its edge that no replay or rejoin served first runs a short leg
+	// (the executor, `FN_MS`) from its starts far from those exits TO the exit tiles, then the landmark rejoin from each
+	// arrival against the kept trajectory from that exit. Every candidate is verified from the level start (`verified`);
+	// a funnel that finds nothing hands the step to the executor with its own full window, as before.
+	const FUNNEL = process.env.EEAT_PLAN_FUNNEL === '1';
+	const REJOIN = process.env.EEAT_PLAN_REJOIN === '1' || FUNNEL;
 	const TRANSPLANT = process.env.EEAT_PLAN_TRANSPLANT === '1' || REJOIN;
+	const FN_MS = Math.max(200, +(process.env.EEAT_FUNNEL_MS || 5000)), FN_NEAR = Math.max(0, +(process.env.EEAT_FUNNEL_NEAR || 3));
+	const FN_MAX = 4;   // (the last teleports of a kept leg kept as its funnels)
+	const fnLib = new Map();   // leg mask string -> [{tile, ext, keys}]: the leg's trajectory from each of its last teleports
+	let fnRuns = 0, fnOk = 0, fnMs = 0;
+	const fnDone = new Map();   // `${edge}|${start tile}` -> the edge's library version when its funnel failed
+	const fnVer = new Map();    // edge -> the number of legs kept for it so far
 	const TP_LEGS = 6, TP_MAX = 4000;
 	const RJ_D = Math.max(0, +(process.env.EEAT_REJOIN_D || 40)), RJ_K = Math.max(1, +(process.env.EEAT_REJOIN_K || 240));
 	const RJ_MS = Math.max(1, +(process.env.EEAT_REJOIN_MS || 250));
@@ -1582,7 +1600,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 			const list = legLib.get(step.edge) || [];
 			if (list.includes(leg)) return;
 			list.unshift(leg);
-			if (list.length > TP_LEGS) { for (const old of list.slice(TP_LEGS)) { rjKeys.delete(old); rjExt.delete(old); } list.length = TP_LEGS; }
+			if (FUNNEL) fnVer.set(step.edge, (fnVer.get(step.edge) || 0) + 1);
+			if (list.length > TP_LEGS) { for (const old of list.slice(TP_LEGS)) { rjKeys.delete(old); rjExt.delete(old); fnLib.delete(old); } list.length = TP_LEGS; }
 			legLib.set(step.edge, list);
 			if (REJOIN && !rjKeys.has(leg)) { const m = rjKeysOf(s, legM); if (m) rjKeys.set(leg, m); }
 			if (REJOIN && RJ_BACK > 0 && !rjExt.has(leg)) {
@@ -1592,7 +1611,88 @@ async function compile(L, opts = {}, emit = () => {}) {
 				const keys = keysAlong(snapAt(s, n0), ext);
 				if (keys) rjExt.set(leg, { ext, keys });
 			}
+			// (THE FUNNEL: the leg's teleports, from its start's last RJ_BACK ticks on, each with the trajectory from its exit)
+			if (FUNNEL && !fnLib.has(leg)) {
+				const n0 = Math.max(0, sm.length - RJ_BACK);
+				const ext = new Uint8Array(sm.length - n0 + legM.length);
+				ext.set(sm.subarray(n0), 0); ext.set(legM, sm.length - n0);
+				const base = snapAt(s, n0), tps = [];
+				try {
+					tpSim.reset(); tpSim.restore(base);
+					let px = tpSim.px, py = tpSim.py;
+					for (let t = 0; t < ext.length - 1; t++) {
+						E.applyMask(tpInp, ext[t] & 31);
+						tpSim.tick(tpInp);
+						if (tpSim.is_dead) break;
+						if (Math.abs(tpSim.px - px) > 24 || Math.abs(tpSim.py - py) > 24) tps.push({ t: t + 1, snap: tpSim.snapshot(), tile: T.tileOf(tpSim, L.width, L.height) });
+						px = tpSim.px; py = tpSim.py;
+					}
+				} catch (e) { tps.length = 0; }
+				const fns = [];
+				for (const x of tps.slice(-FN_MAX)) {
+					const e2 = ext.subarray(x.t);
+					const k2 = keysAlong(x.snap, e2);
+					if (k2) fns.push({ tile: x.tile, ext: e2, keys: k2 });
+				}
+				fnLib.set(leg, fns);
+			}
 		});
+	};
+	/** THE FUNNEL: a step of an edge with kept legs that no replay or rejoin served: a short leg from its starts far from the
+	 *  kept legs' teleport exits to those exits, then the landmark rejoin from each arrival; {res, ran} */
+	const funnel = async (step, wp, starts) => {
+		if (!FUNNEL || !tpOk(wp) || step.synthetic) return { res: null, ran: false };
+		const list = legLib.get(step.edge);
+		if (!list || !list.length) return { res: null, ran: false };
+		const fns = [];
+		for (const str of list) for (const f of (fnLib.get(str) || [])) fns.push(f);
+		if (!fns.length) return { res: null, ran: false };
+		const tiles = [...new Set(fns.map((f) => f.tile))];
+		const near = (s) => tiles.some((t) => Math.max(Math.abs((t % L.width) - (s.tile % L.width)), Math.abs(((t / L.width) | 0) - ((s.tile / L.width) | 0))) <= FN_NEAR);
+		// (a place's funnel that found nothing is not run again until the edge keeps another leg)
+		const fk = (s) => `${step.edge}|${s.tile}`;
+		const far = starts.filter((s) => s && Number.isInteger(s.tile) && !near(s) && fnDone.get(fk(s)) !== (fnVer.get(step.edge) || 0));
+		if (!far.length) return { res: null, ran: false };
+		const t0 = Date.now();
+		fnRuns++;
+		const room = left() - (best ? endRes() : 0) - 100;
+		const ms = Math.max(50, Math.min(FN_MS, room)), deadline = Date.now() + ms;
+		const fb = { ms, level: 1, k: ARRIVALS_K, deadline, fast: !best, stop: () => stopped || left() <= 0 || Date.now() > deadline + 2000 };
+		let r = null;
+		try { r = await exec.reach(far, { kind: 'region', tiles, expect: null, label: `funnel of ${labelOf(step)}` }, fb); } catch (e) { r = null; }
+		const goal = T.goalOf(L, wp);
+		const out = [], legs = [];
+		let rj = 0;
+		if (r && r.ok && Array.isArray(r.arrivals)) {
+			const until = Date.now() + 4 * RJ_MS;
+			for (const a of r.arrivals) {
+				if (!a || !a.masks || out.length >= ARRIVALS_K || Date.now() > until) continue;
+				const am = typeof a.masks === 'string' ? T.masksOf(a.masks) : Uint8Array.from(a.masks);
+				let sim;
+				try { sim = T.playTo(L, am, { allowDeath: false }).sim; } catch (e) { continue; }
+				if (sim.is_dead) continue;
+				const at = T.tileOf(sim, L.width, L.height), base = sim.snapshot();
+				for (const f of fns) {
+					if (f.tile !== at) continue;
+					const tail = rejoinFrom(base, f.ext, f.keys, goal, until);
+					if (!tail) continue;
+					const masks = new Uint8Array(am.length + tail.length);
+					masks.set(am, 0); masks.set(tail, am.length);
+					if (out.some((x) => x.masks.length === masks.length && T.strOf(x.masks) === T.strOf(masks))) break;
+					const { s } = startOf(starts, masks, -1, {});
+					out.push({ masks });
+					legs.push({ start: s ? starts.indexOf(s) : null, ticks: masks.length - (s ? s.masks.length : 0), lb: null, proven: false, tool: 'funnel' });
+					rj++;
+					break;
+				}
+			}
+		}
+		const dt = Date.now() - t0;
+		fnMs += dt;
+		if (out.length) fnOk++;
+		else for (const s of far) fnDone.set(fk(s), fnVer.get(step.edge) || 0);
+		say({ ev: 'funnel', label: labelOf(step), edge: step.edge, starts: far.length, exits: tiles.length, reached: r && r.ok ? r.arrivals.length : 0, rejoined: rj, ms: dt, runs: fnRuns, ok: fnOk, fnMs });
+		return { res: out.length ? { ok: true, arrivals: out, tool: 'funnel', ms: dt, legs, lb: null } : null, ran: true };
 	};
 	/** the rejoin of a kept leg from a start's engine state `base`: the masks past the start, or null */
 	const rejoinFrom = (base, leg, keys, goal, until) => {
@@ -1744,7 +1844,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const ek = edgeKey(step), tk = `${ek}|${step.rung}|${epoch}`;
 		tried.set(tk, { ok: false });
 		A.picks++; picksN++;
-		const budget = budgetOf(windowRung(step));
+		let budget = budgetOf(windowRung(step));
 		const wp = waypointOf(step, A);
 		// (the plan's next waypoint: the executor ranks this step's arrivals by the next leg's cost from them, executor.js
 		// NEXT_ON; a death step, a synthetic step or a plan of one step: none)
@@ -1783,6 +1883,13 @@ async function compile(L, opts = {}, emit = () => {}) {
 		steps++;
 		const verBefore = factsVer(facts), anchorsBefore = anchors.size;
 		let res = TRANSPLANT ? transplant(step, wp, starts) : null;
+		// (THE FUNNEL: a short leg to a kept leg's teleport exit, then the rejoin; one that ran and found nothing gives the
+		// executor its own full window, a fresh budget)
+		if (!res && FUNNEL) {
+			const fr = await funnel(step, wp, starts);
+			if (fr.res) res = fr.res;
+			else if (fr.ran) { const nx2 = budget.next; budget = budgetOf(windowRung(step)); if (nx2) budget.next = nx2; }
+		}
 		if (!res) {
 			try { res = await exec.reach(starts, wp, budget); } catch (e) { res = { ok: false, arrivals: [], tool: null, ms: Date.now() - t1, fail: Object.assign(failOf(null, budget), { error: e.message }) }; bug('reach', { error: e.message, label: labelOf(step) }); }
 		}
