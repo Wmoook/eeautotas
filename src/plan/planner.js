@@ -125,11 +125,7 @@ const FLOOR_HARD_MS = +process.env.EEAT_PLAN_FLOOR_HARD_MS || 30000;
 // are all partial again. Ordering only: no edge dropped, the lb and the proofs untouched. (The gain bonus is KEPT in the long
 // search: from the route's tick-545 state (gain 33) 20 s with it found the 808 plan (1,237 nodes: the plan search expands
 // ~60 nodes a second there), 20 s without it none (1,017 nodes); EEAT_PLAN_LONG_GAIN=0: without.)
-const LONG_MS = process.env.EEAT_PLAN_LONG !== undefined ? Math.max(0, +process.env.EEAT_PLAN_LONG || 0) : 0;
-const LONG_MAX = +process.env.EEAT_PLAN_LONG_MAX > 0 ? +process.env.EEAT_PLAN_LONG_MAX | 0 : 4;
-const LONG_GAIN = process.env.EEAT_PLAN_LONG_GAIN !== '0';
-const LONG_R = process.env.EEAT_PLAN_LONG_R !== undefined ? Math.max(0, +process.env.EEAT_PLAN_LONG_R | 0) : 1;
-const LONG_EXPAND = +process.env.EEAT_PLAN_LONG_EXPAND > 0 ? +process.env.EEAT_PLAN_LONG_EXPAND : 3000000;
+// (its knobs are read per planner: createPlanner)
 const COUNT_GATES = new Set([165, 214]);
 const COLOURS = ['red', 'green', 'blue', 'cyan', 'magenta', 'yellow'];
 
@@ -177,6 +173,12 @@ class Heap {
 }
 
 function createPlanner(model, facts, o = {}) {
+	// (THE LONG PLAN CALL's knobs: the comment at the top)
+	const LONG_MS = process.env.EEAT_PLAN_LONG !== undefined ? Math.max(0, +process.env.EEAT_PLAN_LONG || 0) : 0;
+	const LONG_MAX = +process.env.EEAT_PLAN_LONG_MAX > 0 ? +process.env.EEAT_PLAN_LONG_MAX | 0 : 4;
+	const LONG_GAIN = process.env.EEAT_PLAN_LONG_GAIN !== '0';
+	const LONG_R = process.env.EEAT_PLAN_LONG_R !== undefined ? Math.max(0, +process.env.EEAT_PLAN_LONG_R | 0) : 1;
+	const LONG_EXPAND = +process.env.EEAT_PLAN_LONG_EXPAND > 0 ? +process.env.EEAT_PLAN_LONG_EXPAND : 3000000;
 	const L = model.L, W = model.W, H = model.H;
 	const bounds = o.bounds && typeof o.bounds.pair === 'function' ? o.bounds : null;
 	const ST = { rchChecks: 0, plans: 0, planMs: 0, expands: 0, lbCalls: 0, lbMs: 0, lbExpands: 0, learned: 0, costOf: 0 };
@@ -1416,10 +1418,12 @@ function createPlanner(model, facts, o = {}) {
 			let n = node; while (n.parent && n.parent.parent) n = n.parent;
 			if (n.e) exclude.add(n.e.edge);
 		}
-		// (THE LONG PLAN CALL, EEAT_PLAN_LONG=<ms>: every plan partial: one long search from this abstract state, first)
+		// (THE LONG PLAN CALL, EEAT_PLAN_LONG=<ms>: every plan partial: one long search from this abstract state; its plan
+		// goes FIRST, in front of the near / crumb plans too (made below as without it: they read the search's own plans))
+		let longP = null;
 		if (LONG_MS > 0 && plans.length && plans.every((p) => p.partial || !(p.cost < PENALTY))) {
 			const stuck = !LONG_R || !!(facts && plans[0].steps[0] && facts.rungOf(plans[0].steps[0].edge, plans[0].steps[0].nodeClass) >= LONG_R);
-			try { const lp = longPlan(a, so, po, stuck); if (lp) plans.unshift(lp); } catch (e) { if (process.env.EEAT_LONG_DBG === '1') console.error('longPlan', e.stack); }
+			try { const lp = longPlan(a, so, po, stuck); if (lp) longP = lp; } catch (e) { if (process.env.EEAT_LONG_DBG === '1') console.error('longPlan', e.stack); }
 		}
 		// (THE BYPASS, EEAT_PLAN_BYPASS=R: the trophy without the triggers whose legs failed R rungs from this class, first)
 		if (BYPASS > 0 && facts && plans.length) {
@@ -1465,6 +1469,7 @@ function createPlanner(model, facts, o = {}) {
 				} else if (cp.length) plans.unshift(...cp);
 			} catch (e) { if (process.env.EEAT_CRUMB_DBG === '1') console.error('crumbPlan', e.stack); }
 		}
+		if (longP) plans.unshift(longP);
 		if (!plans.length) {
 			why = rootEdges < 0 ? 'budget' : rootEdges === 0 && !(facts && facts.list().length) ? 'proof' : 'exhausted';
 			// (no edge at the root because the facts took them all: exhausted; none at all without facts: a walk proof)
