@@ -286,6 +286,13 @@ const ST_N = Math.max(1, Math.min(4, +process.env.EEAT_ST_N || 1));
 // (EEAT_ST_GENERAL=0: the short first plan's request alone, no failed stretches after it)
 const ST_GENERAL = process.env.EEAT_ST_GENERAL !== '0';
 const ST_NICE = process.env.EEAT_ST_NICE !== undefined && process.env.EEAT_ST_NICE !== '' ? +process.env.EEAT_ST_NICE : 10;
+// (THE STRETCH SOLVER IN THE REFINEMENT, P4, OPT-IN EEAT_ST_REFINE=1, off = the child killed at the first route as before:
+// once a route is known the child goes on with the failed stretches of the anchors whose f (the first arrival + the plan's
+// cost) is under the route's ticks, the least f first (a request whose anchor's f reached the route's is stale); its
+// arrivals are verified and bounded like the executor's (verified: run ticks at the route's are dropped). Why: the slow
+// routes go through crumbs and detours where the direct stretch failed the executor's rungs (Tutorial 2: the start ->
+// checkpoint (245,28) stretch, the child's 64-s clock found it at tick 1,730; the route's own took a blue coin, 4,099))
+const ST_REFINE = process.env.EEAT_ST_REFINE === '1';
 /** a relative deadline (a step's or a waypoint's beforeTickFrom): a number, or 'prev+N' (N ticks after the previous
  *  step's arrival, i.e. this anchor's arrival: a key's KEY_TICKS) -> ticks | NaN */
 function relOf(x) {
@@ -1026,29 +1033,32 @@ async function compile(L, opts = {}, emit = () => {}) {
 	};
 	/** an idle child: the next request (slot 0: the short first plan once; then the failed stretch of the most progress not
 	 *  in hand in another slot) */
+	// (ST_REFINE: an anchor whose f is under the route's ticks: a stretch from it may give a faster route)
+	const stFOf = (A) => A.firstTick + (Number.isFinite(A.costEst) ? A.costEst : Infinity);
+	const stRefineOk = (A) => !!best && !!A && !A.exhausted && A.arrivals.length > 0 && !uselessA(A) && stFOf(A) < best.ticks;
 	const stSchedule = () => {
 		if (!ST_ON) return;
 		// (a request gone stale: its stretch done by the executor before the child's first leg, or a route known and it is no
 		// whole-level request (whose route may be faster): the child is stopped and started again (its memo lost))
 		for (let i = 0; i < stSlots.length; i++) {
 			const s = stSlots[i], b = s.busy;
-			if (s.ch && b && !b.short && Date.now() - b.t < b.ms - ST_STALE_MS && ((b.cand && b.cand.solved && b.k === 0) || best)) {
+			if (s.ch && b && !b.short && Date.now() - b.t < b.ms - ST_STALE_MS && ((b.cand && b.cand.solved && b.k === 0) || (best && !(ST_REFINE && stRefineOk(b.A))))) {
 				say({ ev: 'stretch', what: 'stale', id: b.id, slot: i, why: best ? 'a route' : 'the executor did it', ms: Date.now() - b.t });
 				stStats.stale++;
 				stKill(s);
-				if (!best && !stopped) stSpawn(i);
+				if ((!best || ST_REFINE) && !stopped) stSpawn(i);
 			}
 		}
-		if (stopped || best) return;
+		if (stopped || (best && !ST_REFINE)) return;
 		// (before a route the moves have the whole budget: the polish's and the proof's reserves are kept only once a route
 		// is known, and a route of the child's own is one; the whole-level backward solve needed 37 s in one piece on Stone
 		// Ruin at a 90-s clock and failed at 45 s)
-		const room = left() - 3000;
+		const room = left() - 3000 - (best ? endRes() : 0);
 		if (room < ST_MIN_MS) return;
 		for (let i = 0; i < stSlots.length; i++) {
 			const slot = stSlots[i];
 			if (!slot.ch || slot.busy) continue;
-			if (i === 0 && !stShortSent) {
+			if (i === 0 && !stShortSent && !best) {
 				stShortSent = true;
 				const A = anchors.get(String(S0.key));
 				const p = A ? planOfAnchor(A) : null;
@@ -1070,6 +1080,12 @@ async function compile(L, opts = {}, emit = () => {}) {
 			let bestC = null;
 			for (const c of stCands.values()) {
 				if (c.solved || c.inflight || c.rung < ST_RUNG || c.tries >= ST_TRIES || (c.tries > 0 && !/budget/.test(c.why)) || c.A.exhausted || !c.A.arrivals.length) continue;
+				if (best) {
+					// (ST_REFINE: the anchors under the route's f only, the least f first)
+					if (!stRefineOk(c.A)) continue;
+					if (!bestC || c.tries < bestC.tries || (c.tries === bestC.tries && stFOf(c.A) < stFOf(bestC.A))) bestC = c;
+					continue;
+				}
 				if (!bestC || c.tries < bestC.tries || (c.tries === bestC.tries && (c.A.gain > bestC.A.gain || (c.A.gain === bestC.A.gain && (c.cost < bestC.cost || (c.cost === bestC.cost && c.seq < bestC.seq)))))) bestC = c;
 			}
 			if (!bestC) return;
