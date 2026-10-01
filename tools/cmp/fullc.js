@@ -13,10 +13,12 @@
 //   --parfile=<file>: the parallelism read again from that file (one integer) before each start (a running full
 //   compile made wider or narrower by the RSS it measures).
 //   --order=list (with --list): the compiles start in the list file's order (default: the paths' sorted order).
+//   --stopfile=<file>: once that file exists no compile starts (the running ones end as usual; the run ends with them:
+//   STOPPED and the count not started), so a time-boxed run keeps what finished and leaves no compile half-run.
 const fs = require('fs'), path = require('path'), cp = require('child_process'), os = require('os');
 const [, , code, lvDir, out, ...rest] = process.argv;
 const opt = (k, d) => { const a = rest.find((s) => s.startsWith('--' + k + '=')); return a ? a.split('=')[1] : d; };
-let par = +opt('par', 36); const parfile = opt('parfile', '');
+let par = +opt('par', 36); const parfile = opt('parfile', ''), stopfile = opt('stopfile', '');
 const workers = +opt('workers', 3), seconds = +opt('seconds', 60), list = opt('list', '');
 const json = opt('json', '0') === '1', minfree = +opt('minfree', 0), rssOn = opt('rss', '0') === '1' && process.platform === 'linux', killfree = +opt('killfree', 0);
 fs.mkdirSync(out, { recursive: true });
@@ -72,8 +74,12 @@ function sampleRss() {
 	fs.appendFileSync(path.join(out, 'rss.jsonl'), JSON.stringify({ s: Math.round((Date.now() - t0) / 1000), running, compilesGB: Math.round(sum / 1048576 * 100) / 100, usedGB: used === null ? null : Math.round(used * 100) / 100 }) + '\n');
 }
 const rssTimer = rssOn ? setInterval(() => { try { sampleRss(); } catch (e) { /* a process gone mid-read */ } if (parfile) start(); }, 2000) : null;
-let waitTimer = null;
+let waitTimer = null, stopped = false;
 function start() {
+	if (stopfile && fs.existsSync(stopfile)) {
+		if (running === 0 && !stopped) { stopped = true; console.log(`STOPPED (${stopfile}): ${done} done, ${todo.length - next} not started`); if (rssTimer) clearInterval(rssTimer); }
+		return;
+	}
 	if (parfile) { try { const v = parseInt(fs.readFileSync(parfile, 'utf8'), 10); if (v > 0 && v !== par) { console.log(`par ${par} -> ${v} (${parfile})`); par = v; } } catch (e) { /* none */ } }
 	while (running < par && next < todo.length) {
 		if (minfree > 0 && running > 0 && memAvailGB() < minfree) { if (!waitTimer) waitTimer = setTimeout(() => { waitTimer = null; start(); }, 3000); return; }
