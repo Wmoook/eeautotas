@@ -1555,7 +1555,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 			return { ev, better: true };
 		},
 		addArrival: (a, S, parent, why, step) => addArrival(a, S, parent, why, step), stateOf: (sim) => model.stateOf(sim), simOf: (a) => simOf(a),
-		labelOf, edgeKey,
+		labelOf, edgeKey, anchorsN: () => anchors.size,
 		// (a room the search entered: replayed from the level start (deaths in the anchor's own prefix are its route's: from),
 		// alive and not finished; a model state not seen yet = an anchor, its parent the leg's anchor)
 		importRun: (masks, parent, from, why) => {

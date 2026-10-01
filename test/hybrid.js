@@ -82,7 +82,7 @@ const gx = (extra) => new Promise((res) => {
 			return { arr, routes: [] };
 		},
 		routeOf: () => null, addArrival: (a) => { added.push(a); return { anchor: { id: 2, key: 'k1' }, isNew: true }; }, stateOf: () => ({ key: 'k1' }), simOf: (a) => T.playTo(L, a.masks).sim,
-		importRun: () => null, labelOf: (s) => s.waypoint.label, edgeKey: (s) => `${s.edge}|${s.nodeClass}`, RM: null,
+		importRun: () => null, labelOf: (s) => s.waypoint.label, edgeKey: (s) => `${s.edge}|${s.nodeClass}`, RM: null, gate: false, anchorsN: () => 1,
 	};
 	const hy = HYB.createHybrid(ctx);
 	hy.note(A, Object.assign({}, step, { edge: 'trig:other' }), wp, { cost: 50 }, true, '');
@@ -106,6 +106,21 @@ const gx = (extra) => new Promise((res) => {
 	hy.schedule();
 	ok(!hy.busy(), 'the solved leg: no second request');
 	hy.stop();
+
+	// 3 THE GATE: the leg's arrival held until the executor fails that leg again (then given), dropped when it solves it
+	for (const solveIt of [false, true]) {
+		added.length = 0;
+		const hg = HYB.createHybrid(Object.assign({}, ctx, { gate: true }));
+		hg.note(A, step, wp, { cost: 100 }, false, 'budget');
+		hg.schedule();
+		const t1 = Date.now();
+		while (hg.busy() && Date.now() - t1 < 40000) { await new Promise((r) => setTimeout(r, 200)); hg.harvest(); }
+		ok(added.length === 0 && hg.held() >= 1, `the gate: the leg held (${hg.held()} held, ${added.length} added)`);
+		const nh = hg.held();
+		hg.note(A, step, wp, { cost: 100 }, solveIt, solveIt ? '' : 'budget');
+		ok(hg.held() === 0 && added.length === (solveIt ? 0 : nh), `the executor ${solveIt ? 'solved' : 'failed'} it: ${solveIt ? 'dropped' : 'given'} (${added.length} added)`);
+		hg.stop();
+	}
 	try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* gone */ }
 	console.log(`hybrid: ${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);

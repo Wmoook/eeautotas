@@ -31,6 +31,13 @@ const num = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' && 
 const HY_RUNG = num('EEAT_HY_RUNG', 2), HY_REPEAT = num('EEAT_HY_REPEAT', 2), HY_S = num('EEAT_HY_S', 60), HY_MIN_S = num('EEAT_HY_MIN_S', 10);
 const HY_TRIES = num('EEAT_HY_TRIES', 3), HY_W = Math.max(1, num('EEAT_HY_W', 2)), HY_MEM = num('EEAT_HY_MEM', 1000), HY_ROOMS = num('EEAT_HY_ROOMS', 24);
 const HY_MORE_F = num('EEAT_HY_MORE_F', 0.5), HY_MORE_MIN = num('EEAT_HY_MORE_MIN', 2) * 1000, HY_MORE_MAX = num('EEAT_HY_MORE_MAX', 15) * 1000;
+// THE GATE (EEAT_HY_GATE=0: off, every answer at once): the search's leg arrivals (and the rooms it entered) are HELD, so
+// the compiler's own path stays the compiler's while it goes on: a leg's arrival is given to it when the executor fails that
+// leg (the same anchor and step) once more, after HY_HOLD_S s, when the compiler has made no new anchor for HY_STALE_S s,
+// or when the executor has nothing left; dropped when the executor solves that leg itself. (The one shot's and the gated
+// chain's lesson: arrivals given at once take the executor's picks: a first route sooner, a slower final; v1 of this lane:
+// 1.08x the run ticks where both arms compiled, EZ Spooky Shack 1.98x.) The rooms: on the stale clock or the end alone.
+const HY_GATE = process.env.EEAT_HY_GATE !== '0', HY_HOLD_S = num('EEAT_HY_HOLD_S', 30), HY_STALE_S = num('EEAT_HY_STALE_S', 45);
 const HY_GPU = process.env.EEAT_HY_GPU !== '0', HY_NICE = num('EEAT_HY_NICE', 0), HY_TROPHY_ON = process.env.EEAT_HY_TROPHY_ON !== '0';
 // (Find a route's goexplore.js defaults: editor.js GX_DEFAULTS, kept in step by hand: this file must not load the editor)
 const GX_DEFAULTS = ['--opts=1', '--frontier=1', '--fBrake=1', '--fPhys=1'];
@@ -47,15 +54,49 @@ function okWp(step, wp) {
 /**
  * createHybrid(ctx): ctx = {L, file, T, E, say, left (ms), hasRoute (), stopped (), verified (step, wp, res, starts),
  * routeOf (masks, how, legId), addArrival (a, S, parent, why, step) -> {anchor, isNew}, stateOf (sim), simOf (a),
- * importRun (masks, parent, fromTick, why) -> a new anchor | null, labelOf, edgeKey, depth (), RM}
+ * importRun (masks, parent, fromTick, why) -> a new anchor | null, labelOf, edgeKey, depth (), RM, anchorsN ()}
  * -> {note (A, step, wp, plan, ok, why), schedule (), harvest (), hold () async, stop (), stats}
  */
 function createHybrid(ctx) {
 	const { L, T, E } = ctx;
+	const GATE = ctx.gate !== undefined ? !!ctx.gate : HY_GATE;
 	const cands = new Map();        // `${A.id}|${edgeKey}` -> {A, step, wp, cost, rung, n, why, tries, solved, inflight, seq}
 	const classFails = new Map();   // edgeKey (the edge + the anchor class) -> failures from any anchor of that class
 	const stats = { requests: 0, ok: 0, legs: 0, routes: 0, rooms: 0, anchors: 0, ms: 0, killed: 0, goals: 0, rejected: 0, errors: 0, gpu: false, byWhy: { rung: 0, stall: 0 } };
 	let child = null, busy = null, seq = 0, q = [];
+	// (THE GATE: the held answers {kind 'leg' | 'room', c, t, ...}; the compiler's anchors' count and when it last grew)
+	const held = [];
+	let anchorsN = -1, anchorAt = Date.now();
+	Object.assign(stats, { held: 0, released: 0, dropped: 0 });
+	/** an answer to the compiler: a leg's verified arrival (an anchor), or a room (importRun) */
+	const give = (e) => {
+		if (e.kind === 'room') { const B = ctx.importRun(e.masks, e.parent, e.from, 'search room'); if (B) stats.rooms++; return; }
+		const { anchor: B, isNew } = ctx.addArrival(e.a, e.S2, e.c.A, e.label, e.c.step);
+		if (isNew) {
+			stats.anchors++;
+			ctx.say({ ev: 'source', kind: 'room', room: e.a.room, desc: e.a.desc, key: B.key, gain: 1, tick: e.a.tick, inputs: T.strOf(e.a.masks), anchor: B.id, label: e.label });
+		}
+	};
+	/** the held answers that pred picks, given (drop: dropped) */
+	const release = (pred, why, drop) => {
+		let n = 0;
+		for (let i = 0; i < held.length;) {
+			if (!pred(held[i])) { i++; continue; }
+			const e = held.splice(i, 1)[0];
+			n++;
+			if (drop) stats.dropped++; else { stats.released++; give(e); }
+		}
+		if (n) ctx.say({ ev: 'hybrid', what: drop ? 'drop' : 'release', why, n, held: held.length });
+		return n;
+	};
+	/** the gate's clocks, every loop turn: a leg held past HY_HOLD_S, everything when no new anchor came for HY_STALE_S */
+	const gateTurn = () => {
+		if (!held.length) return;
+		const n = ctx.anchorsN ? ctx.anchorsN() : 0, now = Date.now();
+		if (n !== anchorsN) { anchorsN = n; anchorAt = now; }
+		if (now - anchorAt > HY_STALE_S * 1000) { release(() => true, 'no new anchor'); anchorAt = now; return; }
+		release((e) => e.kind === 'leg' && now - e.t > HY_HOLD_S * 1000, 'held long enough');
+	};
 	const tool = (() => {
 		if (!HY_GPU) return null;
 		try {
@@ -76,8 +117,9 @@ function createHybrid(ctx) {
 		const ek = ctx.edgeKey(step), rk = `${A.id}|${ek}`;
 		let c = cands.get(rk);
 		if (!c) { c = { A, step, wp, cost: plan && Number.isFinite(+plan.cost) ? +plan.cost : Infinity, rung: -1, n: 0, why: '', tries: 0, solved: false, inflight: false, seq: seq++ }; cands.set(rk, c); }
-		if (ok) { c.solved = true; return; }
+		if (ok) { c.solved = true; if (held.length) release((e) => e.kind === 'leg' && e.c === c, 'the executor did it', true); return; }
 		c.rung = Math.max(c.rung, step.rung | 0); c.n++; c.why = String(why || '');
+		if (held.length) release((e) => e.kind === 'leg' && e.c === c, 'the executor failed it again');
 		classFails.set(ek, (classFails.get(ek) || 0) + 1);
 	};
 	const whyOf = (c) => (c.rung >= HY_RUNG && /budget/.test(c.why) ? 'rung' : (classFails.get(ctx.edgeKey(c.step)) || 0) >= HY_REPEAT ? 'stall' : '');
@@ -179,12 +221,9 @@ function createHybrid(ctx) {
 		for (const a of arr) {
 			let S2;
 			try { S2 = ctx.stateOf(ctx.simOf(a)); } catch (e) { continue; }
-			const { anchor: B, isNew } = ctx.addArrival(a, S2, c.A, `${ctx.labelOf(c.step)} (search)`, c.step);
+			const e = { kind: 'leg', c, a, S2, label: `${ctx.labelOf(c.step)} (search)`, t: Date.now() };
 			any = true;
-			if (isNew) {
-				stats.anchors++;
-				ctx.say({ ev: 'source', kind: 'room', room: a.room, desc: a.desc, key: B.key, gain: 1, tick: a.tick, inputs: T.strOf(a.masks), anchor: B.id, label: `${ctx.labelOf(c.step)} (search)` });
-			}
+			if (GATE && !c.solved) { held.push(e); stats.held++; } else give(e);
 		}
 		if (any) { stats.legs++; ctx.say({ ev: 'hybrid', what: 'leg', id: b.id, kind, label: ctx.labelOf(c.step), from: b.a.tick, tick: ms.length, ticks: ms.length - b.a.tick, ms: Date.now() - b.t }); }
 		else stats.rejected++;
@@ -229,12 +268,13 @@ function createHybrid(ctx) {
 			} else if (m.ev === 'room') {
 				// (a room the search entered: a new model state = an anchor, the plan's later gates as soft guidance; the leg's
 				// own target, when its touch changes the room, comes as a 'goal' event too)
-				if (HY_ROOMS > 0 && b.rooms < HY_ROOMS) { b.rooms++; const B = ctx.importRun(masks, b.c.A, b.a.tick, 'search room'); if (B) stats.rooms++; }
+				if (HY_ROOMS > 0 && b.rooms < HY_ROOMS) { b.rooms++; const e = { kind: 'room', c: b.c, masks, parent: b.c.A, from: b.a.tick, t: Date.now() }; if (GATE) { held.push(e); stats.held++; } else give(e); }
 			}
 		}
 	};
 	/** an idle slot: the next candidate, before the first route, on a slice of the time left */
 	const schedule = () => {
+		gateTurn();
 		if (child && busy && !busy.solved && !busy.halted && Date.now() > busy.slice) halt('the slice');
 		if (child && busy && busy.solved && !busy.trophy && !busy.halted && Date.now() >= busy.more) halt('the leg');
 		// (a trophy leg's search that has its route gives the slot to another failed leg)
@@ -249,14 +289,16 @@ function createHybrid(ctx) {
 	/** the executor has nothing left and would end: while a search works (no route, time left) the loop waits a turn */
 	const hold = async () => {
 		if (ctx.hasRoute() || ctx.stopped() || ctx.left() <= 1000) return false;
-		harvest(); schedule();
+		harvest();
+		if (held.length && release(() => true, 'the executor has nothing left')) return true;
+		schedule();
 		if (!busy) return false;
 		await new Promise((res) => { const tt = setTimeout(res, 250); if (tt.unref) tt.unref(); });
 		harvest();
 		return true;
 	};
 	const stop = () => { harvest(); if (child) { halt('the end'); try { child.kill('SIGKILL'); } catch (e) { /* gone */ } } cleanTmp(); };
-	return { note, schedule, harvest, hold, stop, stats, busy: () => !!busy };
+	return { note, schedule, harvest, hold, stop, stats, busy: () => !!busy, held: () => held.length };
 }
 
 module.exports = { createHybrid, okWp };
