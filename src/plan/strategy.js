@@ -147,9 +147,6 @@ const POLISH_LONG_F = 0.2, REST_F = 0.5, REST_ROUNDS = 8, REST_MIN_MS = 1500;
 // the proof's share once a route is known (a static level start only): min(PROVE_MS, PROVE_F x the budget) kept for the
 // PROVE stage (one exact search from the level start bounded by the route's own arrival), and all the time the moves leave
 const PROVE_MS = 30000, PROVE_F = 0.2;
-// (THE ORDER-AWARE ROUTE BOUND, n5-p4-perfect: OPT-IN EEAT_ROUTELB=1, its clock EEAT_ROUTELB_MS (15 s) after the budget)
-const ROUTE_LB = process.env.EEAT_ROUTELB === '1';
-const ROUTE_LB_MS = +process.env.EEAT_ROUTELB_MS || 15000;
 // THE PERFECT PASS (n5-perfect, src/plan/perfect.js; DEFAULT ON since the C6 merge into n5-plan (the 300-s A/B on the merged
 // head: CLAUDE.md section 11, PERFECT IN n5-plan); EEAT_PERFECT=0: off, and with it every n5-perfect compile-time knob (the
 // precision fast rests, the loop cuts, the LOOPS stage: EEAT_JOINS=0 turns the joins off); EEAT_PERFECT_PASS=0: only this
@@ -2132,20 +2129,6 @@ async function compile(L, opts = {}, emit = () => {}) {
 		} catch (e) { /* the first one stands */ }
 	}
 	if (best && LB > best.runTicks) { bug('bound', { why: `the lower bound ${LB} is above the route's ${best.runTicks} run ticks: inadmissible`, lb: LB, planner: lbPlanner, bounds: lbBounds }); LB = Math.max(0, ...[lbPlanner, lbBounds].filter((x) => Number.isFinite(x) && x <= best.runTicks)); }
-	// THE ORDER-AWARE ROUTE BOUND (n5-p4-perfect, src/math/routelb.js; OPT-IN EEAT_ROUTELB=1, off = the compile byte for
-	// byte): the least over the trigger orders of tight per-leg bounds (local speed caps, the kinematic first leg), its own
-	// clock after the budget (EEAT_ROUTELB_MS, 15 s); taken where it is higher, never above the route (that is a bug)
-	let lbRoute = null;
-	if (ROUTE_LB && !lbProof) {
-		try {
-			const t1 = Date.now();
-			const r = require('../math/routelb.js').createRouteLB(L, { model }).runBound({ ms: ROUTE_LB_MS });
-			lbRoute = { lb: Number.isFinite(r.lb) ? r.lb : null, complete: !!r.complete, ms: Date.now() - t1, order: (r.order || []).slice(0, 16) };
-			if (best && Number.isFinite(r.lb) && r.lb > best.runTicks) bug('bound', { why: `the route bound ${r.lb} is above the route's ${best.runTicks} run ticks: inadmissible`, lb: r.lb });
-			else if (Number.isFinite(r.lb) && r.lb > LB) { LB = r.lb; lbComplete = !!r.complete; }
-			stage('routelb', Date.now() - t1, `the order-aware route bound ${num(r.lb)} run ticks${r.complete ? '' : ' (its search cut: the least f on its open list)'}`);
-		} catch (e) { say({ ev: 'warning', text: `the route bound: ${e.message}` }); }
-	}
 	let execStats = null;
 	try { execStats = exec && exec.stats ? exec.stats() : null; } catch (e) { execStats = null; }
 	try { if (exec && exec.close) await exec.close(); } catch (e) { /* closed */ }
@@ -2159,7 +2142,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		bugs, deepenings, stalls, bnbPlans, bnbArrivals, layers: Math.max(0, ...[...anchors.values()].map((A) => A.firstTick)), ...(why ? { why } : {}) });
 	saveFiles();
 	return { ok: !!best, masks: best ? best.masks : null, route: best ? best.masks : null, runTicks: best ? best.runTicks : null, ticks: best ? best.ticks : null, deaths: best ? best.deaths : null, chance: best ? best.chance : null,
-		lb: LB, lbComplete, lbProof, gap: best ? gapOf(best.runTicks) : null, legs: best ? best.legs : [], stages, known, why, end, anchors: anchors.size, steps, okSteps, bugs, deepenings, stalls, bnbPlans, bnbArrivals, relayRuns, relaySet, relayDrop, ...(ST_ON ? { stretch: stStats } : {}), ...(ROUTE_LB ? { lbRoute } : {}), exec: execStats, perfect: perfectInfo, joins: joinsInfo,
+		lb: LB, lbComplete, lbProof, gap: best ? gapOf(best.runTicks) : null, legs: best ? best.legs : [], stages, known, why, end, anchors: anchors.size, steps, okSteps, bugs, deepenings, stalls, bnbPlans, bnbArrivals, relayRuns, relaySet, relayDrop, ...(ST_ON ? { stretch: stStats } : {}), exec: execStats, perfect: perfectInfo, joins: joinsInfo,
 		...(OS_ON ? { oneshot: os || osw ? Object.assign(os ? os.stats() : Object.assign({}, osStats || {}), { thread: !!osw, readyMs: osReady ? osReady.ms : null, error: osErr || null, gate: osw && OS_GATE ? (osOpen ? 'open' : 'shut') : null, released: osReleased, held: osPending.size, anchorsGiven: osAnchors, injected: osInjected, routeTicks: Number.isFinite(osBestT) ? osBestT : null, how: best ? best.how : null }) : null } : {}) };
 }
 
