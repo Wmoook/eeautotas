@@ -2234,8 +2234,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 		stage('joins', Date.now() - tm, text);
 	}
 
-	// ---- THE ENDGAME (C6 lane 5 block 3; OPT-IN opts.endgameS (compile.js EEAT_ENDGAME_S / --endgame=<s>), 0 / unset: off,
-	// the compile byte for byte): the exact endgame ladder of src/endgame.js on the finished route: from the route's own state
+	// ---- THE ENDGAME (C6 lane 5 block 3; opts.endgameS, 0 / unset: off, the compile byte for byte; compile.js passes it
+	// BY DEFAULT since block 4: a fifth of the budget, at most 60 s; EEAT_ENDGAME=0 / --endgame=0 off): the exact endgame ladder of src/endgame.js on the finished route: from the route's own state
 	// K = 8, 16, .. 64 ticks before its finish EVERY input sequence (stateHash merge, the admissible trophy bound's cut), the
 	// first finish the fastest from that state, a give-up / an exhausted search a proof that none is faster from there;
 	// kept only when the engine replays it faster with no more deaths and no lower chance. Its own clock after the joins.

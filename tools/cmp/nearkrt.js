@@ -65,7 +65,9 @@ const pos = argv.filter((s) => !s.startsWith('--'));
 				why: res.fail ? res.fail.why : null, closest: cl && cl.dist >= 0 ? +(+cl.dist).toFixed(1) : null, ctile: cl && cl.tile >= 0 ? [cl.tile % W, (cl.tile / W) | 0] : null };
 			out.res.push(row);
 			console.error(JSON.stringify(row));
-			if (cl && cl.masks) closestMasks = String(cl.masks);
+			// (reach() hands the closest's masks back as a Uint8Array: String() of one is its comma-joined numbers, which
+			// replayed to a trajectory 100-200 tiles from the reported closest tile (C6 lane 3 block 3's false finding))
+			if (cl && cl.masks) closestMasks = cl.masks instanceof Uint8Array ? T.strOf(cl.masks) : String(cl.masks);
 			if (res.ok) break;
 		}
 		await ex.close();

@@ -57,6 +57,31 @@ const replay = (L, snap, masks, tiles) => {
 		ok(rp.minX < x0 - 8, `${name}: the leg runs away from the gap first (lowest x ${rp.minX.toFixed(1)} < ${x0} - 8)`);
 		if (name.includes('closure')) ok(r.stats.dStart !== null && r.stats.finite > 0, `the values: the start's cell has D ${r.stats.dStart} (${r.stats.finite} cells with a value)`);
 	}
+	// 5 THE RESUMABLE CLOSURE (resume 1): a closure its clock cut is resumed by the next call to the same target (its cells
+	// carried over), a farther start's wider corridor grows it, the leg found at last replayed; resume 0: never resumed
+	{
+		const BR = BW.createBackward(L, { resume: 1 });
+		const B0 = BW.createBackward(L, { resume: 0 });
+		// (a start 60 ticks to the left: farther from the target, a wider corridor)
+		const sim = new E.EESim(L); sim.restore(s0.snapshot());
+		const inp = new E.EEInput();
+		for (let k = 0; k < 60; k++) { E.applyMask(inp, 2); sim.tick(inp); }
+		const sFar = sim.snapshot();
+		// (a tight corridor, the target's walk + 2: the farther start's corridor is wider)
+		const o1 = { ms: 40, quick: 1, quickF: 0.05, closeF: 0.9, meetNodes: 1, maxNodes: 2, relay: 0, ladder: 0, corrF: 1, corrAdd: 2, corrReach: 0 };
+		const r1 = BR.solve(s0.snapshot(), target, o1);
+		ok(!r1.ok && r1.stats.closed === false && r1.stats.cells > 0, `resume: the first call's closure cut by its clock (${r1.stats.cells} cells)`);
+		const r2 = BR.solve(s0.snapshot(), target, Object.assign({}, o1, { ms: 120 }));
+		ok(r2.stats.resumed >= r1.stats.cells && r2.stats.cells > r1.stats.cells, `resume: the second call resumed it (${r2.stats.resumed} carried, ${r2.stats.cells} cells, closed ${r2.stats.closed})`);
+		const r3 = BR.solve(sFar, target, Object.assign({}, o1, { ms: 120 }));
+		ok(r3.stats.resumed > 0 && r3.stats.grown > 0, `resume: a farther start's corridor grew the kept closure (+${r3.stats.grown} tiles)`);
+		const r0a = B0.solve(s0.snapshot(), target, o1), r0b = B0.solve(s0.snapshot(), target, o1);
+		ok(r0a.stats.resumed === undefined && r0b.stats.resumed === undefined, 'resume 0: no call resumes');
+		let rf = null;
+		for (let k = 0; k < 40 && !(rf && rf.ok); k++) rf = BR.solve(s0.snapshot(), target, { ms: 4000, quick: 1 });
+		ok(rf && rf.ok, `resume: the leg found from the resumed values (${rf && rf.why})`);
+		if (rf && rf.ok) ok(replay(L, s0.snapshot(), rf.masks, target.tiles).hit === rf.T, 'resume: the leg replayed onto the target');
+	}
 	// 4 the executor's tier (EEAT_BACKWARD=1): the run-up waypoint from the edge (run at the end: async)
 	tierCheck = async () => {
 		process.env.EEAT_BACKWARD = '1';
