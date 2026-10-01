@@ -25,54 +25,27 @@
 //   4. VERIFY: each candidate (T, x pattern, y member) becomes masks and is replayed ONCE by the engine (EESim from the
 //      start snapshot, ~0.6 us a tick); a miss (a corner of the sub-step staircase, a one-way, a door, the align)
 //      goes on to the next candidate. The answer is the engine's: the first tick the goal test holds.
-//   5. NOT PLAIN (arrows, dots, liquids, climbables, boosts, portals) or no plain candidate: THE FIELD TIER,
-//      src/math/fieldsolve.js solveLeg (the fields derivation's per-axis field kinematics: the start field's axis roles,
-//      the gravity axis' options, the input axes by fields.solveAxis, the schedule iteration across field boundaries),
-//      its answer replayed by this solver's goal test; then THE COUPLED PIECE, the per-tick one-change family over the
-//      9 direction masks (and a press at the first tick) replayed by the engine with the prefix shared, only below the
-//      field answer's T or where neither found one (cheapest T across the tiers). tool: 'plain' | 'field' | 'coupled'.
-//   6. THE BOUND (sections 3.2, 1.4, docs/ee_math.md 5): a lower bound on the leg's ticks for EVERY input sequence of
-//      the plain regime: max(x: the 1D minimum time (hold toward from max(v0 toward, 0), the align slack) to the target
-//      columns' centre range, y: the first tick the fall from max(vy0, 0) (below) or the rise of a jump pressed now /
-//      the current rise (above; past one jump's reach: |J| a tick at most) reaches the target rows' centre range, +1
-//      for a landing above). Its CERTIFICATE: every non-plain, non-solid tile u inside the rectangle the plain extremes
-//      reach in that many ticks has max(the first tick the centre can be in u's column, in u's row) >= the bound (THE
-//      TILE TEST), or, with no portal / killer / effect in the box the ball can reach at the speed limit (20 px a tick),
-//      that plus u's gap to the target at the limit (THE SPEED LIMIT); no timed killer running. A leg whose found T
-//      equals a certified bound is PROVEN OPTIMAL (res.proven): no input sequence reaches the target sooner.
-//   7. CHAINS (chain): A* over SUPPORT STATES with solved legs as edges: the direct leg to the target at every node,
-//      the forward fan-out (landings: the earliest verified landing, and its hop, on the standable tiles the plain
-//      extremes reach) and the event fan-out (the 18 held masks to their first support event), nodes merged by
-//      stateHash; the claim fa = g + the certified plain bound, the order f = g + w x max(that bound, kappa x the reach
-//      field's cost to the target's tiles), the reach field's -1 a proof; closed = optimal within the legs' graph.
-// The gravity members also cover BONKS (a rise stopped by a ceiling line: y blocked there, vy = 0, then the fall) and
-// the x map carries the member's WALLS (a blocked x stops at its last free sub-step, vx = 0); the landing reads the raw
-// x and y before the align (the collision probe sees them).
+//   5. NOT PLAIN (arrows, dots, liquids, climbables, boosts, portals) or no plain candidate: the COUPLED piece, the
+//      per-tick one-change family over the 9 direction masks (and a press at the first tick) replayed by the engine
+//      with the prefix shared, cheapest first-hit tick kept (tool 'coupled').
+//   6. THE BOUND (sections 3.2, 1.4): a lower bound on the leg's ticks for EVERY input sequence of the plain regime:
+//      max(x: the 1D minimum time from max(v0 toward, 0) with the align slack, y: the first tick the jump (or the
+//      fall) reaches the target's floor line); a leg whose found T equals it is PROVEN OPTIMAL (lb === T).
 //
 // API
-//   const S = createSolver(L, {K, Tmax})
+//   const S = createSolver(L, {K, Tmax, alts})
 //   S.leg(start, target, o) -> {ok, masks (Uint8Array of the leg, replayed), T, hop (masks with the jump on the last
-//       tick: the landing hop, verified too) | null, lb, cert, proven, provenBy ('plain' | 'events'), lbMath, proveUs,
-//       tool, member, k, cands, verifies, us, why}
+//       tick: the landing hop, verified too) | null, lb, proven, tool ('plain' | 'coupled' | null), cands, verifies,
+//       us, why}
 //     start: an EESnapshot of L (sim.snapshot()) or an EESim of L (its current state is read, not changed)
 //     target: {tiles: number[] (centre tiles), cls: 'G' | 'Z' | 'W' | 'C' | 'B' | 'A' | 'any', tele: bool (the goal tick
 //       must teleport), via: number[] (portal tiles to enter for a teleport target)}
-//     o: {Tmax, K (max x changes, default 2), plain, fields, coupled (each default true), nodes (the plain branch and
-//       bound's budget, 400 k), deadline (a Date.now() clock for the plain and coupled pieces; 0 none), alts / altSlack (up
-//       to alts more verified plain legs with distinct end states within altSlack ticks: res.alts [{T, masks}]),
-//       fieldMs (250), coupledTicks (2 M), chain / chainAny / chainMs (the chain tier),
-//       prove (the event-graph proof of src/math/lb.js for a leg the plain certificate did not prove; default
-//       createSolver's opts.prove, false), proveMs (50), land (the land-and-act members of the plain tier: an airborne
-//       member lands on a floor line and hops / jumps / walks off / walks on; default on, EEAT_MSOLVE_LAND=0 off),
-//       plainMs (the plain tier's clock, checked per item and every 2048 nodes; none by default), debug(item)}
-//   S.chain(start, target, o) -> {ok, masks, T, closed, expanded, legs, nodes, cut, reach, firstMs, ms}
-//                                o: {ms, legT, w, fanT, fanMax, fanNodes, events, reach (the reach field's order), kappa}
-//   S.landings(start, o) -> [{tile, T, masks, hop}]   the forward fan-out from a plain state
-//   S.lowerBound(start, target) -> ticks (the plain regime's bound; 0 when none applies)
+//     o: {Tmax, K (max x changes, default 2), coupled (default true), plain (default true), alts}
+//   S.lowerBound(start, target) -> ticks (admissible in the plain regime; 0 when no bound applies)
 //   S.goal(target) -> (sim, prevX, prevY) -> bool: the target's exact test on a real state
 //   S.replay(start, masks, target) -> first tick (1-based) the goal holds, or 0
-//   clsOf(sim, flags) -> the support class letter of a state (the moves study's: D W C Z B G A)
-//   holdTables(ctx) -> THE HOLD TABLES (position-free offsets of hold R / hold L per start speed, 1/64 px/tick grid)
+//   clsOf(sim, L) -> the support class letter of a state (the moves study's: D W C Z B G A)
+//   holdTables(ctx) -> {DR, DL, grid}: THE HOLD TABLES (position-free offsets of hold R / hold L per start speed)
 const E = require('../eesim.js');
 const K1 = require('./kin1d.js');
 const KN = require('./kin.js');
@@ -82,84 +55,8 @@ const DOTS = new Set([4, 414]);
 const EFFECT_IDS = new Set([417, 418, 419, 420, 421, 422, 423, 453, 461, 1517, 1573, 1584, 1618]);
 const PORTALS = new Set([242, 381]);
 const TELEPORT_PX = 20;
-const SPEED_PX = 20;                     // the most the centre moves in a tick an axis without a teleport (16 + the align)
-// THE AXIS SPEED BOUNDS (docs/ee_math.md 4.12, THEOREM V; engine check tools/math/speedcut_check.js): away from the
-// tiles that can push an axis past its bound (x: a pull on x (the left / right arrows), an x boost; y: a y boost, ice
-// (its glide keeps more speed on y), levitation; both: a portal, a gravity effect) and with the pulls not rotated onto
-// x (flip not 1 / 3), a tick keeps |vx'| <= max(|vx|, VSTAR_X) (the held run's fixed point: the speed update is monotone
-// in v, the along-key step (v + A sm) B has its fixed point there, every other drag shrinks |v|, walls zero it; x1.5
-// with the run effect) and moves the box |dx| <= |vx'| + the align's 0.2 px; the y axis likewise with the terminal fall
-// VSTAR_Y (13.55: pulls of 2 or less, the world's gravity <= 1, jumps 8.72 at most). Local: from a state, the next R
-// ticks' current and delayed tiles all lie within SPEED_PX (R + 2) px of its centre (the 20-px limit, the queue's 2
-// ticks back), so with no hot tile of an axis in that box the ball covers g px on it in no fewer than
-// ceil(g / (max(|v|, V) + RATE_SLACK)) ticks, for EVERY input sequence of R ticks
-const VSTAR_X = 6.776552880470027, VSTAR_X_RUN = 10.164829320704984, VSTAR_Y = 13.553105760940054, RATE_SLACK = 0.5;
-const CORDER_V = process.env.EEAT_MATH_VCUT === '1';   // OPT-IN: sound, but no leg gained (docs 4.12)
-/** the id's THEOREM V class: 1 hot for x, 2 hot for y, 3 both */
-function hotClass(id, f) {
-	if (id === 1517 || PORTALS.has(id)) return 3;
-	KN.forces(id, id, 0, false, f);
-	let c = 0;
-	if (f.morx !== 0 || f.mox !== 0 || id === 114 || id === 115) c |= 1;
-	if (id === 116 || id === 117 || id === 1064 || id === 418) c |= 2;
-	return c;
-}
-/** the level's hot tiles for THEOREM V: summed-area tables sx / sy, the run effect, the world's gravity */
-function axisHot(L) {
-	const W = L.width, H = L.height, fg = L.fg, R = W + 1;
-	const sx = new Int32Array((W + 1) * (H + 1)), sy = new Int32Array((W + 1) * (H + 1));
-	const cls = new Map(), f = {};
-	let run = false;
-	for (let y = 0; y < H; y++) {
-		let rx = 0, ry = 0;
-		for (let x = 0; x < W; x++) {
-			const id = fg[y * W + x];
-			let c = cls.get(id);
-			if (c === undefined) { c = hotClass(id, f); cls.set(id, c); if (id === 419) run = true; }
-			rx += c & 1; ry += (c >> 1) & 1;
-			sx[(y + 1) * R + x + 1] = sx[y * R + x + 1] + rx;
-			sy[(y + 1) * R + x + 1] = sy[y * R + x + 1] + ry;
-		}
-	}
-	const gm = L.gravityMult === undefined ? 1 : L.gravityMult;
-	return { W, H, sx, sy, run, yOK: Math.abs(gm) <= 1 };
-}
-/** the hot tiles of table S in tile columns [x0, x1] x rows [y0, y1] (clamped to the world) */
-function hotIn(T, S, x0, y0, x1, y1) {
-	x0 = Math.max(0, x0); y0 = Math.max(0, y0); x1 = Math.min(T.W - 1, x1); y1 = Math.min(T.H - 1, y1);
-	if (x1 < x0 || y1 < y0) return 0;
-	const R = T.W + 1;
-	return S[(y1 + 1) * R + x1 + 1] - S[y0 * R + x1 + 1] - S[(y1 + 1) * R + x0] + S[y0 * R + x0];
-}
-/** the most the box moves on each axis a tick over the next R ticks from the state s, for every input (THEOREM V where
- * the box around s of radius RATE_BOX(R) holds no hot tile of that axis; SPEED_PX otherwise) */
-const RATE_BOX = (R) => SPEED_PX * (R + 2) + 32;
-function axisRates(T, s, R, out) {
-	out.x = SPEED_PX; out.y = SPEED_PX;
-	const fl = s.flip_gravity;
-	if (fl === 1 || fl === 3) return out;
-	const rad = RATE_BOX(R), cx = s.px + 8, cy = s.py + 8;
-	const x0 = Math.floor((cx - rad) / 16), x1 = Math.floor((cx + rad) / 16), y0 = Math.floor((cy - rad) / 16), y1 = Math.floor((cy + rad) / 16);
-	if (hotIn(T, T.sx, x0, y0, x1, y1) === 0) out.x = Math.max(Math.abs(s.speed_x), T.run || s.speed_boost === 1 ? VSTAR_X_RUN : VSTAR_X) + RATE_SLACK;
-	if (T.yOK && hotIn(T, T.sy, x0, y0, x1, y1) === 0) out.y = Math.max(Math.abs(s.speed_y), VSTAR_Y) + RATE_SLACK;
-	return out;
-}
-let FS_ = null;
-/** the field leg solver (src/math/fieldsolve.js), loaded on first use */
-const FSOLVE = () => FS_ || (FS_ = require('../math/fieldsolve.js'));
-let RF_ = null;
-/** the reach field (src/reach.js), the chains' order, loaded on first use */
-const RF = () => RF_ || (RF_ = require('../reach.js'));
 const DIR9 = [0, 2, 4, 8, 16, 10, 12, 18, 20];
-/** the land-and-act members' default (o.land overrides): EEAT_MSOLVE_LAND=0 off (the A/B knob through the compiler) */
-const LAND_DEF = process.env.EEAT_MSOLVE_LAND !== '0';
 const MI_MASK = [0, 2, 4];               // kin1d input index -> mask bits (0 '-', 1 L, 2 R)
-
-/** a gravity member's name (the result's `member`): jump@j, off@o, walk, air; a land-and-act member base>land row@T1>act */
-function memberName(m) {
-	if (m.kind === 'land') return `${memberName(m.base)}>land${m.l.fr}@${m.l.T1}>${m.act === 'jump' ? (m.l.j2 === m.l.T1 ? 'hop' : `jump@${m.l.j2}`) : m.act === 'off' ? `off@${m.l.off2}` : 'walk'}`;
-	return m.kind === 'jump' ? `jump@${m.j}` : m.kind === 'off' ? `off@${m.off}` : m.kind;
-}
 
 // ------------------------------------------------------------------ the support class (the moves study's clsOf)
 function clsOf(sim, flags) {
@@ -247,33 +144,6 @@ function createSolver(L, opts = {}) {
 	const sim = new E.EESim(L), inp = new E.EEInput();
 	sim.reset();
 	const KMAX = opts.K === undefined ? 2 : opts.K;
-	// the certificate's tile test (opts.certTiles false: the rectangle alone, the first version) and its speed-limit
-	// refinement (opts.certSpeed false: off): a field tile the ball could reach first still leaves the bound when the
-	// way on from it to the target at the speed limit ends at lb or later. The limit holds while no tile the ball could
-	// meet teleports it (a portal) or kills it (a respawn: a killer, an effect with a timer): STRICT tiles, counted by a
-	// summed-area table of the level's static tiles
-	const certTiles = opts.certTiles !== false, certSpeed = opts.certSpeed !== false;
-	const strictSAT = new Int32Array((W + 1) * (Hh + 1));
-	{
-		KN.flagsOf(flags.length - 1);
-		const gt = KN.gravTables();
-		const strictId = (id) => PORTALS.has(id) || EFFECT_IDS.has(id) || (id < gt.flags.length && (gt.flags[id] & 4) !== 0) || !!(L.gFlags && (L.gFlags[id] & 4) !== 0);
-		for (let y = 0; y < Hh; y++) {
-			let row = 0;
-			for (let x = 0; x < W; x++) {
-				const id = L.fg[y * W + x];
-				if (strictId(id)) row++;
-				strictSAT[(y + 1) * (W + 1) + x + 1] = strictSAT[y * (W + 1) + x + 1] + row;
-			}
-		}
-	}
-	/** the strict tiles in columns [x0, x1] x rows [y0, y1] (clamped to the world) */
-	function strictIn(x0, y0, x1, y1) {
-		x0 = Math.max(0, x0); y0 = Math.max(0, y0); x1 = Math.min(W - 1, x1); y1 = Math.min(Hh - 1, y1);
-		if (x1 < x0 || y1 < y0) return 0;
-		const S = strictSAT, R = W + 1;
-		return S[(y1 + 1) * R + x1 + 1] - S[y0 * R + x1 + 1] - S[(y1 + 1) * R + x0] + S[y0 * R + x0];
-	}
 	// the per-state solid map: 0 free, 1 solid, 3 one-way (a floor from above only), 4 half block (solid, conservative)
 	const base = new Uint8Array(N);
 	const doorTiles = [];
@@ -428,7 +298,7 @@ function createSolver(L, opts = {}) {
 			const rec = (t, x, v, miPrev, k, code) => {
 				for (let mi = 0; mi < 3 && !stop; mi++) {
 					if (k > 0 && mi === miPrev) continue;
-					if (--budget.n < 0 || ((budget.n & 2047) === 0 && budget.tEnd && Date.now() > budget.tEnd)) { stop = true; budget.out = true; return; }
+					if (--budget.n < 0) { stop = true; budget.out = true; return; }
 					if (!feasible(x, v, T - t, kT - k, mi)) continue;
 					const code2 = (code | (mi << (2 * k)) | (k > 0 ? t << (8 + 7 * (k - 1)) : 0)) >>> 0;
 					if (k === kT) {
@@ -463,7 +333,7 @@ function createSolver(L, opts = {}) {
 							const mono = mi !== 0 && mf !== 0 && !(I.mods[mi] < 0.1 && I.mods[mi] > -0.1) && !(I.mods[mf] < 0.1 && I.mods[mf] > -0.1);
 							if (!mono) {
 								for (let i = 0; i < n && !stop; i++) {
-									if (--budget.n < 0 || ((budget.n & 2047) === 0 && budget.tEnd && Date.now() > budget.tEnd)) { stop = true; budget.out = true; return; }
+									if (--budget.n < 0) { stop = true; budget.out = true; return; }
 									if (!feasible(xs[i], vs[i], T - (t + 1 + i), 0, mf)) continue;
 									tryAt(i);
 								}
@@ -475,7 +345,7 @@ function createSolver(L, opts = {}) {
 							let a = 0, b = n;
 							while (a < b) { const m = (a + b) >> 1; budget.n--; const e = endX(m); if (up ? e >= wlo - 1e-9 : e < whi + 1e-9) b = m; else a = m + 1; }
 							for (let i = a; i < n && !stop; i++) {
-								if (--budget.n < 0 || ((budget.n & 2047) === 0 && budget.tEnd && Date.now() > budget.tEnd)) { stop = true; budget.out = true; return; }
+								if (--budget.n < 0) { stop = true; budget.out = true; return; }
 								const e = endX(i);
 								if (up ? e >= whi + 1e-9 : e < wlo - 1e-9) break;
 								tryAt(i);
@@ -523,7 +393,6 @@ function createSolver(L, opts = {}) {
 	 * Returns {ok, masks, T, hop, cands, verifies, tool: 'plain'} or {ok: false, ...}.
 	 */
 	function solvePlain(snap, s, ctx, tg, goal, o, stats) {
-		stats.t0 = process.hrtime.bigint();
 		const Tmax = o.Tmax;
 		const I = K1.ia(ctx), G = K1.ga(ctx), Hd = holdTables(ctx);
 		const sol = solidOf(s), tiles = s.tiles;
@@ -565,95 +434,14 @@ function createSolver(L, opts = {}) {
 				prev = yt;
 			}
 		}
-		// THE LAND-AND-ACT MEMBERS (section 4.10, the coverage iteration): the gravity axis of a leg through ONE landing.
-		// An airborne member crosses the floor line of row fr descending at exactly one tick T1 (y = line after it, vy =
-		// 0: the landing is the collision's, the x map is the same plain recurrence on the ground and in the air); from
-		// there the ball is a STANDING ball on row fr: it jumps at a tick j2 >= T1 (j2 = T1: the landing hop), walks off
-		// at a tick o2 > T1 + 1, or walks on. The member = the base member to T1 + the standing family from (line, T1): a
-		// two-parameter gravity family, still a closed form of the tables (gravTrace from the line). The x axis is one
-		// pattern across the landing; the tube checks the floor under the box on the ground ticks (row fr). Airborne
-		// starts get every act (jump / off / walk); standing starts' members (a jump, a walk-off) the walk and the hop, with
-		// o.landStanding only.
-		if ((o.land !== undefined ? o.land : LAND_DEF) && !o.each && Tmax > 4) {
-			const landMax = o.landRows || 6;
-			const jmpFrom = new Map(), fallFromL = new Map();
-			const jmpL = (yl) => { if (!jmpFrom.has(yl)) jmpFrom.set(yl, gravTrace(yl, G.J, Tmax, G)); return jmpFrom.get(yl); };
-			const fallL = (yl) => { if (!fallFromL.has(yl)) fallFromL.set(yl, gravTrace(yl, 0, Tmax, G)); return fallFromL.get(yl); };
-			// (a standing start's jump / walk-off members as bases only with o.landStanding: on the single real moves they cost
-			// the jump legs' node budget, 39 lost of 11,747, and won 5 hops; its 2-move legs are the chains')
-			const bases = members.filter((m) => m.kind === 'air' || (o.landStanding && (m.kind === 'jump' || m.kind === 'off') && standing));
-			const canJ2 = s.max_jumps >= 1;
-			const rowHasFloor = (fr, lo, hi) => {
-				if (fr >= Hh) return true;
-				const c0 = Math.max(0, Math.floor(lo / 16) - 1), c1 = Math.min(W - 1, Math.floor((hi + 16) / 16) + 1);
-				for (let c = c0; c <= c1; c++) if (sol[fr * W + c] !== 0) return true;
-				return false;
-			};
-			for (const b of bases) {
-				let nl = 0;
-				for (let t = Math.max(1, b.air0 + 1); t < Tmax - 1 && nl < landMax; t++) {
-					if (!(b.v(t) > 0)) continue;
-					const yp = t === 1 ? y0 : b.y(t - 1), rt = b.r(t);
-					// every floor line crossed descending in this tick: yp <= line < raw
-					for (let line = Math.ceil(yp / 16) * 16; line < rt && nl < landMax; line += 16) {
-						const fr = line / 16 + 1;
-						if (fr > Hh) break;
-						const hr = holdRange(Hd, x0, vx0, t, K1.ALIGN_SLACK + 1e-6);
-						if (!rowHasFloor(fr, hr[0], hr[1])) continue;
-						nl++;
-						const T1 = t, yl = line, jl = jmpL(yl), fl = fallL(yl);
-						const pre = (q) => q < T1;
-						const mk = (kind, j2, off2, g2, air0, y, r, v) => ({ kind: 'land', act: kind, base: b, j: 0, g: 0, off: 0, air0, l: { T1, fr, line: yl, j2, off2, g2 }, jumps: (b.kind === 'jump' ? [b.j] : []).concat(j2 ? [j2] : []), sk: (b.kind === 'jump' ? b.j : b.kind === 'off' ? 1e3 + b.off : 0) + 5e3 + (j2 || off2 || 0), y, r, v });
-						const by = b.y, br = b.r, bv = b.v;
-						// the walk on (only on the landing row's target tiles: the items below)
-						members.push(mk('walk', 0, 0, Tmax, Tmax, (q) => (pre(q) ? by(q) : yl), (q) => (q < T1 ? br(q) : q === T1 ? rt : yl), (q) => (pre(q) ? bv(q) : 0)));
-						if (canJ2) {
-							const jEnd = standing ? T1 : Tmax - 1;           // standing starts: the hop alone
-							for (let j2 = T1; j2 <= jEnd; j2++) {
-								members.push(mk('jump', j2, 0, j2, j2, (q) => (pre(q) ? by(q) : q <= j2 ? yl : jl.Y[q - j2]), (q) => (q < T1 ? br(q) : q === T1 ? rt : q <= j2 ? yl : jl.R[q - j2]), (q) => (pre(q) ? bv(q) : q <= j2 ? 0 : jl.V[q - j2])));
-							}
-						}
-						if (!standing) {
-							for (let o2 = T1 + 1; o2 < Tmax; o2++) {
-								members.push(mk('off', 0, o2, o2 - 1, o2 - 1, (q) => (pre(q) ? by(q) : q < o2 ? yl : fl.Y[q - o2 + 1]), (q) => (q < T1 ? br(q) : q === T1 ? rt : q < o2 ? yl : fl.R[q - o2 + 1]), (q) => (pre(q) ? bv(q) : q < o2 ? 0 : fl.V[q - o2 + 1])));
-							}
-						}
-					}
-				}
-			}
-		}
 		// the (T, member, windows) items
 		const items = [];
 		for (const m of members) {
-			if (m.kind === 'land' && m.act === 'walk') {
-				// on the landing row after the landing: the target's tiles in its centre row (class G while walking)
-				if (tg.cls === 'G' || tg.cls === 'any') {
-					const fr = m.l.fr;
-					if (o.each) {
-						for (const c of tg.colsByRow.get(fr - 1) || []) {
-							const wins = landWins({ colsByRow: new Map([[fr - 1, [c]]]) }, sol, fr);
-							if (wins.length) for (let T = m.l.T1 + 1; T <= Tmax; T++) items.push({ T, m, wins, land: fr, tile: (fr - 1) * W + c });
-						}
-					} else {
-						const wins = landWins(tg, sol, fr);
-						if (wins.length) for (let T = m.l.T1 + 1; T <= Tmax; T++) items.push({ T, m, wins, land: fr });
-					}
-				}
-				continue;
-			}
 			if (m.kind === 'walk') {
 				// on the floor row: the target's tiles in the centre row fr0 - 1 (class G while walking)
 				if (tg.cls === 'G' || tg.cls === 'any') {
-					if (o.each) {
-						// the fan-out: the walk's items per tile of the floor row (their own windows and goals)
-						for (const c of tg.colsByRow.get(fr0 - 1) || []) {
-							const wins = landWins({ colsByRow: new Map([[fr0 - 1, [c]]]) }, sol, fr0);
-							if (wins.length) for (let T = 1; T <= Tmax; T++) items.push({ T, m, wins, land: fr0, tile: (fr0 - 1) * W + c });
-						}
-					} else {
-						const wins = landWins(tg, sol, fr0);
-						if (wins.length) for (let T = 1; T <= Tmax; T++) items.push({ T, m, wins, land: fr0 });
-					}
+					const wins = landWins(tg, sol, fr0);
+					if (wins.length) for (let T = 1; T <= Tmax; T++) items.push({ T, m, wins, land: fr0 });
 				}
 				continue;
 			}
@@ -685,29 +473,14 @@ function createSolver(L, opts = {}) {
 				}
 			}
 		}
-		const skOf = (m) => (m.sk !== undefined ? m.sk : m.kind === 'jump' ? m.j : 1e3 + m.off);
-		items.sort((a, b) => a.T - b.T || skOf(a.m) - skOf(b.m));
-		// the plain tier's clock (o.plainMs: a deadline for the whole tier, checked per item and every 2048 nodes)
-		// and the caller's clock (o.deadline, Date.now(): the executor's window; the branch and bound of a leg with no
-		// candidate ran 1.8-2.7 s on MIHB's Dream (400 k nodes, 386 items, 0 verifies) and ate its whole window)
-		const tEnd0 = o.plainMs > 0 ? Date.now() + o.plainMs : 0;
-		const tEnd = o.deadline > 0 ? (tEnd0 ? Math.min(tEnd0, o.deadline) : o.deadline) : tEnd0;
+		items.sort((a, b) => a.T - b.T || (a.m.kind === 'jump' ? a.m.j : 1e3 + a.m.off) - (b.m.kind === 'jump' ? b.m.j : 1e3 + b.m.off));
 		const budget = { n: o.nodes || 400000, out: false };
 		let best = null;
-		const solved = o.each ? new Map() : null, goals = o.each ? new Map() : null, tries = new Map();
-		// (o.alts: up to that many verified legs with DISTINCT END STATES (the arrival's class: vx, vy rounded, grounded) within
-		// o.altSlack ticks of the cheapest, the cheapest per class: the next leg starts from the arrival, and the cheapest
-		// leg's end (full speed, launched) can be the worst start for it; the candidate order is unchanged, the first found
-		// is still the answer)
-		const alts = !o.each && o.alts > 0 ? new Map() : null, altSlack = alts ? Math.max(0, o.altSlack || 0) : 0;
-		stats.setupMs = Number(process.hrtime.bigint() - (stats.t0 || process.hrtime.bigint())) / 1e6; stats.nItems = items.length;
+		const solved = o.each ? new Map() : null, goals = o.each ? new Map() : null;
 		for (const it of items) {
-			if (!o.each && best && it.T > best.T + altSlack) break;
-			if (alts && best && it.T > best.T && alts.size >= o.alts) break;
+			if (!o.each && best && it.T > best.T) break;
 			if (budget.out) break;
-			if (tEnd && Date.now() > tEnd) { budget.out = true; break; }
 			if (o.each && solved.has(it.tile)) continue;
-			if (o.each && o.perTile) { const n = (tries.get(it.tile) || 0) + 1; tries.set(it.tile, n); if (n > o.perTile) continue; }
 			// the root cut: THEOREM M from the start
 			const r0 = holdRange(Hd, x0, vx0, it.T, K1.ALIGN_SLACK + 1e-6);
 			let any = false; for (const w of it.wins) if (r0[1] >= w[0] && r0[0] < w[1]) any = true;
@@ -734,27 +507,18 @@ function createSolver(L, opts = {}) {
 				for (let q = Math.floor(x); q >= xn; q -= 1) { if (blk(q)) return p; p = q; }
 				return p;
 			};
-			const lnd = m.l, bm = lnd ? m.base : m;
 			const tube = (j, xp, x, raw) => {
 				// the first x sub-step's position (the y probe of the lockstep loop sees it); raw = x before the align
 				if (raw === undefined) raw = x;
 				let xs = raw;
 				const fx = Math.floor(xp);
 				if (raw > xp) { if (raw >= fx + 1) xs = fx + 1; } else if (raw < xp) { if (xp !== fx && raw < fx) xs = fx; }
-				if (lnd && j >= lnd.T1 && j < T) {
-					// the land-and-act member after its base: the landing tick (the box over a floor of row fr, free at the
-					// line), the ground ticks (the floor under the first sub-step), the walk-off tick, then its own flight
-					if (j === lnd.T1) return boxFree(sol, x, lnd.line) && plainAt(tiles, x, lnd.line) && (floorAt(sol, raw, lnd.fr) || floorAt(sol, xs, lnd.fr) || floorAt(sol, x, lnd.fr));
-					if (j <= lnd.g2) return floorAt(sol, xs, lnd.fr) && boxFree(sol, x, lnd.line) && plainAt(tiles, x, lnd.line);
-					if (lnd.off2 && j === lnd.off2 && floorAt(sol, xs, lnd.fr)) return false;
-					return boxFree(sol, x, Ys[j]) && plainAt(tiles, x, Ys[j]);
-				}
-				if (j <= bm.g) return floorAt(sol, xs, fr0) && boxFree(sol, x, y0);
-				if (bm.off && j === bm.off) { if (floorAt(sol, xs, fr0)) return false; }
-				if (bm.bonk && j === bm.bonk.b) {
+				if (j <= m.g) return floorAt(sol, xs, fr0) && boxFree(sol, x, y0);
+				if (m.off && j === m.off) { if (floorAt(sol, xs, fr0)) return false; }
+				if (m.bonk && j === m.bonk.b) {
 					// the ceiling over the box (at the sub-step, before or after the align) and the box free under it
-					if (!(ceilAt(sol, xs, bm.bonk.cr) || ceilAt(sol, raw, bm.bonk.cr) || ceilAt(sol, x, bm.bonk.cr))) return false;
-					if (j < T) return boxFree(sol, x, bm.bonk.line) && plainAt(tiles, x, bm.bonk.line);
+					if (!(ceilAt(sol, xs, m.bonk.cr) || ceilAt(sol, raw, m.bonk.cr) || ceilAt(sol, x, m.bonk.cr))) return false;
+					if (j < T) return boxFree(sol, x, m.bonk.line) && plainAt(tiles, x, m.bonk.line);
 				}
 				if (j === T) {
 					if (it.land >= 0) return boxFree(sol, x, 16 * it.land - 16) && (floorAt(sol, raw, it.land) || floorAt(sol, xs, it.land) || floorAt(sol, x, it.land));
@@ -770,7 +534,7 @@ function createSolver(L, opts = {}) {
 				const masks = new Uint8Array(T + extra);
 				for (let t = 1; t <= T + extra; t++) {
 					let mk = MI_MASK[K1.inputAt(code, Math.min(t, T))];
-					if (m.jumps) { for (let q = 0; q < m.jumps.length; q++) if (t === m.jumps[q]) mk |= 1; } else if (m.kind === 'jump' && t === m.j) mk |= 1;
+					if (m.kind === 'jump' && t === m.j) mk |= 1;
 					masks[t - 1] = mk;
 				}
 				stats.verifies++;
@@ -784,158 +548,74 @@ function createSolver(L, opts = {}) {
 				const hit = replay(snap, masks, goal, T + extra);
 				if (hit > 0) {
 					const ms = masks.subarray(0, hit);
-					if (!best || hit < best.T) best = { T: hit, masks: Uint8Array.from(ms), k, member: memberName(m), code };
-					if (alts) {
-						// (the replay left the engine at the arrival: its class, the cheapest leg per class)
-						const key = `${Math.round(sim.speed_x)},${Math.round(sim.speed_y)},${sim.on_ground ? 1 : 0}`;
-						const a = alts.get(key);
-						if (!a || hit < a.T) alts.set(key, { T: hit, masks: Uint8Array.from(ms) });
-						return alts.size >= o.alts;
-					}
+					if (!best || hit < best.T) best = { T: hit, masks: Uint8Array.from(ms), k, member: m.kind === 'jump' ? `jump@${m.j}` : m.kind === 'off' ? `off@${m.off}` : m.kind, code };
 					return true;
 				}
 				return false;
 			};
 			const c0 = stats.cands;
-			// a per-item share of the budget: no one (T, member) item eats the whole leg's budget
-			const cap = o.itemNodes || 40000, before = budget.n;
-			const ib = { n: Math.min(budget.n, cap), out: false, tEnd };
-			solveX(x0, vx0, T, it.wins, tube, kMax, I, Hd, emit, ib, wall);
-			budget.n = before - (Math.min(before, cap) - Math.max(ib.n, 0));
-			if (budget.n <= 0) budget.out = true;
+			solveX(x0, vx0, T, it.wins, tube, kMax, I, Hd, emit, budget, wall);
 			if (o.debug) o.debug({ T, kind: m.kind, j: m.j, off: m.off, bonk: m.bonk, land: it.land, wins: it.wins, cands: stats.cands - c0, best: best && best.T });
 		}
 		if (o.each) return { ok: solved.size > 0, tool: 'plain', each: Array.from(solved.values()), budgetOut: budget.out };
 		if (!best) return { ok: false, why: budget.out ? 'budget' : 'no plain candidate', tool: 'plain' };
-		const res = Object.assign({ ok: true, tool: 'plain' }, best);
-		if (alts) res.alts = Array.from(alts.values()).filter((a) => a.T !== best.T || a.masks.length !== best.masks.length || a.masks.some((v, i) => v !== best.masks[i])).sort((a, b) => a.T - b.T);
-		return res;
+		return Object.assign({ ok: true, tool: 'plain' }, best);
 	}
 
 	// ---------------------------------------------------------------- the coupled piece (per-tick one change, engine)
-	// THE SPEED-LIMIT CUT of the coupled piece (sound): without a teleport the centre moves at most SPEED_PX a tick an axis
-	// (a death ends the hold), so a state whose box position is g px (Chebyshev) from the target tiles' box range needs
-	// ceil(g / SPEED_PX) more ticks; a hold whose tick + that exceeds its limit cannot reach the target within the limit,
-	// nor can any branch from its later ticks (the bound holds for every input from that state). Off with a portal in the
-	// level or a teleport target (the teleport jumps the limit)
-	let hasPortal_ = null, tame_ = null;
-	const rates = { x: SPEED_PX, y: SPEED_PX };
-	/** the level's THEOREM V tameness, made on first use */
-	const tame = () => tame_ || (tame_ = axisHot(L));
-	function hasPortal() {
-		if (hasPortal_ === null) { hasPortal_ = false; for (let i = 0; i < N; i++) if (PORTALS.has(L.fg[i])) { hasPortal_ = true; break; } }
-		return hasPortal_;
-	}
-	function boxOf(tg) {
-		let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
-		for (const t of (tg.via || tg.tiles)) { const c = t % W, r = (t / W) | 0; if (c < x0) x0 = c; if (c > x1) x1 = c; if (r < y0) y0 = r; if (r > y1) y1 = r; }
-		// the box position px of a centre in tile column c: [16 c - 8, 16 c + 8); the goal test clamps a centre outside the
-		// world to the edge tiles, so a target on the world's edge reaches out without end on that side
-		return { xl: x0 <= 0 ? -Infinity : 16 * x0 - 8, xh: x1 >= W - 1 ? Infinity : 16 * x1 + 8,
-			yl: y0 <= 0 ? -Infinity : 16 * y0 - 8, yh: y1 >= Hh - 1 ? Infinity : 16 * y1 + 8 };
-	}
-	// the coupled piece's JUMP FAMILIES and the cut (EEAT_MATH_CORDER=0: the first version's family alone, no cut): the
-	// first version's order (the first-tick press, then DIR9) with the jump press at the change tick on the same direction
-	// (hold, then jump: the most common unsolved field-leg pattern of the moves study) in the same pass, then the press on a
-	// change of direction; a heading order (the masks toward the target first) lost more legs than it found
-	const CORDER = process.env.EEAT_MATH_CORDER !== '0';
-// the twin cut of the coupled piece (EEAT_MATH_TWIN=0: off): every TWIN_MASK + 1 ticks (EEAT_MATH_TWIN_K, a power of 2) a hold's state hash under its mask
-const TWIN = process.env.EEAT_MATH_TWIN !== '0', TWIN_MASK = (+process.env.EEAT_MATH_TWIN_K || 4) - 1;   // K a power of 2
 	function solveCoupled(snap, s, tg, goal, o, stats) {
 		const Tmax = o.Tmax;
-		const ordered = CORDER && o.coupledOrder !== false;
 		const jumpFirst = [0, 1];
 		let best = null;
 		const snaps = [];
-		const bx = ordered && !tg.tele && !tg.via && !hasPortal() ? boxOf(tg) : null;
-		const vcut = CORDER_V ? o.vcut !== false : o.vcut === true;
-		const cut = (t, limit) => {
-			// (t: the leg tick just played, 1-based; the goal can hold at the earliest at t + need)
-			const x = sim.px, y = sim.py;
-			if (!vcut) {
-				const g = Math.max(bx.xl - x, x - bx.xh, bx.yl - y, y - bx.yh, 0);
-				return t + Math.ceil(g / SPEED_PX) > limit;
-			}
-			// THEOREM V: each axis at its own rate from this state on
-			axisRates(tame(), sim, limit - t, rates);
-			const gx = Math.max(bx.xl - x, x - bx.xh, 0), gy = Math.max(bx.yl - y, y - bx.yh, 0);
-			return t + Math.max(Math.ceil(gx / rates.x), Math.ceil(gy / rates.y)) > limit;
-		};
-		const twins = TWIN && o.twin !== false ? new Set() : null;
 		const hold = (m0, p0, from, tick0, limit) => {
-			// play mask m0 (with the jump bit p0 on the first tick of the leg, or of this hold with p0 = 2) from snapshot
-			// `from` at leg tick tick0
+			// play mask m0 (with the jump bit p0 on the first tick of the leg) from snapshot `from` at leg tick tick0
 			sim.restore(from);
 			for (let t = tick0; t < limit; t++) {
 				const px = sim.px, py = sim.py;
-				E.applyMask(inp, t === 0 ? (m0 | (p0 & 1)) : t === tick0 && p0 === 2 ? (m0 | 1) : m0);
+				E.applyMask(inp, t === 0 ? (m0 | p0) : m0);
 				sim.tick(inp);
 				stats.ticks++;
 				if (goal(sim, px, py)) return t + 1;
 				if (sim.is_dead) return 0;
-				if (bx && cut(t + 1, limit)) { stats.cuts = (stats.cuts || 0) + 1; return 0; }
-				// THE TWIN CUT (exact): from tick t + 1 on every hold plays its mask plain, so a state met again at the
-				// same leg tick under the same mask has the continuation already played (with a limit at least this
-				// one's: the limit only shrinks): its outcome is known, the hold ends here
-				if (twins !== null && ((t + 1) & TWIN_MASK) === 0) {
-					const key = m0 + ':' + (t + 1) + ':' + sim.stateHash();
-					if (twins.has(key)) { stats.twins = (stats.twins || 0) + 1; return 0; }
-					twins.add(key);
-				}
 			}
 			return 0;
 		};
-		const pre = [];
-		for (const p0 of jumpFirst) for (const m0 of DIR9) pre.push([p0, m0]);
 		// F0
-		for (const [p0, m0] of pre) {
+		for (const p0 of jumpFirst) for (const m0 of DIR9) {
 			const h = hold(m0, p0, snap, 0, best ? best.T : Tmax);
 			if (h && (!best || h < best.T)) { const ms = new Uint8Array(h).fill(m0); ms[0] |= p0; best = { T: h, masks: ms, k: 0 }; }
 		}
-		// F1: the prefix m0 (snapshots every tick), then m1 from tick c; phase 0 = the family of the first version (m1 != m0)
-		// with THE JUMP PRESS AT c ON THE SAME DIRECTION (m1 = m0, the jump bit at c: hold, then jump: 75% of the unsolved
-		// field legs it solves), phase 1 (the budget left) the press at c on a change of direction (m1 != m0)
-		const budget = o.coupledTicks || 2e6;
-		const phases = ordered && o.coupledJump !== false ? [0, 1] : [0];
-		for (const ph of phases) {
-			// (phase 1 only for a leg phase 0 left unsolved: its extra holds are the time a solved leg does not need)
-			if (ph === 1 && best) break;
-			for (const [p0, m0] of pre) {
-				if (stats.ticks > budget || (o.deadline > 0 && Date.now() > o.deadline)) break;
-				const lim = best ? best.T - 1 : Tmax - 1;
-				snaps.length = 0;
-				sim.restore(snap);
-				let alive = lim;
-				for (let t = 0; t < lim; t++) {
-					const px = sim.px, py = sim.py;
-					E.applyMask(inp, t === 0 ? (m0 | p0) : m0);
-					sim.tick(inp);
-					stats.ticks++;
-					if (sim.is_dead || goal(sim, px, py)) { alive = t; break; }
-					snaps.push(sim.snapshot());
-					// (the cut: no branch from this tick on reaches the target within the limit)
-					if (bx && cut(t + 1, best ? best.T : Tmax)) { alive = t; break; }
-				}
-				for (let c = 1; c <= alive && c <= snaps.length; c++) {
-					const lim2 = best ? best.T : Tmax;
-					if (c >= lim2) break;
-					for (let i = 0; i < DIR9.length + 1; i++) {
-						// phase 0: DIR9 (m1 != m0, no press) then m0 with the press (i = 9); phase 1: DIR9 (m1 != m0) with the press
-						let m1, p1;
-						if (i === DIR9.length) { if (ph !== 0 || !ordered || o.coupledJump === false) continue; m1 = m0; p1 = 2; }
-						else { m1 = DIR9[i]; if (m1 === m0) continue; p1 = ph === 0 ? 0 : 2; }
-						const h = hold(m1, p1, snaps[c - 1], c, best ? best.T : Tmax);
-						if (h && (!best || h < best.T)) {
-							const ms = new Uint8Array(h);
-							for (let t = 0; t < h; t++) ms[t] = t < c ? m0 : m1;
-							ms[0] |= p0;
-							if (p1 === 2) ms[c] |= 1;
-							best = { T: h, masks: ms, k: 1 };
-						}
-					}
-					if (stats.ticks > budget || (o.deadline > 0 && Date.now() > o.deadline)) break;
-				}
+		// F1: the prefix m0 (snapshots every tick), then m1 from tick c
+		for (const p0 of jumpFirst) for (const m0 of DIR9) {
+			const lim = best ? best.T - 1 : Tmax - 1;
+			snaps.length = 0;
+			sim.restore(snap);
+			let alive = lim;
+			for (let t = 0; t < lim; t++) {
+				const px = sim.px, py = sim.py;
+				E.applyMask(inp, t === 0 ? (m0 | p0) : m0);
+				sim.tick(inp);
+				stats.ticks++;
+				if (sim.is_dead || goal(sim, px, py)) { alive = t; break; }
+				snaps.push(sim.snapshot());
 			}
+			for (let c = 1; c <= alive && c <= snaps.length; c++) {
+				const lim2 = best ? best.T : Tmax;
+				if (c >= lim2) break;
+				for (const m1 of DIR9) {
+					if (m1 === m0) continue;
+					const h = hold(m1, 0, snaps[c - 1], c, best ? best.T : Tmax);
+					if (h && (!best || h < best.T)) {
+						const ms = new Uint8Array(h);
+						for (let t = 0; t < h; t++) ms[t] = t < c ? m0 : m1;
+						ms[0] |= p0;
+						best = { T: h, masks: ms, k: 1 };
+					}
+				}
+				if (stats.ticks > (o.coupledTicks || 2e6)) break;
+			}
+			if (stats.ticks > (o.coupledTicks || 2e6)) break;
 		}
 		if (!best) return { ok: false, why: 'no coupled candidate', tool: 'coupled' };
 		return Object.assign({ ok: true, tool: 'coupled' }, best);
@@ -943,41 +623,18 @@ const TWIN = process.env.EEAT_MATH_TWIN !== '0', TWIN_MASK = (+process.env.EEAT_
 
 	// ---------------------------------------------------------------- the bound
 	/** the admissible lower bound of the plain regime (0 when it does not apply: fields, teleports, multi-jumps) */
-	// the x part of the bound for one column: the centre in [16c - 8, 16c + 8) (with the align slack), hold toward from
-	// max(v0 toward, 0)
-	function txOf(s, I, c) {
-		const x0 = s.px, vx0 = s.speed_x, lo = 16 * c - 8, hi = 16 * c + 8;
-		if (x0 >= lo - K1.ALIGN_SLACK && x0 < hi + K1.ALIGN_SLACK) return 0;
-		if (x0 < lo) return minTo(x0, Math.max(vx0, 0), lo - K1.ALIGN_SLACK, 2, I);
-		return minTo(x0, Math.min(vx0, 0), hi + K1.ALIGN_SLACK, 1, I);
-	}
-	// the y part for one row (max_jumps 1): the centre in [16 r - 8, 16 r + 8) (with the slack); land: +1 above the start
-	function tyOf(s, G, r, land) {
-		const y0 = s.py, vy0 = s.speed_y, SL = K1.ALIGN_SLACK;
-		const standing = s.on_ground && vy0 === 0;
-		const ylo = 16 * r - 8 - SL, yhi = 16 * r + 8 + SL;
-		let t = Infinity;
-		if (y0 >= ylo && y0 < yhi) t = 0;
-		else if (y0 < ylo) {
-			let y = y0, v = Math.max(vy0, 0);
-			for (let j = 1; j <= 4000; j++) { v = K1.axisStep(v, 0, G.mo, 0, 0, false); y += v; if (y >= ylo) { t = j; break; } }
-		} else {
-			const jumpNow = standing && s.jump_count < s.max_jumps;
-			let y = y0, v = jumpNow ? G.J : Math.min(vy0, 0);
-			for (let j = 1; j <= 4000; j++) { v = K1.axisStep(v, 0, G.mo, 0, 0, false); y += v; if (y < yhi) { t = j + (jumpNow ? 1 : 0) + (land ? 1 : 0); break; } if (v > 0) break; }
-			// out of one jump's reach (stairs, re-jumps from landings): no tick rises more than |J| (the jump sets it,
-			// gravity only slows it): a looser bound, still one
-			if (!Number.isFinite(t)) t = Math.ceil((y0 - yhi) / Math.abs(G.J)) + (land ? 1 : 0);
-		}
-		return t;
-	}
 	function lowerBoundOf(s, tg, ctx) {
 		if (!ctx || tg.tele) return 0;
 		const G = K1.ga(ctx), I = K1.ia(ctx);
+		const x0 = s.px, vx0 = s.speed_x, y0 = s.py, vy0 = s.speed_y;
 		// x: the nearest target column's centre range [16c - 8, 16c + 8): hold toward from max(v0 toward, 0), with the slack
 		let tx = Infinity;
 		for (const t of tg.tiles) {
-			const need = txOf(s, I, t % W);
+			const c = t % W, lo = 16 * c - 8, hi = 16 * c + 8;
+			let need;
+			if (x0 >= lo - K1.ALIGN_SLACK && x0 < hi + K1.ALIGN_SLACK) need = 0;
+			else if (x0 < lo) need = minTo(x0, Math.max(vx0, 0), lo - K1.ALIGN_SLACK, 2, I);
+			else need = minTo(x0, Math.min(vx0, 0), hi + K1.ALIGN_SLACK, 1, I);
 			if (need < tx) tx = need;
 		}
 		// y: a landing on floor row fr (line 16 fr - 16) needs the ball to cross the line descending: below the start, the
@@ -989,9 +646,24 @@ const TWIN = process.env.EEAT_MATH_TWIN !== '0', TWIN_MASK = (+process.env.EEAT_
 		// above it the rise of a jump pressed at tick 1 (y moves from tick 2) or the current rise, and a landing there
 		// needs one tick more (the rise ends first)
 		let ty = Infinity;
+		const standing = s.on_ground && vy0 === 0;
+		const SL = K1.ALIGN_SLACK;
 		if (s.max_jumps === 1) {
 			for (const r of tg.rows) {
-				const t = tyOf(s, G, r, tg.cls === 'G');
+				const ylo = 16 * r - 8 - SL, yhi = 16 * r + 8 + SL;
+				let t = Infinity;
+				if (y0 >= ylo && y0 < yhi) t = 0;
+				else if (y0 < ylo) {
+					let y = y0, v = Math.max(vy0, 0);
+					for (let j = 1; j <= 4000; j++) { v = K1.axisStep(v, 0, G.mo, 0, 0, false); y += v; if (y >= ylo) { t = j; break; } }
+				} else {
+					const jumpNow = standing && s.jump_count < s.max_jumps;
+					let y = y0, v = jumpNow ? G.J : Math.min(vy0, 0);
+					for (let j = 1; j <= 4000; j++) { v = K1.axisStep(v, 0, G.mo, 0, 0, false); y += v; if (y < yhi) { t = j + (jumpNow ? 1 : 0) + (tg.cls === 'G' ? 1 : 0); break; } if (v > 0) break; }
+					// out of one jump's reach (stairs, re-jumps from landings): no tick rises more than |J| (the jump sets it,
+					// gravity only slows it): a looser bound, still one
+					if (!Number.isFinite(t)) t = Math.ceil((y0 - yhi) / Math.abs(G.J)) + (tg.cls === 'G' ? 1 : 0);
+				}
 				if (t < ty) ty = t;
 			}
 		} else ty = 0;
@@ -1004,10 +676,8 @@ const TWIN = process.env.EEAT_MATH_TWIN !== '0', TWIN_MASK = (+process.env.EEAT_
 	 * lies in the rectangle the plain extremes reach (x: hold L / hold R, y: the jump's apex to the fall), so the bound
 	 * holds for EVERY input sequence (a field, boost or portal the ball could reach first would void it)
 	 */
-	function certify(s, b, ctx, tg) {
+	function certify(s, b, ctx) {
 		if (b <= 0 || b > HOLD_T) return false;
-		// a timed killer running (a curse, a zombie, fire, poison): its death respawns the ball elsewhere, no bound
-		if (s.is_cursed || s.is_zombie || s.is_on_fire || s.is_poisoned) return false;
 		const G = K1.ga(ctx), Hd = holdTables(ctx);
 		let xlo = s.px, xhi = s.px;
 		for (let n = 1; n <= b; n++) {
@@ -1023,49 +693,13 @@ const TWIN = process.env.EEAT_MATH_TWIN !== '0', TWIN_MASK = (+process.env.EEAT_
 		if (s.max_jumps !== 1) return false;
 		const c0 = Math.max(0, (Math.floor(xlo) >> 4)), c1 = Math.min(W - 1, (Math.floor(xhi + 16) >> 4));
 		const r0 = Math.max(0, (Math.floor(ylo) >> 4)), r1 = Math.min(Hh - 1, (Math.floor(yhi + 16) >> 4));
-		// THE TILE TEST: a non-plain tile u inside the rectangle voids the bound only when the ball can reach it before
-		// tick b: the first tick the centre can be in u's column (txOf) and in its row (tyOf, no landing) are lower bounds
-		// on the first tick it is in u, valid up to the first non-plain tile a path enters (the plain regime holds until
-		// then); so min over those tiles of max(tx, ty) >= b means no path leaves the plain regime before b, and the bound
-		// holds for every input sequence
-		const tiles = s.tiles, I = K1.ia(ctx);
-		const txc = new Map(), tyr = new Map();
-		// THE SPEED LIMIT: every speed is capped at 16 px/tick after the drag (boosts set 16), the sub-steps move by the
-		// speed, the align by < 2 px: the centre moves at most SPEED_PX a tick an axis unless a portal teleports it or a
-		// death respawns it; with no strict tile inside the box the ball can reach at that limit in b ticks, a path that
-		// first leaves the plain regime at a field tile u still needs max(tx, ty)(u) + the gap from u to a target tile
-		// at the limit
-		let refine = false;
-		if (certSpeed && tg && tg.tiles && tg.tiles.length) {
-			const R = SPEED_PX * b;
-			refine = strictIn(Math.floor((s.px - R) / 16), Math.floor((s.py - R) / 16), Math.floor((s.px + 16 + R) / 16), Math.floor((s.py + 16 + R) / 16)) === 0;
-		}
+		const tiles = s.tiles;
 		for (let cy = r0; cy <= r1; cy++) for (let cx = c0; cx <= c1; cx++) {
 			const id = tiles[cy * W + cx];
 			if ((flags[id] & F_SOLID) !== 0) continue;
-			if (id < plainId.length && plainId[id] === 1) continue;
-			if (!certTiles) return false;
-			let ty = tyr.get(cy);
-			if (ty === undefined) { ty = tyOf(s, G, cy, false); tyr.set(cy, ty); }
-			if (ty >= b) continue;
-			let tx = txc.get(cx);
-			if (tx === undefined) { tx = txOf(s, I, cx); txc.set(cx, tx); }
-			if (tx >= b) continue;
-			if (refine && Math.max(tx, ty) + gapTicks(cx, cy, tg) >= b) continue;
-			return false;
+			if (!(id < plainId.length && plainId[id] === 1)) return false;
 		}
 		return true;
-	}
-	/** the least ticks from anywhere in tile (cx, cy) to a target tile's centre range at the speed limit */
-	function gapTicks(cx, cy, tg) {
-		let best = Infinity;
-		for (const t of tg.tiles) {
-			const tc = t % W, tr = (t / W) | 0;
-			const gx = Math.max(0, 16 * Math.abs(cx - tc) - 16), gy = Math.max(0, 16 * Math.abs(cy - tr) - 16);
-			const n = Math.ceil(Math.max(gx, gy) / SPEED_PX);
-			if (n < best) best = n;
-		}
-		return Number.isFinite(best) ? best : 0;
 	}
 	function minTo(x0, v0, X, mi, I) {
 		let x = x0, v = v0;
@@ -1094,17 +728,6 @@ const TWIN = process.env.EEAT_MATH_TWIN !== '0', TWIN_MASK = (+process.env.EEAT_
 		if (start instanceof E.EESim) return start.snapshot();
 		return start;
 	}
-	// the reach field to a set of tiles (the chains' order), one per tile set, the newest 8 kept
-	const rfCache = new Map();
-	function reachFieldOf(tiles) {
-		const key = Array.from(tiles).sort((a, b) => a - b).join(',');
-		if (rfCache.has(key)) return rfCache.get(key);
-		let f = null;
-		try { f = RF().reachField(L, { goals: Array.from(tiles).map((t) => ({ tile: t, cost: 0 })), deaths: false }); } catch (e) { f = null; }
-		if (rfCache.size >= 8) rfCache.delete(rfCache.keys().next().value);
-		rfCache.set(key, f);
-		return f;
-	}
 	function leg(start, target, o = {}) {
 		const t0 = process.hrtime.bigint();
 		const snap = snapOf(start);
@@ -1114,11 +737,8 @@ const TWIN = process.env.EEAT_MATH_TWIN !== '0', TWIN_MASK = (+process.env.EEAT_
 		const goal = goalOf(target);
 		const oo = Object.assign({ Tmax: opts.Tmax || 120 }, o);
 		const ctx = plainStart(sim);
-		const hr = () => Number(process.hrtime.bigint() - t0) / 1e6;
-		const split = {};
 		const lb = ctx && !target.tele ? lowerBoundOf(sim, tg, ctx) : 0;
-		const cert = lb > 0 && certify(sim, lb, ctx, tg);
-		split.pre = hr();
+		const cert = lb > 0 && certify(sim, lb, ctx);
 		let res = { ok: false, why: ctx ? 'no candidate' : 'not plain' };
 		if (ctx && oo.plain !== false) {
 			if (tg.via) {
@@ -1135,41 +755,9 @@ const TWIN = process.env.EEAT_MATH_TWIN !== '0', TWIN_MASK = (+process.env.EEAT_
 				}
 			} else res = solvePlain(snap, sim, ctx, tg, goal, oo, stats);
 		}
-		split.plain = hr();
-		// a plain answer through a landing (4.11) is the plain regime's cheapest, not the cheapest of every tier: a way
-		// through a field or the coupled one-change family can be shorter (the single moves' hops: 30 of 11,747 legs
-		// longer than the field / coupled tiers' answers), so the other tiers are asked below its T too
-		const landAns = res.ok && res.tool === 'plain' && typeof res.member === 'string' && res.member.includes('>land');
-		if ((!res.ok || landAns) && oo.fields !== false && !target.tele && (!landAns || res.T > 1)) {
-			// THE FIELD TIER (src/math/fieldsolve.js, the fields derivation): the start field's axis roles, the gravity
-			// axis' option trajectories, the input axes solved by fields.solveAxis in the goal's windows, the schedule
-			// iteration across field boundaries; its candidates replayed by the engine there
-			sim.restore(snap);
-			const r = FSOLVE().solveLeg(L, sim, { tiles: tg.tiles, cls: tg.cls === 'any' ? null : tg.cls, maxT: landAns ? res.T - 1 : oo.Tmax }, { k: oo.fieldK || 2, maxMs: oo.fieldMs || 250 });
-			stats.fields = (stats.fields || 0) + 1;
-			if (r.ok) {
-				// the goal replayed here by this solver's own test (the same letters; a teleport goal never reaches here)
-				const hit = replay(snap, r.masks, goal);
-				if (hit > 0 && (!res.ok || hit < res.T)) res = { ok: true, tool: 'field', T: hit, masks: Uint8Array.from(r.masks.subarray(0, hit)), member: r.tool };
-			}
-		}
-		split.field = hr();
-		if (res.ok && (res.tool === 'field' || landAns) && oo.coupled !== false && res.T > 1) {
-			// cheapest T across the tiers: the coupled piece below the field answer's T
-			const r = solveCoupled(snap, sim, tg, goal, Object.assign({}, oo, { Tmax: res.T - 1 }), stats);
-			if (r.ok && r.T < res.T) res = r;
-		}
 		if (!res.ok && oo.coupled !== false) {
 			const r = solveCoupled(snap, sim, tg, goal, oo, stats);
 			if (r.ok) res = r; else if (!ctx) res.why = 'not plain; ' + r.why;
-		}
-		if (!res.ok && oo.chain !== false && (ctx || oo.chainAny !== false) && !target.tele && oo.Tmax >= (oo.chainMin || 40)) {
-			// THE CHAIN TIER: a long leg as a chain of shorter ones through supports (A* over support states, 4.6),
-			// within this leg's horizon and a small clock; from a non-plain start too (its successors by the event fan-out:
-			// a leg across fields = the pieces between its field events); the root's direct leg is this failed one
-			const r = chain(snap, target, { Tmax: oo.Tmax, ms: oo.chainMs || 400, legT: Math.min(60, oo.Tmax), reach: oo.chainReach === true, rootLeg: false });
-			stats.chain = r;
-			if (r.ok) res = { ok: true, tool: 'chain', T: r.T, masks: r.masks, member: `chain ${r.expanded}` };
 		}
 		if (res.ok) {
 			// the landing hop: the same masks with the jump bit on the last tick (a different end state, the same support)
@@ -1179,33 +767,11 @@ const TWIN = process.env.EEAT_MATH_TWIN !== '0', TWIN_MASK = (+process.env.EEAT_
 			res.lb = lb;
 			res.cert = cert;
 			res.proven = cert && res.T === lb;
-			if (res.proven) res.provenBy = 'plain';
 		} else { res.lb = lb; res.cert = cert; res.proven = false; }
-		split.coupled = hr();
-		res.split = split; res.plainSetup = stats.setupMs;
 		res.cands = stats.cands; res.verifies = stats.verifies; res.items = stats.items; res.ticks = stats.ticks;
 		res.us = Number(process.hrtime.bigint() - t0) / 1e3;
-		if (res.ok && !res.proven && (oo.prove !== undefined ? oo.prove : opts.prove) && !target.tele) {
-			// THE EVENT-GRAPH BOUND (src/math/lb.js, docs/ee_math.md section 5: the admissible bound over the level's
-			// collision events, the build / bounds derivation): a leg found in exactly its bound's ticks is PROVEN OPTIMAL
-			// from this state. The target's mode: 'land' for a landing class G (grounded with the centre there: the goal's
-			// states are among them), 'touch' for the others (the centre in the tiles). Its time apart (res.proveUs)
-			const p0 = process.hrtime.bigint();
-			try {
-				sim.restore(snap);
-				const r = MLB().certify(sim, { tiles: tg.tiles, mode: tg.cls === 'G' ? 'land' : 'touch' }, res.T, { cap: oo.proveCap || 4000, ms: oo.proveMs || 50 });
-				res.lbMath = r.lb;
-				if (r.proven && r.lb === res.T) { res.proven = true; res.provenBy = 'events'; }
-				// a bound above a replayed leg's ticks would be a counterexample to the bound: reported, never a proof
-				if (r.lb !== null && r.lb > res.T) res.lbMathAbove = true;
-			} catch (e) { res.lbMath = null; }
-			res.proveUs = Number(process.hrtime.bigint() - p0) / 1e3;
-		}
 		return res;
 	}
-	let MLB_ = null;
-	/** the event-graph bound (src/math/lb.js) of this level, made on first use */
-	function MLB() { return MLB_ || (MLB_ = require('../math/lb.js').createMathLB(L)); }
 
 	// ---------------------------------------------------------------- CHAINS: A* over support states
 	/**
@@ -1223,8 +789,7 @@ const TWIN = process.env.EEAT_MATH_TWIN !== '0', TWIN_MASK = (+process.env.EEAT_
 		const ylo = s.py - 80, yhi = s.py + ticks * 13.6;
 		const c0 = Math.max(0, Math.floor(xlo / 16)), c1 = Math.min(W - 1, Math.floor((xhi + 16) / 16));
 		const r0 = Math.max(0, Math.floor(ylo / 16)), r1 = Math.min(Hh - 2, Math.floor((yhi + 16) / 16));
-		// the current tile is no successor of a standing ball (a walk in place); a launched one (a hop) lands on it
-		const here = s.on_ground && s.speed_y === 0 ? (Math.trunc(s.py + 8) >> 4) * W + (Math.trunc(s.px + 8) >> 4) : -1;
+		const here = (Math.trunc(s.py + 8) >> 4) * W + (Math.trunc(s.px + 8) >> 4);
 		const tt = tg.tiles.map((t) => [t % W, (t / W) | 0]);
 		const out = [];
 		for (let cy = r0; cy <= r1; cy++) for (let cx = c0; cx <= c1; cx++) {
@@ -1250,19 +815,11 @@ const TWIN = process.env.EEAT_MATH_TWIN !== '0', TWIN_MASK = (+process.env.EEAT_
 		const ctx = plainStart(sim);
 		if (!ctx) return [];
 		const Tmax = o.Tmax || 60;
-		// the fan-out's tiles: the nearest to the target and the nearest to the ball (half each: the target's side and the way out)
-		const mx = o.max || 400;
-		let tiles = supportsNear(sim, Tmax, ctx, o.toward || { tiles: [] }, mx);
-		if (o.toward) {
-			const near = supportsNear(sim, Tmax, ctx, { tiles: [(Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)] }, mx);
-			const set = new Set(tiles.slice(0, mx >> 1));
-			for (const t of near) { if (set.size >= mx) break; set.add(t); }
-			tiles = Array.from(set);
-		}
+		const tiles = supportsNear(sim, Tmax, ctx, { tiles: [] }, o.max || 400);
 		if (!tiles.length) return [];
 		const tg = targetOf({ tiles, cls: 'G' });
 		const stats = { items: 0, cands: 0, verifies: 0, ticks: 0 };
-		const r = solvePlain(snap, sim, ctx, tg, goalOf({ tiles, cls: 'G' }), { Tmax, K: o.K === undefined ? 1 : o.K, each: true, nodes: o.nodes || 150000, perTile: o.perTile || 0, deadline: o.deadline || 0 }, stats);
+		const r = solvePlain(snap, sim, ctx, tg, goalOf({ tiles, cls: 'G' }), { Tmax, K: o.K === undefined ? 1 : o.K, each: true, nodes: o.nodes || 150000 }, stats);
 		const out = r.each || [];
 		for (const e of out) {
 			const hm = Uint8Array.from(e.masks); hm[hm.length - 1] |= 1;
@@ -1273,114 +830,58 @@ const TWIN = process.env.EEAT_MATH_TWIN !== '0', TWIN_MASK = (+process.env.EEAT_
 		return out;
 	}
 	/**
-	 * eventFan(start, maxT): each of the 18 held masks (DIR9, with and without the press on the first tick) played to
-	 * its first support event within maxT ticks: a landing (on_ground after a tick in the air or a fresh press), the
-	 * class letter changing (a field entered or left), a teleport; [{masks}] (deaths dropped)
-	 */
-	function eventFan(start, maxT) {
-		const snap = snapOf(start);
-		const out = [];
-		for (const p0 of [0, 1]) for (const m0 of DIR9) {
-			sim.restore(snap);
-			const c0 = clsOf(sim, flags);
-			let air = !sim.on_ground || sim.speed_y !== 0;
-			const ms = [];
-			for (let t = 0; t < maxT; t++) {
-				const px = sim.px, py = sim.py;
-				const mk = t === 0 ? (m0 | p0) : m0;
-				E.applyMask(inp, mk); sim.tick(inp); ms.push(mk);
-				if (sim.is_dead) break;
-				const c = clsOf(sim, flags);
-				const tele = Math.abs(sim.px - px) > TELEPORT_PX || Math.abs(sim.py - py) > TELEPORT_PX;
-				if (tele || (c !== c0 && c !== 'A') || (sim.on_ground && air && t > 0)) { out.push({ masks: Uint8Array.from(ms), hop: null }); break; }
-				if (!sim.on_ground) air = true;
-			}
-		}
-		return out;
-	}
-	/**
 	 * chain(start, target, o): A* over SUPPORT STATES with solved legs as edges. A node = an exact engine state (its
 	 * snapshot, the masks from the chain's start, g = ticks); its edges = the direct leg to the target and legs to the
 	 * o.fan (8) standable tiles nearest the target (supportsNear), each landing also as its hop (the jump on the
 	 * landing tick: another state, the same support); nodes merged by stateHash (a state reached again no sooner is
-	 * dropped); the order f = g + w x max(the plain bound, the reach field's cost to the target's tiles x kappa ticks a
-	 * tile), the claim fa = g + the plain regime's certified lower bound (0 where none applies), so a search none of
-	 * whose open nodes has fa below the best found has CLOSED: that chain is optimal within the graph of these legs (the
-	 * reach field's -1 in physics mode drops a node: a proof). Lazy verification: every edge is the solver's replayed
-	 * answer, made when its node is expanded, not before.
-	 * o: {ms (2000), fan (8), legT (80: a leg's Tmax), K, w (1), reach (true: the reach field's order), kappa,
-	 * coupledDirect}. Returns {ok, masks, T, closed, expanded, legs, nodes, cut, reach, ms}.
+	 * dropped); h = the plain regime's certified lower bound to the target (0 where none applies), so a search whose
+	 * open list's least f reaches the best found has CLOSED: that chain is optimal within the graph of these legs.
+	 * Lazy verification: every edge is the solver's replayed answer, made when its node is expanded, not before.
+	 * o: {ms (2000), fan (8), legT (80: a leg's Tmax), K, coupled (false: the fan-out legs plain only; the direct leg
+	 * takes o.coupledDirect)}. Returns {ok, masks, T, closed, expanded, legs, nodes, ms}.
 	 */
 	function chain(start, target, o = {}) {
 		const t0 = Date.now(), budgetMs = o.ms || 2000, fan = o.fan === undefined ? 8 : o.fan, legT = o.legT || 80;
 		const snap0 = snapOf(start);
 		const tg = targetOf(target);
 		const heap = [];
-		// the least f first, among equal f the deepest (the larger g: the same guarantees, the goal sooner)
-		const lt = (a, b) => a.f < b.f || (a.f === b.f && a.g > b.g);
-		const up = (i) => { while (i > 0) { const p = (i - 1) >> 1; if (!lt(heap[i], heap[p])) break; [heap[p], heap[i]] = [heap[i], heap[p]]; i = p; } };
-		const down = (i) => { for (;;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < heap.length && lt(heap[l], heap[m])) m = l; if (r < heap.length && lt(heap[r], heap[m])) m = r; if (m === i) break; [heap[m], heap[i]] = [heap[i], heap[m]]; i = m; } };
+		const up = (i) => { while (i > 0) { const p = (i - 1) >> 1; if (heap[p].f <= heap[i].f) break; [heap[p], heap[i]] = [heap[i], heap[p]]; i = p; } };
+		const down = (i) => { for (;;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < heap.length && heap[l].f < heap[m].f) m = l; if (r < heap.length && heap[r].f < heap[m].f) m = r; if (m === i) break; [heap[m], heap[i]] = [heap[i], heap[m]]; i = m; } };
 		const push = (n) => { heap.push(n); up(heap.length - 1); };
 		const pop = () => { const top = heap[0], last = heap.pop(); if (heap.length) { heap[0] = last; down(0); } return top; };
-		// h: two numbers. THE CLAIM (fa = g + adm): the plain bound, admissible; a bound without its certificate (a field
-		// or a portal within reach) voids the closed claim (uncert). THE ORDER (f = g + w x ord): the larger of that bound
-		// and the reach field to the target's tiles (src/reach.js, deaths off: the chain never dies) in ticks at the top
-		// running speed (not admissible: an order only); the reach field's -1 in physics mode is a proof (no death-free way
-		// to the tiles), so such a node is dropped
-		// TWO PHASES (anytime): the order's weight w1 (o.w1, default 2: greedy toward the target) until the first chain
-		// or half the clock, then w (o.w, default 1: A*, the best chain pruned by fa); the heap re-keyed at the switch
-		let uncert = false, cut = 0;
-		const wEnd = o.w || 1, w1 = o.w1 === undefined ? Math.max(2, wEnd) : o.w1, switchMs = budgetMs * (o.phase1 === undefined ? 0.5 : o.phase1);
-		let W8 = w1, phase = w1 === wEnd ? 2 : 1;
-		const rekey = () => {
-			W8 = wEnd; phase = 2;
-			for (const x of heap) x.f = x.g + W8 * x.h;
-			for (let i = (heap.length >> 1) - 1; i >= 0; i--) down(i);
-		};
-		const rf = o.reach === false ? null : reachFieldOf(tg.tiles);
-		const KAPPA = o.kappa || 16 / 6.776552880470027;
+		// h: the plain bound (the order); a bound without its certificate (a field or a portal within reach) orders but
+		// voids the closed claim (uncert)
+		let uncert = false;
+		const W8 = o.w || 1;
 		const hOf = () => {
-			let b = 0;
 			const c = plainStart(sim);
-			if (c && !tg.tele) {
-				b = lowerBoundOf(sim, tg, c);
-				if (b > 0 && !certify(sim, b, c, tg)) uncert = true;
-			}
-			let ord = b;
-			if (rf) {
-				const rc = RF().costAt(rf, sim);
-				if (rc < 0) { if (rf.mode === 'physics') { cut++; return null; } } else ord = Math.max(ord, rc * KAPPA);
-			}
-			return { adm: b, ord };
+			if (!c || tg.tele) return 0;
+			const b = lowerBoundOf(sim, tg, c);
+			if (b > 0 && !certify(sim, b, c)) uncert = true;
+			return b * W8;
 		};
 		const cat = (a, b) => { const r = new Uint8Array(a.length + b.length); r.set(a); r.set(b, a.length); return r; };
 		const seen = new Map();
 		sim.restore(snap0);
 		seen.set(sim.stateHash(), 0);
-		const h0 = hOf();
-		if (h0) push({ snap: snap0, g: 0, masks: new Uint8Array(0), h: h0.ord, f: W8 * h0.ord, fa: h0.adm });
-		let best = null, expanded = 0, legs = 0, nodes = 1, firstAt = 0;
+		push({ snap: snap0, g: 0, masks: new Uint8Array(0), f: hOf() });
+		let best = null, expanded = 0, legs = 0, nodes = 1;
 		while (heap.length && Date.now() - t0 < budgetMs) {
-			if (phase === 1 && (best || Date.now() - t0 >= switchMs)) rekey();
 			const n = pop();
-			if (best && n.fa >= best.T) continue;
+			if (best && n.f >= best.T) { push(n); break; }
 			expanded++;
 			if (o.trace) o.trace(n);
-			const horizon = o.Tmax ? o.Tmax - n.g : Infinity;
-			const lim = Math.min(best ? Math.min(legT, best.T - n.g - 1) : legT, horizon);
+			const lim = best ? Math.min(legT, best.T - n.g - 1) : legT;
 			if (lim <= 0) continue;
 			sim.restore(n.snap);
 			const plainNode = !!plainStart(sim);
-			if (n.g > 0 || o.rootLeg !== false) {
-				const r = leg(n.snap, target, { Tmax: lim, K: o.K, chain: false, fields: !plainNode, coupled: !plainNode && o.coupledDirect !== false, nodes: o.legNodes || 40000, coupledTicks: o.coupledTicks || 300000, fieldMs: o.fieldMs, deadline: t0 + budgetMs });
-				legs++;
-				if (r.ok && (!best || n.g + r.T < best.T)) { if (!best) firstAt = Date.now() - t0; best = { T: n.g + r.T, masks: cat(n.masks, r.masks) }; }
-			}
+			const r = leg(n.snap, target, { Tmax: lim, K: o.K, coupled: !plainNode && o.coupledDirect !== false, nodes: o.legNodes || 40000, coupledTicks: o.coupledTicks || 300000 });
+			legs++;
+			if (r.ok && (!best || n.g + r.T < best.T)) best = { T: n.g + r.T, masks: cat(n.masks, r.masks) };
 			sim.restore(n.snap);
 			const ctx = plainStart(sim);
-			if (fan <= 0) continue;
-			const lands = ctx ? landings(n.snap, { Tmax: Math.min(lim, o.fanT || 60), K: o.fanK, max: o.fanMax || 30, toward: tg, nodes: o.fanNodes || 20000, perTile: o.perTile || 0, deadline: t0 + budgetMs }) : [];
-			if (o.events !== false) for (const e of eventFan(n.snap, Math.min(lim, o.fanT || 60))) lands.push(e);
+			if (!ctx || fan <= 0) continue;
+			const lands = landings(n.snap, { Tmax: Math.min(lim, o.fanT || 60), K: o.fanK, max: o.fanMax });
 			legs += lands.length;
 			for (const rr of lands) {
 				if (Date.now() - t0 >= budgetMs) break;
@@ -1388,7 +889,6 @@ const TWIN = process.env.EEAT_MATH_TWIN !== '0', TWIN_MASK = (+process.env.EEAT_
 					if (!ms) continue;
 					const g = n.g + ms.length;
 					if (best && g >= best.T) continue;
-					if (o.Tmax && g >= o.Tmax) continue;
 					sim.restore(n.snap);
 					let dead = false;
 					for (let t = 0; t < ms.length; t++) { E.applyMask(inp, ms[t]); sim.tick(inp); if (sim.is_dead) { dead = true; break; } }
@@ -1397,17 +897,14 @@ const TWIN = process.env.EEAT_MATH_TWIN !== '0', TWIN_MASK = (+process.env.EEAT_
 					if (seen.has(hsh) && seen.get(hsh) <= g) continue;
 					seen.set(hsh, g);
 					const h = hOf();
-					if (!h) continue;
-					if (best && g + h.adm >= best.T) continue;
-					push({ snap: sim.snapshot(), g, masks: cat(n.masks, ms), h: h.ord, f: g + W8 * h.ord, fa: g + h.adm });
+					if (best && g + h >= best.T) continue;
+					push({ snap: sim.snapshot(), g, masks: cat(n.masks, ms), f: g + h });
 					nodes++;
 				}
 			}
 		}
-		let open = 0;
-		for (const x of heap) if (!best || x.fa < best.T) open++;
-		const closed = !!best && !uncert && open === 0;
-		return { ok: !!best, masks: best ? best.masks : null, T: best ? best.T : 0, closed, expanded, legs, nodes, cut, reach: rf ? rf.mode : null, firstMs: firstAt, ms: Date.now() - t0 };
+		const closed = !!best && !uncert && W8 === 1 && (heap.length === 0 || heap[0].f >= best.T);
+		return { ok: !!best, masks: best ? best.masks : null, T: best ? best.T : 0, closed, expanded, legs, nodes, ms: Date.now() - t0 };
 	}
 
 	return {
@@ -1425,4 +922,4 @@ function mergeWins(ws) {
 	return out;
 }
 
-module.exports = { createSolver, clsOf, holdTables, holdRange, mergeWins, DIR9, TELEPORT_PX, axisHot, hotClass, hotIn, axisRates, RATE_BOX, SPEED_PX, VSTAR_X, VSTAR_X_RUN, VSTAR_Y, RATE_SLACK };
+module.exports = { createSolver, clsOf, holdTables, holdRange, mergeWins, DIR9, TELEPORT_PX };
