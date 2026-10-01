@@ -19,10 +19,13 @@
 //    EEAT_ICE_LOCAL=1 + EEAT_PROT_LAYER=1 (doctor cold: the ice rise and the protection only where a ball can have
 //    them, sound): The Witch's House compiled 2 of 2 (base 0 of 2), Tutorial 3 2 of 2 (4,252 / 4,761 vs the base's
 //    6,002 / none), Eurus 2 -> 4, Ice Cream Expedition 7 -> 9; Super Mario Bros 3 and Sand Castles within the spread.
-//  - EEAT_CRUMB_RANK=2 (C6 lane 5 block 2, strategy.js THE CRUMB RANK: the anchor pick's gain leaves the crumbs out; box 6,
-//    300 s, side by side on one tree): Tutorial 2 3,133 run ticks (first route at 40 s) vs the base's 7,018 (135 s; every
-//    sample of the base 4,479-7,018, main 3,070-3,401, the best known 2,947), On And On 2,917 (kept), Stone Ruin 4,265,
-//    Crypts Of Anubis 3,223, Ruins 1,279 = 1,279; EEAT_CRUMB_RANK=1 (only after the first route) 5,924 on Tutorial 2.
+//  - EEAT_CRUMB_RANK=3 (C6 lane 5 block 2, strategy.js THE CRUMB RANK's F GATE: a crumb's gain counts in the anchor pick
+//    only while the anchor's f (arrival tick + plan cost) is within 10% + 60 ticks of the least f of its real gain; box 6,
+//    300 s, side by side): Tutorial 2 3,112 / 3,673 run ticks vs the base's 7,018 (every base sample 4,479-7,018; main
+//    3,070-3,401; the best known 2,947), On And On 2,516 / 3,226 (base 2,823 / 3,628), Perilous Endeavor - / 5,683 (base -);
+//    COST: EE mountain world 0 of 2 (the base's one run routed it at 293 s through 5 coins and blue coins, 15,233 run
+//    ticks): WATCH. =2 (always out): Tutorial 2 3,133 / 3,334 / 3,960 but On And On 1 of 2; =1 (after the first route)
+//    Tutorial 2 5,924.
 // NOT defaults (measured, opt-in): the stones (EEAT_PLAN_STONES) and the prices (EEAT_WALL_PRICE, EEAT_PHYS_PRICE: Late
 // christmas compiled, Treasure Trove Cove 7 -> 5 in 2 of 2), the cover from rung 2 (EEAT_COVER_RUNG=2: lost Stone Ruin and
 // Perilous Endeavor, no control faster).
@@ -30,7 +33,7 @@ const DEFAULTS = [
 	['EEAT_COVER', '3'], ['EEAT_CRUMBS', '1'], ['EEAT_FIELD_MEMO', '1'],
 	['EEAT_PLAN_ANY', '1'], ['EEAT_PLAN_UNTOGGLE', '1'],
 	['EEAT_FX_FIELD', '1'], ['EEAT_FX_STATE', '1'], ['EEAT_ICE_LOCAL', '1'], ['EEAT_PROT_LAYER', '1'],
-	['EEAT_CRUMB_RANK', '2'],
+	['EEAT_CRUMB_RANK', '3'],
 ];
 /** set the defaults the environment does not name (EEAT_COMPILER_DEFAULTS=0: none of them) */
 function apply() {
