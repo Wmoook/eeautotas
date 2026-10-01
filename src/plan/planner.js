@@ -836,7 +836,7 @@ function createPlanner(model, facts, o = {}) {
 				if (facts) {
 					if (facts.blocked(edge, cls, proofKey(S, pos))) return;
 					if (facts.needsOf(edge, cls).some((n) => S.feats[n.feat] !== n.value)) return;
-					if (NEEDS_NEAR_EDGE && edgeNeeds.has(edge) && edgeNeeds.get(edge).some((n) => S.feats[n.feat] !== n.value) && facts.needsOf(edge, '*').some((n) => S.feats[n.feat] !== n.value)) return;
+					if (NEEDS_NEAR_EDGE && edgeNeeds.has(edge) && edgeNeeds.get(edge).some((n) => n.opened && S.feats[n.feat] !== n.value) && facts.needsOf(edge, '*').some((n) => S.feats[n.feat] !== n.value)) return;
 					const ok = facts.okTicks(edge, cls);
 					if (ok !== undefined) { g.est = Math.max(g.lb, ok); g.pen = ''; }
 					else {
@@ -1617,6 +1617,9 @@ function createPlanner(model, facts, o = {}) {
 				if (!best) continue;
 				const steps = stepsOf(a, best.node);
 				if (!steps.length) continue;
+				// (the need binds the edge from every class only once a way to its value is known: an opener plan built;
+				// box 6's w4a / w4c bound purple switch 20 at 1,000 s with no opener, and the switch was never taken again)
+				n.opened = true;
 				out.push({ id: `p${ST.plans}.o${out.length}`, steps, cost: best.est, lb: best.e.lb + best.E.lb, partial: true, why: `opener: '${best.E.X ? best.E.X.label : edge}' needs ${n.feat}=${n.value}: '${best.e.X.label}' first`, opener: true, est: best.est });
 			}
 		}
@@ -2001,10 +2004,10 @@ function createPlanner(model, facts, o = {}) {
 			// (EEAT_NEEDS_NEAR_EDGE=1: the need binds the edge from EVERY class (nodeClass '*'), unless the edge was already
 			// done from a state without that value: a new class (another switch set, another checkpoint) does not try the
 			// same wall again)
-			if (bf !== null && NEEDS_NEAR_EDGE && !facts.needsOf(edge, '*').some((n) => n.feat === bf && n.value === bv) && !(okFeats.get(edge) || []).some((F) => F[bf] !== bv)) {
+			if (bf !== null && NEEDS_NEAR_EDGE && !facts.needsOf(edge, '*').some((n) => n.feat === bf && n.value === bv) && !(okFeats.get(edge) || []).some((F) => F[bf] !== bv) && /^trig:/.test(String(edge))) {
 				out.push(facts.add({ kind: 'needs', edge, nodeClass: '*', feat: bf, value: bv }));
 				if (!edgeNeeds.has(edge)) edgeNeeds.set(edge, []);
-				edgeNeeds.get(edge).push({ feat: bf, value: bv });
+				edgeNeeds.get(edge).push({ feat: bf, value: bv, opened: false });
 				ST.needsEdge = (ST.needsEdge || 0) + 1;
 			}
 		}
