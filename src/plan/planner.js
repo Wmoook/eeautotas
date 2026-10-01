@@ -116,17 +116,19 @@ const FLOOR_HARD_MS = +process.env.EEAT_PLAN_FLOOR_HARD_MS || 30000;
 // byte): a plan call is 0.3 s (2 s the first), so on a switch level the plan search's budget ends before any trophy plan is
 // generated and the strategy gets only PARTIAL "most gain" plans: First Person Maze (best known 832 run ticks) after its
 // 31-switch column (gain 33-34) planned only switches 36 / 37, deaths and team 1, rung after rung, while a 30-s plan call from
-// the known route's own state there finds a whole trophy plan (est 808), one that toggles the column's switches back OFF:
-// the GAIN BONUS (every switch on lowers f) keeps such a search on the high-gain states (src/out/n5/lanes/c6_lane1_b3.md
-// (4)). The rule: when every plan of a plan call is partial (or priced by the PENALTY), one LONG search from that anchor's
-// abstract state (once a state, at most LONG_MAX a compile, at most a quarter of the compile's time left), with NO gain
-// bonus (a switch state may go DOWN at no price; EEAT_PLAN_LONG_GAIN=1 keeps the bonus); a trophy plan found along est walks
-// (its g below the PENALTY) goes first, and its path is kept: an anchor later in a state on that path gets the path's REST
-// (a search guided along its edges, cheap) when its own plans are all partial again. Ordering only: no edge dropped, the lb
-// and the proofs untouched.
+// the known route's own state there finds a whole trophy plan (est 808), one that toggles the column's switches back OFF
+// (src/out/n5/lanes/c6_lane1_b3.md (4)). The rule: when every plan of a plan call is partial (or priced by the PENALTY) and
+// the first plan's first step has failed LONG_R rungs from the anchor's class (EEAT_PLAN_LONG_R, default 1: stuck, not just
+// new), one LONG search from that anchor's abstract state (once a state, at most LONG_MAX a compile, at most a quarter of
+// the compile's time left); a trophy plan found along est walks (its g below the PENALTY) goes first, and its path is kept:
+// an anchor later in a state on that path gets the path's REST (a search guided along its edges, cheap) when its own plans
+// are all partial again. Ordering only: no edge dropped, the lb and the proofs untouched. (The gain bonus is KEPT in the long
+// search: from the route's tick-545 state (gain 33) 20 s with it found the 808 plan (1,237 nodes: the plan search expands
+// ~60 nodes a second there), 20 s without it none (1,017 nodes); EEAT_PLAN_LONG_GAIN=0: without.)
 const LONG_MS = process.env.EEAT_PLAN_LONG !== undefined ? Math.max(0, +process.env.EEAT_PLAN_LONG || 0) : 0;
 const LONG_MAX = +process.env.EEAT_PLAN_LONG_MAX > 0 ? +process.env.EEAT_PLAN_LONG_MAX | 0 : 4;
-const LONG_GAIN = process.env.EEAT_PLAN_LONG_GAIN === '1';
+const LONG_GAIN = process.env.EEAT_PLAN_LONG_GAIN !== '0';
+const LONG_R = process.env.EEAT_PLAN_LONG_R !== undefined ? Math.max(0, +process.env.EEAT_PLAN_LONG_R | 0) : 1;
 const LONG_EXPAND = +process.env.EEAT_PLAN_LONG_EXPAND > 0 ? +process.env.EEAT_PLAN_LONG_EXPAND : 3000000;
 const COUNT_GATES = new Set([165, 214]);
 const COLOURS = ['red', 'green', 'blue', 'cyan', 'magenta', 'yellow'];
@@ -1416,7 +1418,8 @@ function createPlanner(model, facts, o = {}) {
 		}
 		// (THE LONG PLAN CALL, EEAT_PLAN_LONG=<ms>: every plan partial: one long search from this abstract state, first)
 		if (LONG_MS > 0 && plans.length && plans.every((p) => p.partial || !(p.cost < PENALTY))) {
-			try { const lp = longPlan(a, so, po); if (lp) plans.unshift(lp); } catch (e) { if (process.env.EEAT_LONG_DBG === '1') console.error('longPlan', e.stack); }
+			const stuck = !LONG_R || !!(facts && plans[0].steps[0] && facts.rungOf(plans[0].steps[0].edge, plans[0].steps[0].nodeClass) >= LONG_R);
+			try { const lp = longPlan(a, so, po, stuck); if (lp) plans.unshift(lp); } catch (e) { if (process.env.EEAT_LONG_DBG === '1') console.error('longPlan', e.stack); }
 		}
 		// (THE BYPASS, EEAT_PLAN_BYPASS=R: the trophy without the triggers whose legs failed R rungs from this class, first)
 		if (BYPASS > 0 && facts && plans.length) {
@@ -1592,7 +1595,7 @@ function createPlanner(model, facts, o = {}) {
 	const longTried = new Set(), longPaths = [];
 	let longCalls = 0;
 	/** THE LONG PLAN CALL (EEAT_PLAN_LONG): a kept path's rest from this state, else one long search (once a state) */
-	function longPlan(a, so, po) {
+	function longPlan(a, so, po, stuck) {
 		const sk = a.S.key;
 		const mk = (node, why) => {
 			const steps = stepsOf(a, node);
@@ -1606,7 +1609,8 @@ function createPlanner(model, facts, o = {}) {
 			const res = search(a, Object.assign({}, so, { ms: 300, maxExpand: 20000, guide: lp.edges.slice(i) }), new Set(), null);
 			if (res.found && res.found.g < PENALTY) { ST.longRest = (ST.longRest || 0) + 1; return mk(res.found, `long: the rest of a long plan (step ${i + 1} of ${lp.edges.length})`); }
 		}
-		if (longTried.has(sk) || longCalls >= LONG_MAX) return null;
+		// (a new long search only where the first plan's first step is stuck (LONG_R rungs failed); a kept path's rest any time)
+		if (!stuck || longTried.has(sk) || longCalls >= LONG_MAX) return null;
 		// (a quarter of the compile's time left at most: po.left, the strategy's)
 		const room = Number.isFinite(+po.left) ? +po.left / 4 : LONG_MS;
 		const ms = Math.min(LONG_MS, room);
