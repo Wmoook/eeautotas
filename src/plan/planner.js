@@ -1581,6 +1581,9 @@ function createPlanner(model, facts, o = {}) {
 			const res = search(a, Object.assign({}, so, { ms: Math.max(50, (end - Date.now()) / Math.max(1, BYPASS_MAX - it)) }), new Set(), ban);
 			const node = res.found;
 			if (!node) { ST.bypassNone = (ST.bypassNone || 0) + 1; return null; }
+			// (a bypass only along est walks: a plan with an edge only the relaxation reaches (the PENALTY) is no way around;
+			// Buuwuu's Stronghold's first bypass plans cost 1,005,570 and 3,010,798)
+			if (!(node.g < PENALTY)) { ST.bypassPen = (ST.bypassPen || 0) + 1; return null; }
 			const steps = stepsOf(a, node);
 			if (!steps.length) return null;
 			const f = firstOf({ steps });
