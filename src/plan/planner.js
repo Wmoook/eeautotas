@@ -813,10 +813,11 @@ function createPlanner(model, facts, o = {}) {
 	// (the respawn an anchor holds: the checkpoint under its centre (an arrival ON a checkpoint takes it at the next tick's
 	// start: its sim still names the one before), else its sim's checkpoint; -1 none)
 	function ownCpOf(s) {
-		const tx = Math.floor((s.px + 8) / 16), ty = Math.floor((s.py + 8) / 16), t = ty * W + tx;
-		const c = (tx >= 0 && tx < W && t >= 0 && t < L.fg.length && L.fg[t] === 360) ? t : (s.checkpoint && s.checkpoint.x >= 0 ? s.checkpoint.y * W + s.checkpoint.x : -1);
-		// (a ball at rest on that very checkpoint IS its respawn state (just respawned): a death there is no move)
-		if (c === t && Math.abs(s.speed_x) < 1e-3 && Math.abs(s.speed_y) < 1e-3) return -1;
+		// (the engine's taken checkpoint only: an arrival rising through a checkpoint's tile need not take it (Cold World:
+		// the chain's arrival at (58,235) at vy -2 kept (59,239), so its death went back there))
+		const c = s.checkpoint && s.checkpoint.x >= 0 ? s.checkpoint.y * W + s.checkpoint.x : -1;
+		// (a ball at rest at that checkpoint's own position IS its respawn state (just respawned): a death there is no move)
+		if (c >= 0 && Math.abs(s.px - (c % W) * 16) < 1e-6 && Math.abs(s.py - ((c / W) | 0) * 16) < 1e-6 && Math.abs(s.speed_x) < 1e-3 && Math.abs(s.speed_y) < 1e-3) return -1;
 		return c;
 	}
 	// THE CEGAR WALLS IN THE PHYSICS PASS (B7 cold, cycle 6; OPT-IN EEAT_PHYS_WALLS=1, inside PHYS_EST; off = the pass before,
@@ -894,7 +895,7 @@ function createPlanner(model, facts, o = {}) {
 						n++;
 						if (viaS) curVia = viaS[t * NT + ty];
 						if (d[t] > depth) { d[t] = depth; if (viaT) viaT[t] = curVia; }
-						if (resp && !resp[t] && depth > 0 && L.fg[t] === 360) { resp[t] = 1; const k = depth + PHYS_RESP_D; if (!pend.has(k)) pend.set(k, []); pend.get(k).push(t); ST.physResp = (ST.physResp || 0) + 1; }
+						if (resp && !resp[t] && (depth > 0 || viaS) && L.fg[t] === 360) { resp[t] = 1; const k = depth + PHYS_RESP_D; if (!pend.has(k)) pend.set(k, []); pend.get(k).push(t); ST.physResp = (ST.physResp || 0) + 1; }
 						f._m.edgesOf(t, ty, l, (t2, ty2, l2) => { addV(t2, ty2, l2, t2 === t ? cur : nxt); });
 					}
 					curVia = -1;
@@ -1486,7 +1487,7 @@ function createPlanner(model, facts, o = {}) {
 		let d1 = INF;
 		for (const t of live) if (fwd[t] < d1) d1 = fwd[t];
 		return { edge, nodeClass: cls, rung, estTicks: Math.round((d1 < INF ? d1 : 40) * pace()), lb: 0, crumb: true,
-			waypoint: { kind: 'trigger', tiles: live.slice(), trig: X.id, expect: null, label: `crumb ${X.label} (respawn)` } };
+			waypoint: { kind: 'trigger', tiles: live.slice(), trig: X.id, expect: { feat: 'cp', value: c }, label: `crumb ${X.label} (respawn)` } };
 	}
 	function crumbStep(a, e, cls) {
 		if (!CRUMBS || e.viaDeath) return null;
