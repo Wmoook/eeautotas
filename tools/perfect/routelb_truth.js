@@ -21,7 +21,10 @@ let nR = 0, nS = 0, viol = 0, skipped = 0;
 const ratios = [];
 const t0 = Date.now();
 const levelCache = new Map();
-for (const [ri, e] of routes.entries()) {
+// (--reverse=1: the shard from its end: a second machine meets the first in the middle; the records carry ri)
+const order = [...routes.entries()];
+if (args.reverse === '1') order.reverse();
+for (const [ri, e] of order) {
 	if (ri % shN !== shI) continue;
 	if (args.limit && nR >= +args.limit) break;
 	if (args.only && !String(e.name).toLowerCase().includes(String(args.only).toLowerCase())) continue;
@@ -33,7 +36,7 @@ for (const [ri, e] of routes.entries()) {
 	const tq = Date.now();
 	let rl = null;
 	try { rl = R.createRouteLB(L, {}); } catch (err) { console.log(`  ERROR ${e.name}: ${err.message}`); continue; }
-	const rec = { name: e.name, source: e.source, route: path.basename(path.dirname(e.route)), run: tr.runTicks, complete: tr.complete, W: L.width, H: L.height };
+	const rec = { ri, name: e.name, source: e.source, route: path.basename(path.dirname(e.route)), run: tr.runTicks, complete: tr.complete, W: L.width, H: L.height };
 	// the start
 	const rb = rl.runBound({ ms });
 	rec.start = rb.lb; rec.startComplete = rb.complete; rec.order = (rb.order || []).slice(0, 12);
