@@ -64,6 +64,7 @@ const DEF = {
 	corrF: ENV('EEAT_BW_CORRF', 1.5), corrAdd: ENV('EEAT_BW_CORRADD', 40), maxCells: ENV('EEAT_BW_MAXCELLS', 400000),
 	w: ENV('EEAT_BW_W', 1.0), closeF: ENV('EEAT_BW_CLOSEF', 0.6), meetNodes: ENV('EEAT_BW_MEET', 400000), maxNodes: ENV('EEAT_BW_MAXNODES', 900000), keep: ENV('EEAT_BW_KEEP', 2), quick: ENV('EEAT_BW_QUICK', 50000), quickF: ENV('EEAT_BW_QUICKF', 0.3), reach: ENV('EEAT_BW_REACH', 1), perim: ENV('EEAT_BW_PERIM', 0), corrReach: ENV('EEAT_BW_CORRREACH', 1), relay: ENV('EEAT_BW_RELAY', 6), memo: ENV('EEAT_BW_MEMO', 2), variants: ENV('EEAT_BW_VARIANTS', 2), relayMin: ENV('EEAT_BW_RELAYMIN', 20), meetF: ENV('EEAT_BW_MEETF', 1), finish: ENV('EEAT_BW_FINISH', 1), ladder: ENV('EEAT_BW_LADDER', 3), finishShare: ENV('EEAT_BW_FINISHSHARE', 0.25), finishH: ENV('EEAT_BW_FINISHH', 100), finishEvery: ENV('EEAT_BW_FINISHEVERY', 8), finishMs: ENV('EEAT_BW_FINISHMS', 25), finishT: ENV('EEAT_BW_FINISHT', 120), fw: ENV('EEAT_BW_FW', 3), fadd: ENV('EEAT_BW_FADD', 200),
 	resume: ENV('EEAT_BW_RESUME', 0),
+	ellipse: ENV('EEAT_BW_ELLIPSE', 0), wD: ENV('EEAT_BW_WD', 0),
 };
 
 // ------------------------------------------------------------------ a small binary heap (key, value pairs)
@@ -202,6 +203,8 @@ function createBackward(L, opts = {}) {
 
 		// ------------------------------------------------------------ THE CORRIDOR: the gravity-blind walk from the target
 		const wd = new Int32Array(N).fill(-1);
+		// (walkFrom: the same walk from other seeds into dst: THE ELLIPSE's walk from the start)
+		let walkFrom = null;
 		{
 			// portals: a portal tile and its exits are neighbours both ways (a relaxation: the corridor only)
 			const padj = new Map();
@@ -216,6 +219,28 @@ function createBackward(L, opts = {}) {
 					for (let k = 0; k < ex.n; k++) { const e = (ex.ys[k] >> 4) * W + (ex.xs[k] >> 4); if (e >= 0 && e < N) { link(i, e); link(e, i); } }
 				}
 			}
+			walkFrom = (seeds, dst) => {
+				const q2 = new Int32Array(N);
+				let h2 = 0, t2 = 0;
+				for (const t of seeds) if (t >= 0 && t < N && dst[t] < 0) { dst[t] = 0; q2[t2++] = t; }
+				while (h2 < t2) {
+					const t = q2[h2++], x = t % W, y = (t / W) | 0;
+					for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+						if (!dx && !dy) continue;
+						const nx = x + dx, ny = y + dy;
+						if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+						const u = ny * W + nx;
+						if (dst[u] >= 0) continue;
+						const qq = solC[u];
+						if (qq === 1 || qq === 4) continue;
+						if (dx && dy) { const a = solC[y * W + nx], b = solC[ny * W + x]; if ((a === 1 || a === 4) && (b === 1 || b === 4)) continue; }
+						dst[u] = dst[t] + 1; q2[t2++] = u;
+					}
+					const pa = padj.get(t);
+					if (pa) for (const u of pa) if (dst[u] < 0) { dst[u] = dst[t] + 1; q2[t2++] = u; }
+				}
+				return dst;
+			};
 			const q = new Int32Array(N);
 			let qh = 0, qt = 0;
 			for (const t of target.tiles) if (t >= 0 && t < N && wd[t] < 0) { wd[t] = 0; q[qt++] = t; }
@@ -273,7 +298,15 @@ function createBackward(L, opts = {}) {
 			for (const vy of [0, 4, -4]) { const q = RF.costAt(rfield, x, y, vy); if (q >= 0 && (c < 0 || q < c)) c = q; }
 			return c >= 0 && c <= rLim;
 		};
-		for (let t = 0; t < N; t++) if (wd[t] >= 0 && wd[t] <= limC && rOK(t)) { inCorr[t] = 1; corrTiles++; }
+		// THE ELLIPSE (P.ellipse > 0, opt-in EEAT_BW_ELLIPSE=<f>; 0 = the disk as before): the corridor = the tiles on a walk from
+		// the start to the target of at most dS x f + corrAdd steps (the walk from the target + the walk from the start), not every
+		// tile within dS x corrF + corrAdd of the target: the disk spent the closure's cells behind the target and beside the
+		// start (INFINITE 34,121 tiles for a 98-step walk, the 400 K-cell closure never reached the start: dStart none, the meet
+		// lost in the fallback order); a walk of at most that length passes only ellipse tiles
+		let ws = null;
+		if (P.ellipse > 0 && sTile >= 0 && sTile < N) ws = walkFrom([sTile], new Int32Array(N).fill(-1));
+		const limE = ws ? Math.ceil(dS * P.ellipse + P.corrAdd) : 0;
+		for (let t = 0; t < N; t++) if (wd[t] >= 0 && wd[t] <= limC && (!ws || (ws[t] >= 0 && wd[t] + ws[t] <= limE)) && rOK(t)) { inCorr[t] = 1; corrTiles++; }
 		if (sTile >= 0 && sTile < N) inCorr[sTile] = 1;
 		stats.corrTiles = corrTiles; stats.dStartTiles = dS;
 		const tileOfS = (s) => {
@@ -577,7 +610,9 @@ function createBackward(L, opts = {}) {
 				const id = nodes.length;
 				// (hr: the node's time to go in ticks: its value, else the fallback's own ticks without its weight)
 				nodes.push({ snap, par, masks, g, hsh, h: hv === hf ? (hf - P.fadd) / P.fw : hv });
-				heap.push(g + P.w * hv, id);
+				// (THE VALUES' WEIGHT, P.wD > 0, opt-in EEAT_BW_WD: a node with a closure value is ordered by g + wD x D, the
+				// fallback's by g + w x its order as before; 0 = w for both, byte for byte)
+				heap.push(g + (hv === hf || !(P.wD > 0) ? P.w : P.wD) * hv, id);
 			};
 			sim.restore(root.snap);
 			push(root.snap, -1, null, 0, root === root0 ? startKey : keyOf(sim), tileOfS(sim), undefined, hFall(sim, tileOfS(sim)), mkeyOf(sim, res));
@@ -655,7 +690,7 @@ function createBackward(L, opts = {}) {
 			// legs 1 -> 2 -> 4 ... s): the closure's work adds up across calls. The new call's corridor joins the kept one
 			// (union); where it grew, the kept cells with a child outside the old corridor are expanded again and the new tiles
 			// seeded. The values are the same Bellman values over a bigger cell graph: an order, as before
-			const rKey = P.resume > 0 ? `${mKey}|${target.cls || ''}|${target.tele ? 1 : 0}|${VXQ},${VYQ},${AIR},${MAXT},${P.corrF},${P.corrAdd},${P.perim},${P.corrReach},${P.maxCells},${P.variants},${P.seeds === false ? 0 : 1}` : null;
+			const rKey = P.resume > 0 ? `${mKey}|${target.cls || ''}|${target.tele ? 1 : 0}|${VXQ},${VYQ},${AIR},${MAXT},${P.corrF},${P.corrAdd},${P.perim},${P.corrReach},${P.maxCells},${P.variants},${P.seeds === false ? 0 : 1}${P.ellipse > 0 ? ',e' + P.ellipse : ''}` : null;
 			const cm = rKey && !(mm && mm.lim >= lim && tileOfS(sim) >= 0 && mm.inCorr[tileOfS(sim)]) ? cutMemo.get(rKey) : null;			let limR = lim;
 			if (mm && mm.lim >= lim && tileOfS(sim) >= 0 && mm.inCorr[tileOfS(sim)]) {
 				cellId = mm.cellId; cellKey = mm.cellKey; byPlace = mm.byPlace; D = mm.D;
