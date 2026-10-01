@@ -49,6 +49,9 @@ const HEAP_STOP = 0.8 * require('v8').getHeapStatistics().heap_size_limit;
 function createH(L, o = {}) {
 	const W = L.width, H = L.height, N = W * H;
 	const bounds = BO.createBounds(L, {});
+	// o.noEndgame (wholepar.js with its kin tier: endgame.lowerBound from the same state): bounds.at without its own endgame max
+	// (the same kinematic bound computed again per field: 16% of a node's time on Switch Labyrinth); absent = as before
+	const AO = o.noEndgame ? { endgame: false } : undefined;
 	const trophyTiles = [];
 	for (let i = 0; i < N; i++) if (L.fg[i] === TROPHY) trophyTiles.push(i);
 	const fRel = bounds.field(trophyTiles, null, { touch: true });
@@ -108,14 +111,14 @@ function createH(L, o = {}) {
 	};
 	function h(sim) {
 		st.calls++;
-		let v = bounds.at(fRel, sim);
+		let v = bounds.at(fRel, sim, AO);
 		if (useGate && v !== Infinity && !sim.is_dead && !inShut(sim, gateOf(sim).Lc)) {
 			const g = gateOf(sim);
 			let a;
-			if (g.fI) a = bounds.at(g.fI, sim);
+			if (g.fI) a = bounds.at(g.fI, sim, AO);
 			else {
-				a = bounds.at(g.fT, sim);
-				if (g.fG !== null && minTrig !== Infinity) { const b = bounds.at(g.fG, sim) + minTrig; if (b < a) a = b; }
+				a = bounds.at(g.fT, sim, AO);
+				if (g.fG !== null && minTrig !== Infinity) { const b = bounds.at(g.fG, sim, AO) + minTrig; if (b < a) a = b; }
 			}
 			if (a > v) { v = a; st.gateWins++; }
 		}

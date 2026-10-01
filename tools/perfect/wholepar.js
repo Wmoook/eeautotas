@@ -35,7 +35,7 @@ function makeCtx(L, tiers) {
 	const useTogo = tiers.has('togo');
 	const useKin = useTogo || tiers.has('kin');
 	const lp = LP.contextOf(L, { field: useTogo });
-	const mine = (tiers.has('rel') || tiers.has('gate')) ? WP.createH(L, { gate: tiers.has('gate') }) : null;
+	const mine = (tiers.has('rel') || tiers.has('gate')) ? WP.createH(L, { gate: tiers.has('gate'), noEndgame: useKin && process.env.EEAT_WP_ATEG !== '1' }) : null;
 	// 'reach': reach.js's field (RCH3, the searches' prune field: every rule errs toward reachable, its -1 a proof in physics
 	// mode, deaths as edges where a death can move the ball) cuts a state it calls cut off (h = Infinity); walk mode: no tier
 	let RF = null;
