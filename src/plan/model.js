@@ -31,6 +31,17 @@ const RF = require('../reach.js');
 const ST = require('../steer.js');
 const T = require('./types.js');
 
+// THE PENDING GATE COUNTS IN THE PLAN (B7 cold, cycle 6; OPT-IN EEAT_PLAN_PENDING=1; off = the states' copies before,
+// byte for byte): stateOf's S.show (the _show_* copies the coin / blue coin gates read: the est / now / walk modes and
+// the lb's min) as types.js pendingGates leaves them at the next tick's start (the count, unless the box overlaps a gate
+// tile of that kind the new count shuts: the engine refuses the copy then), as EEAT_GATE_PENDING does for the executor's
+// level copy. On the tick a coin is taken the shown count lags it, so the planner's est walk from that anchor passed the
+// gates the next tick shuts: Cold World's chapter-2 blue coin (98,207) (shown 0, count 1): the est walk went back UP the
+// coin's shaft through its gate (98,205) (open only on the pickup tick) to the portal by (84,194) and the hub top
+// (250,2) in 20 steps, so no CEGAR wall on the chamber climb (the executor's stall at (104-106, 209-210)) ever moved a
+// plan: 8 learned walls there and every plan still 'crumb -> coin (132,251) / blue coin (280,82) -> trophy'. The lb
+// keeps its least of the anchor's base (the shown copy) and the count: unchanged. Exact: the gates from the next tick on.
+const PLAN_PENDING = process.env.EEAT_PLAN_PENDING === '1';
 const TROPHY = 121, CHECKPOINT = 360, SPAWN = 255;
 const CURSE = 421, ZOMBIE = 422, POISON = 1584, LAVA = 416;
 const DEAD_TICKS = 54;          // the dead ticks before the respawn (a death costs at least that)
@@ -366,6 +377,7 @@ function compileModel(L, o = {}) {
 		// _show_*, >= 1 tick late and frozen while the ball overlaps one; the time doors' phase; zombie. The lb and the
 		// 'now' mode read them; abstract states (touch) have none)
 		S.show = { coins: sim._show_coin_gate | 0, bcoins: sim._show_blue_coin_gate | 0, deaths: sim._show_death_gate | 0 };
+		if (PLAN_PENDING) { const pg = T.pendingGates(L, sim); if (pg) { if (pg.coin !== null) S.show.coins = pg.coin; if (pg.blue !== null) S.show.bcoins = pg.blue; } }
 		S.td = !!sim._timedoor_state;
 		S.zombie = !!sim.is_zombie;
 		return S;
