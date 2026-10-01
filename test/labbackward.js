@@ -116,6 +116,47 @@ const replay = (L, snap, masks, tiles) => {
 	ok(r2.ok && r2.T === 0, 'a start already at the target: 0 ticks');
 }
 
+// ---------------------------------------------------------------- 5 the open walk (P.openWalk) and the portfolio's dead start
+{
+	// a corridor: the spawn, a coin on the way, a 1-coin door column, the target behind it: the walk with the doors as they
+	// stand never reaches the start (the gated signal), the open walk's leg takes the coin and passes the door
+	const W = 40, H = 12, F = 9;
+	const cells = [];
+	for (let x = 0; x < W; x++) { cells.push([x, 0, 9]); cells.push([x, H - 1, 9]); cells.push([x, F, 9]); }
+	for (let y = 0; y < H; y++) { cells.push([0, y, 9]); cells.push([W - 1, y, 9]); }
+	cells.push([3, F - 1, 255], [12, F - 1, 100]);
+	for (let y = 1; y < F; y++) cells.push([20, y, 43, 1]);
+	const L = levelOf('bw-openwalk', W, H, cells);
+	const s0 = settle(L);
+	const target = { tiles: [(F - 1) * W + 30] };
+	const B = BW.createBackward(L);
+	const r0 = B.solve(s0.snapshot(), target, { ms: 3000 });
+	ok(!r0.ok && /walk/.test(r0.why || ''), `the door shut: the start is not in the target's walk (${r0.why})`);
+	const r1 = B.solve(s0.snapshot(), target, { ms: 8000, openWalk: 1 });
+	ok(r1.ok && r1.stats.openWalk === 1, `the open walk: the leg through the coin and the door (${r1.why})`);
+	if (r1.ok) ok(replay(L, s0.snapshot(), r1.masks, target.tiles).hit === r1.T, 'the open walk\'s leg replayed onto the target');
+	// the portfolio's bw arm (EEAT_PF_OPENWALK, on by default) gives the same stretch its leg, replayed by the portfolio
+	const PO = require('../src/plan/portfolio.js');
+	const P = PO.createPortfolio(L, {});
+	const rp = P.solve(s0.snapshot(), target, { ms: 8000, resume: false });
+	ok(rp.ok && rp.arm === 'bw', `the portfolio: the open walk's leg by its bw arm (${rp.arm} ${rp.why})`);
+	// a dead start through the portfolio: its arms' answers replayed through the dead ticks (msolve's replay ended at the first)
+	const Wd = 30, Hd = 12, Fd = 9;
+	const cd = [];
+	for (let x = 0; x < Wd; x++) { cd.push([x, 0, 9]); cd.push([x, Hd - 1, 9]); if (x < 8 || x > 9) cd.push([x, Fd, 9]); else cd.push([x, Fd, 361]); }
+	for (let y = 0; y < Hd; y++) { cd.push([0, y, 9]); cd.push([Wd - 1, y, 9]); }
+	cd.push([3, Fd - 1, 255]);
+	const Ld = levelOf('bw-deadstart-pf', Wd, Hd, cd);
+	const sd = settle(Ld);
+	const id = new E.EEInput();
+	for (let t = 0; t < 200 && !sd.is_dead; t++) { E.applyMask(id, 4); sd.tick(id); }
+	ok(sd.is_dead, 'the ball ran into the spikes: a dead start');
+	const tgtD = { tiles: [(Fd - 1) * Wd + 5] };
+	const Pd = PO.createPortfolio(Ld, {});
+	const rd = Pd.solve(sd.snapshot(), tgtD, { ms: 6000, resume: false });
+	ok(rd.ok, `the portfolio from a dead start: a leg after the respawn (${rd.why})`);
+}
+
 (async () => {
 	if (tierCheck) { try { await tierCheck(); } catch (e) { ok(false, 'the executor tier: ' + (e && e.stack || e)); } }
 	console.log(`labbackward: ${pass} passed, ${fail} failed`);
