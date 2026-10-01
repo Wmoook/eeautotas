@@ -3,7 +3,7 @@
 //   1 goexplore.js --goalTiles on a room (the trophy right of the start, a coin behind it on the left), from a prefix:
 //     'goal' events whose inputs begin with the prefix and whose replay touches the coin's tile (T.goalOf); without the
 //     option no 'goal' event;
-//   2 createHybrid on a stand-in compiler (ctx): a failed step to the coin from the anchor at the prefix's end becomes a
+//   2 createHybrid on a stand-in compiler (ctx): a failed step (rung 2, 'budget') to the coin from the anchor at the prefix's end becomes a
 //     request, the search's answer is verified by the ctx (the waypoint's own goal test from the level start), the leg's
 //     arrival added once, the child stopped ('done' ok); a step that succeeded or a death step is no candidate.
 // Usage: node test/hybrid.js   (CPU only: EEAT_HY_GPU=0)
@@ -70,7 +70,7 @@ const gx = (extra) => new Promise((res) => {
 	const a0 = Object.assign(T.arrivalOf(L, r0.sim, prefix, null), { run: 0, leg: null });
 	const A = { id: 1, key: 'k0', gain: 0, arrivals: [a0], exhausted: false };
 	const wp = { kind: 'trigger', tiles: [coin], expect: { feat: 'coins', value: 1 }, label: 'coin (12,15)' };
-	const step = { edge: 'trig:coin', nodeClass: 'c0', rung: 1, waypoint: wp, estTicks: 100 };
+	const step = { edge: 'trig:coin', nodeClass: 'c0', rung: 2, waypoint: wp, estTicks: 100 };
 	const added = [], says = [];
 	let verifiedCalls = 0;
 	const ctx = {
@@ -91,7 +91,7 @@ const gx = (extra) => new Promise((res) => {
 	ok(!hy.busy(), 'a solved step and a death step: no request');
 	hy.note(A, step, wp, { cost: 100 }, false, 'budget');
 	hy.schedule();
-	ok(hy.busy(), 'a failed step at rung 1: a request');
+	ok(hy.busy(), 'a failed step at rung 2: a request');
 	const t0 = Date.now();
 	while (hy.busy() && Date.now() - t0 < 40000) { await new Promise((r) => setTimeout(r, 200)); hy.harvest(); }
 	ok(!hy.busy(), 'the request ended');

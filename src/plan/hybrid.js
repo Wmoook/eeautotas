@@ -18,7 +18,8 @@
 // One child at a time, started only before the first route (a route stops it), never past the moves. A TROPHY leg's search
 // gets the moves' whole time left: stopped at its slice's end when it has no route, else it goes on (its after-route heads
 // L / W) and every faster route it prints is a route here too, until the moves end (EEAT_HY_TROPHY_ON=0: its slice). The knobs:
-// EEAT_HY_RUNG (1), EEAT_HY_REPEAT (2), EEAT_HY_S (60), EEAT_HY_MIN_S (10), EEAT_HY_TRIES (3), EEAT_HY_W (2),
+// EEAT_HY_RUNG (2), EEAT_HY_MORE_F (0.5) / _MIN (2) / _MAX (15) (after a leg's first arrival its search goes on that share of
+// the time it took, in s, and every SOONER arrival at the target is added too: the earliest one leads the anchor), EEAT_HY_REPEAT (2), EEAT_HY_S (60), EEAT_HY_MIN_S (10), EEAT_HY_TRIES (3), EEAT_HY_W (2),
 // EEAT_HY_MEM (MB a worker, 1000), EEAT_HY_GPU (1), EEAT_HY_TOOL (the eegpu path), EEAT_HY_ROOMS (the rooms imported a
 // call, 24; 0 none), EEAT_HY_GX (more goexplore.js options), EEAT_HY_NICE (0).
 const fs = require('fs');
@@ -27,8 +28,9 @@ const path = require('path');
 const cp = require('child_process');
 
 const num = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' && Number.isFinite(+process.env[k]) ? +process.env[k] : d);
-const HY_RUNG = num('EEAT_HY_RUNG', 1), HY_REPEAT = num('EEAT_HY_REPEAT', 2), HY_S = num('EEAT_HY_S', 60), HY_MIN_S = num('EEAT_HY_MIN_S', 10);
+const HY_RUNG = num('EEAT_HY_RUNG', 2), HY_REPEAT = num('EEAT_HY_REPEAT', 2), HY_S = num('EEAT_HY_S', 60), HY_MIN_S = num('EEAT_HY_MIN_S', 10);
 const HY_TRIES = num('EEAT_HY_TRIES', 3), HY_W = Math.max(1, num('EEAT_HY_W', 2)), HY_MEM = num('EEAT_HY_MEM', 1000), HY_ROOMS = num('EEAT_HY_ROOMS', 24);
+const HY_MORE_F = num('EEAT_HY_MORE_F', 0.5), HY_MORE_MIN = num('EEAT_HY_MORE_MIN', 2) * 1000, HY_MORE_MAX = num('EEAT_HY_MORE_MAX', 15) * 1000;
 const HY_GPU = process.env.EEAT_HY_GPU !== '0', HY_NICE = num('EEAT_HY_NICE', 0), HY_TROPHY_ON = process.env.EEAT_HY_TROPHY_ON !== '0';
 // (Find a route's goexplore.js defaults: editor.js GX_DEFAULTS, kept in step by hand: this file must not load the editor)
 const GX_DEFAULTS = ['--opts=1', '--frontier=1', '--fBrake=1', '--fPhys=1'];
@@ -112,7 +114,7 @@ function createHybrid(ctx) {
 		if (env.NODE_OPTIONS) env.NODE_OPTIONS = env.NODE_OPTIONS.replace(/--max[-_]old[-_]space[-_]size[= ]\d+/g, '').trim();
 		try { ch = cp.spawn(process.execPath, args, { stdio: ['pipe', 'pipe', 'ignore'], env }); } catch (e) { stats.errors++; ctx.say({ ev: 'warning', text: `the hybrid's search: ${e.message}` }); return false; }
 		child = ch;
-		busy = { id, c, a, t: Date.now(), ms, trophy, rooms: 0, solved: false, why: whyOf(c), done: false, slice: Date.now() + ms };
+		busy = { id, c, a, t: Date.now(), ms, trophy, rooms: 0, solved: false, why: whyOf(c), done: false, slice: Date.now() + ms, more: Infinity, bestT: Infinity };
 		c.inflight = true; c.tries++;
 		stats.byWhy[busy.why] = (stats.byWhy[busy.why] || 0) + 1;
 		ctx.say({ ev: 'hybrid', what: 'request', id, anchor: c.A.id, gain: c.A.gain, label: ctx.labelOf(c.step), rung: c.rung, fails: c.n, why: busy.why, from: a.tick, seconds: secs, gpu: !!tool, goal: trophy ? 'trophy' : `${c.wp.tiles.length} tiles` });
@@ -206,7 +208,7 @@ function createHybrid(ctx) {
 			if (m.ev === 'done') { b.end = m.end; continue; }
 			if (typeof m.inputs !== 'string' || !m.inputs) continue;
 			// (the leg solved: only a trophy leg's search goes on, its faster routes)
-			if (b.solved && !(b.trophy && m.ev === 'result' && m.kind === 'finish')) continue;
+			if (b.solved && !(b.trophy && m.ev === 'result' && m.kind === 'finish') && !(!b.trophy && m.ev === 'goal')) continue;
 			const masks = T.masksOf(m.inputs.replace(/[^0-O]/g, ''));
 			if (m.ev === 'result' && m.kind === 'finish') {
 				// (a route of the search: a route (routeOf replays it), and the leg when it passes the leg's target)
@@ -217,7 +219,13 @@ function createHybrid(ctx) {
 				halt('a route');
 			} else if (m.ev === 'goal') {
 				stats.goals++;
-				if (tryLeg(b, masks, 'goal')) { b.solved = true; halt('the leg'); }
+				// (after the first: only a sooner touch, until the extra time is over)
+				if (b.solved && !(m.t < b.bestT)) continue;
+				if (tryLeg(b, masks, 'goal')) {
+					if (!b.solved) { b.solved = true; b.more = Date.now() + Math.min(HY_MORE_MAX, Math.max(HY_MORE_MIN, (Date.now() - b.t) * HY_MORE_F)); }
+					b.bestT = Math.min(b.bestT, +m.t || Infinity);
+					if (!(HY_MORE_F > 0) || Date.now() >= b.more) halt('the leg');
+				}
 			} else if (m.ev === 'room') {
 				// (a room the search entered: a new model state = an anchor, the plan's later gates as soft guidance; the leg's
 				// own target, when its touch changes the room, comes as a 'goal' event too)
@@ -228,6 +236,7 @@ function createHybrid(ctx) {
 	/** an idle slot: the next candidate, before the first route, on a slice of the time left */
 	const schedule = () => {
 		if (child && busy && !busy.solved && !busy.halted && Date.now() > busy.slice) halt('the slice');
+		if (child && busy && busy.solved && !busy.trophy && !busy.halted && Date.now() >= busy.more) halt('the leg');
 		// (a trophy leg's search that has its route gives the slot to another failed leg)
 		if (child && busy && busy.trophy && busy.solved && !busy.halted && !ctx.hasRoute() && pick()) halt('another leg');
 		if (child || busy || ctx.stopped() || ctx.hasRoute()) { if (child && busy && ctx.hasRoute() && !(busy.trophy && busy.solved)) halt('a route'); return; }
