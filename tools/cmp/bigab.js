@@ -25,7 +25,9 @@ function read(dir) {
 		let frac = 1;
 		for (const e of sk) { let m = e.c0; for (const l of e.levels || []) if (l.ok && l.c < m) m = l.c; if (e.c0 > 0) frac = Math.min(frac, m / e.c0); }
 		const ix = idx.get(id) || {};
-		out.set(id, { done, ok: !!rep.ok, runTicks: rep.runTicks || null, trig: lastP.triggers || 0, t: (ev[ev.length - 1] || {}).t,
+		let pre = 0;   // (the stages before the moves: parse, model, bounds, plan)
+		for (const e of ev) if (e.ev === 'stage' && e.name !== 'moves' && e.name !== 'polish') pre += e.ms || 0;
+		out.set(id, { pre: Math.round(pre / 100) / 10, done, ok: !!rep.ok, runTicks: rep.runTicks || null, trig: lastP.triggers || 0, t: (ev[ev.length - 1] || {}).t,
 			steps: steps.length, okSteps: steps.filter((e) => e.ok).length, sub: re.length, subOk: re.filter((e) => e.ok).length,
 			subF0: re.filter((e) => !e.ok && !e.sims).length, subF: re.filter((e) => !e.ok).length, exMs: Math.round(exMs / 1000), exN,
 			frac: Math.round(frac * 100) / 100, rss: ix.peakRssMB || null, firstTrig: (prog.find((e) => e.triggers > 0) || {}).t || null });
@@ -39,12 +41,13 @@ const add = (o, r) => {
 	for (const k of ['ok', 'trig', 'steps', 'okSteps', 'sub', 'subOk', 'subF', 'subF0', 'exMs']) o[k] = (o[k] || 0) + (+r[k] || 0);
 	o.n = (o.n || 0) + 1; o.withTrig = (o.withTrig || 0) + (r.trig > 0 ? 1 : 0); o.fracSum = Math.round(((o.fracSum || 0) + r.frac) * 100) / 100;
 	if (r.rss) (o.rss = o.rss || []).push(r.rss);
+	(o.pre = o.pre || []).push(r.pre);
 };
-const f = (r) => r ? `${r.ok ? 'OK ' + r.runTicks : '-'} trig ${r.trig}${r.firstTrig ? '@' + Math.round(r.firstTrig) : ''} steps ${r.okSteps}/${r.steps} sub ${r.subOk}/${r.sub} f0 ${r.subF0}/${r.subF} exact ${r.exMs}s/${r.exN} deep ${r.frac} rss ${r.rss || '?'}${r.done ? '' : ' (running t ' + r.t + ')'}` : 'none';
+const f = (r) => r ? `${r.ok ? 'OK ' + r.runTicks : '-'} trig ${r.trig}${r.firstTrig ? '@' + Math.round(r.firstTrig) : ''} steps ${r.okSteps}/${r.steps} sub ${r.subOk}/${r.sub} f0 ${r.subF0}/${r.subF} exact ${r.exMs}s/${r.exN} deep ${r.frac} pre ${r.pre}s rss ${r.rss || '?'}${r.done ? '' : ' (running t ' + r.t + ')'}` : 'none';
 for (const id of ids) {
 	const a = A.get(id), b = B.get(id);
 	console.log(id.replace('campaign__', '').slice(0, 28).padEnd(29), '| off', f(a), '| on', f(b));
 	if (a && b && a.done && b.done) { add(tot.a, a); add(tot.b, b); }
 }
 const med = (l) => { if (!l || !l.length) return null; const s = l.slice().sort((x, y) => x - y); return s[s.length >> 1]; };
-for (const [k, o] of Object.entries(tot)) console.log(k === 'a' ? 'OFF' : 'ON ', JSON.stringify(Object.assign({}, o, { rss: undefined, rssMed: med(o.rss), rssMax: o.rss ? Math.max(...o.rss) : null })));
+for (const [k, o] of Object.entries(tot)) console.log(k === 'a' ? 'OFF' : 'ON ', JSON.stringify(Object.assign({}, o, { rss: undefined, pre: undefined, preMed: med(o.pre), preMax: o.pre ? Math.max(...o.pre) : null, rssMed: med(o.rss), rssMax: o.rss ? Math.max(...o.rss) : null })));
