@@ -1366,7 +1366,10 @@ ways in.
   (98,207), 1 blue coin, 1 death, alive (the known route's coin at ~8,000); + PICK=near (C4): gain 4 (chapter 1), 39
   anchors, the crumbs (104,211) at rung 3 (120 s), (109,206), (117,206), (130,203) by 190 s, no blue coin in 1,050 s. THE NEXT STOP: from the blue-coin anchor the planner's plans are 'crumb
   (127,215) -> coin (132,251) -> trophy' (cost 2,351) and 'purple switch 11 (135,251) -> trophy': the gravity-free walk's way,
-  not the hub's blue door #1 (271 / 287, 11-12) -> chapters 3-8; and the field calls the true way's (101,229) (route 1,557:
+  not the hub's blue door #1 (271 / 287, 11-12) -> chapters 3-8 (pl.js from that anchor's inputs: the coin (132,251) est 424,
+  then the trophy est 316; the RCH3 goal fields from its state read the coin 117.2, switch 11 118.4 and THE TROPHY 140.8
+  tiles, their crumbs back through (118,215) -> (141,225) -> (137,257): the trophy field still has a way from chapter 2
+  that skips the hub's chain, the next relaxation to find); and the field calls the true way's (101,229) (route 1,557:
   the bottom corridor and the up-arrow column (96-97, 222-227), which the route climbs slowly) a step back (gc 146.8 > D
   142.6 from (127,215)), so the chain from (118,215) to (104,211) is a 2,000-route-tick leg. NOT MERGED (opt-in, one run an
   arm, no shared gate).
