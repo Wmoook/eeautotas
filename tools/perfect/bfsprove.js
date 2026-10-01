@@ -15,7 +15,7 @@
 // closed C is wrong only if a collision merged away EVERY shortest route's states (each of its ~C states against the n seen:
 // ~C n / 2^53, 1e-6 at n = 1e8).
 //   node tools/perfect/bfsprove.js <level.eelvl> --C=<layer bound> [--route=<a.eetas>,..] [--U=] [--threads=16]
-//        [--seconds=1800] [--ttBits=28 (past 30: 2^(ttBits-30) shards of 2^30 slots)] [--tiers=kin,rel,gate] [--out=<faster.eetas>] [--check=1] [--initPer=64]
+//        [--seconds=1800] [--ttBits=28 (past 30: 2^(ttBits-30) shards of 2^30 slots)] [--replay=1 (THE REPLAY FRONT: 5 B a front state)] [--tiers=kin,rel,gate] [--out=<faster.eetas>] [--check=1] [--initPer=64]
 //        [--maxGB=12 (the process's RSS: past it the run stops, 'memory')] [--heapMB=4096 (a worker's old space)]
 //        [--rebalance=1.5 (re-root the fronts when the largest is past this factor of the mean; 0 off)]
 // Prints JSON lines: {ev 'check'} {ev 'start'} {ev 'layer', d, states, cut, merged, seen, minW, maxW, s, rssGB} {ev 'result',
@@ -149,7 +149,7 @@ function makeTripleStore() {
 
 // ---------------------------------------------------------------- a worker: its own front, every layer on the barrier
 function workerMain() {
-	const { file, tiers, C, sab, deadline, maxBytes } = workerData;
+	const { file, tiers, C, sab, deadline, maxBytes, replay } = workerData;
 	const L = T.loadLevelFile(file);
 	const ctx = WPAR.makeCtx(L, new Set(tiers));
 	const insert = seenTable(sab);
@@ -158,11 +158,41 @@ function workerMain() {
 	let roots = null, front = null, base = null;
 	const cur = new E.EESnapshot(), tmp = new E.EESnapshot();
 	let par = [], mk = [];   // per layer (from the roots on): the parent's index in the layer before, the input
+	// THE REPLAY FRONT (last hour, 2026-10-01; --replay=1): no layer past the roots is stored as states: a layer is its
+	// parent links + inputs only (5 B a state, kept anyway for the route), and a state is rebuilt when its layer is expanded
+	// by the engine from its nearest cached ancestor (one snapshot a depth, cache[q] = the state at index cacheIdx[q] of
+	// layer q; layer 0 = the roots, stored): the layer is walked in index order and a parent's children are contiguous, so
+	// a state costs ~1 tick more than reading it back (the parent's tick is shared by its children). The front's memory
+	// (~105-300 B a state packed) goes; the seen table (8 B a slot) stays. Exact: the same states, the same inputs, the
+	// same cut / dedup / finish as the stored front (the engine's tick from a restored snapshot is deterministic).
+	const cache = [], cacheIdx = [], anc = [];
+	const derive = (i, k) => {   // the state at index i of layer k (k = par.length: the front) into cache[k]; returns it
+		anc[k] = i;
+		for (let q = k - 1; q >= 0; q--) anc[q] = par[q][anc[q + 1]];
+		let q = k;
+		while (q >= 0 && cacheIdx[q] !== anc[q]) q--;
+		if (q < 0) {
+			if (cache[0] === undefined) cache[0] = new E.EESnapshot();
+			const hs = front.get(anc[0], base, cache[0]);
+			sim.restore(cache[0]);
+			if (sim.stateHash() !== hs) throw new Error(`bfsprove: a packed root read back wrong (root ${anc[0]})`);
+			cacheIdx[0] = anc[0]; q = 0;
+		}
+		if (q === k) return cache[k];
+		sim.restore(cache[q]);
+		for (let r = q + 1; r <= k; r++) {
+			E.applyMask(inp, mk[r - 1][anc[r]]); sim.tick(inp);
+			if (cache[r] === undefined) cache[r] = new E.EESnapshot();
+			sim.snapshot(cache[r]); cacheIdx[r] = anc[r];
+		}
+		return cache[k];
+	};
+	const frontN = () => (par.length === 0 ? front.n : par[par.length - 1].length);
 	parentPort.on('message', (m) => {
 		if (m.type === 'roots') {
 			// a root set (packed paths from the sources: the first layers, or a re-rooting's share of every worker's front),
 			// each state rebuilt by its own path and, where the hash came with it, checked against it
-			roots = m.rs; front = makeStore(); par = []; mk = [];
+			roots = m.rs; front = makeStore(); par = []; mk = []; cacheIdx.length = 0;
 			for (let i = 0; i < roots.src.length; i++) {
 				sim.restore(sources[roots.src[i]]);
 				for (let j = roots.off[i]; j < roots.off[i + 1]; j++) { E.applyMask(inp, roots.masks[j]); sim.tick(inp); }
@@ -174,7 +204,7 @@ function workerMain() {
 			parentPort.postMessage({ type: 'ready', n: front.n });
 		} else if (m.type === 'dump') {
 			// the front as packed paths from the sources (its root's path + the inputs since), with the states' hashes
-			const n = front.n, k = par.length, src = new Int32Array(n), off = new Int32Array(n + 1), hs = new Float64Array(n);
+			const n = replay ? frontN() : front.n, k = par.length, src = new Int32Array(n), off = new Int32Array(n + 1), hs = new Float64Array(n);
 			let total = 0;
 			const rootOf = new Int32Array(n);
 			for (let i = 0; i < n; i++) {
@@ -192,23 +222,28 @@ function workerMain() {
 				let j = i;
 				for (let q = k - 1; q >= 0; q--) { masks[at + q] = mk[q][j]; j = par[q][j]; }
 				at += k;
-				hs[i] = front.get(i, base, cur);
+				if (replay) { derive(i, k); sim.restore(cache[k]); hs[i] = sim.stateHash(); } else hs[i] = front.get(i, base, cur);
 			}
 			off[n] = at;
-			front = makeStore(); par = []; mk = [];
+			front = makeStore(); par = []; mk = []; cacheIdx.length = 0;
 			parentPort.postMessage({ type: 'dumped', rs: { src, off, masks, hs } }, [src.buffer, off.buffer, masks.buffer, hs.buffer]);
 		} else if (m.type === 'layer') {
 			const d = m.d;
-			const next = makeStore(), np = [], nm = [];
+			const next = replay ? null : makeStore(), np = [], nm = [];
 			let cut = 0, merged = 0, full = 0, crown = null, stopped = false;
 			const lim = C - (d + 1);
-			for (let i = 0; i < front.n && crown === null; i++) {
-				const h0 = front.get(i, base, cur);
-				sim.restore(cur);
-				if (sim.stateHash() !== h0) throw new Error(`bfsprove: a packed state read back wrong (layer ${d}, state ${i})`);
-				const masks = EG.probeMasks(sim, inp, cur);
+			const n = replay ? frontN() : front.n, k = par.length;
+			for (let i = 0; i < n && crown === null; i++) {
+				let st = cur;
+				if (replay) st = derive(i, k);
+				else {
+					const h0 = front.get(i, base, cur);
+					sim.restore(cur);
+					if (sim.stateHash() !== h0) throw new Error(`bfsprove: a packed state read back wrong (layer ${d}, state ${i})`);
+				}
+				const masks = EG.probeMasks(sim, inp, st);
 				for (const x of masks) {
-					sim.restore(cur); E.applyMask(inp, x); sim.tick(inp);
+					sim.restore(st); E.applyMask(inp, x); sim.tick(inp);
 					if (sim.has_silver_crown) { crown = { i, x }; break; }
 					if (sim.is_dead && !ctx.canDie) continue;
 					if (lim < 1 || ctx.h(sim, lim) > lim) { cut++; continue; }
@@ -216,7 +251,8 @@ function workerMain() {
 					const r = insert(hs);
 					if (r === false) { merged++; continue; }
 					if (r === null) full++;
-					next.push(sim.snapshot(tmp), base, hs); np.push(i); nm.push(x);
+					if (!replay) next.push(sim.snapshot(tmp), base, hs);
+					np.push(i); nm.push(x);
 				}
 				if ((i & 1023) === 0 && (Date.now() > deadline || process.memoryUsage.rss() > maxBytes)) { stopped = Date.now() > deadline ? 'time' : 'memory'; break; }
 			}
@@ -228,8 +264,9 @@ function workerMain() {
 				for (let k = par.length - 1; k >= 0; k--) { back.push(mk[k][j]); j = par[k][j]; }
 				route = { src: roots.src[j], path: Array.from(roots.masks.subarray(roots.off[j], roots.off[j + 1])).concat(back.reverse()) };
 			}
-			const states = stopped ? 0 : next.n, bytes = next.bytes(), used = next.used();
-			front = stopped || crown !== null ? makeStore() : next;
+			const states = stopped ? 0 : np.length, bytes = replay ? 5 * np.length : next.bytes(), used = replay ? 5 * np.length : next.used();
+			if (stopped || crown !== null) front = makeStore();
+			else if (!replay) front = next;
 			if (!stopped && crown === null) { par.push(Int32Array.from(np)); mk.push(Uint8Array.from(nm)); }
 			parentPort.postMessage({ type: 'done', d, states, cut, merged, full, stopped, route, bytes, used });
 		} else if (m.type === 'quit') process.exit(0);
@@ -306,7 +343,7 @@ async function main() {
 	if (found === null && front.length > 0) {
 		const wk = [];
 		const maxBytes = (+args.maxGB || 12) * 1e9, heapMB = +args.heapMB || 4096;
-		for (let w = 0; w < threads; w++) wk.push(new Worker(__filename, { workerData: { file, tiers, C, sab, deadline, maxBytes }, resourceLimits: { maxOldGenerationSizeMb: heapMB } }));
+		for (let w = 0; w < threads; w++) wk.push(new Worker(__filename, { workerData: { file, tiers, C, sab, deadline, maxBytes, replay: args.replay === '1' || process.env.EEAT_BFS_REPLAY === '1' }, resourceLimits: { maxOldGenerationSizeMb: heapMB } }));
 		const ask = (w, msg, type) => new Promise((res) => { const f = (m) => { if (m.type === type) { w.off('message', f); res(m); } }; w.on('message', f); w.postMessage(msg); });
 		const packRs = (list) => {   // [{src, path}] -> a packed root set
 			const src = new Int32Array(list.length), off = new Int32Array(list.length + 1);

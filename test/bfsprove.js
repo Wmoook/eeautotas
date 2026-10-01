@@ -71,6 +71,23 @@ for (const [name, rows] of Object.entries(ROOMS)) {
 		const r6 = run([...forced, `--C=${ref}`]);
 		check(`${name} re-rooted every layer: C = the optimum CLOSED`, r6.verdict === 'CLOSED' && r6.lb === ref && r6.rebalances > 0, `${r6.verdict} lb ${r6.lb}, ${r6.rebalances} re-rootings`);
 	}
+	// THE REPLAY FRONT (--replay=1: a layer = parent links + inputs, its states rebuilt by the engine): the same layers state
+	// for state count as the stored front, the same optimum and closed C, with and without the re-rooting after every layer
+	{
+		const layers = (args) => cp.execFileSync(process.execPath, [TOOL, ...args], { encoding: 'utf8', timeout: 120000 }).trim().split('\n').map((l) => JSON.parse(l));
+		for (const reb of ['0', '0.5']) {
+			const a = [file, '--threads=3', '--seconds=60', '--ttBits=22', '--initPer=1', `--rebalance=${reb}`, '--rebalanceMin=1'];
+			const s1 = layers([...a, `--C=${ref + 3}`]), s2 = layers([...a, `--C=${ref + 3}`, '--replay=1']);
+			// (every layer but the finish layer: there each worker stops its own share at its first finish, a race in both modes)
+			const L1 = s1.filter((l) => l.ev === 'layer').slice(0, -1).map((l) => `${l.d}:${l.states}:${l.cut}:${l.merged}`).join(' ');
+			const L2 = s2.filter((l) => l.ev === 'layer').slice(0, -1).map((l) => `${l.d}:${l.states}:${l.cut}:${l.merged}`).join(' ');
+			const q1 = s1.find((l) => l.ev === 'result'), q2 = s2.find((l) => l.ev === 'result');
+			check(`${name} replay front (rebalance ${reb}): the same layers as the stored front`, L1 === L2 && L1.length > 0, L1 === L2 ? `${s1.filter((l) => l.ev === 'layer').length} layers` : `${L1} | ${L2}`);
+			check(`${name} replay front (rebalance ${reb}): the same optimum, replayed`, q2.verdict === 'PROVEN' && q2.opt === ref && q2.optReplay === ref, `${q2.verdict} ${q2.opt} vs ${ref}`);
+			const r7 = run([...a, `--C=${ref}`, '--replay=1']);
+			check(`${name} replay front (rebalance ${reb}): C = the optimum CLOSED`, r7.verdict === 'CLOSED' && r7.lb === ref, `${r7.verdict} lb ${r7.lb}`);
+		}
+	}
 }
 {
 	const sab = new SharedArrayBuffer(8 * 256);
