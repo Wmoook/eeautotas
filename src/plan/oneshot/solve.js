@@ -93,6 +93,13 @@ const BW_RETRY = OS_BW && process.env.EEAT_OS_BW_RETRY !== '0';
 // clock (the closure 0.6 of it): a short clock cuts its closure and the meet fails where a long one ends early with the
 // leg (the lab: Gravity's Rainbow's trophy leg in 17.7 s of a 90-s clock; 1 + 2 + ... + 32 s: none))
 const BW_X = env('EEAT_OS_BW_X', 2);
+// THE SHARED SESSION (lane 6, push 3 block 3; o.farLeg given: osworker.js with EEAT_OS_BW_ST=1 and the compile's stretch
+// solver on): a far leg is not solved here (a second backward solver of 2-3 GB in this process) but sent out as a request
+// (the node's masks from the level start, the waypoint's tiles, the clock) to the compile's stretch child, whose backward
+// solver (and its closed closures' values) serves the executor's stretches too; ONE request out at a time; its answer
+// (farDone: the leg's masks from the level start to the waypoint) comes in as an injected node of kind 'bw', chased at once.
+// No o.farLeg: the far legs as before (bwSolver here).
+const BW_OUT_MS = env('EEAT_OS_BW_OUTMS', 30000);   // an unanswered request is dropped after 4 x its clock + this
 const CHASE_MAX = env('EEAT_OS_CHASE_MAX', 48);
 const LEG_NOGAIN = env('EEAT_OS_LEG_NOGAIN', 12);   // a step's legs that changed nothing before it gets no more legs        // landings fan-outs per (abstract state, support tile, speed class)   // the landings fan-out from airborne nodes too
 const CLASS_MODE = String(process.env.EEAT_OS_CLASS || 'fine');   // the support class: 'fine' | 'coarse'
@@ -189,6 +196,9 @@ function createOneShot(L, o = {}) {
 		bwLegs: 0, bwOk: 0, bwMs: 0, chased: 0, chaseDeep: 0 };
 	let BWS = null;
 	const bwSolver = () => BWS || (BWS = require('../lab/backward.js').createBackward(L));
+	// (THE SHARED SESSION: the far legs as requests to the compile's stretch child; farOut the one request out)
+	const farLeg = OS_BW && typeof o.farLeg === 'function' ? o.farLeg : null;
+	let farOut = null, farSeq = 0;
 	const nodes = [];                 // id -> node
 	const heap = new Heap();
 	const chaseQ = [];                // (THE CHASE) nodes to expand at once, depth first (a stack)
@@ -467,6 +477,8 @@ function createOneShot(L, o = {}) {
 		// nearer, LEG_FAIL tries with no find halve the distance they are tried from)
 		sim.restore(n.snap);
 		const tl = Date.now();
+		// (THE SHARED SESSION: a request out and unanswered past 4 x its clock + BW_OUT_MS is dropped)
+		if (farOut && Date.now() - farOut.at > 4 * farOut.ms + BW_OUT_MS) { ST.bwLost = (ST.bwLost || 0) + 1; farOut = null; }
 		for (let p = 0; p < inf.plans.length; p++) {
 			if (Date.now() >= deadline) break;
 			const wp = inf.plans[p].steps[n.si ? n.si[p] : 0];
@@ -477,16 +489,23 @@ function createOneShot(L, o = {}) {
 			const reachT = wp.oks > 0 || chasing ? LEG_TILES : LEG_TILES / (1 << Math.min(3, Math.floor(wp.tries / LEG_FAIL)));
 			if (OS_BW && c > reachT && (chasing || (!(wp.bwDone) && (wp.bwC === undefined || c < wp.bwC - BW_GAP ||
 				(BW_RETRY && c <= wp.bwC && Date.now() - wp.bwAt >= wp.bwMsLast)))) &&
-				ST.bwMs <= BW_SHARE * (runMs + Date.now() - tRun0)) {
+				(farLeg ? !farOut : ST.bwMs <= BW_SHARE * (runMs + Date.now() - tRun0))) {
 				wp.bwC = Math.min(c, wp.bwC === undefined ? c : wp.bwC); wp.bwN = (wp.bwN || 0) + 1;
 				const bms = BW_X === 2 ? Math.min(BW_MSMAX, BW_MS0 * (1 << Math.min(5, wp.bwN - 1))) : Math.min(BW_MSMAX, BW_MS0 * Math.pow(BW_X, Math.min(8, wp.bwN - 1)));
 				wp.bwAt = Date.now(); wp.bwMsLast = bms;
-				const tb = Date.now();
-				let r = null;
-				try { r = bwSolver().solve(n.snap, { tiles: Array.from(wp.tiles) }, { ms: bms }); } catch (e) { r = null; ST.bwErr = String(e && e.message || e).slice(0, 120); }
-				ST.bwLegs++; ST.bwMs += Date.now() - tb;
-				if (r && r.ok && r.masks && r.masks.length) { ST.bwOk++; wp.bwDone = true; cand.push([r.masks instanceof Uint8Array ? r.masks : Uint8Array.from(r.masks), 'bw', wp]); }
-				sim.restore(n.snap);
+				if (farLeg) {
+					// (THE SHARED SESSION: the request out; its answer comes in through farDone)
+					farOut = { id: ++farSeq, wp, at: Date.now(), ms: bms };
+					ST.bwLegs++;
+					try { farLeg({ id: farOut.id, masks: masksOf(n.id), wp: { kind: wp.kind === 'trophy' ? 'trophy' : 'tiles', tiles: Array.from(wp.tiles), label: wp.label || '' }, ms: bms }); } catch (e) { farOut = null; ST.bwErr = String(e && e.message || e).slice(0, 120); }
+				} else {
+					const tb = Date.now();
+					let r = null;
+					try { r = bwSolver().solve(n.snap, { tiles: Array.from(wp.tiles) }, { ms: bms }); } catch (e) { r = null; ST.bwErr = String(e && e.message || e).slice(0, 120); }
+					ST.bwLegs++; ST.bwMs += Date.now() - tb;
+					if (r && r.ok && r.masks && r.masks.length) { ST.bwOk++; wp.bwDone = true; cand.push([r.masks instanceof Uint8Array ? r.masks : Uint8Array.from(r.masks), 'bw', wp]); }
+					sim.restore(n.snap);
+				}
 			}
 			if (c < 0 || c > reachT) continue;
 			// (a step whose legs arrive and change nothing (the same abstract state, no new node) LEG_NOGAIN times: no more legs)
@@ -622,20 +641,35 @@ function createOneShot(L, o = {}) {
 		return { ok: !!best, done, closed, best: best ? { masks: best.masks, ticks: best.T } : null, stats: stats() };
 	}
 	/** a real state from outside (masks from the level start) as a node: the executor's exact fallback's legs */
-	function inject(masks, why) {
+	function inject(masks, why, kind) {
+		const kd = kind || 'inj';
 		if (!rooted) { rooted = true; if (!o.noRoot) root(); }
 		sim.reset();
 		for (let t = 0; t < masks.length; t++) { E.applyMask(inp, masks[t] & 31); sim.tick(inp); if (sim.is_dead && !deathsOK) return false; }
 		if (sim.is_dead) return false;
-		if (sim.has_silver_crown) { routeAt(-1, Uint8Array.from(masks), masks.length, 'inj'); return true; }
+		if (sim.has_silver_crown) { routeAt(-1, Uint8Array.from(masks), masks.length, kd); return true; }
 		// (tRun0 for the plan share's clock)
 		if (!tRun0) tRun0 = Date.now();
-		const n = addNode(-1, Uint8Array.from(masks), masks.length, 'inj');
+		const n = addNode(-1, Uint8Array.from(masks), masks.length, kd);
 		if (!o.noLadderInj) injList.push(Uint8Array.from(masks));
 		if (n) { ST.injected++; ST.injH = Math.round(n.h); ST.injNear = n.near; }
 		// (THE CHASE: inject, then leg: the executor's anchor expanded next, its far leg from there)
 		if (n && CHASE) { n.cd = 1; chaseQ.push(n); }
 		return !!n;
+	}
+	/** THE SHARED SESSION: the answer to request id ({id, ok, masks (a mask string or array from the level start, ending
+	 *  where the waypoint's goal holds), ms}): the leg's end an injected node of kind 'bw' (chased at once; a route if it
+	 *  has the crown); the next far leg may go out -> true when a node or a route came of it */
+	function farDone(ans) {
+		if (!ans || !farOut || ans.id !== farOut.id) return false;
+		const q = farOut;
+		farOut = null;
+		ST.bwMs += Number.isFinite(+ans.ms) ? +ans.ms : Date.now() - q.at;
+		if (!ans.ok || !ans.masks || !ans.masks.length) { if (ans.why) ST.bwWhy = String(ans.why).slice(0, 60); return false; }
+		const m = typeof ans.masks === 'string' ? T.masksOf(ans.masks) : Uint8Array.from(ans.masks);
+		const okN = inject(m, 'bw', 'bw');
+		if (okN) { ST.bwOk++; q.wp.bwDone = true; }
+		return okN;
 	}
 	function arrivals() {
 		const out = [];
@@ -654,7 +688,7 @@ function createOneShot(L, o = {}) {
 		return Object.assign({}, ST, { open, minF: Number.isFinite(minF) ? Math.round(minF) : null, best: best ? best.T : null, phase, closed, closedLevel, level, uncert, classes: classes.size });
 	}
 	// (best().kind: the last edge's kind; 'inj' = a whole route handed in (inject): the bound, not the one shot's own)
-	return { run, inject, arrivals, firsts, best: () => (best ? { masks: best.masks, ticks: best.T, kind: best.kind } : null), stats, masksOf, _nodes: nodes };
+	return { run, inject, farDone, arrivals, firsts, best: () => (best ? { masks: best.masks, ticks: best.T, kind: best.kind } : null), stats, masksOf, _nodes: nodes };
 }
 
 /**
