@@ -683,6 +683,27 @@ ways in.
   the floor 4 rows below, where the jump's 63.42 px leaves the box 0.6 px over the door's top edge: a false near of both
   relaxations (the centre-tile models), which the CEGAR's 3 x 3 walls at the executor's closest tile never refute. Notes:
   `src/out/n5/lanes/c6_lane3_b2.md`.
+  BLOCK 3 (C6 push 3 lane 3): **THE DEATH STEP'S FLAG** (B7's executor.js wpData `dieField`, OPT-IN `EEAT_WP_DIEFIELD=1`)
+  A/B on the 8 death-step levels (Spring Rose, Ice Cream Expedition, First Person Maze, Frolic, Don't Stop Jumping, One
+  Minute Descent, Katwalk, Trail Blazer; box 5, 300 s, W3, 2 runs an arm side by side): the death steps succeed 32 of 55
+  with it vs 11 of 49 without, but compiled 0 vs 1 of 16 level runs (Trail Blazer 3,040 in 1 of 2 off runs) and the
+  progress no better (Spring Rose -1 twice, Ice Cream 11 -> 7 once): NOT a default. **THE ANCHOR DUMP** (strategy.js,
+  OPT-IN `EEAT_ANCHOR_DUMP=<file | dir>`: every anchor's arrivals as input strings at the compile's end, `<dir>/<level>.anchors.jsonl`)
+  and `tools/cmp/nearkrt.js` (the executor's reach from a compile's own anchor at given rungs, then a scan: layers or
+  `--greedy=W` best-first by the px distance to the target, a hit a real leg) + `tools/cmp/nearlist.js` (a log's near
+  misses). THE NEAR LEVELS' EXACT REASONS: **DECOY TROPHIES**: the trophy waypoint is the union of the trophy tiles, so the
+  plans and the goal field go to the nearest: Ice Cream Expedition has 6 (one SEALED at (5,177): planks / emerald / solid
+  around it and one-way platforms 154 at rotation 0 above, passable only moving left; three in a box under coin doors;
+  the routes take (95,339): S99's route ends there) and its NEAR is 2 tiles from the sealed one; DEEPER has 2 ((25,91)
+  in a cell whose floor is live portals, (42,91) open) and its NEAR is at the portal (25,93); both walk-mode levels, so
+  no reach field drops them: the next step is the trophy as ranked COMPONENTS with a per-component CEGAR fact (a
+  component failed at rung >= 2 within 2 tiles, or sealed by a box-exact entry test, leaves that anchor class's trophy
+  set). BOX-EXACT POCKETS / PUSHES: Two's coins above the spawn enter only at py 3040.0 exactly (a ceiling bonk; a
+  best-first engine search from the start reaches the next tile at tick 48, never the coin), Beaches in Space's coin at
+  the end of 3 right arrows needs an entry speed against the push (the best-first search from the anchor: 1.5 M states,
+  3 tiles short at (62,133)), Daybreak's switch 44 only through the shut door of switch 45. Of the chief's NEAR runs' last
+  plans 6 of 8 were relax-only (est >= 1,000,000). The executor's `fail.closest.masks` do not pass the reported closest
+  tile (replayed, 100-200 tiles off): its relay starts begin elsewhere (not chased). Notes: `src/out/n5/lanes/c6_lane3_b3.md`.
 - **Fields in chains** (C6 push 3 lane 2, STUCK-FIELD; `src/out/n5/lanes/c6_lane2_b1.md`): THE KNOWN-ROUTE TEST of 16
   STUCK-FIELD levels' stuck waypoints (tools/cmp/krt.js, box 5): 5 of 13 are not on the known route at all (the plan's
   off-route targets), 4 of the 8 on it are found from the route's previous-trigger state (the compile's anchor there holds
