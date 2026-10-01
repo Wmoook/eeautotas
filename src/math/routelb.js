@@ -832,29 +832,76 @@ function createRouteLB(L, o = {}) {
 		const idleMax = bo.idleMax || 3000;
 		const sim = new E.EESim(L), inp = new E.EEInput();
 		sim.reset(); E.applyMask(inp, 0);
-		// (the clock-blind hash: the time doors' phase and the key timers left out, which this bound does not read (time
-		// doors open; a key that runs out only shuts doors: a later idle start's bound is no lower))
-		let h = sim.stateHashClockBlind(), rests = -1;
+		// THE IDLE STARTS (the run timer starts at the end of the first tick with an input: idle ticks before it are free):
+		// the idle ball's states until its FULL state hash repeats (equal hashes behave identically from then on: every later
+		// idle state is one already seen; a resting ball repeats at once, a bobbing one after its period, a time-door level's
+		// within the doors' phase). Before, the walk stopped at the first CLOCK-BLIND repeat, which a ball resting on a time
+		// door repeats while the door is shut, and gave 0 where the ball never rests (Level 1 Overworld bobs in water: its
+		// full state repeats at 1,642 of 1,570)
+		const seen = new Set(), blind = new Map();
+		let n = -1;
 		for (let k = 0; k <= idleMax; k++) {
 			if (sim.has_silver_crown) return { lb: 0, why: 'the idle ball finishes', idle: k };
+			const hf = sim.stateHash();
+			if (seen.has(hf)) { n = k; break; }
+			seen.add(hf);
+			const hb = sim.stateHashClockBlind();
+			if (!blind.has(hb)) blind.set(hb, k);
 			sim.tick(inp);
-			const h2 = sim.stateHashClockBlind();
-			if (h2 === h && !sim.is_dead) { rests = k; break; }
-			h = h2;
 		}
-		if (rests < 0) return { lb: 0, why: `the idle ball does not rest within ${idleMax} ticks`, idle: -1 };
+		if (n < 0) return { lb: 0, why: 'the idle ball\'s state does not repeat within ' + idleMax + ' ticks', idle: -1 };
+		// (the bound reads no clock: one bound per clock-blind state; past MANY_IDLE of them (a long bob) one per abstract state
+		// and lattice node, from the node with the largest floor offsets of its states and no kinematic first leg: at most
+		// every one of its states' bounds)
+		const MANY_IDLE = 64;
+		const many = blind.size > MANY_IDLE;
+		const groups = new Map();
 		sim.reset();
-		let lb = Infinity, at = -1, starts = 0, last = null, lastKey = '';
-		for (let k = 0; k <= rests; k++) {
-			// (consecutive idle states in one abstract state at one lattice node give the same bound but the offset: computed)
-			const r = bound(sim, bo);
+		let lb = Infinity, at = -1, starts = 0, last = null;
+		const done = new Set(), direct = [];
+		for (let k = 0; k < n; k++) {
+			const hb = sim.stateHashClockBlind();
+			if (!done.has(hb)) {
+				done.add(hb);
+				const S = model.stateOf(sim);
+				const pend = model.pendingOf ? model.pendingOf(sim, S) : null;
+				if (!many) {
+					const r = bound(sim, bo);
+					starts++;
+					const v = r.lb === Infinity ? Infinity : r.lb - 1;
+					if (v < lb) { lb = v; at = k; last = r; }
+				} else if (sim.is_dead || pend) {
+					direct.push({ snap: sim.snapshot(), k });
+				} else {
+					const cx = sim.px + 8, cy = sim.py + 8;
+					const i0 = Math.max(0, Math.min(LW - 1, Math.floor(cx / 8))), j0 = Math.max(0, Math.min(LH - 1, Math.floor(cy / 8)));
+					const gk = S.key + '|' + i0 + ',' + j0;
+					let g = groups.get(gk);
+					if (!g) { g = { S, i0, j0, dx: 0, dy: 0, k }; groups.set(gk, g); }
+					g.dx = Math.max(g.dx, cx - 8 * i0); g.dy = Math.max(g.dy, cy - 8 * j0);
+				}
+			}
+			if (k + 1 < n) sim.tick(inp);
+		}
+		// (the many starts share 4 x the start's budget, at least 250 ms each: a search the clock ends is still a bound)
+		const jobs = groups.size + direct.length;
+		const bo3 = jobs ? Object.assign({}, bo, { ms: Math.max(250, Math.floor(4 * (bo.ms !== undefined ? bo.ms : 5000) / jobs)) }) : bo;
+		for (const j of direct) {
+			sim.restore(j.snap);
+			const r = bound(sim, bo3);
 			starts++;
 			const v = r.lb === Infinity ? Infinity : r.lb - 1;
-			if (v < lb) { lb = v; at = k; last = r; }
-			void lastKey;
-			if (k < rests) sim.tick(inp);
+			if (v < lb) { lb = v; at = j.k; last = r; }
 		}
-		return { lb: lb === Infinity ? Infinity : Math.max(0, Math.ceil(lb - 1e-6)), lbRaw: lb, at, starts, idle: rests, order: last ? last.order : [], complete: last ? last.complete : false };
+		for (const g of groups.values()) {
+			const c0 = Math.max(0, Math.min(W - 1, g.i0 >> 1)) + W * Math.max(0, Math.min(H - 1, g.j0 >> 1));
+			const startCorr = (lam) => lam * g.dx / caps.Wx[c0] + (1 - lam) * g.dy / caps.Wdn[c0];
+			const r = boundFromNodes(g.S, Int32Array.of(g.j0 * LW + g.i0), startCorr, bo3);
+			starts++;
+			const v = r.lb === Infinity ? Infinity : r.lb - 1;
+			if (v < lb) { lb = v; at = g.k; last = r; }
+		}
+		return { lb: lb === Infinity ? Infinity : Math.max(0, Math.ceil(lb - 1e-6)), lbRaw: lb, at, starts, idle: n, idleStates: blind.size, grouped: groups.size, order: last ? last.order : [], complete: last ? last.complete : false };
 	}
 	// ---- the cost-to-go field per abstract state (the exact search's heuristic)
 	/**
