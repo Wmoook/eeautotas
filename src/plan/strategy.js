@@ -46,44 +46,6 @@ const T = require('./types.js');
 const E = require('../eesim.js');
 
 const RUNG_MS = [1500, 5000, 15000, 45000];
-// THE DEEP RUNG (B7 lane b9, cycle 2; OPT-IN EEAT_RUNG_DEEP=<ms>, unset / 0: off, the ladder as before byte for byte): one
-// more rung of that many ms after the 45-s one (the facts block an (edge, node class) after 5 failures instead of 4; the
-// executor runs it at its top tier, level 3, with the longer window; the relay start goes on from rung 3's closest). Bad EE
-// Level 9's mini 5 (a ladder maze between spike columns, 700 ticks) from its own entrance, tools/cmp/legab.js on box 7, 6
-// knob arms x 3 reps: 0 finds at rungs 1-2 (5 / 15 s) in every rep, found at rung 3 in 34-45 s (skel+leg / skel+portfolio,
-// 585-839 ticks): a leg that needs ~40 s in ONE window, where the compile's 45-s rung is the edge (box 7's c4X: 108 steps
-// of it, 0 finds, 1,583 worker-s, the rung-3 calls closest 27-37 tiles; the same wall on minis 7, 12, 13, 15).
-const RUNG_DEEP = +process.env.EEAT_RUNG_DEEP > 0 ? +process.env.EEAT_RUNG_DEEP : 0;
-const RUNG_LADDER = RUNG_DEEP ? RUNG_MS.concat([RUNG_DEEP]) : RUNG_MS;
-// THE WARM RUNG (B7 lane b9, cycle 2; OPT-IN EEAT_RUNG_WARM=1, off = the steps' rungs as the facts give them): the facts'
-// ladder is per (edge, node class) and a node class is the whole abstract state + the checkpoint + the start's speed, so
-// a hard leg climbs rungs 0-3 again from EVERY new class (box 7's c4X: mini 5's switch 108 steps from ~27 classes, each
-// class's 1.5 + 5 + 15 s rungs spent before its one 45-s window: 0 finds). With the knob a step of an edge that already
-// failed rung r by its BUDGET from another class starts at rung r (never above the ladder's top): the windows proven too
-// short for that leg are not run again. A found leg returns at once, so a higher rung costs only when it fails.
-const RUNG_WARM = process.env.EEAT_RUNG_WARM === '1';
-// THE PLACE RUNG (B7 lane b9, cycle 3; OPT-IN EEAT_RUNG_PLACE=1, off = the steps' rungs as the facts give them): the facts'
-// ladder is per (edge, node class), and a node class is the whole abstract state, so every new lineage that arrives at the
-// SAME place (a mini's entrance checkpoint: the anchor's first arrival tile) climbs the same hard leg's rungs 0-3 again
-// (Bad EE Level 9, box 7 c6D1: switch 5 from 7 anchors made at its mini's entrance (262,246), 14 + 10 + 8 + 4 steps at
-// rungs 0-3 found 0, the 135-s rung 2 of 3). With the knob a step of an edge whose (edge, place) failed rung r by the
-// BUDGET runs at rung r + 1 at least (the lowest such rung its own (edge, class) has not run in this epoch; none left:
-// the anchor leaves that edge for the epoch, as a repeated triple does); a find at rung r lowers the place's floor to r.
-// Unlike the warm rung (by edge alone, from any place) it lifts only the steps that start where the window was proven
-// too short. Cleared at a deepening (the facts start over).
-const RUNG_PLACE = process.env.EEAT_RUNG_PLACE === '1';
-// THE START JITTER (B7 lane b9, cycle 3; OPT-IN EEAT_START_JITTER=1, off = the steps' starts byte for byte): lineages that
-// reach a place through the same portal arrive in the SAME physical state (Bad EE Level 9: the anchors at mini 5's
-// entrance (262,246) of c6D1 and c11D, different switch sets, px / speed / ground equal), so every new class's try of a hard
-// leg from there is the same search again; and the leg's finders find it in a 45-s window only from some starts
-// (tools/cmp/legab.js, box 7, 3 reps each: from cycle 2's start, jumping at the entrance, 3 / 3 at 42.6 s; from the
-// compile's own arrival 1.4 px left, standing, 0 / 3; the same arrival + a jump tick 0 / 3; cycle 2's start one tick
-// earlier, standing, 0 / 3). With the knob, once an (edge, place) has failed by the budget, each later step of it from
-// that place swaps the anchor's first arrival for that arrival followed by k ticks of one held input (the k-th try's:
-// jump, right + jump, left + jump, right, left, idle, then the same with 3, 5, .. ticks): another start each time, every
-// one a real state replayed from the level start (a death or a finish in the jitter: the arrival as it is).
-const START_JITTER = process.env.EEAT_START_JITTER === '1';
-const JITTER_MASKS = [1, 5, 3, 4, 2, 0];
 // THE ONE SHOT (n5-oneshot part 3, OPT-IN EEAT_ONESHOT=1; off = the loop below byte for byte): the MOVES stage's first
 // tier: src/plan/oneshot/solve.js, ONE A* over (the move graph x the trigger state) from the level start with the
 // planner's plans and the bounds as its heuristic, for OS_SHARE of the time left before the loop; then in the loop's
@@ -106,12 +68,6 @@ const OS_THREAD = process.env.EEAT_OS_THREAD !== '0';
 // platform threads of the process with the executor's worker threads and the main thread. EEAT_OS_PROC=0: the worker
 // thread. The same messages either way: osProc() gives the child the Worker's face.)
 const OS_PROC = process.env.EEAT_OS_PROC !== '0';
-// (THE SHARED SESSION, lane 6 push 3 block 3; OPT-IN EEAT_OS_BW_ST=1 with EEAT_OS_BW=1 and the stretch solver (EEAT_STRETCH,
-// a compiler default): the one shot's far legs go to the compile's stretch child (one backward solver and its closed
-// closures' values a compile, the executor's stretches and the one shot's far legs in turn) instead of a second backward
-// solver of 2-3 GB in the one shot's own process; one far leg out at a time; its answer replayed there and again in the
-// one shot (an injected node, chased). Off: the far legs in the one shot's process as before)
-const OS_BW_ST = process.env.EEAT_OS_BW_ST === '1' && process.env.EEAT_OS_BW === '1';
 /** osworker.js as a child process with a Worker's face (on / once 'message' 'error' 'exit', postMessage, unref, terminate) */
 function osProc(file, data, heapMB) {
 	const cp = require('child_process'), EventEmitter = require('events');
@@ -177,25 +133,8 @@ const CR_F_SLACK = +process.env.EEAT_CR_F_SLACK || 0.1, CR_F_ABS = +process.env.
 // levels the trophy steps took 25% of the failed time with no success at any rung (the whole level left as one leg)
 const FAR_TROPHY = +process.env.EEAT_FAR_TROPHY > 0 ? +process.env.EEAT_FAR_TROPHY : 0;
 const FAR_TROPHY_RUNG = process.env.EEAT_FAR_TROPHY_RUNG !== undefined ? +process.env.EEAT_FAR_TROPHY_RUNG : 1;
-// THE FAR WALK (C6 push 3 lane 2 block 3, RATE; OPT-IN EEAT_FAR_WALK=<walk ticks>, unset / 0: off, the compile byte for
-// byte as before): the far trophy's window cap for EVERY waypoint kind, by the step's WALK: its est, or for an est at or
-// past the planner's PENALTY (1e6: an edge only the relaxation reaches, est = 3 x the relaxation's walk x the pace +
-// PENALTY; a floor / zone / rch price adds PENALTY too) the rest past the penalties / 3 (the relaxation's own price is
-// 3x). A step whose walk is longer runs at most at rung EEAT_FAR_WALK_RUNG (1) whatever rung its facts reached; its
-// failures still climb the facts' ladder (the planner moves on as before). A death step (its est the dead ticks, its
-// window the respawn's) and a synthetic step keep their rung. Why (lane 2 block 3, the far-trophy arm's step events, the
-// 18 RATE levels, 300 s, 4,021 steps with their est): '1e6+' is NOT a whole level: 144 of those steps succeeded (33 at
-// the 45-s rung), the rest past the penalty is the relaxation's walk; by the WALK, no step of a plain est >= 3,000 ticks
-// succeeded at any rung (0 of ~470) and 1 of 230 of a penalty est with a rest >= 10,000 (an Inferno coin at rung 3).
-const FAR_WALK = +process.env.EEAT_FAR_WALK > 0 ? +process.env.EEAT_FAR_WALK : 0;
-const FAR_WALK_RUNG = process.env.EEAT_FAR_WALK_RUNG !== undefined ? +process.env.EEAT_FAR_WALK_RUNG : 1;
-const EST_PENALTY = 1e6;   // (planner.js PENALTY)
-/** a step's walk est: its est, or past the planner's penalties the relaxation's walk (the rest / 3) */
-const walkOf = (step) => { const e = +step.estTicks; return !Number.isFinite(e) ? 0 : e >= EST_PENALTY ? (e % EST_PENALTY) / 3 : e; };
-const farWalk = (step) => FAR_WALK > 0 && step && !step.synthetic && !String(step.edge).startsWith('death:') && !(step.waypoint && step.waypoint.allowDeath) && walkOf(step) > FAR_WALK;
-/** the rung a step's window is sized by: its own, or the far trophy's / the far walk's cap */
-const windowRung = (step) => (FAR_TROPHY > 0 && step && !step.synthetic && (!step.waypoint || step.waypoint.kind === 'trophy') && +step.estTicks > FAR_TROPHY ? Math.min(step.rung | 0, FAR_TROPHY_RUNG)
-	: farWalk(step) ? Math.min(step.rung | 0, FAR_WALK_RUNG) : step.rung);
+/** the rung a step's window is sized by: its own, or the far trophy's cap */
+const windowRung = (step) => (FAR_TROPHY > 0 && step && !step.synthetic && (!step.waypoint || step.waypoint.kind === 'trophy') && +step.estTicks > FAR_TROPHY ? Math.min(step.rung | 0, FAR_TROPHY_RUNG) : step.rung);
 const ARRIVALS_K = 4, MAX_DEEPEN = 4, STEER_MISS = 6000;
 // the polish's share of the budget once a route is known: min(POLISH_MS, POLISH_F x the budget)
 const POLISH_MS = 15000, POLISH_F = 0.25;
@@ -239,24 +178,6 @@ const PREC_FIRST = process.env.EEAT_PREC_FIRST === '1', PREC_AFTER_S = 10;
 // (with the fast rests the coasted pass stops at its first route (--first=1, as measured): the fast pass is the one that
 // looks for the fastest, and precision.js's --after clock (from that first route) would cut it short)
 const PREC_FAST = process.env.EEAT_PREC_FAST !== '0' && process.env.EEAT_PERFECT !== '0';
-// (B8 speed, cycle 2) THE EXACT LANDING WITHOUT THE IDLE WAIT (OPT-IN EEAT_PREC_ASYNC=1; off = the step awaits the child,
-// byte for byte as before): the trophy step that started the precision child returned only when the child ended (up to
-// PREC_S = 40 s), and that step's edge stayed in flight, so on a one-trigger level the whole loop waited: the precision
-// puzzle and NC Naos d3c6 (box 8, n5-plan 8a5d9a6, 300 s, W3) spent 68 / 73 s of their 91 / 96 s first route in that wait
-// (the executor's worker use 0.07); the child's first run, from rung 0's one nearest state, ran out its 40 s, then rungs 1-2
-// ran (20 s), then the second run with their nearest states found the 154-tick route in 24 s. With the knob the child runs
-// in the background (its route goes through routeOf like the stretch child's), the step returns at once, the next rungs
-// run beside it, and a run that ends without a route starts again AT ONCE with the nearest states that came meanwhile
-// (still at most PREC_RUNS runs); the moves' end with no route waits for a running child (precHold) as for the stretch
-// child; the child is killed when the moves end, and a route it prints after that is not taken.
-const PREC_ASYNC = process.env.EEAT_PREC_ASYNC === '1';
-// (B8 speed, cycle 2) THE EXACT LANDING'S ROUTES AS THEY COME (EEAT_PREC_STREAM=1: a compiler default, src/plan/defaults.js;
-// unset here / =0: off, byte for byte): the child
-// prints every faster route it finds (precision.js with the fast rests: the coasted rests' route first, then the braked
-// rests' faster one), but the compile took its route only when the child ENDED; with the knob each better route is verified
-// (routeOf) the moment it is printed, so the first route comes at the coasted pass's find; the child, its later faster
-// routes and the step that waits for it are as before.
-const PREC_STREAM = process.env.EEAT_PREC_STREAM === '1';
 // the proof's starts: the level start after k = 0..R idle ticks, R = the idle ticks until the state rests (the timer starts
 // at the first input: waiting is free); at most PROVE_IDLE_MAX (one exact search each)
 const PROVE_IDLE_MAX = 64;
@@ -502,7 +423,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	const total = seconds * 1000;
 	const workers = Math.max(1, Math.round(+opts.workers || 2));
 	const P = Math.max(1, Math.round(+opts.inflight || workers));
-	const rungMs = Array.isArray(opts.rungMs) ? opts.rungMs : RUNG_LADDER;
+	const rungMs = Array.isArray(opts.rungMs) ? opts.rungMs : RUNG_MS;
 	const stallWindow = (+opts.stallWindowS > 0 ? +opts.stallWindowS : Math.max(STALL_MIN_S, Math.min(STALL_S, seconds * STALL_F))) * 1000;
 	const watchMs = +opts.watchMs > 0 ? +opts.watchMs : WATCH_MS;
 	const progressMs = +opts.progressMs > 0 ? +opts.progressMs : PROGRESS_MS;
@@ -535,7 +456,6 @@ async function compile(L, opts = {}, emit = () => {}) {
 	// ---- THE ONE SHOT's thread (OS_ON + OS_THREAD, a level file, the real parts): started first, it builds its own parts
 	let osw = null, osStats = null, osReady = null, osErr = '', osThreadDone = false, osOpen = !OS_GATE, osReleased = 0, osWantOpen = '';
 	const osQ = [];
-	let osBwReq = null;            // (THE SHARED SESSION) the one shot's far leg waiting for an idle stretch child
 	const osPending = new Map();   // (the gate) abstract state key -> the one shot's soonest arrival's masks, held
 	if (OS_ON && OS_THREAD && opts.file && !opts.parts) {
 		try {
@@ -543,14 +463,12 @@ async function compile(L, opts = {}, emit = () => {}) {
 			// (its isolate's old space: osworker.js OS_HEAP_MB (the live heap where its A* stops growing) + 512 MB; 0: V8's own)
 			const osHeap = process.env.EEAT_OS_HEAP_MB !== undefined && process.env.EEAT_OS_HEAP_MB !== '' && Number.isFinite(+process.env.EEAT_OS_HEAP_MB) ? +process.env.EEAT_OS_HEAP_MB : 1024;
 			const osData = { file: path.resolve(String(opts.file)), graph: process.env.EEAT_OS_GRAPH === '1', graphThreads: 1, cache: process.env.EEAT_OS_CACHE || null };
-			if (OS_BW_ST && ST_ON) osData.bwShare = 1;
 			const osFile = path.join(__dirname, 'oneshot', 'osworker.js');
 			osw = OS_PROC ? osProc(osFile, osData, osHeap)
 				: new Worker(osFile, { workerData: osData, ...(osHeap > 0 ? { resourceLimits: { maxOldGenerationSizeMb: Math.round(osHeap + 512) } } : {}) });
 			osw.on('message', (m) => {
 				if (!m || typeof m !== 'object') return;
 				if (m.type === 'route' || m.type === 'arr') osQ.push(m);
-				else if (m.type === 'bwreq') osBwReq = m;   // (THE SHARED SESSION: one out at a time; stSchedule sends it)
 				else if (m.type === 'stats') { osStats = m.stats; osThreadDone = !!m.done; }
 				else if (m.type === 'ready') { osReady = m; say({ ev: 'oneshot', what: 'ready', ms: m.ms, setupMs: m.setupMs }); }
 				else if (m.type === 'error') { osErr = String(m.error || '').split('\n')[0]; say({ ev: 'warning', text: `the one shot's thread: ${osErr}` }); }
@@ -574,7 +492,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	if (parts.createBounds) {
 		try { bounds = await parts.createBounds(L, { model }); } catch (e) { bounds = null; say({ ev: 'warning', text: `the bounds could not be built (${e.message}): no admissible bound but the planner's` }); }
 	}
-	const facts = parts.createFacts({ rungs: RUNG_DEEP && rungMs === RUNG_LADDER ? RUNG_LADDER.length : 4, model });
+	const facts = parts.createFacts({ rungs: 4, model });
 	// (the planner's floor probe runs in a worker thread off the bounds stage: EEAT_PLAN_FLOOR_ASYNC=0 in line, as before)
 	const planner = parts.createPlanner(model, facts, { bounds, seed: opts.seed, file: opts.file, floorAsync: process.env.EEAT_PLAN_FLOOR_ASYNC !== '0' });
 	const floorVerOf = () => { try { return typeof planner.floorVersion === 'function' ? planner.floorVersion() : 0; } catch (e) { return 0; } };
@@ -770,21 +688,13 @@ async function compile(L, opts = {}, emit = () => {}) {
 	const precOn = opts.precision !== false && process.env.EEAT_PLAN_PREC !== '0' && !!opts.file;
 	const precAtt = new Map();   // masks string -> dist
 	let precRuns = 0, precBusy = false, precChild = null;
-	// (EEAT_PREC_ASYNC: the attempts the last run was given; the moves ended: no new run, no late route)
-	let precGiven = 0, precOver = false;
-	const precision = async (closest, again) => {
-		if (again) {
-			// (EEAT_PREC_ASYNC: a run ended without a route: again at once when nearest states came meanwhile)
-			if (!precOn || precOver || precBusy || precRuns >= PREC_RUNS || precAtt.size === precGiven || stopped) return null;
-		} else {
-			if (!precOn || !closest || !closest.masks || !(closest.dist >= 0) || closest.dist > PREC_NEAR) return null;
-			const str = typeof closest.masks === 'string' ? closest.masks : T.strOf(closest.masks);
-			if (!/^[0-O]+$/.test(str)) return null;
-			const had = precAtt.size;
-			if (!precAtt.has(str)) precAtt.set(str, +closest.dist);
-			if (precBusy || precRuns >= PREC_RUNS || precAtt.size === had || stopped || precOver) return null;
-		}
-		precGiven = precAtt.size;
+	const precision = async (closest) => {
+		if (!precOn || !closest || !closest.masks || !(closest.dist >= 0) || closest.dist > PREC_NEAR) return null;
+		const str = typeof closest.masks === 'string' ? closest.masks : T.strOf(closest.masks);
+		if (!/^[0-O]+$/.test(str)) return null;
+		const had = precAtt.size;
+		if (!precAtt.has(str)) precAtt.set(str, +closest.dist);
+		if (precBusy || precRuns >= PREC_RUNS || precAtt.size === had || stopped) return null;
 		const secs = Math.floor(Math.min(PREC_S * 1000, left() - endReserve - 2000) / 1000);
 		if (secs < PREC_MIN_S) return null;
 		precBusy = true; precRuns++;
@@ -792,7 +702,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const att = [...precAtt].sort((a, b) => a[1] - b[1]).slice(0, PREC_ATTEMPTS).map((e) => e[0]);
 		const file = path.join(os.tmpdir(), `eeat_prec_${process.pid}_${precRuns}.txt`);
 		const t1 = Date.now();
-		let found = null, done = null, foundRun = Infinity, streamEv = null;
+		let found = null, done = null, foundRun = Infinity;
 		try {
 			fs.writeFileSync(file, att.join('\n') + '\n');
 			say({ ev: 'precision', run: precRuns, attempts: att.length, nearest: Math.round(+precAtt.get(att[0]) * 10) / 10, seconds: secs });
@@ -817,11 +727,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 						let ev = null;
 						try { ev = JSON.parse(line); } catch (e) { continue; }
 						// (the fewest run ticks of its results: the fast pass and --after print each faster one)
-						if (ev.ev === 'result' && ev.kind === 'finish' && typeof ev.inputs === 'string' && (!found || (Number.isFinite(+ev.runTicks) && +ev.runTicks < foundRun))) {
-							found = ev.inputs; foundRun = Number.isFinite(+ev.runTicks) ? +ev.runTicks : Infinity;
-							// (EEAT_PREC_STREAM: the route at once, not at the child's end)
-							if (PREC_STREAM && !precOver) { const x = routeOf(T.masksOf(found.replace(/[^0-O]/g, '')), 'the exact landing (precision)', null); if (x && x.better) streamEv = x.ev; }
-						}
+						if (ev.ev === 'result' && ev.kind === 'finish' && typeof ev.inputs === 'string' && (!found || (Number.isFinite(+ev.runTicks) && +ev.runTicks < foundRun))) { found = ev.inputs; foundRun = Number.isFinite(+ev.runTicks) ? +ev.runTicks : Infinity; }
 						else if (ev.ev === 'done') done = ev.end;
 					}
 				});
@@ -832,18 +738,9 @@ async function compile(L, opts = {}, emit = () => {}) {
 		try { fs.unlinkSync(file); } catch (e) { /* gone */ }
 		precBusy = false;
 		say({ ev: 'precision', run: precRuns, end: found ? 'finish' : done || 'ended', ms: Date.now() - t1 });
-		if (PREC_ASYNC && !found && !precOver) setImmediate(() => { precision(null, true).catch((e) => bug('precision', { error: e.message })); });
-		if (!found || (PREC_ASYNC && precOver)) return null;
-		if (PREC_STREAM) return streamEv;
+		if (!found) return null;
 		const x = routeOf(T.masksOf(found.replace(/[^0-O]/g, '')), 'the exact landing (precision)', null);
 		return x && x.better ? x.ev : null;
-	};
-	/** EEAT_PREC_ASYNC: the executor has nothing left and would end: while the precision child runs (no route yet, time
-	 *  left) the loop waits a turn for it (-> true: go on) */
-	const precHold = async () => {
-		if (!precBusy || best || stopped || left() <= 1000) return false;
-		await new Promise((res) => { const tt = setTimeout(res, 250); if (tt.unref) tt.unref(); });
-		return true;
 	};
 
 	// ---- THE WHOLE LEVEL AS ONE LEG (EEAT_BW_LEVEL=1; BW_LEVEL above): started with the moves loop, killed at its end
@@ -989,16 +886,10 @@ async function compile(L, opts = {}, emit = () => {}) {
 	// ---- THE STRETCH SOLVER IN ITS OWN PROCESS (EEAT_STRETCH=1; ST_* above): ST_N children, one stretch each at a time on
 	// one clock; slot 0 takes the short first plan, every slot the failed stretches
 	const stSlots = [];              // {ch, busy}: busy = the request in hand {id, A, a, legs, k, ms, cand, t, short}
-	let stSeq = 0, stShortSent = false, stLastOs = false;
+	let stSeq = 0, stShortSent = false;
 	const stQ = [];                  // the children's messages, harvested in the loop's turns (stHarvest)
 	const stCands = new Map();       // `${anchor id}|${edge key}` -> {A, step, wp, cost, rung, n, tries, lastMs, why, solved, inflight}
 	const stStats = { requests: 0, ok: 0, anchors: 0, routes: 0, legs: 0, ms: 0, relays: 0, stale: 0, children: 0, short: null };
-	if (OS_BW_ST) Object.assign(stStats, { osReq: 0, osOk: 0, osMs: 0 });
-	/** (THE SHARED SESSION) the answer to the one shot's far leg id: masks (a string from the level start) or null */
-	const osBwAns = (id, masks, why, ms) => {
-		if (!osw) return;
-		try { osw.postMessage({ type: 'bwans', id, ok: !!masks, masks: masks || '', why: why || '', ms: +ms || 0 }); } catch (e) { /* the one shot is gone */ }
-	};
 	const stBusyAny = () => stSlots.some((s) => s.busy);
 	const stOkWp = (step, wp) => {
 		if (!step || !wp || step.synthetic || wp.allowDeath || wp.dieField || (wp.fieldTiles && wp.fieldTiles.length)) return false;
@@ -1031,7 +922,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 			}
 		});
 		ch.stdin.on('error', () => { /* the child ended */ });
-		const gone = () => { if (slot.ch === ch) { slot.ch = null; if (slot.busy && slot.busy.os && !slot.busy.osSent) osBwAns(slot.busy.os, null, 'the stretch child ended'); if (slot.busy && slot.busy.cand) slot.busy.cand.inflight = false; slot.busy = null; } };
+		const gone = () => { if (slot.ch === ch) { slot.ch = null; if (slot.busy && slot.busy.cand) slot.busy.cand.inflight = false; slot.busy = null; } };
 		ch.on('error', gone);
 		ch.on('close', () => { process.removeListener('exit', onExit); gone(); });
 	};
@@ -1068,18 +959,6 @@ async function compile(L, opts = {}, emit = () => {}) {
 			const m = stQ.shift();
 			const slot = stSlots.find((s) => s.busy && s.busy.id === m.id) || null;
 			const q = slot ? slot.busy : null;
-			if (q && q.os) {
-				// (THE SHARED SESSION: the one shot's far leg: its arrival to the one shot (replayed there, an injected node),
-				// none at the done)
-				if (m.ev === 'arrival' && !q.osSent) { q.osSent = true; stStats.osOk++; osBwAns(q.os, String(m.inputs || ''), '', m.ms); }
-				else if (m.ev === 'done') {
-					stStats.osMs += Date.now() - q.t;
-					if (!q.osSent) osBwAns(q.os, null, m.why || 'none', m.ms);
-					say({ ev: 'stretch', what: 'done', id: q.id, oneshot: q.os, ok: !!q.osSent, why: m.why || '', ms: m.ms });
-					slot.busy = null;
-				}
-				continue;
-			}
 			if (m.ev === 'arrival' && q && q.legs[m.k]) {
 				const g = q.legs[m.k];
 				const masks = T.masksOf(String(m.inputs || ''));
@@ -1136,31 +1015,6 @@ async function compile(L, opts = {}, emit = () => {}) {
 		if (ok) { c.solved = true; return; }
 		c.rung = Math.max(c.rung, step.rung | 0); c.n++;
 	};
-	/** the failed stretch of the most progress a child may take now (the fewest tries, the most gain, the least cost), or null */
-	const stPickCand = () => {
-		let bestC = null;
-		for (const c of stCands.values()) {
-			if (c.solved || c.inflight || c.rung < ST_RUNG || c.tries >= ST_TRIES || (c.tries > 0 && !/budget/.test(c.why)) || c.A.exhausted || !c.A.arrivals.length) continue;
-			if (!bestC || c.tries < bestC.tries || (c.tries === bestC.tries && (c.A.gain > bestC.A.gain || (c.A.gain === bestC.A.gain && (c.cost < bestC.cost || (c.cost === bestC.cost && c.seq < bestC.seq)))))) bestC = c;
-		}
-		return bestC;
-	};
-	/** (THE SHARED SESSION) the one shot's far leg waiting (osBwReq) to the idle child in slot: one leg from its node's masks
-	 *  to the waypoint's tiles (the trophy: the crown) on its clock -> true when sent */
-	const stSendOs = (slot) => {
-		const m = osBwReq;
-		if (!m || !slot.ch || slot.busy) return false;
-		osBwReq = null;
-		const id = ++stSeq;
-		const ms = Math.max(500, Math.min(+m.ms || 1000, left() - 3000));
-		const wp = m.wp && m.wp.kind === 'trophy' ? { kind: 'trophy' } : { kind: 'tiles', tiles: Array.from((m.wp && m.wp.tiles) || []), expect: null, label: 'the one shot\'s far leg' };
-		slot.busy = { id, os: m.id, A: null, a: null, legs: [], k: 0, ms, cand: null, t: Date.now() };
-		const req = { id, from: String(m.masks || ''), legs: [{ wp, w: 1 }], ms: Math.round(ms), closest: false };
-		try { slot.ch.stdin.write(JSON.stringify(req) + '\n'); } catch (e) { slot.busy = null; osBwAns(m.id, null, 'the stretch child is gone'); return false; }
-		stStats.osReq++; stLastOs = true;
-		say({ ev: 'stretch', what: 'request', id, slot: stSlots.indexOf(slot), oneshot: m.id, legs: [wp.kind === 'trophy' ? 'trophy' : 'far leg'], ms: Math.round(ms), from: String(m.masks || '').length });
-		return true;
-	};
 	/** an idle child: the next request (slot 0: the short first plan once; then the failed stretch of the most progress not
 	 *  in hand in another slot) */
 	const stSchedule = () => {
@@ -1169,21 +1023,11 @@ async function compile(L, opts = {}, emit = () => {}) {
 		// whole-level request (whose route may be faster): the child is stopped and started again (its memo lost))
 		for (let i = 0; i < stSlots.length; i++) {
 			const s = stSlots[i], b = s.busy;
-			if (s.ch && b && !b.short && !b.os && Date.now() - b.t < b.ms - ST_STALE_MS && ((b.cand && b.cand.solved && b.k === 0) || best)) {
+			if (s.ch && b && !b.short && Date.now() - b.t < b.ms - ST_STALE_MS && ((b.cand && b.cand.solved && b.k === 0) || best)) {
 				say({ ev: 'stretch', what: 'stale', id: b.id, slot: i, why: best ? 'a route' : 'the executor did it', ms: Date.now() - b.t });
 				stStats.stale++;
 				stKill(s);
 				if (!best && !stopped) stSpawn(i);
-			}
-		}
-		// (THE SHARED SESSION: the one shot's far leg to an idle child, after the short first plan, in turn with the
-		// executor's stretches (one of each while both wait); also once a route is known: the one shot looks for faster ones)
-		if (OS_BW_ST && osBwReq && !stopped && left() - 3000 >= ST_MIN_MS) {
-			for (let i = 0; i < stSlots.length && osBwReq; i++) {
-				const slot = stSlots[i];
-				if (!slot.ch || slot.busy || (i === 0 && !stShortSent && !best)) continue;
-				if (stLastOs && !best && ST_GENERAL && stPickCand()) continue;
-				stSendOs(slot);
 			}
 		}
 		if (stopped || best) return;
@@ -1214,13 +1058,12 @@ async function compile(L, opts = {}, emit = () => {}) {
 				}
 			}
 			if (!ST_GENERAL) continue;
-			const bestC = stPickCand();
-			if (!bestC) {
-				// (THE SHARED SESSION: no stretch of the executor's waits: the one shot's far leg)
-				if (OS_BW_ST && osBwReq && stSendOs(slot)) continue;
-				return;
+			let bestC = null;
+			for (const c of stCands.values()) {
+				if (c.solved || c.inflight || c.rung < ST_RUNG || c.tries >= ST_TRIES || (c.tries > 0 && !/budget/.test(c.why)) || c.A.exhausted || !c.A.arrivals.length) continue;
+				if (!bestC || c.tries < bestC.tries || (c.tries === bestC.tries && (c.A.gain > bestC.A.gain || (c.A.gain === bestC.A.gain && (c.cost < bestC.cost || (c.cost === bestC.cost && c.seq < bestC.seq)))))) bestC = c;
 			}
-			stLastOs = false;
+			if (!bestC) return;
 			// (THE REST OF A SHORT PLAN: the anchor's plan through this stretch has at most ST_SHORT steps: its legs in order on
 			// one clock, ST_MS a leg, from its first arrival (the whole-level request's rule from the frontier); EEAT_ST_CHAIN=0:
 			// the stretch alone)
@@ -1272,12 +1115,6 @@ async function compile(L, opts = {}, emit = () => {}) {
 
 	// ---- the no-stall bookkeeping
 	const tried = new Map();   // `${edge}|${nodeClass}|${rung}|${epoch}` -> {ok}
-	const warmRung = new Map();   // (EEAT_RUNG_WARM: edge -> the highest rung it failed by the budget (lowered by a find below it))
-	const placeRung = new Map();   // (EEAT_RUNG_PLACE: `${edge}|${place}` -> the rung a step from that place starts at)
-	const placeOf = (A) => (A && A.arrivals && A.arrivals[0] && Number.isFinite(A.arrivals[0].tile) ? A.arrivals[0].tile : null);
-	const placeKey = (step, A) => { const p = placeOf(A); return p === null ? null : `${step.edge}|${p}`; };
-	const placeFails = new Map();   // (EEAT_START_JITTER: `${edge}|${place}` -> the budget failures from there; the jitter's turn)
-	let jitterRuns = 0;
 	const localBlock = new Set();   // `${anchor.key}|${edge}|${nodeClass}`: blocked here (a part's bug)
 	let epoch = 0, mult = 1, deepenings = 0, stalls = 0, lastSteps = [], lastFails = [], bugs = 0, nothingSince = -1;
 	const inflight = new Map();   // edgeKey -> {promise, job, started, budgetMs}
@@ -1385,17 +1222,6 @@ async function compile(L, opts = {}, emit = () => {}) {
 				const step = plan.steps[0];
 				const ek = edgeKey(step);
 				if (inflight.has(ek) || localBlock.has(`${A.key}|${ek}`)) continue;
-				// (THE PLACE RUNG: the lowest rung at or above the place's floor that this (edge, class) has not run in this epoch;
-				// none left: this anchor leaves the edge for the epoch)
-				if (RUNG_PLACE && !step.synthetic && step.placeFrom === undefined) {
-					const pk = placeKey(step, A), f = pk === null ? undefined : placeRung.get(pk);
-					if (f !== undefined && f > (step.rung | 0)) {
-						let w = -1;
-						for (let r = Math.min(rungMs.length - 1, f); r < rungMs.length; r++) if (!tried.has(`${ek}|${r}|${epoch}`)) { w = r; break; }
-						if (w < 0) { localBlock.add(`${A.key}|${ek}`); continue; }
-						step.placeFrom = step.rung | 0; step.rung = w;
-					}
-				}
 				const tk = `${ek}|${step.rung}|${epoch}`;
 				if (tried.has(tk)) {
 					// (a triple already run in this epoch: the planner proposes it again; blocked here so it never runs twice: a
@@ -1416,8 +1242,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const ms = Math.max(50, Math.min(rungMs[r] * mult, room));
 		const deadline = Date.now() + ms;
 		// (fast: before the first route a found leg's tightening is capped by the time it took to find it: executor.js RATE_ON)
-		// (THE DEEP RUNG: the executor's tiers know levels 0..3; the deep rung is level 3 with the longer window)
-		return { ms, level: RUNG_DEEP ? Math.min(r, RUNG_MS.length - 1) : r, k: ARRIVALS_K, deadline, fast: !best, stop: () => stopped || left() <= 0 || Date.now() > deadline + 2000 };
+		return { ms, level: r, k: ARRIVALS_K, deadline, fast: !best, stop: () => stopped || left() <= 0 || Date.now() > deadline + 2000 };
 	};
 	/** the waypoint a step runs to: its own, with beforeTick filled from beforeTickFrom (ticks after the earliest start) */
 	const waypointOf = (step, A) => {
@@ -1499,26 +1324,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 	// meets the goal in the engine here (the waypoint's goal test, each tick) and is verified from the level start like any
 	// arrival (`verified`): the physical key only proposes; a wrong door or timer state just fails the replay. Bounded:
 	// RJ_D shifts each way, RJ_K approach ticks, RJ_MS ms a call.
-	// ---- THE FUNNEL (box 7 lane b9, cycle 4, 2026-10-01; OPT-IN EEAT_PLAN_FUNNEL=1, which also turns the rejoin on; off =
-	// as before): a kept leg of a trigger step passes TELEPORTS (a portal's exit puts every ball on one tile), and the
-	// physical states of balls that came through the same exit converge a few ticks later (a landing): Bad EE Level 9's
-	// minis are entered by one arch portal each, and from another lineage's entry state the kept mini leg rejoins in 7-8
-	// ticks (c13J's two switch-5 tails, both ways, 1 ms). The rejoin above serves only starts at or just past such a place;
-	// a lineage whose anchor is elsewhere (the hub) searched the whole mini again (switch 5 found 3 times, 91-130 s each at
-	// the 135-s rung). So every kept leg also keeps its teleports (from its start's last RJ_BACK ticks on: the leg's own
-	// trajectory from each exit, `fnLib`), and a step of its edge that no replay or rejoin served first runs a short leg
-	// (the executor, `FN_MS`) from its starts far from those exits TO the exit tiles, then the landmark rejoin from each
-	// arrival against the kept trajectory from that exit. Every candidate is verified from the level start (`verified`);
-	// a funnel that finds nothing hands the step to the executor with its own full window, as before.
-	const FUNNEL = process.env.EEAT_PLAN_FUNNEL === '1';
-	const REJOIN = process.env.EEAT_PLAN_REJOIN === '1' || FUNNEL;
+	const REJOIN = process.env.EEAT_PLAN_REJOIN === '1';
 	const TRANSPLANT = process.env.EEAT_PLAN_TRANSPLANT === '1' || REJOIN;
-	const FN_MS = Math.max(200, +(process.env.EEAT_FUNNEL_MS || 5000)), FN_NEAR = Math.max(0, +(process.env.EEAT_FUNNEL_NEAR || 3));
-	const FN_MAX = 4;   // (the last teleports of a kept leg kept as its funnels)
-	const fnLib = new Map();   // leg mask string -> [{tile, ext, keys}]: the leg's trajectory from each of its last teleports
-	let fnRuns = 0, fnOk = 0, fnMs = 0;
-	const fnDone = new Map();   // `${edge}|${start tile}` -> the edge's library version when its funnel failed
-	const fnVer = new Map();    // edge -> the number of legs kept for it so far
 	const TP_LEGS = 6, TP_MAX = 4000;
 	const RJ_D = Math.max(0, +(process.env.EEAT_REJOIN_D || 40)), RJ_K = Math.max(1, +(process.env.EEAT_REJOIN_K || 240));
 	const RJ_MS = Math.max(1, +(process.env.EEAT_REJOIN_MS || 250));
@@ -1600,8 +1407,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 			const list = legLib.get(step.edge) || [];
 			if (list.includes(leg)) return;
 			list.unshift(leg);
-			if (FUNNEL) fnVer.set(step.edge, (fnVer.get(step.edge) || 0) + 1);
-			if (list.length > TP_LEGS) { for (const old of list.slice(TP_LEGS)) { rjKeys.delete(old); rjExt.delete(old); fnLib.delete(old); } list.length = TP_LEGS; }
+			if (list.length > TP_LEGS) { for (const old of list.slice(TP_LEGS)) { rjKeys.delete(old); rjExt.delete(old); } list.length = TP_LEGS; }
 			legLib.set(step.edge, list);
 			if (REJOIN && !rjKeys.has(leg)) { const m = rjKeysOf(s, legM); if (m) rjKeys.set(leg, m); }
 			if (REJOIN && RJ_BACK > 0 && !rjExt.has(leg)) {
@@ -1611,88 +1417,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 				const keys = keysAlong(snapAt(s, n0), ext);
 				if (keys) rjExt.set(leg, { ext, keys });
 			}
-			// (THE FUNNEL: the leg's teleports, from its start's last RJ_BACK ticks on, each with the trajectory from its exit)
-			if (FUNNEL && !fnLib.has(leg)) {
-				const n0 = Math.max(0, sm.length - RJ_BACK);
-				const ext = new Uint8Array(sm.length - n0 + legM.length);
-				ext.set(sm.subarray(n0), 0); ext.set(legM, sm.length - n0);
-				const base = snapAt(s, n0), tps = [];
-				try {
-					tpSim.reset(); tpSim.restore(base);
-					let px = tpSim.px, py = tpSim.py;
-					for (let t = 0; t < ext.length - 1; t++) {
-						E.applyMask(tpInp, ext[t] & 31);
-						tpSim.tick(tpInp);
-						if (tpSim.is_dead) break;
-						if (Math.abs(tpSim.px - px) > 24 || Math.abs(tpSim.py - py) > 24) tps.push({ t: t + 1, snap: tpSim.snapshot(), tile: T.tileOf(tpSim, L.width, L.height) });
-						px = tpSim.px; py = tpSim.py;
-					}
-				} catch (e) { tps.length = 0; }
-				const fns = [];
-				for (const x of tps.slice(-FN_MAX)) {
-					const e2 = ext.subarray(x.t);
-					const k2 = keysAlong(x.snap, e2);
-					if (k2) fns.push({ tile: x.tile, ext: e2, keys: k2 });
-				}
-				fnLib.set(leg, fns);
-			}
 		});
-	};
-	/** THE FUNNEL: a step of an edge with kept legs that no replay or rejoin served: a short leg from its starts far from the
-	 *  kept legs' teleport exits to those exits, then the landmark rejoin from each arrival; {res, ran} */
-	const funnel = async (step, wp, starts) => {
-		if (!FUNNEL || !tpOk(wp) || step.synthetic) return { res: null, ran: false };
-		const list = legLib.get(step.edge);
-		if (!list || !list.length) return { res: null, ran: false };
-		const fns = [];
-		for (const str of list) for (const f of (fnLib.get(str) || [])) fns.push(f);
-		if (!fns.length) return { res: null, ran: false };
-		const tiles = [...new Set(fns.map((f) => f.tile))];
-		const near = (s) => tiles.some((t) => Math.max(Math.abs((t % L.width) - (s.tile % L.width)), Math.abs(((t / L.width) | 0) - ((s.tile / L.width) | 0))) <= FN_NEAR);
-		// (a place's funnel that found nothing is not run again until the edge keeps another leg)
-		const fk = (s) => `${step.edge}|${s.tile}`;
-		const far = starts.filter((s) => s && Number.isInteger(s.tile) && !near(s) && fnDone.get(fk(s)) !== (fnVer.get(step.edge) || 0));
-		if (!far.length) return { res: null, ran: false };
-		const t0 = Date.now();
-		fnRuns++;
-		const room = left() - (best ? endRes() : 0) - 100;
-		const ms = Math.max(50, Math.min(FN_MS, room)), deadline = Date.now() + ms;
-		const fb = { ms, level: 1, k: ARRIVALS_K, deadline, fast: !best, stop: () => stopped || left() <= 0 || Date.now() > deadline + 2000 };
-		let r = null;
-		try { r = await exec.reach(far, { kind: 'region', tiles, expect: null, label: `funnel of ${labelOf(step)}` }, fb); } catch (e) { r = null; }
-		const goal = T.goalOf(L, wp);
-		const out = [], legs = [];
-		let rj = 0;
-		if (r && r.ok && Array.isArray(r.arrivals)) {
-			const until = Date.now() + 4 * RJ_MS;
-			for (const a of r.arrivals) {
-				if (!a || !a.masks || out.length >= ARRIVALS_K || Date.now() > until) continue;
-				const am = typeof a.masks === 'string' ? T.masksOf(a.masks) : Uint8Array.from(a.masks);
-				let sim;
-				try { sim = T.playTo(L, am, { allowDeath: false }).sim; } catch (e) { continue; }
-				if (sim.is_dead) continue;
-				const at = T.tileOf(sim, L.width, L.height), base = sim.snapshot();
-				for (const f of fns) {
-					if (f.tile !== at) continue;
-					const tail = rejoinFrom(base, f.ext, f.keys, goal, until);
-					if (!tail) continue;
-					const masks = new Uint8Array(am.length + tail.length);
-					masks.set(am, 0); masks.set(tail, am.length);
-					if (out.some((x) => x.masks.length === masks.length && T.strOf(x.masks) === T.strOf(masks))) break;
-					const { s } = startOf(starts, masks, -1, {});
-					out.push({ masks });
-					legs.push({ start: s ? starts.indexOf(s) : null, ticks: masks.length - (s ? s.masks.length : 0), lb: null, proven: false, tool: 'funnel' });
-					rj++;
-					break;
-				}
-			}
-		}
-		const dt = Date.now() - t0;
-		fnMs += dt;
-		if (out.length) fnOk++;
-		else for (const s of far) fnDone.set(fk(s), fnVer.get(step.edge) || 0);
-		say({ ev: 'funnel', label: labelOf(step), edge: step.edge, starts: far.length, exits: tiles.length, reached: r && r.ok ? r.arrivals.length : 0, rejoined: rj, ms: dt, runs: fnRuns, ok: fnOk, fnMs });
-		return { res: out.length ? { ok: true, arrivals: out, tool: 'funnel', ms: dt, legs, lb: null } : null, ran: true };
 	};
 	/** the rejoin of a kept leg from a start's engine state `base`: the masks past the start, or null */
 	const rejoinFrom = (base, leg, keys, goal, until) => {
@@ -1838,13 +1563,10 @@ async function compile(L, opts = {}, emit = () => {}) {
 	/** one job run: exec.reach, verify, learn, anchors; resolves when done */
 	const runJob = async (job) => {
 		const { anchor: A, step, plan } = job;
-		// (THE WARM RUNG: an edge's rung failed by the budget from another class: this class starts there)
-		// (never onto a triple already run in this epoch: the planner's own rung then, as without the knob)
-		if (RUNG_WARM && !step.synthetic && warmRung.has(String(step.edge))) { const w = Math.min(rungMs.length - 1, warmRung.get(String(step.edge))); if (w > (step.rung | 0) && !tried.has(`${edgeKey(step)}|${w}|${epoch}`)) { step.warmFrom = step.rung | 0; step.rung = w; } }
 		const ek = edgeKey(step), tk = `${ek}|${step.rung}|${epoch}`;
 		tried.set(tk, { ok: false });
 		A.picks++; picksN++;
-		let budget = budgetOf(windowRung(step));
+		const budget = budgetOf(windowRung(step));
 		const wp = waypointOf(step, A);
 		// (the plan's next waypoint: the executor ranks this step's arrivals by the next leg's cost from them, executor.js
 		// NEXT_ON; a death step, a synthetic step or a plan of one step: none)
@@ -1858,38 +1580,10 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const rl = RELAY ? relays.get(rk) : null;
 		let rlUsed = false;
 		if (rl && !Number.isFinite(runBound()) && rl.arrival.masks.length < tickBound && !starts.some((s) => s.hash === rl.arrival.hash)) { starts.push(rl.arrival); relayRuns++; rlUsed = true; }
-		// (THE START JITTER: the k-th step of an (edge, place) that failed by the budget starts from the first arrival + a
-		// held input instead of the first arrival itself)
-		let jitter = null;
-		if (START_JITTER && !step.synthetic && starts.length && starts[0] === A.arrivals[0]) {
-			const pk = placeKey(step, A), nf = pk === null ? 0 : (placeFails.get(pk) || 0);
-			if (nf > 0) {
-				const k = nf - 1, mk = JITTER_MASKS[k % JITTER_MASKS.length], len = 1 + 2 * Math.floor(k / JITTER_MASKS.length);
-				const a0 = starts[0], m0 = a0.masks instanceof Uint8Array ? a0.masks : T.masksOf(a0.masks);
-				const m = new Uint8Array(m0.length + len); m.set(m0); m.fill(mk, m0.length);
-				try {
-					const r = replay(m, null, false, m0.length);
-					const h = r.sim.stateHash();
-					if (r.dead < 0 && !r.sim.is_dead && r.finished < 0 && !starts.some((x) => x.hash === h)) {
-						const leg = addLeg({ label: `jitter ${labelOf(step)}`, fromTick: m0.length, ticks: len, lb: null, proven: false, tool: 'jitter', prev: a0.leg || null });
-						starts[0] = Object.assign(T.arrivalOf(L, r.sim, m, RM), { run: r.run, leg, jitter: true });
-						jitter = { k, mask: mk, len };
-						jitterRuns++;
-					}
-				} catch (e) { /* the arrival as it is */ }
-			}
-		}
 		const t1 = Date.now();
 		steps++;
 		const verBefore = factsVer(facts), anchorsBefore = anchors.size;
 		let res = TRANSPLANT ? transplant(step, wp, starts) : null;
-		// (THE FUNNEL: a short leg to a kept leg's teleport exit, then the rejoin; one that ran and found nothing gives the
-		// executor its own full window, a fresh budget)
-		if (!res && FUNNEL) {
-			const fr = await funnel(step, wp, starts);
-			if (fr.res) res = fr.res;
-			else if (fr.ran) { const nx2 = budget.next; budget = budgetOf(windowRung(step)); if (nx2) budget.next = nx2; }
-		}
 		if (!res) {
 			try { res = await exec.reach(starts, wp, budget); } catch (e) { res = { ok: false, arrivals: [], tool: null, ms: Date.now() - t1, fail: Object.assign(failOf(null, budget), { error: e.message }) }; bug('reach', { error: e.message, label: labelOf(step) }); }
 		}
@@ -1954,30 +1648,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const rec = { ev: 'step', n: steps, anchor: A.id, label: labelOf(step), edge: step.edge, nodeClass: step.nodeClass, rung: step.rung, epoch, tool: res.tool || null, ok: !!res.ok, ms, budgetMs: Math.round(budget.ms),
 			why: res.ok ? '' : (fail && fail.why) || '', arrivals: arr.length, news, routes: routes.length };
 		if (fail && fail.closest) rec.closest = { tile: fail.closest.tile, dist: fail.closest.dist };
-		// (THE WARM RUNG: a budget failure lifts the edge's start rung for the other classes; a find at a lower rung lowers it)
-		if (RUNG_WARM && !step.synthetic) {
-			const ke = String(step.edge);
-			if (res.ok) { if (warmRung.has(ke) && (step.rung | 0) < warmRung.get(ke)) warmRung.set(ke, step.rung | 0); }
-			else if (rec.why === 'budget' && (step.rung | 0) > (warmRung.get(ke) || 0)) warmRung.set(ke, step.rung | 0);
-			if (step.warmFrom !== undefined) rec.warmFrom = step.warmFrom;
-		}
-		// (THE PLACE RUNG: a budget failure lifts the (edge, place)'s floor to the next rung; a find at a lower rung lowers it)
-		if (RUNG_PLACE && !step.synthetic) {
-			const pk = placeKey(step, A);
-			if (pk !== null) {
-				const r = step.rung | 0, f = placeRung.get(pk);
-				if (res.ok) { if (f !== undefined && r < f) placeRung.set(pk, r); }
-				else if (rec.why === 'budget') { const nx = Math.min(rungMs.length - 1, r + 1); if (!(f >= nx)) placeRung.set(pk, nx); }
-			}
-			if (step.placeFrom !== undefined) { rec.placeFrom = step.placeFrom; delete step.placeFrom; }
-		}
-		// (THE START JITTER: a budget failure from a place makes the next step from there start elsewhere)
-		if (START_JITTER && !step.synthetic) {
-			const pk = placeKey(step, A);
-			if (pk !== null && !res.ok && rec.why === 'budget') placeFails.set(pk, (placeFails.get(pk) || 0) + 1);
-			if (jitter) rec.jitter = jitter;
-		}
-		if (FAR_TROPHY > 0 || FAR_WALK > 0) { rec.est = Number.isFinite(+step.estTicks) ? Math.round(+step.estTicks) : null; if (windowRung(step) !== step.rung) rec.farTrophy = windowRung(step); }
+		if (FAR_TROPHY > 0) { rec.est = Number.isFinite(+step.estTicks) ? Math.round(+step.estTicks) : null; if (windowRung(step) !== step.rung) rec.farTrophy = windowRung(step); }
 		// (the executor's exact end search from a near start, when it ran: tier 0b)
 		const nearT = Array.isArray(res.tiers) ? res.tiers.find((x) => x && x.tier === 'near') : null;
 		if (nearT) rec.near = { ok: nearT.ok, runs: nearT.runs, ms: nearT.ms, nearest: nearT.nearest };
@@ -1993,11 +1664,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 		if (fail) { lastFails.push({ n: steps, label: rec.label, rung: step.rung, why: fail.why, closest: fail.closest ? { tile: fail.closest.tile, dist: fail.closest.dist } : null, blockedBy: fail.blockedBy || [], touched: (fail.touched || []).length }); if (lastFails.length > 6) lastFails.shift(); }
 		// (a trophy leg that ended within PREC_NEAR tiles of the trophy: the exact landing, above)
 		if (fail && wp.kind === 'trophy' && fail.closest && !route) {
-			if (PREC_ASYNC) precision(fail.closest).catch((e) => bug('precision', { error: e.message }));   // (in the background: EEAT_PREC_ASYNC)
-			else {
-				const pr = await precision(fail.closest);
-				if (pr) route = pr;
-			}
+			const pr = await precision(fail.closest);
+			if (pr) route = pr;
 		}
 		const verAfter = factsVer(facts);
 		if (verAfter !== verBefore) lastProgress = Date.now();
@@ -2077,8 +1745,6 @@ async function compile(L, opts = {}, emit = () => {}) {
 	const deepen = (why) => {
 		if (deepenings >= maxDeepen || rungMs[0] * mult * 2 > left() - (best ? endRes() : 0)) return false;
 		deepenings++; epoch++; mult *= 2;
-		warmRung.clear();   // (THE WARM RUNG: the facts start over at a deepening, so does the warm start)
-		placeRung.clear();   // (THE PLACE RUNG: likewise)
 		try { if (facts && typeof facts.reset === 'function') facts.reset({ keepProofs: true, boost: 2 }); } catch (e) { bug('reset', { error: e.message }); }
 		for (const A of anchors.values()) { if (A.why !== 'bound') { A.exhausted = false; A.why = ''; } A.plans = null; }
 		localBlock.clear();
@@ -2310,12 +1976,12 @@ async function compile(L, opts = {}, emit = () => {}) {
 				// fallbacks (a direct trophy step, then the frontier) while time is left; else the end)
 				if (exploreQ.length) continue;
 				if (left() < 250 || (best && left() <= endRes())) { end = 'time'; break; }
-				if (nothingSince >= 0 && nothingSince === steps) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } if (osw && await osHold()) continue; if (!best && bwcRelease('the executor has nothing left')) { nothingSince = -1; continue; } if (await bwlHold()) continue; if (ST_ON && await stHold()) continue; if (PREC_ASYNC && await precHold()) continue; end = 'exhausted'; break; }
+				if (nothingSince >= 0 && nothingSince === steps) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } if (osw && await osHold()) continue; if (!best && bwcRelease('the executor has nothing left')) { nothingSince = -1; continue; } if (await bwlHold()) continue; if (ST_ON && await stHold()) continue; end = 'exhausted'; break; }
 				nothingSince = steps;
 				// (a deepening refused for the clock alone (its doubled first rung past the time left) is no exhaustion: the
 				// end is the time's, not a claim that no plan is left (The Flighty Slighty, The Tunnels, Fish Gods, OCTOS:
 				// "end exhausted" 1-5 s before the 60-s budget; every level is possible))
-				if (!deepen('exhausted')) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } if (osw && await osHold()) continue; if (!best && bwcRelease('the executor has nothing left')) continue; if (await bwlHold()) continue; if (ST_ON && await stHold()) continue; if (PREC_ASYNC && await precHold()) continue; end = deepenings < maxDeepen ? 'time' : 'exhausted'; break; }
+				if (!deepen('exhausted')) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } if (osw && await osHold()) continue; if (!best && bwcRelease('the executor has nothing left')) continue; if (await bwlHold()) continue; if (ST_ON && await stHold()) continue; end = deepenings < maxDeepen ? 'time' : 'exhausted'; break; }
 				continue;
 			}
 			if (osw) { /* (the thread runs on its own) */ } else if (os && !osDone && !stopped && !(best && left() <= endReserve)) {
@@ -2345,7 +2011,6 @@ async function compile(L, opts = {}, emit = () => {}) {
 		for (const tt of timers) clearInterval(tt);
 		if (bwlChild) { try { bwlChild.kill('SIGKILL'); } catch (e) { /* gone */ } }
 		if (ST_ON) { stHarvest(); stStop(); }
-		if (PREC_ASYNC) { precOver = true; if (precChild) { try { precChild.kill('SIGKILL'); } catch (e) { /* gone */ } } }
 	}
 	if (osw) osHarvest();   // (the one shot's thread: what arrived during the last turn)
 	const legTools = (lg) => { const c = {}; for (const g of lg) c[g.tool || '?'] = (c[g.tool || '?'] || 0) + 1; return c; };
@@ -2496,7 +2161,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 					const idle = new Uint8Array(k);
 					const Sk = k === 0 ? a0 : T.arrivalOf(L, T.playTo(L, idle).sim, idle, RM);
 					const wp = { kind: 'trophy', tiles: Array.from(trophy.tiles), expect: null, label: 'trophy (the proof)', beforeTick: k + Cost - 1, allowDeath: !noDeath };
-					const r = await exec.reach([Sk], wp, { ms, level: RUNG_DEEP ? Math.min(rungMs.length, RUNG_MS.length) - 1 : rungMs.length - 1, k: ARRIVALS_K, deadline, stop: () => stopped || Date.now() > deadline + 2000 });
+					const r = await exec.reach([Sk], wp, { ms, level: rungMs.length - 1, k: ARRIVALS_K, deadline, stop: () => stopped || Date.now() > deadline + 2000 });
 					if (r && r.ok) {
 						const arr = (r.arrivals || []).filter((a) => a && a.masks && a.tick <= k + Cost - 1).sort((a, b) => a.tick - b.tick);
 						if (!arr.length) { bug('prove', { why: `the executor returned arrivals past the waypoint's beforeTick ${k + Cost - 1}` }); fail = 'its arrivals were past the bound (a bug)'; lbMin = 0; break; }
@@ -2633,37 +2298,6 @@ async function compile(L, opts = {}, emit = () => {}) {
 		stage('joins', Date.now() - tm, text);
 	}
 
-	// ---- THE ENDGAME (C6 lane 5 block 3; OPT-IN opts.endgameS (compile.js EEAT_ENDGAME_S / --endgame=<s>), 0 / unset: off,
-	// the compile byte for byte): the exact endgame ladder of src/endgame.js on the finished route: from the route's own state
-	// K = 8, 16, .. 64 ticks before its finish EVERY input sequence (stateHash merge, the admissible trophy bound's cut), the
-	// first finish the fastest from that state, a give-up / an exhausted search a proof that none is faster from there;
-	// kept only when the engine replays it faster with no more deaths and no lower chance. Its own clock after the joins.
-	// (celeste x2: the route's last 34 ticks where the best known takes 16; the ladder 239 -> 238, no faster finish within
-	// the last 31 ticks proven)
-	let endgameInfo = null;
-	if (best && opts.endgameS > 0 && !stopped) {
-		tm = Date.now();
-		let text = '';
-		try {
-			const EG = require('../endgame.js');
-			const r = EG.ladder(L, [{ name: 'route', masks: best.masks }], { K: { max: +process.env.EEAT_ENDGAME_K || 64 }, seconds: opts.endgameS });
-			let provedK = 0;
-			for (const p of r.proofs || []) if (!p.rejected && p.start === 'route') provedK = Math.max(provedK, p.K);
-			endgameInfo = { before: best.runTicks, found: (r.found || []).length, proofs: (r.proofs || []).length, provedK, searches: r.searches, ms: Date.now() - tm };
-			const ev = r.masks ? C.evaluate(L, r.masks) : null;
-			if (ev && ev.deaths <= best.deaths && ev.chance >= best.chance - 1e-9 && ev.runTicks < best.runTicks) {
-				const saved = best.runTicks - ev.runTicks;
-				best = { masks: ev.ms, ticks: ev.complete, runTicks: ev.runTicks, deaths: ev.deaths, chance: ev.chance, legs: best.legs, how: `${best.how} + endgame` };
-				endgameInfo.after = ev.runTicks;
-				say({ ev: 'result', kind: 'finish', ticks: ev.complete, runTicks: ev.runTicks, deaths: ev.deaths, chance: ev.chance, how: best.how, endgame: saved, lb: LB, gap: gapOf(ev.runTicks), inputs: T.strOf(ev.ms) });
-				if (out) { try { C.writeEetas(path.join(out, 'route.eetas'), ev.ms); } catch (e) { /* read-only */ } }
-				text = `-${num(saved)} ticks`;
-			} else text = 'no gain';
-			text += `; ${endgameInfo.proofs} proofs${endgameInfo.provedK ? `, no faster finish within the last ${endgameInfo.provedK} ticks` : ''}`;
-		} catch (e) { bug('endgame', { error: e.message }); text = `failed: ${e.message}`; }
-		stage('endgame', Date.now() - tm, text);
-	}
-
 	// ---- the bound again (the planner's facts may have raised it), the report
 	// (a proof of optimality: the route is one exact leg from the level start, proven the fewest ticks, and the start is
 	// static: no route has fewer run ticks)
@@ -2692,24 +2326,11 @@ async function compile(L, opts = {}, emit = () => {}) {
 	else if (opts.known !== false && (opts.file || opts.md5)) { try { known = knownOf(opts.file, { md5: opts.md5 }); } catch (e) { known = null; } }
 	progress();
 	const why = best ? '' : `no route (end ${end}): ${whyNow().text}`;
-	// THE ANCHOR DUMP (a diagnosis aid, OPT-IN EEAT_ANCHOR_DUMP=<file.jsonl>; unset = nothing written): one JSON line per
-	// anchor {id, gain, tick, fails, via, masks (every arrival's input string)}, so the last mile of a NEAR level (a failed
-	// leg 1-3 tiles from its target) can be replayed from the anchor's exact engine state (tools/cmp/nearkrt.js)
-	if (process.env.EEAT_ANCHOR_DUMP) {
-		try {
-			const lines = [...anchors.values()].map((A) => JSON.stringify({ id: A.id, gain: A.gain, tick: A.firstTick, fails: A.fails, via: A.via || '', edgeVia: A.edgeVia || null,
-				masks: A.arrivals.map((a) => (typeof a.masks === 'string' ? a.masks : T.strOf(a.masks instanceof Uint8Array ? a.masks : T.masksOf(a.masks)))) }));
-			const fs = require('fs'); let f = process.env.EEAT_ANCHOR_DUMP;
-			// (a directory: one file a level, <dir>/<level>.anchors.jsonl, for a full compile's levels)
-			try { if (fs.statSync(f).isDirectory()) f = path.join(f, path.basename(String(opts.file || 'level'), '.eelvl') + '.anchors.jsonl'); } catch (e) { /* a file name */ }
-			fs.writeFileSync(f, lines.join('\n') + '\n');
-		} catch (e) { /* a diagnosis file only */ }
-	}
 	say({ ev: 'done', end, sec: Math.round(secNow() * 10) / 10, steps, okSteps, anchors: anchors.size, routes: best ? 1 : 0, best: best ? best.ticks : null, runTicks: best ? best.runTicks : null, lb: LB, gap: best ? gapOf(best.runTicks) : null,
 		bugs, deepenings, stalls, bnbPlans, bnbArrivals, layers: Math.max(0, ...[...anchors.values()].map((A) => A.firstTick)), ...(why ? { why } : {}) });
 	saveFiles();
 	return { ok: !!best, masks: best ? best.masks : null, route: best ? best.masks : null, runTicks: best ? best.runTicks : null, ticks: best ? best.ticks : null, deaths: best ? best.deaths : null, chance: best ? best.chance : null,
-		lb: LB, lbComplete, lbProof, gap: best ? gapOf(best.runTicks) : null, legs: best ? best.legs : [], stages, known, why, end, anchors: anchors.size, steps, okSteps, bugs, deepenings, stalls, bnbPlans, bnbArrivals, relayRuns, relaySet, relayDrop, ...(ST_ON ? { stretch: stStats } : {}), exec: execStats, perfect: perfectInfo, joins: joinsInfo, ...(endgameInfo ? { endgame: endgameInfo } : {}),
+		lb: LB, lbComplete, lbProof, gap: best ? gapOf(best.runTicks) : null, legs: best ? best.legs : [], stages, known, why, end, anchors: anchors.size, steps, okSteps, bugs, deepenings, stalls, bnbPlans, bnbArrivals, relayRuns, relaySet, relayDrop, ...(ST_ON ? { stretch: stStats } : {}), exec: execStats, perfect: perfectInfo, joins: joinsInfo,
 		...(OS_ON ? { oneshot: os || osw ? Object.assign(os ? os.stats() : Object.assign({}, osStats || {}), { thread: !!osw, readyMs: osReady ? osReady.ms : null, error: osErr || null, gate: osw && OS_GATE ? (osOpen ? 'open' : 'shut') : null, released: osReleased, held: osPending.size, anchorsGiven: osAnchors, injected: osInjected, routeTicks: Number.isFinite(osBestT) ? osBestT : null, how: best ? best.how : null }) : null } : {}) };
 }
 
