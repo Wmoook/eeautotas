@@ -125,6 +125,16 @@ const TIMER_PICK = process.env.EEAT_PLAN_TIMER === '1';
 // ~1,600-tick estimate) counts nothing.
 const CRUMB_RANK = process.env.EEAT_CRUMB_RANK === '1' ? 1 : process.env.EEAT_CRUMB_RANK === '2' ? 2 : process.env.EEAT_CRUMB_RANK === '3' ? 3 : 0;
 const CR_F_SLACK = +process.env.EEAT_CR_F_SLACK || 0.1, CR_F_ABS = +process.env.EEAT_CR_F_ABS || 60;
+// THE FAR TROPHY (C6 push 3 lane 2 block 2, RATE; OPT-IN EEAT_FAR_TROPHY=<est ticks>, unset / 0: off, the compile byte for
+// byte as before): a plan whose first step is the trophy and whose est walk to it is longer than that runs at most at rung
+// EEAT_FAR_TROPHY_RUNG (1: a 5-s window) whatever rung its facts reached; its failures still climb the facts' ladder (the
+// planner moves on as before), only the window is cut. Why: the chief's 300-s full compile (box 5's 122 levels): 73% of the
+// failed steps' worker time went to (anchor, edge) pairs that climbed to the 45-s rung and never resolved; on the RATE
+// levels the trophy steps took 25% of the failed time with no success at any rung (the whole level left as one leg)
+const FAR_TROPHY = +process.env.EEAT_FAR_TROPHY > 0 ? +process.env.EEAT_FAR_TROPHY : 0;
+const FAR_TROPHY_RUNG = process.env.EEAT_FAR_TROPHY_RUNG !== undefined ? +process.env.EEAT_FAR_TROPHY_RUNG : 1;
+/** the rung a step's window is sized by: its own, or the far trophy's cap */
+const windowRung = (step) => (FAR_TROPHY > 0 && step && !step.synthetic && (!step.waypoint || step.waypoint.kind === 'trophy') && +step.estTicks > FAR_TROPHY ? Math.min(step.rung | 0, FAR_TROPHY_RUNG) : step.rung);
 const ARRIVALS_K = 4, MAX_DEEPEN = 4, STEER_MISS = 6000;
 // the polish's share of the budget once a route is known: min(POLISH_MS, POLISH_F x the budget)
 const POLISH_MS = 15000, POLISH_F = 0.25;
@@ -1358,7 +1368,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const ek = edgeKey(step), tk = `${ek}|${step.rung}|${epoch}`;
 		tried.set(tk, { ok: false });
 		A.picks++; picksN++;
-		const budget = budgetOf(step.rung);
+		const budget = budgetOf(windowRung(step));
 		const wp = waypointOf(step, A);
 		// (the plan's next waypoint: the executor ranks this step's arrivals by the next leg's cost from them, executor.js
 		// NEXT_ON; a death step, a synthetic step or a plan of one step: none)
@@ -1440,6 +1450,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const rec = { ev: 'step', n: steps, anchor: A.id, label: labelOf(step), edge: step.edge, nodeClass: step.nodeClass, rung: step.rung, epoch, tool: res.tool || null, ok: !!res.ok, ms, budgetMs: Math.round(budget.ms),
 			why: res.ok ? '' : (fail && fail.why) || '', arrivals: arr.length, news, routes: routes.length };
 		if (fail && fail.closest) rec.closest = { tile: fail.closest.tile, dist: fail.closest.dist };
+		if (FAR_TROPHY > 0) { rec.est = Number.isFinite(+step.estTicks) ? Math.round(+step.estTicks) : null; if (windowRung(step) !== step.rung) rec.farTrophy = windowRung(step); }
 		// (the executor's exact end search from a near start, when it ran: tier 0b)
 		const nearT = Array.isArray(res.tiers) ? res.tiers.find((x) => x && x.tier === 'near') : null;
 		if (nearT) rec.near = { ok: nearT.ok, runs: nearT.runs, ms: nearT.ms, nearest: nearT.nearest };
@@ -1758,7 +1769,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 				cur = { plan: job.plan, step: job.step, anchor: job.anchor.id, ok: null, depth: job.anchor.depth };
 				if (bwlWpFile) bwlPlan(job.anchor);
 				say({ ev: 'plan', anchor: job.anchor.id, steps: job.plan.steps.map(labelOf), cost: job.plan.cost, lb: job.plan.lb, partial: !!job.plan.partial, why: job.plan.why || '', rung: job.step.rung });
-				const f = { job, started: Date.now(), budgetMs: budgetOf(job.step.rung).ms };
+				const f = { job, started: Date.now(), budgetMs: budgetOf(windowRung(job.step)).ms };
 				f.promise = runJob(job).catch((e) => { bug('job', { error: e.message }); return {}; }).then((r) => { inflight.delete(ek); return r; });
 				inflight.set(ek, f);
 			}
