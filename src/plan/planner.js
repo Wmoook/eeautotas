@@ -565,6 +565,11 @@ function createPlanner(model, facts, o = {}) {
 	// the physics agree (Octorage: RCH3 / walk 1.0-1.2 on all 18 legs of its known route) nothing changes.
 	// EEAT_PHYS_PRICE=1 (OPT-IN: o.physPrice overrides), EEAT_PHYS_R (2), EEAT_PHYS_ADD (24 tiles).
 	const PHYS_PRICE = o.physPrice !== undefined ? !!o.physPrice : process.env.EEAT_PHYS_PRICE === '1';
+	// (EEAT_PHYS_PRICE=sa, OPT-IN, C6 push 3 lane 4: the price only for an edge whose RCH3 cost holds reach.js's side-arrow
+	// price (SA_COST, 2,500 tiles: the physics' only way crosses a run of side arrows against their push, which the
+	// relaxation's speedless states cannot do), the rest as without the knob. Don't Stop Jumping: the 64-tick trophy plan
+	// (RCH3 2,515 tiles: the priced passage) took ~290 of 300 s; priced, the switch plans go first)
+	const PHYS_SA = o.physPrice === undefined && process.env.EEAT_PHYS_PRICE === 'sa', SA_TILES = 2500;
 	const PHYS_R = +process.env.EEAT_PHYS_R || 2, PHYS_ADD = process.env.EEAT_PHYS_ADD !== undefined ? +process.env.EEAT_PHYS_ADD : 24;
 	const rchPrice = new Map();   // (rchKey -> the RCH3 cost in tiles, where it prices the edge)
 	// THE STEPPING STONES (n5 doctor 4): a ONE-LEG level's plan is one leg of thousands of ticks (13_3 Stone Ruin
@@ -765,13 +770,13 @@ function createPlanner(model, facts, o = {}) {
 					const ok = facts.okTicks(edge, cls);
 					if (ok !== undefined) { g.est = Math.max(g.lb, ok); g.pen = ''; }
 					else {
-						if (PHYS_PRICE) { const pr = rchPrice.get(rchKey(S, pos, edge)); if (pr !== undefined) g.est = Math.max(g.est, pr * P + extra); }
+						if (PHYS_PRICE || PHYS_SA) { const pr = rchPrice.get(rchKey(S, pos, edge)); if (pr !== undefined) g.est = Math.max(g.est, pr * P + extra); }
 						if (FAIL_EST > 0 && typeof facts.failsAny === 'function') {
 							const fa = facts.failsAny(edge);
 							if (fa > 0 && !facts.okAnyOf(edge)) { g.est += FAIL_EST * fa; ST.failEst = (ST.failEst || 0) + 1; }
 						}
 					}
-				} else if (PHYS_PRICE) { const pr = rchPrice.get(rchKey(S, pos, edge)); if (pr !== undefined) g.est = Math.max(g.est, pr * P + extra); }
+				} else if (PHYS_PRICE || PHYS_SA) { const pr = rchPrice.get(rchKey(S, pos, edge)); if (pr !== undefined) g.est = Math.max(g.est, pr * P + extra); }
 				if (X === null) { for (const n of floorNeeds) if (!((S.feats[n.feat] || 0) >= n.min)) { g.est += PENALTY; g.pen = (g.pen ? g.pen + '+' : '') + 'floor'; break; } }
 				else if (floorNeeds.length && zoneNeed(S, tiles)) { g.est += PENALTY; g.pen = (g.pen ? g.pen + '+' : '') + 'zone'; }
 				const bad = rchBad.get(rchKey(S, pos, edge));
@@ -932,7 +937,7 @@ function createPlanner(model, facts, o = {}) {
 			rchBad.set(k, bad);
 			if (bad) newBad++;
 			// (the physics price: RCH3's cost well above the est walk's steps of this edge)
-			else if (PHYS_PRICE && r.cost > 0 && Number.isFinite(e.steps) && e.steps < INF && !e.relaxOnly && r.cost > PHYS_R * e.steps + PHYS_ADD) {
+			else if ((PHYS_PRICE || (PHYS_SA && r.cost >= SA_TILES)) && r.cost > 0 && Number.isFinite(e.steps) && e.steps < INF && !e.relaxOnly && r.cost > PHYS_R * e.steps + PHYS_ADD) {
 				rchPrice.set(k, r.cost); ST.physPriced = (ST.physPriced || 0) + 1; newBad++;
 			}
 		}
