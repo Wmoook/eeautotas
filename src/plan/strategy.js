@@ -94,6 +94,17 @@ const JITTER_MASKS = [1, 5, 3, 4, 2, 0];
 // edge for the epoch, as THE PLACE RUNG does). Never above the 45-s rung (the deep rung stays the facts' 5th try).
 // The floor only rises from counts: rungs below it stop being measured; cleared at a deepening (the windows double).
 const RUNG_FLOOR = +process.env.EEAT_RUNG_FLOOR > 0 ? Math.max(2, Math.round(+process.env.EEAT_RUNG_FLOOR)) : 0;
+// THE DEEP RUNG'S GATE (B8 hard, cycle 3; OPT-IN EEAT_DEEP_GATE=<tiles>, with EEAT_RUNG_DEEP; unset / 0: off, every deep
+// step runs as before byte for byte): the 135-s rung found 22 legs in 1,797 worker-s and failed 87 times in 9,545 s on 12
+// hard-set compiles at 900 s (box 8: cycle 2's deep + yield arm, cycle 3's deep / deep + place + jitter round 1), and its
+// (edge, class)'s rung-3 closest told them apart: a find came after a rung-3 closest <= 80 tiles or a rung-3 closest under
+// 0.9 x the rung-2 one (the leg nearing with the window) in 21 of 22 (the 22nd: 131.6 / 131.6); the fails mostly stood
+// still far away (EQ2's red key 994 / 994, NC Naos 10a3's coins 269 / 269, 404 / 404). With the knob a deep step of an
+// (edge, class) whose rung-3 closest is known, above <tiles>, and not under EEAT_DEEP_GATE_P (0.9) x its rung-2 closest
+// is not run: the anchor leaves that edge for the epoch (as a failed top rung does). An unknown rung-3 closest (the rung
+// not run from that class, a dist < 0) runs as before.
+const DEEP_GATE = RUNG_DEEP && +process.env.EEAT_DEEP_GATE > 0 ? +process.env.EEAT_DEEP_GATE : 0;
+const DEEP_GATE_P = process.env.EEAT_DEEP_GATE_P !== undefined ? +process.env.EEAT_DEEP_GATE_P : 0.9;
 // THE ONE SHOT (n5-oneshot part 3, OPT-IN EEAT_ONESHOT=1; off = the loop below byte for byte): the MOVES stage's first
 // tier: src/plan/oneshot/solve.js, ONE A* over (the move graph x the trigger state) from the level start with the
 // planner's plans and the bounds as its heuristic, for OS_SHARE of the time left before the loop; then in the loop's
@@ -1287,6 +1298,16 @@ async function compile(L, opts = {}, emit = () => {}) {
 	// (EEAT_RUNG_FLOOR: per rung the level's counted steps n and finds k; the floor = the lowest rung not dead)
 	const floorStat = RUNG_MS.map(() => ({ n: 0, k: 0 }));
 	let floorSaid = 0;
+	// (EEAT_DEEP_GATE: `${edge}|${nodeClass}` -> [rung-2 closest, rung-3 closest] of its last failures; gated deep steps)
+	const deepHist = new Map();
+	let deepGated = 0;
+	const deepOpen = (ek) => {
+		const h = deepHist.get(ek);
+		const d3 = h ? h[1] : undefined, d2 = h ? h[0] : undefined;
+		if (!(d3 >= 0)) return true;
+		if (d3 <= DEEP_GATE) return true;
+		return d2 > 0 && d3 < DEEP_GATE_P * d2;
+	};
 	const levelFloor = () => {
 		let f = 0;
 		while (f < RUNG_MS.length - 1 && floorStat[f].n >= RUNG_FLOOR && floorStat[f].k * RUNG_FLOOR < floorStat[f].n) f++;
@@ -1424,6 +1445,13 @@ async function compile(L, opts = {}, emit = () => {}) {
 						if (w < 0) { localBlock.add(`${A.key}|${ek}`); continue; }
 						step.floorFrom = step.rung | 0; step.rung = w;
 					}
+				}
+				// (THE DEEP RUNG'S GATE: a deep step of an (edge, class) that stood still far away at rung 3 is not run)
+				if (DEEP_GATE && !step.synthetic && (step.rung | 0) >= RUNG_MS.length && !deepOpen(ek)) {
+					localBlock.add(`${A.key}|${ek}`);
+					deepGated++;
+					say({ ev: 'deepgate', anchor: A.id, label: labelOf(step), d2: deepHist.get(ek)[0], d3: deepHist.get(ek)[1], n: deepGated });
+					continue;
 				}
 				const tk = `${ek}|${step.rung}|${epoch}`;
 				if (tried.has(tk)) {
@@ -1901,6 +1929,12 @@ async function compile(L, opts = {}, emit = () => {}) {
 			const f = levelFloor();
 			if (f > floorSaid) { floorSaid = f; say({ ev: 'floor', rung: f, stat: floorStat.map((x) => `${x.k}/${x.n}`).join(' ') }); }
 		}
+		// (THE DEEP RUNG'S GATE: a rung-2 / rung-3 failure's closest kept for its (edge, class))
+		if (DEEP_GATE && !step.synthetic && !res.ok && ((step.rung | 0) === 2 || (step.rung | 0) === 3)) {
+			const ek = edgeKey(step), h = deepHist.get(ek) || [undefined, undefined];
+			h[(step.rung | 0) - 2] = rec.closest && Number.isFinite(rec.closest.dist) ? rec.closest.dist : undefined;
+			deepHist.set(ek, h);
+		}
 		// (THE START JITTER: a budget failure from a place makes the next step from there start elsewhere)
 		if (START_JITTER && !step.synthetic) {
 			const pk = placeKey(step, A);
@@ -2010,6 +2044,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		warmRung.clear();   // (THE WARM RUNG: the facts start over at a deepening, so does the warm start)
 		placeRung.clear();   // (THE PLACE RUNG: likewise)
 		if (RUNG_FLOOR) { for (const x of floorStat) { x.n = 0; x.k = 0; } floorSaid = 0; }   // (THE LEVEL'S FLOOR RUNG: the windows double)
+		if (DEEP_GATE) deepHist.clear();   // (THE DEEP RUNG'S GATE: likewise)
 		try { if (facts && typeof facts.reset === 'function') facts.reset({ keepProofs: true, boost: 2 }); } catch (e) { bug('reset', { error: e.message }); }
 		for (const A of anchors.values()) { if (A.why !== 'bound') { A.exhausted = false; A.why = ''; } A.plans = null; }
 		localBlock.clear();
