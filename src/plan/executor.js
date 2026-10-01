@@ -2679,7 +2679,8 @@ async function createExecutor(L, opts) {
 				S.nofieldDeath = (S.nofieldDeath || 0) + 1;
 				const dMs = NOFIELD_SHARE * (deadline - Date.now());
 				const r0 = await reachLeg(starts, wp, { ms: dMs, level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline: Math.min(deadline, Date.now() + dMs), stop: budget.stop, next: budget.next || null });
-				if (r0.ok || (r0.fail && (r0.fail.why === 'proof' || r0.fail.why === 'stopped' || r0.fail.why === 'dies'))) return r0;
+				// (a proof of no way without a death is the death leg's case: it goes on)
+				if (r0.ok || (r0.fail && (r0.fail.why === 'stopped' || r0.fail.why === 'dies'))) return r0;
 				const rF = r0.fail ? Object.assign({}, r0, { fail: Object.assign({}, r0.fail, { closedAll: true }) }) : Object.assign({}, r0, { fail: { why: 'budget', closedAll: true } });
 				const rD = await deathLeg(starts, wp, budget, rF, deadline);
 				if (rD) { S.nofieldDeathOk = (S.nofieldDeathOk || 0) + 1; return rD; }

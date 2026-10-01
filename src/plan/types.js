@@ -281,6 +281,15 @@ function levelNow(L, sim) {
 // tile, and is then a way of the unprotected physics, or touches one first at some p, and costs at least fP's least there
 // from then on); its -1 is a proof for an unprotected ball. Off = the fields as before byte for byte.
 const PROT_LAYER = process.env.EEAT_PROT_LAYER === '1';
+// THE PROTECTION LAYER'S PHYSICS (n5-b8-big cycle 5, OPT-IN EEAT_PROT_FX=1; unset = byte for byte): fU above was built with
+// no effect-state option, so on a level with protection AND effect tiles (31 of the 149 big failing levels of the c6 b3
+// full compile: Infinity Pain, Endless Pain, Nirthophia, Demonic Citadel, MegaMan Dash, The Burj, VVVVVV, ...) every goal
+// field of an unprotected ball (most of every route) was reach.js's gravity-blind WALK while the protected ball's fP was the
+// effect-state physics field (EEAT_FX_STATE / EEAT_FX_FIELD, compiler defaults). With the knob fU takes the same option as
+// the plain branch's field (the ball's state {mj, jb} with the next state's seeds of this layer, or the plain-ball field),
+// keyed by it. Ordering as the plain branch's fields: its -1 is the walk's (reach.js FX_FAR), read by the executor's proof
+// pre-check as every effect-state field's.
+const PROT_FX = process.env.EEAT_PROT_FX === '1';
 /** the least cost (fifths) over the ball states centred on tile t by the reach field f (walk mode: its walk), or -1 */
 function tileMinFifths(f, t) {
 	const CUT = 0xffff;
@@ -414,12 +423,17 @@ function goalField(Lc, tiles, o = {}) {
 		for (let i = 0; i < Lc.fg.length; i++) if (Lc.fg[i] === 420 && lk && lk[i] !== 0) on.push(i);
 		const plain = Object.assign({}, Lc); delete plain._unprot;
 		if (!on.length) return goalField(plain, tiles, o);
-		const keyU = `${fgHash(Lc.fg)}|${Array.from(tiles).sort((a, b) => a - b).join(',')}|${o.deaths === true ? 1 : 0}|u`;
+		// (EEAT_PROT_FX=1, PROT_FX below: fU in the effect state of the ball, as the plain branch's field; its key by it)
+		const fsU = PROT_FX && o.plainFx && typeof o.plainFx === 'object' && FX_STATE && wildOf(Lc.fg) ? o.plainFx : null;
+		const pfxU = PROT_FX && fsU === null && o.plainFx === true && FX_FIELD && wildOf(Lc.fg);
+		const keyU = `${fgHash(Lc.fg)}|${Array.from(tiles).sort((a, b) => a - b).join(',')}|${o.deaths === true ? 1 : 0}|u` + (fsU ? fxSuffix(fsU) + (o.fxDepth ? '|d1' : '') : pfxU ? '|p' : '');
 		const hadU = FIELDS.get(keyU);
 		if (hadU) { FIELDS.delete(keyU); FIELDS.set(keyU, hadU); return hadU; }
 		// (EEAT_FIELD_SHARE: another thread's field of this key, as built here)
 		const shU = SHARE_ON ? shareGet(keyU) : undefined;
-		if (shU) { FIELDS.set(keyU, shU); while (FIELDS.size > FIELDS_MAX) FIELDS.delete(FIELDS.keys().next().value); return shU; }
+		if (shU) {
+			if (fsU && shU.fx && !Object.prototype.hasOwnProperty.call(shU, 'fxOf')) Object.defineProperty(shU, 'fxOf', { value: (s2) => goalField(Lc, tiles, { deaths: o.deaths === true, plainFx: s2 }), enumerable: false });
+			FIELDS.set(keyU, shU); while (FIELDS.size > FIELDS_MAX) FIELDS.delete(FIELDS.keys().next().value); return shU; }
 		if (o.cachedOnly === true) return null;   // (the memo only: executor.js FIELD_MEMO)
 		const fP = goalField(plain, tiles, o);
 		const fgU = Int32Array.from(Lc.fg);
@@ -427,7 +441,19 @@ function goalField(Lc, tiles, o = {}) {
 		for (let i = 0; i < fgU.length; i++) if (fgU[i] === 420) fgU[i] = 0;   // (the off tiles too: no protection anywhere)
 		const goals = Array.from(tiles, (t) => ({ tile: t, cost: 0 }));
 		for (const p of on) { const c = tileMinFifths(fP, p); if (c >= 0) goals.push({ tile: p, cost: c / 5 }); }
-		const fU = RF.reachField(Object.assign({}, plain, { fg: fgU }), { goals, deaths: o.deaths === true });
+		let fU;
+		if (fsU) {
+			// (the next state's seed: the same layer's field of that state, one layer deep, as the plain branch's seedCost)
+			const seedU = !o.fxDepth ? (i, s2) => {
+				if (!s2) return -1;
+				const g = goalField(Lc, tiles, { deaths: o.deaths === true, plainFx: s2, fxDepth: 1 });
+				if (!g || !g.fx) return -1;
+				const c = RF.costAt(g, (i % Lc.width) * 16, ((i / Lc.width) | 0) * 16, 0);
+				return c < 0 ? -1 : Math.round(c * 5);
+			} : null;
+			fU = RF.reachField(Object.assign({}, plain, { fg: fgU }), { goals, deaths: o.deaths === true, fxState: fsU, fxSeedCost: seedU });
+			if (fU.fx) Object.defineProperty(fU, 'fxOf', { value: (s2) => goalField(Lc, tiles, { deaths: o.deaths === true, plainFx: s2 }), enumerable: false });
+		} else fU = RF.reachField(Object.assign({}, plain, { fg: fgU }), pfxU ? { goals, deaths: o.deaths === true, plainFx: true } : { goals, deaths: o.deaths === true });
 		FIELDS.set(keyU, fU);
 		while (FIELDS.size > FIELDS_MAX) FIELDS.delete(FIELDS.keys().next().value);
 		if (SHARE_ON) shareOut(keyU, fU);
