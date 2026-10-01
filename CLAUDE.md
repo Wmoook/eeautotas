@@ -1343,3 +1343,32 @@ ways in.
   the same hard sub-level sets: NO GAIN SHOWN, opt-in, not merged. NEXT: the hard sub-level set itself (Phina's last 38
   tiles to blue coin (145,7), TEZ, MegaMan Dash's 887-tile stop), and the time per waypoint by the plan's order rather
   than a breadth-first ladder over ~17 waypoints.
+  CYCLE 4 (box 8, n5-b8-big-c4, three OPT-IN knobs, each off = byte for byte; `tools/cmp/xlvab.js` <off> <on>: per level
+  compiled, triggers, ok steps, the waypoints' depth with resumed / seeded levels counted). THE SHARED APPROACH (executor.js
+  `EEAT_SKEL_XLV=1`): every level of any waypoint's skeleton from the same first start pooled (its arrival tile, the latest
+  512); a call ranks them by its waypoint's field at the starts (tileMin, no build), measures the 6 best on its own field at
+  their doors (at most 1.2 s) and resumes from the least under 0.7 x its memo's deepest level; a seeded level that fails
+  twice is popped and not seeded again. A/B (6 of the 20 big failing levels, 300 s, W3, par 3 an arm side by side, then
+  stopped): compiled 0 = 0, triggers 2 vs 0 (Happy Spookaween: its 300-s flip, it went the other way in the next A/B), seeds
+  10 of 286 calls; the diagnosis (`EEAT_SKEL_XLV_DBG=<n>`: n candidates measured and logged, `exec.xlvdbg`): on Phina and
+  the Rose no pooled level is nearer than the waypoint's own start; its 17 waypoints lie in different directions from a
+  start about as far from all of them (180-600 real tiles): no shared approach. THE FX_FAR OFFSET (found by that
+  diagnosis): on an effect-state field (reach.js costAt with `f.fx`, EEAT_FX_STATE, a compiler default) a ball state the
+  physics part has no way for is priced walk + FX_FAR (4,000 tiles), while the skeleton's sub-level sets are the field's
+  tileMin (any state at the tile): Phina's c0 4,100-4,600 = ~4,000 phantom tiles + 180-600 real (the field at every pooled
+  arrival = its tileMin + ~4,000); each skeleton walked the phantom in ~90 trivial sub-legs (the arrivals already in every
+  set: rung 2 of blue coin (145,7) 4,181 -> 2,453 in its 15 s), every walls refresh re-measured it back up, and the step's
+  closest (skelClosest, on the start's field) read 4,029 where the skeleton stood 29 tiles from the coin. Phina 60 of 65
+  skeleton calls with c0 >= 4,000, LOEE Aquatic Sanctuary 16 / 65, TTL Spike 2 / 182, the other 17 levels none: cycles 2-3's
+  'least c / c0' on Phina (0.01-0.07) is the offset's; in real tiles its skeletons stop 250-450 out of 400-600. THE SETS'
+  OWN MEASURE (`EEAT_SKEL_REMEAS=1`): the call's start, a walls refresh and every found sub-leg take the least of the level
+  and the arrivals' tiles on the set's own tileMin (they stand in the set, at or below its level). A/B (9 big failing levels:
+  Phina, Aquatic Sanctuary, TTL Spike, TEZ, Happy Spookaween, Nirthophia, Endless Pain, Persian Peril, MegaMan Dash; 300 s,
+  W3, par 3 an arm side by side, `EEAT_EXEC_PROF=1` both, box load 185-225): the skeletons' sub-legs 4,707 -> 2,618 (ok
+  3,201 -> 1,177: the trivial ones gone; Phina 1,492 -> 264, Persian Peril 660 -> 275), failed 1,506 -> 1,441, the exact
+  tier's seconds on sub-legs 1,091 vs 1,103 (Phina's sub-legs 415 s both: the time goes to the hard sets); compiled 0 = 0,
+  triggers 8 vs 6 (Spookaween 2 vs 0, Nirthophia 6 = 6), ok steps 58 vs 60, the waypoints within 0.1 x c0 19 vs 24, within
+  60 tiles 31 vs 29, peak RSS median 5.39 vs 5.06 GB; planexec 32/32 and planstrategy 27/0 with each knob on. NO GAIN SHOWN,
+  opt-in, not merged: the big levels' wall is the hard sub-level set itself (every waypoint stops at one), not the walk to
+  it. NEXT: skelClosest by the same set measure (the strategy's relays and near plans read 4,029 on Phina), the hard
+  sub-level set from the inside (which tiles of the set the finders never reach, by the engine).
