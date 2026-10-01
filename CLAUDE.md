@@ -1290,8 +1290,10 @@ ways in.
   (coinexec, rung 3, 150 s, box 7 at load ~140): from route ticks 3000 / 3500 the closest moves from (114,231) to
   (123-124, 208) with q 4 / 6 (and with the unsound cap on every field: the same), from the spawn (109,231) at 141-143 by
   the priced field: NO leg; from route ticks 4000 / 4500 found in 53 s with and without it (841 / 715 vs 841 / 720 ticks):
-  the price does not break the later route; from route ticks 3700 / 3850 ((107,210) / (106,204), 150 ticks before
-  (133,206)) NOT found either way (plain: closest (114,231) 45.8; q 4: (124,208) 92). THE NEXT BREAK is that 150-tick
+  the price does not break the later route; FROM ROUTE TICK 3900 ((110,206), the corridor's west end) FOUND WITH IT (q 4:
+  974 ticks, 54 s) and NOT without (the plain field's closest the bottom corridor (114,231) 45.8): the price moves the
+  break 50 route ticks earlier (from 3950 both: 897 / 883); from route ticks 3700 / 3850 ((107,210) / (106,204)) NOT found
+  either way (plain: closest (114,231) 45.8; q 4: (124,208) 92). THE NEXT BREAK is that 150-tick
   stretch: the route runs east along the row-206 corridor (110,206) -> (125,207) at 5.4 px/tick, dips under the wall
   block (126-130, 206-207) through rows 208-210 and rises on its far side to (133,206) at tick 4000, then climbs the
   column (131-134, 199-207); the search reaches (124,208) and never the far side. THE SHAFT: the blue coin
