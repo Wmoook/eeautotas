@@ -94,8 +94,10 @@ function start() {
 			if (me.requeue) { running--; start(); return; }
 			fs.appendFileSync(path.join(out, 'index.jsonl'), JSON.stringify(Object.assign({ rel, id, code: c, sec: (Date.now() - ts) / 1000 }, rssOn ? { peakRssMB: Math.round(me.peak / 1024) } : {})) + '\n');
 			running--; done++;
-			if (done % 10 === 0 || done === todo.length) console.log(`${done}/${todo.length} ${((Date.now() - t0) / 1000).toFixed(0)} s`);
-			if (done === todo.length) { console.log('ALL DONE'); if (rssTimer) clearInterval(rssTimer); }
+			// (a compile the RAM guard killed is in todo twice: the total is todo.length - requeued)
+			const total = todo.length - requeued;
+			if (done % 10 === 0 || done === total) console.log(`${done}/${total} ${((Date.now() - t0) / 1000).toFixed(0)} s`);
+			if (done === total) { console.log('ALL DONE'); if (rssTimer) clearInterval(rssTimer); }
 			start();
 		});
 	}
