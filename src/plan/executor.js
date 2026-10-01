@@ -2328,6 +2328,91 @@ async function createExecutor(L, opts) {
 		r2.ms = Date.now() - tIn;
 		return r2;
 	}
+	// ---- THE RUN-UP RELAY (C6 push 3 lane 4 block 3; OPT-IN EEAT_RUNUP=1, off = the executor byte for byte): the goal field
+	// has no speed, so a sub-level set the ball reaches only with a run-up is a wall to the finders it orders: Sentinel
+	// Ravines' skeleton stuck at (90,108), where the known route goes 29 tiles LEFT and up to the far end of a 45-tile dot
+	// row, accelerates right along it to 6.4 px/tick and only then climbs (the field +24 tiles above its running minimum on
+	// the way; the sub-leg failed at 45 s with every finder knob, from the route's state past the detour prims found it in
+	// 3.5 s). From the level's structure: the RUNS (a row's maximal stretch of tiles the ball can move along horizontally: a
+	// non-solid tile over a floor (solid, one-way, half block), or a dot tile) of RUNUP_MIN tiles or more within RUNUP_RY rows
+	// of the stuck arrival whose span covers its column, the run's end farther from the goal by the sub-leg's own field the
+	// run-up's start (at least RUNUP_DMIN tiles from the arrival, the field falling along the run by that much); the longest
+	// runs first, RUNUP_K of them: a relay leg to that end (a region waypoint, its own field), then the stuck sub-level set
+	// from the relay's arrivals. Waypoints only: every leg is the finders' from real arrivals, replayed as before; no claim.
+	const RUNUP_ON = process.env.EEAT_RUNUP === '1';
+	const RUNUP_MIN = +process.env.EEAT_RUNUP_MIN > 0 ? +process.env.EEAT_RUNUP_MIN : 16;
+	const RUNUP_RY = +process.env.EEAT_RUNUP_RY >= 0 ? +process.env.EEAT_RUNUP_RY : 8;
+	const RUNUP_DMIN = +process.env.EEAT_RUNUP_DMIN > 0 ? +process.env.EEAT_RUNUP_DMIN : 8;
+	const RUNUP_K = +process.env.EEAT_RUNUP_K > 0 ? +process.env.EEAT_RUNUP_K : 2;
+	const RUNUP_SHARE = +process.env.EEAT_RUNUP_SHARE > 0 ? Math.min(0.95, +process.env.EEAT_RUNUP_SHARE) : 0.6;
+	let runsMemo = null;
+	function runsOf() {
+		if (runsMemo) return runsMemo;
+		const Wl = L.width, Hl = L.height, fl = L.flags, fg = L.fg, runs = [];
+		// (eesim.js flags: 1 solid, 2 one-way, 4 rotated half, 8 half, 16 door; 4 / 414 the dots)
+		const ok = (x, y) => {
+			const t = y * Wl + x, id = fg[t], f = fl[id] | 0;
+			if (f & (1 | 16)) return false;
+			if (id === 4 || id === 414) return true;
+			const below = y + 1 < Hl ? (fl[fg[t + Wl]] | 0) : 1;
+			return (below & (1 | 2 | 4 | 8)) !== 0;
+		};
+		for (let y = 0; y < Hl; y++) {
+			let x = 0;
+			while (x < Wl) {
+				if (!ok(x, y)) { x++; continue; }
+				const x0 = x;
+				while (x < Wl && ok(x, y)) x++;
+				if (x - x0 >= RUNUP_MIN) runs.push({ y, x0, x1: x - 1 });
+			}
+		}
+		runsMemo = runs;
+		return runs;
+	}
+	/** the stuck sub-level set `sub` again through a run-up relay: the arrivals' mask strings, or null */
+	async function runupRelay(cur, sub, fr, budget, deadline) {
+		let e;
+		try { e = core.startOf(String(cur[0])); } catch (x) { return null; }
+		if (!e || e.dead || !fr || !fr.f) return null;
+		vsim.restore(e.snap);
+		const Wl = L.width, Hl = L.height, at = T.tileOf(vsim, Wl, Hl), ax = at % Wl, ay = (at / Wl) | 0;
+		const m = tileMin(fr.f), CUT = RF.CUT, cands = [];
+		for (const R of runsOf()) {
+			if (Math.abs(R.y - ay) > RUNUP_RY || ax < R.x0 - RUNUP_RY || ax > R.x1 + RUNUP_RY) continue;
+			const mL = m[R.y * Wl + R.x0], mR = m[R.y * Wl + R.x1];
+			if (!(mL < CUT) || !(mR < CUT) || Math.abs(mL - mR) < 5 * RUNUP_DMIN) continue;
+			const fromL = mL > mR, xa = fromL ? R.x0 : R.x1;
+			if (Math.abs(xa - ax) < RUNUP_DMIN) continue;
+			const tiles = [];
+			for (let k = 0; k < 3 && k <= R.x1 - R.x0; k++) tiles.push(R.y * Wl + (fromL ? R.x0 + k : R.x1 - k));
+			cands.push({ tiles, x: xa, y: R.y, len: R.x1 - R.x0 + 1, dy: Math.abs(R.y - ay) });
+		}
+		if (!cands.length) { S.runupNone = (S.runupNone || 0) + 1; return null; }
+		cands.sort((a, b) => b.len - a.len || a.dy - b.dy);
+		const use = cands.slice(0, RUNUP_K), tIn = Date.now(), total = RUNUP_SHARE * (deadline - tIn);
+		for (let i = 0; i < use.length; i++) {
+			const cd = use[i], now = Date.now(), share = Math.min(deadline - now - 50, total / use.length);
+			if (!(share >= 400)) break;
+			S.runups = (S.runups || 0) + 1;
+			const wp1 = { kind: 'region', tiles: cd.tiles, expect: null, allowDeath: !!sub.allowDeath, label: `${sub.label || 'sub'} (run-up ${cd.x},${cd.y})` };
+			const s1 = 0.4 * share;
+			const r1 = await reachLeg(cur, wp1, { ms: s1, level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline: Math.min(deadline, Date.now() + s1), stop: budget.stop }, true);
+			let ok2 = false, r2 = null;
+			if (r1.ok) {
+				const c1 = r1.arrivals.map((a) => T.strOf(a.masks));
+				const s2 = Math.min(deadline - Date.now() - 50, share - (Date.now() - now));
+				if (s2 >= 200) {
+					r2 = await reachLeg(c1, sub, { ms: s2, level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline: Math.min(deadline, Date.now() + s2), stop: budget.stop }, true);
+					ok2 = !!r2.ok;
+				}
+			}
+			if (emit) emit({ ev: 'exec.runup', label: sub.label || '', from: [ax, ay], to: [cd.x, cd.y], len: cd.len, ok1: !!r1.ok, ok2, ms: Date.now() - now });
+			if (ok2) { S.runupOk = (S.runupOk || 0) + 1; return r2.arrivals.map((a) => T.strOf(a.masks)); }
+			if ((r1.fail && r1.fail.why === 'stopped') || (r2 && r2.fail && r2.fail.why === 'stopped')) break;
+		}
+		S.runupMs = (S.runupMs || 0) + (Date.now() - tIn);
+		return null;
+	}
 	async function reach(starts, wp, budget) {
 		const r = await reachWp(starts, wp, budget);
 		stuckNote(wp, r);
@@ -2445,6 +2530,7 @@ async function createExecutor(L, opts) {
 		// (the step adapts: a sub-leg found in under a third of its share doubles it (fast motion: fewer legs, fewer goal
 		// fields to build), a failed one halves it for its retry)
 		let lastFail = null, sims = 0, retried = false, stuck = false, step = SKEL_STEP, firstExh = false, backs = 0, okRun = 2;
+		const runupTried = new Set();
 		while (Date.now() < deadline - 100) {
 			// (new counterexample walls from the last sub-leg: the level where the skeleton stands, on the new field)
 			if (wRefresh()) {
@@ -2506,6 +2592,20 @@ async function createExecutor(L, opts) {
 					retried = false; step = SKEL_STEP;
 					levels.push({ back: Math.round(cCur) });
 					continue;
+				}
+				// (THE RUN-UP RELAY, OPT-IN EEAT_RUNUP=1: the stuck sub-level set through a run's far end, once a level)
+				if (RUNUP_ON && !runupTried.has(Math.round(cCur)) && Date.now() < deadline - 600) {
+					runupTried.add(Math.round(cCur));
+					const ru = await runupRelay(cur, sub, fr, budget, deadline);
+					if (ru && ru.length) {
+						levels.push({ c: Math.round(c), ok: true, runup: true });
+						retried = false; okRun = 1; step = SKEL_STEP;
+						cur = ru; cCur = c;
+						if (!skelMemo.has(key)) skelMemo.set(key, []);
+						skelMemo.get(key).push({ c: cCur, cur: cur.slice() });
+						skelBasePush(key, cur);
+						continue;
+					}
 				}
 				// (a resumed level whose next sub-leg fails twice: a dead end, one level back next time)
 				if (top && levels.length === 2) {
