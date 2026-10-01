@@ -520,6 +520,52 @@ ways in.
   to the executor from the compile's start: its routes are routes (verified), the executor's anchors and routes go into it
   (a route = its bound: its refinement ladder then looks only for faster ones), its arrivals reach the executor only when the
   executor stalls or has nothing left (THE GATE). Measured (box 6): with the arrivals given at once it HURT (slower routes on 10 of 15 levels, 2 levels lost); with the gate (300 s, 40 levels) 25 = 25 compiled (lost INFINITE and TPs The Horror, late base routes; gained Endless Space and K Underground), the first route 18% sooner (geo-mean), run ticks 0.7% fewer, one thread and ~1.7 GB more a compile: OPT-IN (it does not yet lose nothing). C6 push 3 lane 6: THE ONE SHOT IN A PROCESS OF ITS OWN (`EEAT_OS_PROC`, the default with the knob; 0 = the worker thread): osworker.js forked, every thread of it at nice 19 (its V8 GC threads too: in the thread mode they were the compile process's shared pool), `--max-old-space-size` = `EEAT_OS_HEAP_MB` (1,024: the live heap where its A* stops growing) + 512; the worker-thread mode gets its own nice and the same limit. THE FAR LEGS (`EEAT_OS_BW=1`, opt-in): a waypoint past `LEG_TILES` got no leg, so on the far-step levels the A* was a flood of 10-tick held-mask segments (0 legs, 99.9% 'fan' nodes in 300 s on Tutorial 2 / 4, Egg Quest II, Gravity's Rainbow); now the lab's backward solver from the first node of its abstract state, then from nodes 4 tiles nearer, its clock 1 -> 16 s (`EEAT_OS_BW_MSMAX`), at most half the one shot's time. The spread (box 6, 300 s, one run a level): the base 7 / 12 test levels, the thread 8 / 12 (w0), and over d300 + w0 on the late-route levels (TPs, INFINITE, K Underground, Endless Space) 7 of 10 either way: the one shot's losses are the late routes' spread, not shown to be its cost (a contention test, `src/out/l6/contend.js`: 3 executor stand-in threads 1.91-2.18 M ticks/s alone, 2.22 beside the A* thread, 2.42 beside the A* process). Still OPT-IN: ~1-1.6 GB and a core more a compile (a full compile at par 32 on box 5 would need ~40 GB more).
+- **The corridor's fields pass** (n5-s99-fields, 2026-09-30; `src/plan/lab/corridor.js`, the executor's tier MC under
+  `EEAT_CORRIDOR=1`; `EEAT_CORR_FIELDS=1` = the pass, OPT-IN, off = the tier byte for byte; each knob of the corridor off =
+  the corridor before). WHY the corridor lost chains through fields: in a field a direct leg (msolve.leg with the field tier
+  and the coupled family) costs ~40 ms where a whole event fan costs ~0.15 ms, so the direct legs took 97% of the clock
+  (Wine Quest I's 4-arrow chain: 131 expansions in 5 s, none found); a support node keyed as standing while on its jump
+  tick or bonking under a ceiling dominated every child it made in its tile (the search ended 'exhausted' after 1
+  expansion: Forgotten Helix, Octorage, Planets, Egg Quest II, Infinity Pain). THE PASS: `o.goalFan` (the fans test the
+  target on every tick they play), `o.directShare` 0.15 (the direct legs' clock a share of the call's; a deferred node
+  waits by its cost, only a NEW nearest state within `o.directNear` 2 tiles skips the share: the hot list), `o.restKey` (a
+  support node only at rest, speed_y 0), `o.refine` (an exhausted search goes again, fresh, with the field cells keyed by
+  the sub-tile offset and the speeds, 8 px / 2 px/tick, then 4 px / 1 px/tick: `o.fieldKey 'sub'`, `o.fieldPx`,
+  `o.fieldV`, `o.Kf`; as the key from the start the cells dilute the search: field chains side by side 80.3% vs 78.4% /
+  75.0%), `o.more` 1 (a found chain goes on for as long again in the refinement's order, a shorter chain replacing it).
+  Opt-in, no gain measured: `o.bfs` (the exact short search, 18 masks a tick, stateHash merge, from a new nearest state and
+  an exhausted store's best states). THE MEASURE (tools/lab/corridor_chain.js `--exec=1` = the tier's own options, the
+  pass by its knobs, `--fields=1` = only the chains with a field move; the moves study's 1,123 4-move chains, 5 s each,
+  both arms side by side, box 6, every answer replayed): **73.7% -> 87.9%** (fields 681: 65.1 -> 85.2, arrow 433: 54.3 ->
+  81.5, dot 72.5 -> 84.2, boost 64.9 -> 81.4; plain 442: 87.1 -> 92.1; by the route's ticks 60-120 85.4 -> 92.5, 120-240
+  61.9 -> 87.0, 240-480 55.1 -> 81.1, 480+ 39.1 -> 60.9), <= the route 431 -> 510 chains; on the 819 both found the pass
+  is faster on 245, slower on 93, the ticks summed -4.2% (without `o.more` +2.4%); with the speed profiles' answers
+  (n5-lab-profile) either 91.6%. The known-route legs (tools/lab/judge_legs.js, arm `corrf` without `o.more`, 20 s, the
+  55 cases from 3 starts, box 5): 72 -> 87 of 129 (prev 21 -> 28 / 55, hit-300 17 -> 22 / 32, hit-120 34 -> 37 / 42;
+  LONG 30 -> 38 of 58), the first chain in 0.8 s vs 7.1 s median. COMPILES (25 levels: 13 STUCK-FIELD / failing with a
+  known route + 12 compiled, 120 s, W3, one run an arm, both arms side by side, one tree; box 6 + box 5): `EEAT_CORRIDOR=1`
+  vs `+ EEAT_CORR_FIELDS=1` compiled **10 vs 13** (+ MIHB's Dream 9,595, Crypts of Anubis 3,232, INVASION 4,576; none
+  lost), the 10 both compiled 32,012 vs 34,381 run ticks (faster 3, slower 7: Trick Or Treat 4,023 vs 5,824, The Ten
+  Commandments 666 vs 852: its corridor chain to the blue coin, 420 ticks, taken as found, changed the route), anchors
+  on the failing: Tutorial 3 2 -> 9, Planets 1 -> 4, Frostbitten 26 -> 35, EZ Spooky Shack 11 -> 14, Tutorial 4 6 -> 2;
+  its REPLICATE (box 6, the same 25): 13 = 13 compiled, the 13 both 52,228 vs 52,151 run ticks: pooled 23 vs 26 of 50
+  level-runs, the first run's losses on the both compiled the compile's own spread. THE EXECUTOR'S OWN LEGS (judge_legs.js
+  arm `exec`: reach() at rung 2, 20 s, from the known route's previous trigger, the 55 cases, box 5): `EEAT_CORRIDOR=1`
+  24 / 55, + `EEAT_CORR_FIELDS=1` 25, + `EEAT_CORR_MIN=0 EEAT_CORR_REPLACE=1` (the near chains through the corridor too)
+  26, + `EEAT_CORR_SHARE=0.7 EEAT_CORR_MS=15000` **29**: inside the executor the corridor has 0.4 of a window and at most
+  6 s (the standalone corridor 21 -> 28 of the same 55 at 20 s). THE PORTFOLIO (n5-s99-portfolio's portfolio.js with this
+  corridor: `EEAT_CORR_FIELDS=1` is the corridor's own default for every caller; tools/lab/portfolio_chain.js arm port, the
+  1,123 chains, 5 s, box 5 loaded): 85.7% -> 87.2% (its plan gives the corridor 0.2-0.25 of the budget, the backward
+  solver's legs 908 of 962; the corridor with the pass alone at 5 s: 87.9% on box 6). From the later starts (hit-300 /
+  hit-120, 74 legs) `EEAT_CORRIDOR=1` 62 vs the wide config 63, T / route median 1.017 -> 1.000 (hit-300 1.117 -> 1.003),
+  found in 2.7 s vs 7.1 s median. THE WIDE CONFIG IN THE COMPILE (`EEAT_CORRIDOR=1 EEAT_CORR_FIELDS=1 EEAT_CORR_MIN=0
+  EEAT_CORR_REPLACE=1 EEAT_CORR_SHARE=0.7 EEAT_CORR_MS=15000` vs `EEAT_CORRIDOR=1`, the same 25 levels, 120 s, W3, box 6,
+  one run an arm, side by side): compiled **13 vs 15** (+ Tutorial 3 2,327, + Christmas Town 4,185 (STUCK-FIELD); none
+  lost), the 13 both 53,787 vs 53,837 run ticks (faster 7: Tutorial 1 1,867 vs 2,254, INFINITE 2,842 vs 3,216, Frostbitten
+  7,973 vs 8,753, Fish Gods 3,660 vs 4,083; slower 6: Crypts of Anubis 4,091 vs 3,309, Trick Or Treat 5,229 vs 4,339, K
+  Underground 2,725 vs 2,343). Not yet: its replicate, a full compile, 300 s.
+  Still failing (the chain set): long routes (480+ ticks 60.9%: the clock), precision staircases (celeste's half-block
+  steps: 52-tick chains, every copy), boost / portal chains the held-mask fans do not make.
 - **The timer** (C6 push 3 lane 3, `src/plan/planner.js` `timerOf` / `timerPlan` / `removerInTime`, strategy.js
   `TIMER_PICK`; OPT-IN `EEAT_PLAN_TIMER=1`, off = the compiler before byte for byte): a ball with a running timed killer
   (curse 421, zombie 422, poison 1584, fire: it dies at start + duration) gets, at every plan of its anchor, a DEADLINE plan

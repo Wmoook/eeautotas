@@ -64,11 +64,13 @@ async function main() {
 						S = S || MS.createSolver(L, {});
 						const q = S.chain(snap, { tiles, cls: 'any' }, { ms: MSC, Tmax: 4000, legT: 80 });
 						r = { ok: q.ok, masks: q.masks, why: q.why };
-					} else if (arm === 'corr') {
+					} else if (arm === 'corr' || arm === 'corrf') {
 						S = S || MS.createSolver(L, {});
 						X = X || require(path.join(root, 'src/plan/lab/corridor.js')).createCorridor(L, { solver: S });
-						const q = X.solve(snap, { tiles, cls: 'any' }, { M: 3, Mu: 1, legT: 90, RX: 18, RD: 30, subStop: 2, plainStops: [8, 20], dom: 'dir', landMax: 0, legMode: 'lazy', lazyWide: true, lazyLegs: false,
-							ms: MSC, deadline: Date.now() + MSC, Tmax: Math.min(4000, Math.max(2, routeLeg * 4)), first: true });
+						// (corrf, or corr with EEAT_CORR_FIELDS=1 as the executor reads it: the corridor's fields pass, n5-s99-fields)
+						const fp = arm === 'corrf' || process.env.EEAT_CORR_FIELDS === '1' ? { goalFan: true, directShare: 0.15, restKey: true, refine: true, more: 1 } : null;
+						const q = X.solve(snap, { tiles, cls: 'any' }, Object.assign({ M: 3, Mu: 1, legT: 90, RX: 18, RD: 30, subStop: 2, plainStops: [8, 20], dom: 'dir', landMax: 0, legMode: 'lazy', lazyWide: true, lazyLegs: false,
+							ms: MSC, deadline: Date.now() + MSC, Tmax: Math.min(4000, Math.max(2, routeLeg * 4)), first: true }, fp));
 						r = { ok: q.ok, masks: q.masks, why: q.why };
 					} else if (arm === 'bw') {
 						B = B || require(path.join(root, 'src/plan/lab/backward.js')).createBackward(L);
@@ -130,7 +132,7 @@ function agg(files) {
 			return `${a} ${f.length}/${rows.length} (only ${only}; T/route med ${med(f.map((v) => v[a].ratio))}; ms med ${med(rows.map((v) => v[a].ms))})`;
 		}).join(' | ');
 		const any = rows.filter((v) => arms.some((a) => ok(v, a))).length;
-		const lab = rows.filter((v) => ['corr', 'bw', 'prof'].some((a) => v[a] && ok(v, a))).length;
+		const lab = rows.filter((v) => ['corr', 'corrf', 'bw', 'prof'].some((a) => v[a] && ok(v, a))).length;
 		console.log(`[${s}] ${line} | ANY ${any}/${rows.length} | ANY-LAB ${lab}`);
 	}
 	// the pairs: where both find, which is faster (T), and a rejected (ok but not verified) count
