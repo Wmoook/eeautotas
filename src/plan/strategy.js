@@ -134,6 +134,10 @@ const CR_F_SLACK = +process.env.EEAT_CR_F_SLACK || 0.1, CR_F_ABS = +process.env.
 // 2,421 tried 6 times in 10 s, then never. =f: after the first route the pick is the score first (f = arrival + plan cost
 // + FAIL_TICKS x fails - the UCB term), the gain only its tie-break; =mix: every other pick so (the rest as before)
 const REFINE_PICK = process.env.EEAT_REFINE_PICK === 'f' || process.env.EEAT_REFINE_PICK === '1' ? 'f' : process.env.EEAT_REFINE_PICK === 'mix' ? 'mix' : '';
+// (BEFORE the first route, OPT-IN EEAT_PRE_PICK=mix|f, unset = gain first as before: every other pick (mix) or every pick
+// (f) by the score first too: Tutorial 2's crumb path one step ahead (a death after the blue coin) outranked the stretch
+// solver's checkpoint at 1,730 ticks with the same real triggers, whose f is 1,500 ticks less)
+const PRE_PICK = process.env.EEAT_PRE_PICK === 'f' ? 'f' : process.env.EEAT_PRE_PICK === 'mix' ? 'mix' : '';
 // THE FAR TROPHY (C6 push 3 lane 2 block 2, RATE; OPT-IN EEAT_FAR_TROPHY=<est ticks>, unset / 0: off, the compile byte for
 // byte as before): a plan whose first step is the trophy and whose est walk to it is longer than that runs at most at rung
 // EEAT_FAR_TROPHY_RUNG (1: a 5-s window) whatever rung its facts reached; its failures still climb the facts' ladder (the
@@ -1243,7 +1247,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const lateOf = (A) => (TIMER_PICK && A.plans && A.plans.late ? 1 : 0);
 		if (CRUMB_RANK === 3) crumbGate(live);
 		// (THE REFINEMENT PICK, EEAT_REFINE_PICK: once a route is known, the score (f) first)
-		const fFirst = !!REFINE_PICK && !!best && (REFINE_PICK === 'f' || (picksN & 1) === 1);
+		const pickMode = best ? REFINE_PICK : PRE_PICK;
+		const fFirst = !!pickMode && (pickMode === 'f' || (picksN & 1) === 1);
 		const list = fFirst ? live.filter((A) => !A.exhausted).sort((a, b) => (lateOf(a) - lateOf(b)) || (scoreOf(a, N) - scoreOf(b, N)) || (pickGain(b) - pickGain(a)))
 			: live.filter((A) => !A.exhausted).sort((a, b) => (lateOf(a) - lateOf(b)) || (pickGain(b) - pickGain(a)) || (scoreOf(a, N) - scoreOf(b, N)));
 		for (const A of list) {
