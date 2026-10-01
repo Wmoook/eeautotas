@@ -157,7 +157,9 @@ function sectionUnit(TMP) {
 		['parse', 'model', 'bounds', 'plan', 'moves', 'verify', 'polish'].every((k) => Number.isFinite(rj.stages[k])) && rj.loadtas === `/loadtas ${outF}`,
 		rj ? JSON.stringify({ lb: rj.lb, gap: rj.gap, legs: rj.legs, stages: rj.stages }) : 'none');
 	// (exit 2: no route; the reason and where it stalled)
-	r = cli([toy, `--parts=${path.join(__dirname, 'planmock.js')}`, '--seconds=8', '--workers=1', `--out=${path.join(TMP, 'out', 'none.eetas')}`], { PLANMOCK_MODE: 'fail' });
+	// (EEAT_S99_DEFAULTS=0: the mock fails the executor; the stretch / chain children are real solvers the mock does not
+	// replace, and on the toy they route it)
+	r = cli([toy, `--parts=${path.join(__dirname, 'planmock.js')}`, '--seconds=8', '--workers=1', `--out=${path.join(TMP, 'out', 'none.eetas')}`], { PLANMOCK_MODE: 'fail', EEAT_S99_DEFAULTS: '0' });
 	const l2 = String(r.stdout || '').split('\n').filter(Boolean);
 	check('no route (a failing executor): exit 2, no .eetas, the result line says why and where it stalled (the most progress, the last failures)',
 		r.status === 2 && !fs.existsSync(path.join(TMP, 'out', 'none.eetas')) && /^result\s+no route \(end \w+\): .*the most progress: anchor .*last failures/.test(l2.find((l) => l.startsWith('result')) || ''),

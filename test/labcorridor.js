@@ -123,7 +123,7 @@ const PASS = { plainStops: [8, 20], dom: 'dir', landMax: 0, legMode: 'lazy', laz
 	const loaded = Object.keys(require.cache).filter((k) => /lab[\\/]corridor\.js$/.test(k));
 	// (this test loaded it itself: the executor's own lazy require is what is checked, by its source)
 	const src = require('fs').readFileSync(require.resolve('../src/plan/executor.js'), 'utf8');
-	ok(/const corridor = \(\) => CR_ \|\| \(CR_ = require\('\.\/lab\/corridor\.js'\)/.test(src) && /if \(CORR_ON\(\) && mathOn/.test(src), 'the executor loads the corridor lazily, behind CORR_ON()');
+	ok(/const corridor = \(\) => CR_ \|\| \(CR_ = require\('\.\/lab\/corridor\.js'\)/.test(src) && /if \((!pfOn && )?CORR_ON\(\) && mathOn/.test(src), 'the executor loads the corridor lazily, behind CORR_ON()');
 	ok(loaded.length === 1, 'one corridor module in the cache (this test\'s)');
 }
 
