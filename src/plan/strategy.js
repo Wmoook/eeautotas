@@ -231,6 +231,16 @@ const ST_N = Math.max(1, Math.min(4, +process.env.EEAT_ST_N || 1));
 // (EEAT_ST_GENERAL=0: the short first plan's request alone, no failed stretches after it)
 const ST_GENERAL = process.env.EEAT_ST_GENERAL !== '0';
 const ST_NICE = process.env.EEAT_ST_NICE !== undefined && process.env.EEAT_ST_NICE !== '' ? +process.env.EEAT_ST_NICE : 10;
+// THE LEVEL AS A CHAIN OF BACKWARD LEGS (n5-s99-gated, src/plan/lab/bwchain_child.js; OPT-IN EEAT_BW_CHAIN=1, off = the compile
+// byte for byte): the whole-level stage's child for every level: a one-leg level gets the whole-level solve first, a GATED level
+// (the trophy behind doors a trigger opens) the chain at once (a best-first search over trigger orders, one continuous backward
+// leg a trigger, the end states carried exactly: bwchain.js); every chain node goes to the loop as an import (an anchor the
+// executor goes on from); at most BWC_F of the budget and BWC_MAX_S (the child is one thread next to the workers)
+const BW_CHAIN = process.env.EEAT_BW_CHAIN === '1', BWC_F = +process.env.EEAT_BWC_F || 0.98, BWC_MAX_S = +process.env.EEAT_BWC_MAX_S || 900;
+const BWC_IMPORT = process.env.EEAT_BWC_IMPORT !== '0';
+// (THE GATE, as the one shot's: the chain's anchors are held until the executor needs them: a stall of the watchdog or the
+// loop's end with no route; EEAT_BWC_GATE=0: at once)
+const BWC_GATE = process.env.EEAT_BWC_GATE !== '0';   // (the child reads it too: 1 the chain's frontier only (the default), 2 every node)
 /** a relative deadline (a step's or a waypoint's beforeTickFrom): a number, or 'prev+N' (N ticks after the previous
  *  step's arrival, i.e. this anchor's arrival: a key's KEY_TICKS) -> ticks | NaN */
 function relOf(x) {
@@ -720,14 +730,29 @@ async function compile(L, opts = {}, emit = () => {}) {
 			say({ ev: 'bwlevel', waypoints: wps.length, plan: k.slice(0, 200) });
 		} catch (e) { /* the file: next time */ }
 	};
+	let bwcOpen = !BWC_GATE, bwcReleased = 0;
+	const bwcHeld = [];
+	/** the chain's gate opens: its held anchors go to the loop (import) -> true when an anchor is new */
+	const bwcRelease = (why) => {
+		if (!BW_CHAIN || bwcOpen) return false;
+		bwcOpen = true;
+		const n0 = anchors.size;
+		for (const m of bwcHeld) onLine('import ' + m);
+		bwcReleased = bwcHeld.length;
+		bwcHeld.length = 0;
+		say({ ev: 'bwchain', what: 'gate', why, held: bwcReleased, anchors: anchors.size - n0 });
+		return anchors.size !== n0;
+	};
 	const wholeLevel = () => {
-		if (!BW_LEVEL || !opts.file || bwlDone) return;
-		const secs = Math.floor(Math.min(BW_LEVEL_MAX_S, (+seconds || 60) * BW_LEVEL_F, (left() - endReserve - 2000) / 1000));
+		if (!(BW_LEVEL || BW_CHAIN) || !opts.file || bwlDone) return;
+		const secs = BW_CHAIN ? Math.floor(Math.min(BWC_MAX_S, (+seconds || 60) * BWC_F, (left() - 3000) / 1000))   // (the chain: to the budget's end; with no route the loop waits for it there)
+			: Math.floor(Math.min(BW_LEVEL_MAX_S, (+seconds || 60) * BW_LEVEL_F, (left() - endReserve - 2000) / 1000));
 		if (!(secs >= 5)) return;
 		const cp = require('child_process'), t1 = Date.now();
-		// (BW_LEGS: the first plan's waypoints from the start, in order, for the child's legs when the trophy is gated)
+		// (BW_LEGS: the first plan's waypoints from the start, in order, for the child's legs when the trophy is gated; the
+		// chain child (BW_CHAIN) takes no waypoint file: it searches the trigger orders itself)
 		let wpFile = null, nWp = 0;
-		if (BW_LEGS) {
+		if (BW_LEGS && !BW_CHAIN) {
 			try {
 				wpFile = path.join(require('os').tmpdir(), `eeat_bwl_${process.pid}_${Date.now()}.json`);
 				const A = anchors.get(String(S0.key));
@@ -738,10 +763,13 @@ async function compile(L, opts = {}, emit = () => {}) {
 				bwlWpFile = wpFile;
 			} catch (e) { wpFile = null; say({ ev: 'warning', text: `bwlevel legs: ${e.message}` }); }
 		}
-		say({ ev: 'bwlevel', seconds: secs, waypoints: nWp });
+		say(BW_CHAIN ? { ev: 'bwlevel', seconds: secs, chain: true } : { ev: 'bwlevel', seconds: secs, waypoints: nWp });
+		let imported = 0;
 		bwlDone = new Promise((resolve) => {
 			let found = null, done = null, buf = '';
-			const ch = cp.spawn(process.execPath, ['--max-old-space-size=2000', path.join(__dirname, 'lab', 'bwlevel_child.js'), String(opts.file), `--ms=${secs * 1000}`, ...(wpFile ? [`--wps=${wpFile}`] : []), ...(BW_CUTS ? ['--cuts=1'] : [])], { stdio: ['ignore', 'pipe', 'ignore'] });
+			const childArgs = BW_CHAIN ? [path.join(__dirname, 'lab', 'bwchain_child.js'), String(opts.file), `--ms=${secs * 1000}`]
+				: [path.join(__dirname, 'lab', 'bwlevel_child.js'), String(opts.file), `--ms=${secs * 1000}`, ...(wpFile ? [`--wps=${wpFile}`] : []), ...(BW_CUTS ? ['--cuts=1'] : [])];
+			const ch = cp.spawn(process.execPath, ['--max-old-space-size=2000', ...childArgs], { stdio: ['ignore', 'pipe', 'ignore'] });
 			bwlChild = ch;
 			const onExit = () => { try { ch.kill('SIGKILL'); } catch (e) { /* gone */ } };
 			process.once('exit', onExit);
@@ -758,13 +786,19 @@ async function compile(L, opts = {}, emit = () => {}) {
 					try { ev = JSON.parse(line); } catch (e) { continue; }
 					if (ev.ev === 'result' && ev.kind === 'finish' && typeof ev.inputs === 'string') {
 						found = ev.inputs;
-						const x = routeOf(T.masksOf(found.replace(/[^0-O]/g, '')), 'the whole level as one leg (backward)', null);
+						const x = routeOf(T.masksOf(found.replace(/[^0-O]/g, '')), BW_CHAIN ? 'the level as a chain of backward legs' : 'the whole level as one leg (backward)', null);
 						say({ ev: 'bwlevel', end: 'finish', runTicks: x && x.ev ? x.ev.runTicks : null, better: !!(x && x.better), ms: Date.now() - t1 });
 					} else if (ev.ev === 'arrival' && typeof ev.inputs === 'string' && !best) {
 						// (a leg of the whole level: its new model state an anchor, as an imported state: replayed, addArrival)
 						say({ ev: 'bwlevel', leg: ev.label || '', ticks: ev.ticks, ms: Date.now() - t1 });
 						onLine(`import ${ev.inputs.replace(/[^0-O]/g, '')}`);
 					} else if (ev.ev === 'leg') say({ ev: 'bwlevel', legTry: ev.n, of: ev.of, label: ev.label, ok: ev.ok, T: ev.T, why: ev.why, ms: Date.now() - t1 });
+					else if (ev.ev === 'anchor' && BWC_IMPORT && typeof ev.inputs === 'string' && !best && !stopped) {
+						// (a chain node: the loop's import (replayed; a model state not seen yet is an anchor))
+						imported++;
+						if (bwcOpen) onLine('import ' + ev.inputs.replace(/[^0-O]/g, ''));
+						else bwcHeld.push(ev.inputs.replace(/[^0-O]/g, ''));
+					} else if (ev.ev === 'chain') say({ ev: 'bwchain', ok: ev.ok, why: ev.why, legs: ev.legs, legsOk: ev.legsOk, nodes: ev.nodes, gain: ev.gain, imported, ms: Date.now() - t1 });
 					else if (ev.ev === 'done') done = ev.end;
 				}
 			});
@@ -1507,7 +1541,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 			if (stalls === 1) deepen('stall');
 			else { const j = exploreJob(); if (j) exploreQ.push(j); }
 			lastProgress = now;
-			if (osw && !best && !osWantOpen) osWantOpen = 'stall';   // (the one shot's gate: opened at the loop's next turn)
+			if (osw && !best && !osWantOpen) osWantOpen = 'stall';
+			if (!best) bwcRelease('stall');   // (the chain's gate: EEAT_BW_CHAIN)   // (the one shot's gate: opened at the loop's next turn)
 		}
 	};
 	const timers = [setInterval(progress, progressMs), setInterval(watchdog, watchMs), setInterval(saveFiles, SAVE_MS)];
@@ -1673,12 +1708,12 @@ async function compile(L, opts = {}, emit = () => {}) {
 				// fallbacks (a direct trophy step, then the frontier) while time is left; else the end)
 				if (exploreQ.length) continue;
 				if (left() < 250 || (best && left() <= endRes())) { end = 'time'; break; }
-				if (nothingSince >= 0 && nothingSince === steps) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } if (osw && await osHold()) continue; if (ST_ON && await stHold()) continue; end = 'exhausted'; break; }
+				if (nothingSince >= 0 && nothingSince === steps) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } if (osw && await osHold()) continue; if (!best && bwcRelease('the executor has nothing left')) { nothingSince = -1; continue; } if (ST_ON && await stHold()) continue; end = 'exhausted'; break; }
 				nothingSince = steps;
 				// (a deepening refused for the clock alone (its doubled first rung past the time left) is no exhaustion: the
 				// end is the time's, not a claim that no plan is left (The Flighty Slighty, The Tunnels, Fish Gods, OCTOS:
 				// "end exhausted" 1-5 s before the 60-s budget; every level is possible))
-				if (!deepen('exhausted')) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } if (osw && await osHold()) continue; if (ST_ON && await stHold()) continue; end = deepenings < maxDeepen ? 'time' : 'exhausted'; break; }
+				if (!deepen('exhausted')) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } if (osw && await osHold()) continue; if (!best && bwcRelease('the executor has nothing left')) continue; if (ST_ON && await stHold()) continue; end = deepenings < maxDeepen ? 'time' : 'exhausted'; break; }
 				continue;
 			}
 			if (osw) { /* (the thread runs on its own) */ } else if (os && !osDone && !stopped && !(best && left() <= endReserve)) {
