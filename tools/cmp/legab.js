@@ -87,7 +87,12 @@ const pos = argv.filter((s) => !s.startsWith('--'));
 			out.ms += ms;
 			const row = { rep, rung: r, ok: res.ok, ms, tool: res.tool, ticks: res.ok ? res.arrivals[0].tick - start.length : null, why: res.fail ? res.fail.why : null, closest: cl(res) };
 			console.error(JSON.stringify(row));
-			if (res.ok) { out.found++; out.ticks.push(row.ticks); out.okRung.push(r); break; }
+			if (res.ok) {
+				out.found++; out.ticks.push(row.ticks); out.okRung.push(r);
+				// (--save=<file.eetas>: the first find's whole run, the start's inputs + the leg)
+				if (opt('save', '') && out.found === 1) { const a = res.arrivals[0].masks; C.writeEetas(opt('save', ''), typeof a === 'string' ? T.masksOf(a) : Uint8Array.from(a)); }
+				break;
+			}
 			out.closest.push(row.closest && row.closest.join(':'));
 		}
 		await ex.close();
