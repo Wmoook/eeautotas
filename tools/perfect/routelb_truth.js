@@ -21,7 +21,12 @@ let nR = 0, nS = 0, viol = 0, skipped = 0;
 const ratios = [];
 const t0 = Date.now();
 const levelCache = new Map();
-for (const [ri, e] of routes.entries()) {
+// (--reverse=1: the shard from its end: a second machine meets the first in the middle; the records carry ri)
+// (--idx=<list or @file>: only those route indices (a recheck))
+const idxSet = args.idx ? new Set((String(args.idx).startsWith('@') ? fs.readFileSync(String(args.idx).slice(1), 'utf8') : String(args.idx)).split(',').map((x) => +x).filter((x) => Number.isFinite(x))) : null;
+const order = [...routes.entries()].filter(([ri]) => !idxSet || idxSet.has(ri));
+if (args.reverse === '1') order.reverse();
+for (const [ri, e] of order) {
 	if (ri % shN !== shI) continue;
 	if (args.limit && nR >= +args.limit) break;
 	if (args.only && !String(e.name).toLowerCase().includes(String(args.only).toLowerCase())) continue;
@@ -33,7 +38,7 @@ for (const [ri, e] of routes.entries()) {
 	const tq = Date.now();
 	let rl = null;
 	try { rl = R.createRouteLB(L, {}); } catch (err) { console.log(`  ERROR ${e.name}: ${err.message}`); continue; }
-	const rec = { name: e.name, source: e.source, route: path.basename(path.dirname(e.route)), run: tr.runTicks, complete: tr.complete, W: L.width, H: L.height };
+	const rec = { ri, name: e.name, source: e.source, route: path.basename(path.dirname(e.route)), run: tr.runTicks, complete: tr.complete, W: L.width, H: L.height };
 	// the start
 	const rb = rl.runBound({ ms });
 	rec.start = rb.lb; rec.startComplete = rb.complete; rec.order = (rb.order || []).slice(0, 12);
@@ -43,9 +48,12 @@ for (const [ri, e] of routes.entries()) {
 	const ticks = new Set();
 	try { for (const x of TS.routeEvents(L, tr.masks, { until: tr.complete }).events) if (x.tick < tr.complete) ticks.add(x.tick); } catch (err) { /* none */ }
 	for (let k = 1; k <= nStates; k++) ticks.add(Math.floor((tr.complete * k) / (nStates + 1)));
+	// (the tightest states: the last 4 ticks before the crown)
+	for (let k = 1; k <= 4; k++) ticks.add(tr.complete - k);
 	const list = [...ticks].filter((t) => t > 0 && t < tr.complete).sort((a, b) => a - b);
 	// (at most 60 states a route: the events of a long route are many)
-	const pick = list.length > 60 ? list.filter((t, i) => i % Math.ceil(list.length / 60) === 0) : list;
+	const pick0 = list.length > 60 ? list.filter((t, i) => i % Math.ceil(list.length / 60) === 0) : list;
+	const pick = [...new Set(pick0.concat(list.filter((x) => x >= tr.complete - 4)))].sort((a, b) => a - b);
 	const sim = new E.EESim(L), inp = new E.EEInput();
 	sim.reset();
 	let t = 0, worst = 0;
@@ -63,6 +71,24 @@ for (const [ri, e] of routes.entries()) {
 		if (left > 0 && b.lb / left > worst) worst = b.lb / left;
 	}
 	rec.worstRatio = Math.round(worst * 1000) / 1000;
+	// THE DENSE PART (--togo=1, the default): the cost-to-go field (togoFor, the cheap trigger values: the lattice geometry,
+	// the speed caps, the portals and the trophy's +1 at EVERY tick of the route)
+	if (args.togo !== '0') {
+		let rc = null;
+		try { rc = R.createRouteLB(L, { togoCheap: true }); } catch (err) { rc = null; }
+		if (rc) {
+			const s2 = new E.EESim(L), i2 = new E.EEInput(); s2.reset();
+			let tw = 0; rec.togoViol = 0; rec.togoChecks = 0;
+			for (let u = 0; u < tr.complete; u++) {
+				const left = tr.complete - u;
+				const v = rc.togoFor(s2); rec.togoChecks++;
+				if (v > left + 1e-9) { viol++; rec.togoViol++; if (rec.togoViol <= 3) console.log(`  VIOLATION togo ${e.name} (${e.source}) t${u}: ${v.toFixed(3)} > ${left} left; pos ${(s2.px / 16).toFixed(2)},${(s2.py / 16).toFixed(2)} v ${s2.speed_x.toFixed(2)},${s2.speed_y.toFixed(2)}`); }
+				if (left > 0 && v / left > tw) tw = v / left;
+				E.applyMask(i2, tr.masks[u]); s2.tick(i2);
+			}
+			rec.togoWorst = Math.round(tw * 1000) / 1000;
+		}
+	}
 	rec.ms = Date.now() - tq;
 	rec.stats = rl.stats();
 	if (out) fs.writeSync(out, JSON.stringify(rec) + '\n');

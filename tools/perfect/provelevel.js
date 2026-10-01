@@ -13,7 +13,7 @@ const file = process.argv.slice(2).find((a) => !a.startsWith('--'));
 (async () => {
 	const o = {
 		threads: +args.threads || 4, seconds: +args.seconds || 600, split: args.split !== undefined ? +args.split : 3, ttBits: +args.ttBits || 22,
-		field: args.field === '1',
+		field: args.field === 'full' ? 'full' : args.field === '1',
 		onProgress: (ev) => console.log(JSON.stringify(ev)),
 	};
 	if (args.route) o.route = C.readEetas(args.route);
