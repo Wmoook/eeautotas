@@ -193,7 +193,8 @@
 //        inputs; every path begins with them, only finds after the start state count; CPU cells only)]
 //        [--rooms=0|1 (an event "room" for every room the one search registers: its cause, the inputs; coarse cells)]
 //        [--pL=0.3 (head L, the one search once a route is known: the picks by the lead on the best route's schedule, its
-//        share by its yield: LEAD_GRACE_S)] [--lb=1 (the sound lower bound per tile prunes states: lowerBoundTiles)]
+//        share by its yield: LEAD_GRACE_S)] [--pW=0.3 (head W, once a route is known: of the picks head L leaves, the
+//        cells off the route's (room, tile) schedule by their key-blind lead: WAY_PICK; 0: off)] [--lb=1 (the sound lower bound per tile prunes states: lowerBoundTiles)]
 //        [--nice=0 (Linux: each worker THREAD lowers its own priority to this nice value; the main thread, the bursts'
 //        eegpu it starts and the editor's GPU tools keep theirs. The editor passes 10 next to GPU strategies; before, it
 //        reniced the whole process, so the one search's GPU bursts ran at nice 10 too, below every normal process of a
@@ -230,9 +231,16 @@ const SEED_EVERY = 30;
 // LEAD_FLOOR x --pL (Infinity Pain: head L's routes came 19 s after the first route and every few minutes after; Stupid
 // Fox: none in 15 min, while heads A / B found main's 7,680 -> 6,789 at 630-834 s: src/out/night/macro_fix.md)
 const LEAD_PICK = 20, LEAD_GRACE_S = 120, LEAD_HALF_S = 120, LEAD_FLOOR = 0.1;
+// head W (a route known, the path gap: another WAY): a cell at a (room, tile) the best route never passes (head L has no
+// lead for it) gets the KEY-BLIND lead = its tick - the route's first tick at that tile in any room (on time-door levels
+// at that tile in the cell's doors' phase bucket); WAY_PICK x sqrt(its picks): 25 picks cost 200 ticks of lead (a region
+// ahead but walled in by a door the route opened runs out sooner than head L's). --pW of the picks head L leaves. The
+// macro branch's A/B after the first route (cycle 6, 22 min, 5 workers, the A100's GPU 7): Stupid Fox 3,749 vs 6,114 run
+// ticks, Octorage 7,039 vs 7,194 (10 rooms vs 18); held in cycles 7-8 (Stupid Fox 3,592-3,934, Octorage 6,969-7,083)
+const WAY_PICK = 40;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
-	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, pL: 0.3, nice: 0,
+	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, pL: 0.3, pW: 0.3, nice: 0,
 	jumpP: 0, jumpNear: 0.75 };
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
 // its end closes this process's stdin, which stops the search); --bursts=1 (the one search's GPU operator, src/bursts.js)
@@ -896,24 +904,36 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	// On time-door levels the schedule is per (room, tile, the doors' phase bucket: the cell key's, --phase ticks): a lead
 	// then keeps the doors' phase (whole periods sooner, within a bucket), where by (room, tile) alone a cell "ahead" by a
 	// part of a period meets the doors the route passed open shut (Stupid Fox: leads of 625 and 1,351 ticks, doomed).
-	let sched = null;
+	// Head W (--pW of the picks head L leaves): a cell head L has no lead for (a (room, tile) the route never passes; on
+	// time-door levels, or not in that phase bucket) by its KEY-BLIND lead (tsched: per tile, and on time-door levels per
+	// (tile, phase bucket), the route's first tick there in any room; 0 never): a skipped room, another coin / switch subset
+	// or another path in a room that gets somewhere sooner than the best route did is pushed on, where head L sees nothing
+	let sched = null, tsched = null;
 	const TDL = coarse && !!L.hasTimeDoors, clock0 = sim.level_ticks(), NPH = Math.ceil(E.TIMEDOOR_PERIOD / a.phase);
 	const phaseOf = (lt) => ((lt % E.TIMEDOOR_PERIOD) / a.phase) | 0;
 	const leadHeap = () => heapOf((c) => c.lead + LEAD_PICK * Math.sqrt(c.picks));
+	const wayHeap = () => heapOf((c) => c.wlead + WAY_PICK * Math.sqrt(c.picks));
 	let HL = coarse && port ? leadHeap() : null;
+	let HW = coarse && port && a.pW > 0 ? wayHeap() : null;
 	const lpush = (c) => {
 		const v = sched.get(c.room.key * 2097152 + c.tile);
-		if (v === undefined) return;
-		const s = TDL ? v[phaseOf(clock0 + c.t)] : v;
-		if (s < 0) return;
-		c.lead = c.t - s;
-		HL.push(c);
+		const ph = TDL ? phaseOf(clock0 + c.t) : 0;
+		const s = v === undefined ? -1 : TDL ? v[ph] : v;
+		if (s >= 0) {
+			if (a.pL > 0) { c.lead = c.t - s; HL.push(c); }
+			return;
+		}
+		if (HW === null) return;
+		const w = tsched[TDL ? c.tile * NPH + ph : c.tile];
+		if (w === 0) return;
+		c.wlead = c.t - w;
+		HW.push(c);
 	};
 	// (head L's share now: see LEAD_GRACE_S; lastL: the first route's or head L's last faster route's time)
 	let lastL = 0, lShare = 0, pickL = false;
 	const leadShare = (now) => (sched === null || a.pL <= 0 ? 0 : a.pL * Math.max(LEAD_FLOOR, Math.pow(0.5, Math.max(0, (now - lastL) / 1000 - LEAD_GRACE_S) / LEAD_HALF_S)));
 	const hpush = HS ? (c) => { HA.push(c); HS.push(c); if (sched !== null) lpush(c); } : (c) => { HA.push(c); if (sched !== null) lpush(c); };
-	const compact = () => { HA.compact(); if (HS) HS.compact(); if (HL) HL.compact(); };
+	const compact = () => { HA.compact(); if (HS) HS.compact(); if (HL) HL.compact(); if (HW) HW.compact(); };
 	/** the steer cost of the live state (tiles; STEER_NONE when it has no value) */
 	const steerOf = () => { const v = SF.steerFifths(ST, sim); return v < 0 ? STEER_NONE : v / 5; };
 	// (--steerDist: the closest attempt's and the sources' distances by the steer field, at most STEER_REAL_MAX; 6000 + the
@@ -932,7 +952,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	// the memory budget (see the header): the archive's bytes as its structures change, the snapshots in what it leaves
 	const budget = mem * 1048576, capA = ARCHIVE_SHARE * budget, BLK = B_BLOCK + a.rolls * a.roll;
 	let nNodes = 0, nBlocks = 0, xBytes = 0;   // (xBytes: the imported runs' inputs past a pick's block of rolls x roll)
-	const archiveBytes = () => cells.size * (ST ? B_CELL + B_SC : B_CELL) + (HA.size() + (HS ? HS.size() : 0) + (HL ? HL.size() : 0)) * B_HEAPE + nNodes * B_NODE + nBlocks * BLK + xBytes +
+	const archiveBytes = () => cells.size * (ST ? B_CELL + B_SC : B_CELL) + (HA.size() + (HS ? HS.size() : 0) + (HL ? HL.size() : 0) + (HW ? HW.size() : 0)) * B_HEAPE + nNodes * B_NODE + nBlocks * BLK + xBytes +
 		roomList.length * B_ROOM + (queue.length - qh) * B_QUEUE + (fields !== null ? fields.bytes() : 0);
 	const memBytes = () => archiveBytes() + nSnaps * B_SNAP;
 	/** room for a new cell: --maxCells and the archive's share (else the next sweep makes some) */
