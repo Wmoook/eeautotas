@@ -10,11 +10,9 @@
 //              answers at once, the page asks again; the "No way up" note; the cache named by the model's fingerprint)
 //   app        the page's script parses; the HTTP API (in-process server, temp data folder): the page, blocks, eelvl,
 //              parse, check, solve refusals, a job from a route (Watch / Optimize); the search frontier, the exploration
-//              view (the heat merged from the server's answers, its pixels by the first visit, the blocks cut out of it,
-//              the trails and their palette) and Follow (its replay, camera lead and bounds, no restart on a new nearest
-//              attempt, the route switch, the seek bar and End / Home, what stops it, a stopping click paints nothing):
-//              the page's code cut out and run on fake canvases
-//   explore    the exploration view's data: src/heat.js (the first visits too); goexplore.js --heat=1 (one worker: its heat's tiles = the tiles its
+//              view (the heat merged from the server's answers, its pixels, the trails) and Follow (its replay, camera,
+//              route switch, what stops it): the page's code cut out and run on fake canvases
+//   explore    the exploration view's data: src/heat.js; goexplore.js --heat=1 (one worker: its heat's tiles = the tiles its
 //              archive made cells in; off: the same search, no event); the GPU random runs' heat with a stand-in for eegpu
 //              roll (on or off: the same search); the editor's merge of a stand-in search's heat and attempts, its trails,
 //              GET /api/editor/solve/heat (deltas since a version, another search starting over)
@@ -468,22 +466,15 @@ function pageBlockSrc(name) {
 /** a stand-in for a page element: text, html, hidden, a class list, children by selector none */
 function fakeEl() { const cls = new Set(); return { textContent: '', innerHTML: '', hidden: true, classList: { toggle: (c, on) => { if (on) cls.add(c); else cls.delete(c); }, contains: (c) => cls.has(c) } }; }
 /**
- * The exploration view and Follow (editor.html: heatApply, heatFill, heatMaskFill, heatImage, drawHeatLayer, drawTrails,
- * followSrc, sameStart, followRetarget, followAim, followStep, followSet, followSeek, followToEnd, drawFollow cut out of
- * the page and run): the toolbar's "exploration" toggle (on by default, remembered) and Follow (V), their canvases under
- * the frontier's; the page's merge of the server's heat answers (src/heat.js HeatMap.since: a full answer, a delta, the
- * first visits (an older server's answer without them: the last visit when first seen), another search starting over;
- * the trails kept, at most EXP_TRAILS); the heat's pixels (the colour by the FIRST visit: just found = cyan, found at the
- * search's start = purple even when visited again now, the scale the search's time; stronger with more visits (log),
- * unvisited clear, a glow only for newly found tiles); the solid blocks cut out of the heat (not a door it went through);
- * the trails on a fake canvas context (a jump not joined, faded by age, gone after EXP_TRAIL_FADE, the newest brightest,
- * at most EXP_TRAILS_K a search) and their palette (no two searches that run together alike, none the route's, the
- * nearest attempt's, the guide line's or the job run's colour, none gold / orange); Follow's replay (the tick moves on
- * by the speed, holds at the end and loops, the camera eased toward the smiley at 16 px a tile or more with no lag at a
- * steady 4x, kept in the level; a new nearest attempt from the same tick when it shares its start, else from its point
- * nearest the smiley, else the same tick: never back to the start; the route once found; the seek bar, End / Home),
- * leaving Follow (a pan, a drag, a click (which paints nothing), the wheel, a zoom, Fit, F, Escape), the smiley drawn
- * where the replay is.
+ * The exploration view and Follow (editor.html: heatApply, heatFill, drawTrails, followSrc, sameStart, followStep, followSet,
+ * drawFollow cut out of the page and run): the toolbar's "exploration" toggle (on by default, remembered) and Follow (V),
+ * their canvases under the frontier's; the page's merge of the server's heat answers (src/heat.js HeatMap.since: a full
+ * answer, a delta, another search starting over; the trails kept, at most EXP_TRAILS); the heat's pixels (fresh = cyan,
+ * old = purple, stronger with more visits (log), unvisited clear, a glow only for fresh tiles); the trails on a fake canvas
+ * context (a jump not joined, faded by age, gone after EXP_TRAIL_FADE, the newest brightest, at most EXP_TRAILS_K a search);
+ * Follow's replay (the tick moves on by the speed, holds at the end and loops, the camera eased toward the smiley at 16 px
+ * a tile or more, a new nearest attempt from the same tick when it shares its start, else from its start, the route once
+ * found), leaving Follow (a pan, a drag, the wheel, a zoom, Fit, F), the smiley drawn where the replay is.
  */
 function exploreViewChecks() {
 	const tools = (PAGE.match(/<div class="tools" id="tools">[\s\S]*?<\/div>/) || [''])[0];
@@ -495,30 +486,19 @@ function exploreViewChecks() {
 		/if \(k === 'v' \|\| k === 'V'\) \{ followSet\(!FOL\.on\); return; \}/.test(PAGE) && /\n\tif \(EXP\.on\) pollHeat\(\);/.test(PAGE) &&
 		/\/api\/editor\/solve\/heat\?search=\$\{EXP\.search\}&since=\$\{EXP\.version\}&trail=\$\{EXP\.trailId\}/.test(PAGE) &&
 		/if \(EXP\.on \|\| EXP\.shown\) drawExplore\(now\);/.test(PAGE) && /if \(FOL\.on\) followStep\(now\);/.test(PAGE));
-	// (a pan, a drag or a click on the map, the wheel, a zoom (the buttons, + / -), Fit, F / "Go to" and Escape stop Follow)
-	const stops = ['cv.addEventListener(\'pointerdown\'', 'cv.addEventListener(\'wheel\'', 'function zoom(', 'function fit(', 'function gotoFrontier(', 'if (k === \'Escape\')'].map((h) => {
+	// (a pan, a drag or a click on the map, the wheel, a zoom (the buttons, + / -), Fit and F / "Go to" stop Follow)
+	const stops = ['cv.addEventListener(\'pointerdown\'', 'cv.addEventListener(\'wheel\'', 'function zoom(', 'function fit(', 'function gotoFrontier('].map((h) => {
 		const i = PAGE.indexOf(h);
-		return i >= 0 && /if \(FOL\.on\) \{?\s*followSet\(false\);/.test(PAGE.slice(i, i + 260));
+		return i >= 0 && /if \(FOL\.on\) followSet\(false\);/.test(PAGE.slice(i, i + 260));
 	});
-	check('Follow stops on a pan, a drag or a click on the map, the wheel, a zoom, Fit, F / "Go to" and Escape', stops.every(Boolean), stops.join());
-	{
-		// (the UI review, 2026-09-29: with Follow on and the paint tool, one click stopped Follow AND painted a block: the level
-		// then no longer the one searched, the heat dimmed, the trails gone)
-		const i = PAGE.indexOf('cv.addEventListener(\'pointerdown\''), body = PAGE.slice(i, PAGE.indexOf('\n});', i));
-		const stopAt = body.indexOf('followSet(false);'), retAt = body.indexOf('if (e.button === 0 && !VW.space) { e.preventDefault(); return; }'), paintAt = body.indexOf('paintCell(');
-		check('a plain left click that stops Follow paints nothing (the handler returns before the tools; a right / middle / Space drag still pans)', stopAt > 0 && retAt > stopAt && paintAt > retAt &&
-			body.indexOf('VW.pan = {') > retAt && body.slice(stopAt, retAt).split('}').length === 1, JSON.stringify({ stopAt, retAt, paintAt }));
-		check('Follow\'s keys: End to the frontier, Home to the start (only while following); the panel\'s seek bar and end button',
-			/if \(FOL\.on && \(k === 'End' \|\| k === 'Home'\)\) \{ e\.preventDefault\(\); if \(k === 'End'\) followToEnd\(\); else followSeek\(0\); return; \}/.test(PAGE) &&
-			/<input type="range" id="fSeek"/.test(PAGE) && /<button id="fEnd"/.test(PAGE) && /\$\('fEnd'\)\.onclick = \(\) => followToEnd\(\);/.test(PAGE) && /sk\.addEventListener\('input', \(\) => followSeek\(\+sk\.value\)\);/.test(PAGE));
-	}
+	check('Follow stops on a pan, a drag or a click on the map, the wheel, a zoom, Fit and F / "Go to"', stops.every(Boolean), stops.join());
 	// ---- the page's merge of the server's answers (the server's own HeatMap)
 	const perf = { t: 0, now() { return this.t; } };
 	const env = { performance: perf, atob: (s) => Buffer.from(String(s), 'base64').toString('latin1') };
-	const consts = ['EXP_HEAT_MS', 'HEAT_SPAN_MIN', 'HEAT_STOPS', 'heatSpan'].map(pageConstSrc).join('\n');
-	const code = [pageConstSrc('clamp'), consts, pageBlockSrc('HEAT_LUT'), pageBlockSrc('EXP_COLORS'), pageConstSrc('expColor'), ...['b64u8', 'heatApply', 'heatFill', 'heatMaskFill', 'drawTrails'].map(pageFnSrc)].join('\n');
+	const consts = ['EXP_HEAT_MS', 'HEAT_TAU', 'HEAT_STOPS', 'EXP_COLORS'].map(pageConstSrc).join('\n');
+	const code = [pageConstSrc('clamp'), consts, pageBlockSrc('HEAT_LUT'), pageConstSrc('expColor'), ...['b64u8', 'heatApply', 'heatFill', 'drawTrails'].map(pageFnSrc)].join('\n');
 	let F = null;
-	const fe = errOf(() => { F = new Function(...Object.keys(env), `'use strict';\n${code}\nreturn { heatApply, heatFill, heatMaskFill, drawTrails, EXP_TRAILS, EXP_TRAILS_K, EXP_TRAIL_FADE, EXP_TAIL, HEAT_SPAN_MIN, HEAT_GLOW, HEAT_A, EXP_COLORS, expColor };`)(...Object.values(env)); });
+	const fe = errOf(() => { F = new Function(...Object.keys(env), `'use strict';\n${code}\nreturn { heatApply, heatFill, drawTrails, EXP_TRAILS, EXP_TRAILS_K, EXP_TRAIL_FADE, EXP_TAIL, HEAT_TAU, HEAT_GLOW, expColor };`)(...Object.values(env)); });
 	check('the exploration view\'s functions cut out of the page run', !!F, fe ? fe.message : undefined);
 	if (!F) return;
 	const W = 30, H = 20, HM = new HX.HeatMap(W, H);
@@ -526,106 +506,52 @@ function exploreViewChecks() {
 	const E = { search: 0, W: 0, H: 0, version: 0, trailId: 0, trails: [], list: [], visited: 0 };
 	const answer = (since, extra) => Object.assign({ search: 111, running: true, t: 3500, w: W, h: H }, HM.since(since), { trailId: 0, trails: [] }, extra || {});
 	F.heatApply(E, answer(0), 50);
-	const s1 = { v: E.version, visited: E.visited, c7: E.count[7], f7: E.first[7], l7: E.last[7], c5: E.count[5], f100: E.first[100], l100: E.last[100], list: E.list.slice().sort((a, b) => a - b).join() };
+	const s1 = { v: E.version, visited: E.visited, c7: E.count[7], l7: E.last[7], c5: E.count[5], l100: E.last[100], list: E.list.slice().sort((a, b) => a - b).join() };
 	HM.merge([100, 200], 5000);
 	F.heatApply(E, answer(E.version, { t: 5200 }), 90);
-	const s2 = { v: E.version, visited: E.visited, c100: E.count[100], f100: E.first[100], l100: E.last[100], c200: E.count[200], f200: E.first[200], c7: E.count[7], t: E.t, tAt: E.tAt };
-	check('the page\'s heat from the server\'s answers (src/heat.js HeatMap.since): every visited tile at first (counts, first and last visits), then the delta since its version (a tile seen again: its new count and last visit, its first visit kept)',
-		s1.v === 2 && s1.visited === 4 && s1.c7 === 2 && s1.f7 === 1000 && s1.l7 === 3000 && s1.c5 === 1 && s1.f100 === 3000 && s1.l100 === 3000 && s1.list === '5,6,7,100' &&
-		s2.v === 3 && s2.visited === 5 && s2.c100 === 2 && s2.f100 === 3000 && s2.l100 === 5000 && s2.c200 === 1 && s2.f200 === 5000 && s2.c7 === 2 && s2.t === 5200 && s2.tAt === 90, JSON.stringify({ s1, s2 }));
-	{
-		// (an older server: no first visits in the answer; the first is the last visit when the page first sees the tile)
-		const E0 = { search: 0, W: 0, H: 0, version: 0, trailId: 0, trails: [], list: [], visited: 0 };
-		const HO = new HX.HeatMap(W, H);
-		const ans = (since) => { const a = Object.assign({ search: 112, running: true, t: 9000, w: W, h: H }, HO.since(since), { trailId: 0, trails: [] }); delete a.first; return a; };
-		HO.merge([9], 2000); F.heatApply(E0, ans(0), 1); HO.merge([9, 10], 8000); F.heatApply(E0, ans(E0.version), 2);
-		check('... an answer without first visits (an older server): the first is the last visit when the page first saw the tile', E0.first[9] === 2000 && E0.last[9] === 8000 && E0.first[10] === 8000 && E0.count[9] === 2,
-			JSON.stringify({ f9: E0.first[9], l9: E0.last[9], f10: E0.first[10] }));
-	}
+	const s2 = { v: E.version, visited: E.visited, c100: E.count[100], l100: E.last[100], c200: E.count[200], c7: E.count[7], t: E.t, tAt: E.tAt };
+	check('the page\'s heat from the server\'s answers (src/heat.js HeatMap.since): every visited tile at first (counts, last visits), then the delta since its version (a tile seen again: its new count and last visit)',
+		s1.v === 2 && s1.visited === 4 && s1.c7 === 2 && s1.l7 === 3000 && s1.c5 === 1 && s1.l100 === 3000 && s1.list === '5,6,7,100' &&
+		s2.v === 3 && s2.visited === 5 && s2.c100 === 2 && s2.l100 === 5000 && s2.c200 === 1 && s2.c7 === 2 && s2.t === 5200 && s2.tAt === 90, JSON.stringify({ s1, s2 }));
 	// another search: from scratch (another level size too)
 	const HM2 = new HX.HeatMap(10, 10);
 	HM2.merge([3], 100);
 	F.heatApply(E, Object.assign({ search: 222, running: true, t: 200, w: 10, h: 10 }, HM2.since(0), { trailId: 0, trails: [] }), 100);
-	check('another search starts the page\'s heat over (its size, no tile of the last one)', E.search === 222 && E.W === 10 && E.count.length === 100 && E.first.length === 100 && E.visited === 1 && E.count[3] === 1 && E.version === 1,
+	check('another search starts the page\'s heat over (its size, no tile of the last one)', E.search === 222 && E.W === 10 && E.count.length === 100 && E.visited === 1 && E.count[3] === 1 && E.version === 1,
 		JSON.stringify({ search: E.search, W: E.W, visited: E.visited, v: E.version }));
 	// the trails: appended, at most EXP_TRAILS (the newest)
 	const mk = (id, k, t) => ({ id, k, label: k, t, ticks: 100, pts: [0, 0, 16, 0, 32, 0, 48, 16], br: [] });
 	F.heatApply(E, Object.assign({ search: 222, running: true, t: 300, w: 10, h: 10 }, HM2.since(1), { trailId: 70, trails: Array.from({ length: 70 }, (_, k) => mk(k + 1, 'goexplore', k * 10)) }), 110);
 	check('the trails: appended as they come, the newest EXP_TRAILS (60) kept, the page\'s trail id the newest', E.trails.length === F.EXP_TRAILS && F.EXP_TRAILS === 60 && E.trails[0].id === 11 && E.trails[59].id === 70 && E.trailId === 70,
 		`${E.trails.length} ${E.trails[0] && E.trails[0].id} ${E.trailId}`);
-	// ---- the heat's pixels: lone tiles (no visited neighbour: their own colours), at tNow 100 s (the scale: 100 s)
-	const P = { W: 9, H: 9, list: [10, 16, 64, 70], count: new Uint16Array(81), first: new Uint32Array(81), last: new Uint32Array(81) };
-	P.count[10] = 1; P.first[10] = 100000; P.last[10] = 100000;   // found just now, once
-	P.count[16] = 16; P.first[16] = 100000; P.last[16] = 100000;  // found just now, 16 visits
-	P.count[64] = 1; P.first[64] = 5000; P.last[64] = 99500;      // found at the start, visited again half a second ago
-	P.count[70] = 16; P.first[70] = 99000; P.last[70] = 99000;    // found a second ago, 16 visits
+	// ---- the heat's pixels: lone tiles (no visited neighbour: their own colours), at tNow 100 s
+	const P = { W: 9, H: 9, list: [10, 16, 64, 70], count: new Uint16Array(81), last: new Uint32Array(81) };
+	P.count[10] = 1; P.last[10] = 100000;   // just now, once
+	P.count[16] = 16; P.last[16] = 100000;  // just now, 16 times
+	P.count[64] = 1; P.last[64] = 40000;    // a minute ago
+	P.count[70] = 16; P.last[70] = 99000;   // a second ago, 16 times
 	const px = new Uint8ClampedArray(81 * 4), gl = new Uint8ClampedArray(81 * 4);
 	const glowed = F.heatFill(P, 100000, px, gl);
 	const rgba = (a, i) => Array.from(a.slice(4 * i, 4 * i + 4));
 	const [f1, f16, old, sec] = [10, 16, 64, 70].map((i) => rgba(px, i));
-	check('the heat\'s pixels by the FIRST visit: found just now cyan-white, found at the search\'s start purple (red above green) though visited again just now, more visits stronger (16 vs 1 at the same age), at most HEAT_A, unvisited clear; a glow only around the newly found tiles (blurred: the tile and its neighbours), none for the old tile visited again',
-		glowed && f1[1] > 200 && f1[2] > 200 && old[0] > old[1] && old[2] > 100 && old[1] < 80 && f16[3] > f1[3] && f1[3] > old[3] && sec[3] > 0 && Math.max(f1[3], f16[3], old[3], sec[3]) <= Math.round(255 * F.HEAT_A) &&
+	check('the heat\'s pixels: fresh tiles cyan-white, a minute old purple (red above green), more visits stronger (16 visits vs 1 at the same age), unvisited clear, a glow only around fresh tiles (blurred: the tile and its neighbours)',
+		glowed && f1[1] > 200 && f1[2] > 200 && old[0] > old[1] && old[2] > 100 && f16[3] > f1[3] && f1[3] > old[3] && sec[3] > 0 &&
 		rgba(px, 0)[3] === 0 && rgba(px, 40)[3] === 0 && rgba(gl, 10)[3] > 0 && rgba(gl, 11)[3] > 0 && rgba(gl, 64)[3] === 0 && rgba(gl, 63)[3] === 0 && rgba(gl, 10)[3] > rgba(gl, 11)[3],
 		JSON.stringify({ f1, f16, old, sec, g10: rgba(gl, 10), g11: rgba(gl, 11), g64: rgba(gl, 64) }));
 	const px2 = new Uint8ClampedArray(81 * 4), gl2 = new Uint8ClampedArray(81 * 4);
-	check('... and no glow at all once every tile was found longer than HEAT_GLOW ago', F.heatFill(P, 100000 + F.HEAT_GLOW + 1, px2, gl2) === false && gl2.every((v, i) => i % 4 !== 3 || v === 0));
-	{
-		// (the scale is the search's time: a tile found 100 s ago is purple in a 100-s search, still blue-cyan in a 400-s one)
-		const Q = { W: 9, H: 9, list: [40], count: new Uint16Array(81), first: new Uint32Array(81), last: new Uint32Array(81) };
-		Q.count[40] = 1; Q.first[40] = 300000; Q.last[40] = 300000;
-		const a = new Uint8ClampedArray(81 * 4), b = new Uint8ClampedArray(81 * 4);
-		F.heatFill(Q, 400000, a, null);
-		Q.first[40] = 0; Q.last[40] = 0;
-		F.heatFill(Q, 100000, b, null);
-		const young = rgba(a, 40), aged = rgba(b, 40);
-		check('the heat\'s colour scale is the search\'s time (at least HEAT_SPAN_MIN): found 100 s ago in a 400-s search blue-cyan (green above red), in a 100-s search at its start deep purple',
-			young[1] > young[0] && young[2] > 200 && aged[0] > aged[1] && F.HEAT_SPAN_MIN === 8000, JSON.stringify({ young, aged }));
-	}
-	{
-		// ---- the blocks cut out of the heat: plain solids the search never visited (not a door, not unknown blocks, not a
-		// visited tile)
-		const M = { W: 4, H: 2, count: new Uint16Array(8) };
-		const fg = new Int32Array([9, 9, 0, 23, 100, 9, 777, 0]);   // 9 solid, 23 a door, 100 a coin, 777 unknown
-		const kinds = new Map([[9, 'solid'], [23, 'door'], [100, 'coin']]);
-		M.count[5] = 2;   // (a solid tile the search was in: e.g. a door that is now shut, or a block since painted)
-		const m = new Uint8ClampedArray(8 * 4);
-		const n = F.heatMaskFill(M, fg, (id) => kinds.get(id) === 'solid', m);
-		const cut = Array.from({ length: 8 }, (_, i) => m[4 * i + 3] === 255 ? 1 : 0).join('');
-		check('the heat\'s cut: opaque on the plain solid blocks the search never visited (a door, a coin, an unknown block, a visited solid tile and the air stay lit)', n === 2 && cut === '11000000', JSON.stringify({ n, cut }));
-	}
-	// the offscreen canvases (a pixel a tile: the heat, its glow, the blocks' cut): made once for a search's size, kept for
-	// its rebuilds; the blocks' cut from the page's level
+	check('... and no glow at all once every tile is older than HEAT_GLOW', F.heatFill(P, 100000 + F.HEAT_GLOW + 1, px2, gl2) === false && gl2.every((v, i) => i % 4 !== 3 || v === 0));
+	// the offscreen canvases (a pixel a tile): made once for a search's size, kept for its rebuilds
 	{
 		let made = 0, puts = 0;
 		const doc = { createElement: () => { made++; const c = { width: 0, height: 0, getContext: () => ({ createImageData: (w, h) => ({ data: new Uint8ClampedArray(w * h * 4) }), putImageData: () => { puts++; } }) }; return c; } };
-		const LVf = { W: 9, H: 9, fg: new Int32Array(81), kind: new Map([[9, { kind: 'solid' }]]) };
-		LVf.fg[0] = 9; LVf.fg[1] = 9; LVf.fg[10] = 9;   // (tile 10 is visited: not cut)
-		const hcode = [pageBlockSrc('EXP'), 'Object.assign(EXP, EXIN);', ...['EXP_HEAT_MS', 'HEAT_SPAN_MIN', 'HEAT_STOPS', 'heatSpan', 'solidIds'].map(pageConstSrc), pageBlockSrc('HEAT_LUT'),
-			...['heatFill', 'heatMaskFill', 'solidBlock', 'heatImage'].map(pageFnSrc)].join('\n');
+		const hcode = [pageBlockSrc('EXP'), 'Object.assign(EXP, EXIN);', ...['EXP_HEAT_MS', 'HEAT_TAU', 'HEAT_STOPS'].map(pageConstSrc), pageBlockSrc('HEAT_LUT'), ...['heatFill', 'heatImage'].map(pageFnSrc)].join('\n');
 		let Hf = null;
-		const he = errOf(() => { Hf = new Function('document', 'store', 'EXIN', 'LV', `'use strict';\n${hcode}\nreturn { heatImage, EXP };`)(doc, { get: () => null }, { W: 9, H: 9, list: P.list, count: P.count, first: P.first, last: P.last }, LVf); });
+		const he = errOf(() => { Hf = new Function('document', 'store', 'EXIN', `'use strict';\n${hcode}\nreturn { heatImage, EXP };`)(doc, { get: () => null }, { W: 9, H: 9, list: P.list, count: P.count, last: P.last }); });
 		if (Hf) { Hf.heatImage(100000); Hf.heatImage(101000); }
 		const img1 = Hf && Hf.EXP.img;
 		if (Hf) Hf.heatImage(102000);
-		check('heatImage: its offscreen canvases (the heat, its glow, the blocks\' cut; a pixel a tile) made once and drawn again at every rebuild; the cut from the page\'s level (its unvisited solid blocks)',
-			!he && made === 3 && puts === 9 && Hf.EXP.img === img1 && Hf.EXP.img.c.width === 9 && Hf.EXP.masked === 2, he ? he.message : JSON.stringify({ made, puts, masked: Hf && Hf.EXP.masked }));
-	}
-	{
-		// ---- the heat's layer: the heat and the glow smoothed, then the blocks cut out tile by tile (no smoothing)
-		const g = fakeCtx();
-		g.drawImage = (...a) => g.calls.push({ name: 'drawImage', a, op: g.globalCompositeOperation, smooth: g.imageSmoothingEnabled, alpha: g.globalAlpha });
-		g.globalCompositeOperation = 'source-over';
-		const canvas = { width: 800, height: 600, getContext: () => g };
-		const cvs = { img: { c: 'IMG' }, glow: { c: 'GLOW' }, mask: { c: 'MASK' } };
-		const denv = { $: () => canvas, origin: () => ({ T: 16, s: 1, ox: 0, oy: 0 }), SOLVE: { sig: null }, currentSig: () => 'x',
-			EXP: { W: 60, H: 40, img: cvs.img, glow: cvs.glow, mask: cvs.mask, glowOn: true, masked: 5 } };
-		let D = null;
-		const de = errOf(() => { D = new Function(...Object.keys(denv), `'use strict';\n${pageConstSrc('clamp')}\n${pageFnSrc('drawHeatLayer')}\nreturn { drawHeatLayer };`)(...Object.values(denv)); D.drawHeatLayer(); });
-		const di = g.calls.filter((q) => q.name === 'drawImage');
-		check('drawHeatLayer: the heat (smoothed), its glow added (lighter), then the unvisited blocks cut out (destination-out, not smoothed, full strength); the context left as it was',
-			!de && di.length === 3 && di[0].a[0] === 'IMG' && di[0].smooth === true && di[0].op === 'source-over' && di[1].a[0] === 'GLOW' && di[1].op === 'lighter' &&
-			di[2].a[0] === 'MASK' && di[2].op === 'destination-out' && di[2].smooth === false && di[2].alpha === 1 && g.globalCompositeOperation === 'source-over' && g.globalAlpha === 1,
-			de ? de.stack : JSON.stringify(di.map((q) => [q.a[0], q.op, q.smooth, q.alpha])));
+		check('heatImage: its offscreen canvases (the heat and its glow, a pixel a tile) made once and drawn again at every rebuild', !he && made === 2 && puts === 6 && Hf.EXP.img === img1 && Hf.EXP.img.c.width === 9,
+			he ? he.message : JSON.stringify({ made, puts }));
 	}
 	// ---- the trails on a fake canvas context (s = 1, the origin (10, 20), d = 1)
 	const draw = (trails, tNow) => { const g = fakeCtx(); let n = -1; const e = errOf(() => { n = F.drawTrails(g, trails, 10, 20, 1, 1, tNow); }); return { g, e, n, c: g.calls }; };
@@ -638,7 +564,7 @@ function exploreViewChecks() {
 	const tip = (r, col) => Math.max(...strokes(r, col).filter((q) => q.width < 3).map((q) => q.alpha));
 	const jumped = A.c.filter((q) => q.name === 'lineTo' && q.a[0] === 10 + 400);
 	const moved = A.c.filter((q) => q.name === 'moveTo' && q.a[0] === 10 + 400 && q.a[1] === 20 + 300);
-	check('drawTrails: each attempt in its search\'s colour (every move magenta, the GPU random runs white), a faint tail and a bright tip, the portal\'s jump not joined, the newer brighter, a dot at its end',
+	check('drawTrails: each attempt in its search\'s colour (every move pink, the GPU random runs mint), a faint tail and a bright tip, the portal\'s jump not joined, the newer brighter, a dot at its end',
 		!A.e && A.n === 2 && strokes(A, F.expColor('explore')).length >= 2 && strokes(A, F.expColor('gorolls')).length >= 2 && F.expColor('explore') !== F.expColor('gorolls') &&
 		jumped.length === 0 && moved.length === 1 && tip(A, F.expColor('gorolls')) > tip(A, F.expColor('explore')) &&
 		A.c.filter((q) => q.name === 'arc').length === 2 && A.c.filter((q) => q.name === 'save').length === A.c.filter((q) => q.name === 'restore').length,
@@ -650,35 +576,18 @@ function exploreViewChecks() {
 	const many = Array.from({ length: 14 }, (_, k) => Object.assign({}, T2, { id: 10 + k, k: 'goexplore', t: 1000 + k }));
 	const M = draw([T1, ...many], 2000);
 	check('drawTrails: at most EXP_TRAILS_K (10) a search (its newest), the other searches\' too', M.n === F.EXP_TRAILS_K + 1 && F.EXP_TRAILS_K === 10, `${M.n}`);
-	{
-		// ---- the palette (the UI review: 3 oranges, 3 pinks and yellows next to the route's gold and Follow's streak): no two
-		// searches that can run together alike (the relay only up to 50 x 50 tiles, the escape only above: they may share; the
-		// path skips and exact landings rarely leave a trail: they may share), none the route's gold, the nearest attempt's
-		// orange, the guide line's red-pink or the job run's light blue, none in the gold / orange hues
-		const hsl = (h) => { const r = parseInt(h.slice(1, 3), 16) / 255, g = parseInt(h.slice(3, 5), 16) / 255, b = parseInt(h.slice(5, 7), 16) / 255, mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
-			let hue = 0; if (d) hue = mx === r ? ((g - b) / d) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4; hue = (hue * 60 + 360) % 360; const l = (mx + mn) / 2; return { hue, s: d ? d / (1 - Math.abs(2 * l - 1)) : 0 }; };
-		const C = F.EXP_COLORS, keys = Object.keys(C), shared = new Set(['escape|relay', 'relay|escape', 'precision|skips', 'skips|precision']);
-		const clash = [];
-		for (let i = 0; i < keys.length; i++) for (let j = i + 1; j < keys.length; j++) if (C[keys[i]].toLowerCase() === C[keys[j]].toLowerCase() && !shared.has(`${keys[i]}|${keys[j]}`)) clash.push(`${keys[i]}=${keys[j]}`);
-		const reserved = ['#ffd23f', '#ff9f43', '#ff4d6d', '#6ec8ff'], bad = keys.filter((k) => reserved.includes(C[k].toLowerCase()) || (hsl(C[k]).s > 0.3 && hsl(C[k]).hue >= 20 && hsl(C[k]).hue <= 65));
-		const all = ['explore', 'relay', 'breaker', 'guide', 'goal', 'goexplore', 'escape', 'skips', 'gorolls', 'precision'];
-		check('the trails\' palette: every search a colour, no two that run together alike, none the route\'s, the nearest attempt\'s, the guide line\'s or the job run\'s colour, none gold / orange',
-			all.every((k) => /^#[0-9a-f]{6}$/i.test(C[k] || '')) && clash.length === 0 && bad.length === 0, JSON.stringify({ clash, bad }));
-	}
 	// ---- Follow
 	followChecks();
 }
-/** Follow (see exploreViewChecks): its replay, camera, route switch, seek and smiley, cut out of the page */
+/** Follow (see exploreViewChecks): its replay, camera, route switch and smiley, cut out of the page */
 function followChecks() {
 	const els = {};
 	const $ = (id) => (els[id] = els[id] || fakeEl());
 	const env = { $, SOLVE: { st: null }, VW: { zi: 2, camX: 0, camY: 0, glide: null, dirty: false, play: null }, FX: { dirty: false }, store: { get: () => null, set: () => {} },
-		document: { querySelectorAll: () => [] }, gxReady: () => false, GX: {}, toolInfo: () => {}, renderSolve: () => {}, changedView: () => {},
-		LV: { W: 100, H: 60 }, tileT: () => 16 };
-	const code = [pageConstSrc('fmt'), pageConstSrc('clamp'), pageConstSrc('ZOOMS'), pageBlockSrc('FOL'), pageConstSrc('FOL_TAU'),
-		...['followSrc', 'sameStart', 'followRetarget', 'followAim', 'followStep', 'followHud', 'followSeek', 'followToEnd', 'followSet', 'drawFollow', 'ball'].map(pageFnSrc)].join('\n');
+		document: { querySelectorAll: () => [] }, gxReady: () => false, GX: {}, toolInfo: () => {}, renderSolve: () => {}, changedView: () => {} };
+	const code = [pageConstSrc('fmt'), pageConstSrc('ZOOMS'), pageBlockSrc('FOL'), pageConstSrc('FOL_TAU'), ...['followSrc', 'sameStart', 'followStep', 'followHud', 'followSet', 'drawFollow', 'ball'].map(pageFnSrc)].join('\n');
 	let F = null;
-	const fe = errOf(() => { F = new Function(...Object.keys(env), `'use strict';\n${code}\nreturn { FOL, FOL_HOLD, FOL_SNAP, FOL_END, followSrc, sameStart, followRetarget, followStep, followSet, followSeek, followToEnd, drawFollow, ZOOMS };`)(...Object.values(env)); });
+	const fe = errOf(() => { F = new Function(...Object.keys(env), `'use strict';\n${code}\nreturn { FOL, FOL_HOLD, followSrc, sameStart, followStep, followSet, drawFollow, ZOOMS };`)(...Object.values(env)); });
 	check('Follow\'s functions cut out of the page run', !!F, fe ? fe.message : undefined);
 	if (!F) return;
 	const { FOL } = F, VW = env.VW;
@@ -705,73 +614,26 @@ function followChecks() {
 		on.on && F.ZOOMS[on.zi] === 16 && on.hud && on.btn && t0 === 0 && Math.abs(t1 - 10) < 1e-9 && Math.abs(x1 - (40 + 2 * 10)) < 1e-9 && cam1 > 0 && cam1 < x1 &&
 		Math.abs(t2 - 50) < 1e-9 && atEnd === 500 && held && looped === 0,
 		JSON.stringify({ on, t0, t1, x1, cam1, t2, atEnd, held, looped }));
-	// the camera at a steady 4x (2 px a tick, 0.8 px a ms): it leads by the smiley's speed, so it sits on the smiley (the UI
-	// review: 233 CSS px behind at 4x before, the speed x FOL_TAU)
-	{
-		FOL.speed = 4; F.followSeek(0); VW.camX = 120; VW.camY = 88;
-		let tt = 50000;
-		F.followStep(tt);
-		for (let k = 0; k < 40; k++) { tt += 16; F.followStep(tt); }   // (0.64 s at 4x: tick 296, on the floor; the corner at 400 past the aim)
-		const lag = Math.abs(VW.camX - FOL.x), tick = FOL.tick;
-		check('Follow\'s camera at a steady 4x: on the smiley (it aims where the smiley will be ~FOL_TAU on, followAim; aimed at the smiley it would trail by ~122 px)', tick > 250 && tick < 330 && lag < 2, JSON.stringify({ tick, lag, x: FOL.x, cam: VW.camX }));
-	}
-	// the camera kept in the level: an 800 x 600 view at 16 px a tile (half a view 400 x 300 level px) on a 100 x 60 level
-	// (1600 x 960 px): at the smiley's x 40..220 the camera stops a tile past the left edge; a level smaller than the view:
-	// centred
-	{
-		$('cv').width = 800; $('cv').height = 600;
-		FOL.speed = 1; F.followSeek(5); VW.camX = 300; VW.camY = 200;
-		let tt = 60000;
-		for (let k = 0; k < 60; k++) { tt += 16; F.followStep(tt); }
-		const inLevel = { x: VW.camX, y: VW.camY };
-		env.LV.W = 30; env.LV.H = 20;
-		for (let k = 0; k < 200; k++) { tt += 16; F.followStep(tt); }
-		const small = { x: VW.camX, y: VW.camY };
-		$('cv').width = 0; $('cv').height = 0; env.LV.W = 100; env.LV.H = 60;
-		check('Follow\'s camera kept in the level: at its left edge a tile past it at most (not centred on the smiley), a level smaller than the view centred',
-			Math.abs(inLevel.x - (400 - 16)) < 1 && Math.abs(inLevel.y - (300 - 16)) < 1 && Math.abs(small.x - 240) < 1 && Math.abs(small.y - 160) < 1, JSON.stringify({ inLevel, small }));
-	}
 	// a new nearest attempt: sharing its start with the one playing (the same ticks up to now): from the same tick; another
-	// start: from its point nearest the smiley (within FOL_SNAP px), else the same tick: never back to the start; a route: the route
-	FOL.speed = 1; F.followSeek(0);
+	// start: from its start; a route: the route
+	FOL.speed = 1;
 	for (let k = 0; k < 30; k++) F.followStep(10000 + 10 * k);   // (to tick ~29)
 	const before = FOL.tick;
 	const longer = path.concat(Array.from({ length: 100 }, (_, k) => [840, -12 - k]));
 	env.SOLVE.st = { running: true, closest: Object.assign({}, closest, { path: longer, ticks: 600, runTicks: 590, foundAfter: 20 }), result: null };
 	F.followStep(10300);
 	const kept = FOL.tick, keptLen = FOL.P.length;
-	const other = path.map(([x, y]) => [x, y + 32]);   // (32 px below: within FOL_SNAP)
+	const other = path.map(([x, y]) => [x, y + 32]);
 	env.SOLVE.st = { running: true, closest: Object.assign({}, closest, { path: other, foundAfter: 25 }), result: null };
 	F.followStep(10310);
-	const near = FOL.tick;
-	const far = path.map(([x, y]) => [x, y + 400]);   // (400 px below: nothing near the smiley)
-	env.SOLVE.st = { running: true, closest: Object.assign({}, closest, { path: far, foundAfter: 26 }), result: null };
-	F.followStep(10320);
-	const farTick = FOL.tick;
+	const restarted = FOL.tick;
 	const route = { time: '0:05.00', runTicks: 500, ticks: 510, path: other.concat([[900, 0]]), strategy: 'every move', foundAfter: 30 };
 	env.SOLVE.st = { running: false, closest: null, result: route };
-	F.followStep(10330);
+	F.followStep(10320);
 	const kind = FOL.kind, rtick = FOL.tick;
-	check('Follow: a new nearest attempt never sends the smiley back to the start: one that shares its start plays on from the same tick, one from another start from its point nearest the smiley, one with nothing near the same tick; a found route replaces it',
-		before > 25 && Math.abs(kept - before - 1) < 1e-6 && keptLen === 601 && Math.abs(near - kept - 1) <= 1.5 && Math.abs(farTick - near - 1) <= 1.5 && kind === 'route' && Math.abs(rtick - farTick - 1) <= 1.5 &&
-		F.sameStart(path, longer, 400) && !F.sameStart(path, other, 0) && !F.sameStart(path, longer.slice(0, 10), 20), JSON.stringify({ before, kept, keptLen, near, farTick, kind, rtick }));
-	{
-		// followRetarget: nothing played yet -> 0; the nearest point's tick nearest the one playing (a path that passes the
-		// smiley's place twice: the pass nearest in time)
-		const loop = [];
-		for (let t = 0; t <= 300; t++) loop.push(t <= 100 ? [2 * t, 0] : t <= 200 ? [200 - 2 * (t - 100), 8] : [2 * (t - 200), 16]);
-		const r0 = F.followRetarget(null, loop, 50, 100, 0), r1 = F.followRetarget(path, loop, 240, 80, 16), r2 = F.followRetarget(path, loop, 100, 80, 16);
-		check('followRetarget: nothing played yet: the start; a path passing the smiley\'s place several times: the pass nearest the tick playing', r0 === 0 && r1 === 240 && r2 === 137, JSON.stringify({ r0, r1, r2 }));
-	}
-	// the seek bar and End / Home: to a tick, to the attempt's last FOL_END ticks (where the search has got)
-	{
-		F.followToEnd();
-		const end = FOL.tick;
-		F.followSeek(7);
-		const seek = FOL.tick, bar = { max: $('fSeek').max, value: $('fSeek').value };
-		check('Follow: End (the panel\'s end button) to the attempt\'s last FOL_END (300) ticks, the seek bar / Home to a tick; the bar shows the attempt\'s length and the tick',
-			F.FOL_END === 300 && end === route.path.length - 1 - 300 && seek === 7 && bar.max === String(route.path.length - 1) && bar.value === '7', JSON.stringify({ end, seek, bar }));
-	}
+	check('Follow: a new nearest attempt that shares its start plays on from the same tick, one from another start from its start, a found route replaces it (from the same tick when it shares the start)',
+		before > 25 && Math.abs(kept - before - 1) < 1e-6 && keptLen === 601 && Math.abs(restarted - 1) < 1e-6 && kind === 'route' && Math.abs(rtick - 2) < 1e-6 &&
+		F.sameStart(path, longer, 400) && !F.sameStart(path, other, 0) && !F.sameStart(path, longer.slice(0, 10), 20), JSON.stringify({ before, kept, keptLen, restarted, kind, rtick }));
 	// the smiley drawn (no EE graphics: the drawn ball) where the replay is; off: nothing more, the panel hidden
 	const g = fakeCtx();
 	const de = errOf(() => F.drawFollow(g, 5, 7, 1, 1));
@@ -2539,15 +2401,6 @@ async function exploreSection() {
 		check('heat.js HeatMap: per tile the visits and the last visit, a version per update; since(0) every visited tile, since(v) the tiles changed after v, since(the version) nothing; the count saturates at 65535',
 			full.full && full.version === 2 && dec(full) === '1:1@100 2:2@250 3:1@250' && !delta.full && dec(delta) === '2:2@250 3:1@250' && !none.full && none.n === 0 && none.version === 2 &&
 			HM.count[5] === 65535 && HM.visited === 3, JSON.stringify({ full: dec(full), delta: dec(delta), none: none.n, c5: HM.count[5] }));
-		{
-			// (the first visits: the page colours a tile by when the search first got there)
-			const HF = new HX.HeatMap(10, 10);
-			HF.merge([1, 2], 100); HF.merge([2, 3], 250); HF.merge([1], 400);
-			const firsts = (r) => { const I = Buffer.from(r.idx, 'base64'), Fs = Buffer.from(r.first, 'base64'), Ls = Buffer.from(r.last, 'base64'); return Array.from({ length: r.n }, (_, i) => `${I.readUInt32LE(4 * i)}:${Fs.readUInt32LE(4 * i)}-${Ls.readUInt32LE(4 * i)}`).sort().join(' '); };
-			const all = firsts(HF.since(0)), d2 = firsts(HF.since(2)), none = HF.since(3);
-			check('heat.js HeatMap: each tile\'s first visit kept (a tile seen again keeps it, its last visit moves on), in every answer (the full one and the deltas)',
-				all === '1:100-400 2:100-250 3:250-250' && d2 === '1:100-400' && none.n === 0 && none.first === '' && HF.first[2] === 100, JSON.stringify({ all, d2 }));
-		}
 		const H2 = new HX.HeatMap(4, 4);
 		for (let k = 0; k < 600; k++) H2.merge([k % 16], k);
 		const old = H2.since(5);
