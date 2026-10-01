@@ -23,6 +23,23 @@ const opt = (k, d) => { const a = argv.find((s) => s.startsWith('--' + k + '='))
 const file = argv.find((s) => !s.startsWith('--'));
 const ms = +opt('ms', 120000);
 const GATED_ONLY = opt('gatedOnly', '0') === '1';
+// (--roots=<file>: the compile's frontier anchors, one input string a line (strategy.js EEAT_BWC_ROOTS): read between the
+// chain's legs, each new line a root of the chain)
+const ROOTS_FILE = opt('roots', '');
+let rootsOff = 0, rootsBuf = '';
+const rootsNew = () => {
+	if (!ROOTS_FILE) return [];
+	const fs = require('fs');
+	let st;
+	try { st = fs.statSync(ROOTS_FILE); } catch (e) { return []; }
+	if (st.size <= rootsOff) return [];
+	const fd = fs.openSync(ROOTS_FILE, 'r');
+	try { const b = Buffer.alloc(st.size - rootsOff); fs.readSync(fd, b, 0, b.length, rootsOff); rootsOff = st.size; rootsBuf += b.toString('latin1'); } finally { fs.closeSync(fd); }
+	const out = [];
+	let k;
+	while ((k = rootsBuf.indexOf('\n')) >= 0) { const line = rootsBuf.slice(0, k).replace(/[^0-O]/g, ''); rootsBuf = rootsBuf.slice(k + 1); if (line.length) out.push(Uint8Array.from(line, (c) => c.charCodeAt(0) - 48)); }
+	return out;
+};
 const IMPORT = process.env.EEAT_BWC_IMPORT !== undefined && process.env.EEAT_BWC_IMPORT !== '' ? +process.env.EEAT_BWC_IMPORT : 1;
 let topGain = 0;
 const t0 = Date.now();
@@ -71,7 +88,7 @@ try {
 		// (EEAT_BWC_MORE: every faster chain route as it comes; the compile's routeOf keeps the fastest)
 		let printed = null;
 		const c = BC.chainLevel(L, {
-			ms: left() - 500, model: M, backward: B, file,
+			ms: left() - 500, model: M, backward: B, file, roots: ROOTS_FILE ? rootsNew : null,
 			onRoute: process.env.EEAT_BWC_MORE === '1' ? (b) => { printed = b.runTicks; out({ ev: 'result', kind: 'finish', inputs: T.strOf(b.masks), runTicks: b.runTicks, deaths: b.deaths, ms: Date.now() - t0 }); } : null,
 			// (EEAT_BWC_IMPORT: 1 (the default) only the chain's FRONTIER (a node of more gain than every one printed before: the
 			// executor goes on from the chain's progress, not from every order it tried), 2 every node, 0 none)
@@ -81,7 +98,7 @@ try {
 				out({ ev: 'anchor', inputs: T.strOf(masks), gain: info.gain, tick: info.tick, label: info.label });
 			},
 		});
-		out({ ev: 'chain', ok: c.ok, why: c.why, legs: c.stats.legs, legsOk: c.stats.legsOk, nodes: c.stats.nodes, gain: c.gain, ms: Date.now() - t0 });
+		out(Object.assign({ ev: 'chain', ok: c.ok, why: c.why, legs: c.stats.legs, legsOk: c.stats.legsOk, nodes: c.stats.nodes, gain: c.gain, ms: Date.now() - t0 }, ROOTS_FILE ? { roots: c.stats.roots || 0 } : {}));
 		if (c.ok) { if (printed !== c.runTicks) out({ ev: 'result', kind: 'finish', inputs: T.strOf(c.masks), runTicks: c.runTicks, deaths: c.deaths }); end = 'finish'; }
 		else end = c.why || 'none';
 	} else if (end !== 'finish') end = r.why || 'none';

@@ -255,6 +255,14 @@ const BWC_GATE = process.env.EEAT_BWC_GATE !== '0';   // (the child reads it too
 // when a held frontier node's gain is BWC_LEAD over the most the executor's anchors hold and at least BWC_LEAD_F x it (the
 // chain far ahead; where the executor keeps up it opens as before, so its own routes are not slowed by the imports)
 const BWC_LEAD = Math.max(0, +process.env.EEAT_BWC_LEAD || 0), BWC_LEAD_F = +process.env.EEAT_BWC_LEAD_F > 0 ? +process.env.EEAT_BWC_LEAD_F : 2;
+// THE EXECUTOR'S FRONTIER AS CHAIN ROOTS (P4 gated, OPT-IN EEAT_BWC_ROOTS=1; off = byte for byte): on the gated levels the
+// executor's anchors usually lead the chain (S99's full compile: Booty Return gain 62 vs the chain's 42, Pancake Quest 61 vs
+// 58, CDB Inc 29 vs 5, Pretty How Town 24 vs 0, The Tunnels 37 vs 10), and its legs from there fail at the rung windows
+// that the chain's one continuous backward leg could finish (the krt data: 30 / 49 vs 34 / 49, either 36 / 49). With the
+// knob every new executor anchor of more gain than the chain's frontier and every root sent before goes to the child as a
+// root (its first arrival's inputs, a file the child reads between its legs: bwchain_child.js --roots): the chain goes on
+// from the executor's progress, as the executor from the chain's (the gate, the lead gate)
+const BWC_ROOTS = process.env.EEAT_BWC_ROOTS === '1';
 // (THE GATE, with BW_LEVEL: the one shot's gate for the child's legs: their arrivals (a leg's new model state) are held until
 // the executor needs them, its watchdog's first stall or the loop's end with no route, then they go to it as they come; its
 // routes are taken at once. Given at once, the imported anchors outranked the executor's own (Ruins, local 100 s: 1,510 vs
@@ -605,6 +613,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 
 	// ---- anchors
 	const anchors = new Map();   // S.key -> anchor
+	// (EEAT_BWC_ROOTS: the chain child's roots file, the chain's frontier gain as printed, the gain of the last root sent)
+	let bwcRootsFile = null, bwcTop = 0, bwcRootSent = 0, bwcRootsN = 0;
 	let anchorSeq = 0, lastProgress = Date.now(), progressVer = factsVer(facts), steps = 0, okSteps = 0, failSteps = 0, picksN = 0, bnbPlans = 0, bnbArrivals = 0, lateArrivals = 0;
 	// (the relay starts: per (anchor id, edge) the nearest state its failed rungs reached, a start of its next rung;
 	// EEAT_RELAY=0: off)
@@ -641,6 +651,11 @@ async function compile(L, opts = {}, emit = () => {}) {
 				edgeVia: step && !step.synthetic ? String(step.edge) : null, qual };
 			anchors.set(key, A);
 			lastProgress = Date.now();
+			// (THE EXECUTOR'S FRONTIER AS CHAIN ROOTS, EEAT_BWC_ROOTS: an anchor of more gain than the chain's frontier and
+			// every root sent: its first arrival's inputs to the chain child's roots file)
+			if (bwcRootsFile && !best && A.gain > bwcTop && A.gain > bwcRootSent && a && a.masks && a.masks.length) {
+				try { require('fs').appendFileSync(bwcRootsFile, T.strOf(a.masks) + '\n'); bwcRootSent = A.gain; bwcRootsN++; } catch (e) { /* the file gone: the child ended */ }
+			}
 			return { anchor: A, isNew: true };
 		}
 		const before = A.arrivals.map((x) => x.hash).join(',');
@@ -821,11 +836,15 @@ async function compile(L, opts = {}, emit = () => {}) {
 		}
 		if (BW_CHAIN) say({ ev: 'bwlevel', seconds: secs, chain: BW_CHAIN }); else say({ ev: 'bwlevel', seconds: secs, waypoints: nWp });
 		let imported = 0;
+		// (THE EXECUTOR'S FRONTIER AS CHAIN ROOTS, EEAT_BWC_ROOTS: a file the child reads between its legs)
+		if (BW_CHAIN && BWC_ROOTS) {
+			try { bwcRootsFile = path.join(require('os').tmpdir(), `eeat_bwc_roots_${process.pid}_${Date.now()}.txt`); require('fs').writeFileSync(bwcRootsFile, ''); } catch (e) { bwcRootsFile = null; }
+		}
 		bwlDone = new Promise((resolve) => {
 			let found = null, done = null, buf = '';
 			// (the chain with the stretch solver on: only a GATED level, --gatedOnly=1; the stretch child takes a one-leg level's
 			// whole-level solve)
-			const ch = cp.spawn(process.execPath, ['--max-old-space-size=2000', path.join(__dirname, 'lab', BW_CHAIN ? 'bwchain_child.js' : 'bwlevel_child.js'), String(opts.file), `--ms=${secs * 1000}`, ...(wpFile ? [`--wps=${wpFile}`] : []), ...(BW_CUTS && !BW_CHAIN ? ['--cuts=1'] : []), ...(BW_CHAIN && ST_ON ? ['--gatedOnly=1'] : [])], { stdio: ['ignore', 'pipe', 'ignore'] });
+			const ch = cp.spawn(process.execPath, ['--max-old-space-size=2000', path.join(__dirname, 'lab', BW_CHAIN ? 'bwchain_child.js' : 'bwlevel_child.js'), String(opts.file), `--ms=${secs * 1000}`, ...(wpFile ? [`--wps=${wpFile}`] : []), ...(BW_CUTS && !BW_CHAIN ? ['--cuts=1'] : []), ...(BW_CHAIN && ST_ON ? ['--gatedOnly=1'] : []), ...(bwcRootsFile ? [`--roots=${bwcRootsFile}`] : [])], { stdio: ['ignore', 'pipe', 'ignore'] });
 			bwlChild = ch;
 			const onExit = () => { try { ch.kill('SIGKILL'); } catch (e) { /* gone */ } };
 			process.once('exit', onExit);
@@ -854,6 +873,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 					} else if (ev.ev === 'anchor' && BWC_IMPORT && typeof ev.inputs === 'string' && !best && !stopped) {
 						// (a chain node: the loop's import (replayed; a model state not seen yet is an anchor))
 						imported++;
+						if (Number.isFinite(+ev.gain) && +ev.gain > bwcTop) bwcTop = +ev.gain;
 						if (bwcOpen) onLine('import ' + ev.inputs.replace(/[^0-O]/g, ''));
 						else {
 							bwcHeld.push(ev.inputs.replace(/[^0-O]/g, ''));
@@ -864,13 +884,13 @@ async function compile(L, opts = {}, emit = () => {}) {
 								if (+ev.gain >= exMax + BWC_LEAD && +ev.gain >= BWC_LEAD_F * exMax) bwcRelease(`the chain leads: gain ${ev.gain} vs the executor's ${exMax}`);
 							}
 						}
-					} else if (ev.ev === 'chain') say({ ev: 'bwchain', ok: ev.ok, why: ev.why, legs: ev.legs, legsOk: ev.legsOk, nodes: ev.nodes, gain: ev.gain, imported, ms: Date.now() - t1 });
+					} else if (ev.ev === 'chain') say(Object.assign({ ev: 'bwchain', ok: ev.ok, why: ev.why, legs: ev.legs, legsOk: ev.legsOk, nodes: ev.nodes, gain: ev.gain, imported, ms: Date.now() - t1 }, BWC_ROOTS ? { roots: bwcRootsN, rootNodes: ev.roots } : {}));
 					else if (ev.ev === 'leg') say({ ev: 'bwlevel', legTry: ev.n, of: ev.of, label: ev.label, ok: ev.ok, T: ev.T, why: ev.why, ms: Date.now() - t1 });
 					else if (ev.ev === 'done') done = ev.end;
 				}
 			});
 			let finished = false;
-			const fin = () => { if (finished) return; finished = true; clearTimeout(kill); clearInterval(poll); process.removeListener('exit', onExit); bwlChild = null; if (wpFile) { bwlWpFile = null; try { require('fs').unlinkSync(wpFile); } catch (e) { /* gone */ } } if (!found) say({ ev: 'bwlevel', end: done || 'ended', ms: Date.now() - t1 }); resolve(); };
+			const fin = () => { if (finished) return; finished = true; clearTimeout(kill); clearInterval(poll); process.removeListener('exit', onExit); bwlChild = null; if (wpFile) { bwlWpFile = null; try { require('fs').unlinkSync(wpFile); } catch (e) { /* gone */ } } if (bwcRootsFile) { const f = bwcRootsFile; bwcRootsFile = null; try { require('fs').unlinkSync(f); } catch (e) { /* gone */ } } if (!found) say({ ev: 'bwlevel', end: done || 'ended', ms: Date.now() - t1 }); resolve(); };
 			ch.on('error', fin);
 			ch.on('close', fin);
 		});

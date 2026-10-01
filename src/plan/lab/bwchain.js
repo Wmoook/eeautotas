@@ -279,6 +279,19 @@ function chainLevel(L, o = {}) {
 	const boundOut = (n) => bestC < Infinity && n.a.tick + lbOf(n) >= bestC;
 	outer:
 	while (left() > 300 && !stop()) {
+		// (o.roots: the caller's new roots between two legs (the compile's frontier anchors: strategy.js EEAT_BWC_ROOTS))
+		if (o.roots) {
+			let nr = [];
+			try { nr = o.roots() || []; } catch (e) { nr = []; }
+			for (const m of nr) {
+				try {
+					const r0 = T.playTo(L, m, { allowDeath: true });
+					if (r0.sim.is_dead) continue;
+					const rn = addNode(m, r0.sim, null, 'root');
+					if (rn) { stats.roots = (stats.roots || 0) + 1; log(`root: tick ${rn.a.tick}, gain ${rn.gain}`); }
+				} catch (e) { /* skip */ }
+			}
+		}
 		// the next try: the least COST over (node, candidate, its next clock level) = the clock x (1 + RANK_W x the candidate's
 		// rank at its node) x (1 + GAIN_W x the node's gain below the best), ties by the node's order (a node not yet planned
 		// stands for its first candidate at the first clock); EEAT_BWC_ORDER=level: every candidate of every node at a clock
