@@ -267,6 +267,51 @@ function createPlanner(model, facts, o = {}) {
 	// checkpoint (127,215): the farthest (117,206), the known route's tick 3,925 of 932); the nearest makes the chain of
 	// short legs the executor finds)
 	const CRUMB_PICK_NEAR = process.env.EEAT_CRUMB_PICK === 'near';
+	// THE CRUMB FIELD'S STALL WALLS (B7 cold, cycle 6; OPT-IN EEAT_CRUMB_WALLS=1, physics crumbs only; off = the crumbs'
+	// field as before, byte for byte): the crumb's goal field is the root target's RCH3 field, a relaxation, and its
+	// cheapest way can be one the executor cannot make; every crumb on that way then fails at the same place and the
+	// crumbs never leave it (Cold World's chapter-2 blue coin pocket: every field from the coin's state routes UP the
+	// chamber (102-108, 206-215) to its 1-tile exit (108,206), every crumb on it ((127,215), (120,206), (117,206)) failed
+	// rungs 0-3 from the coin's anchor with the closest (106,209-210) (the box-7 compiles E1-E4), while the executor finds
+	// the way DOWN through the one-ways (108,215) / (110,216) to the checkpoints (99,223) / (101,229) in 338-401 ticks at
+	// rung 2: no crumb is ever there, its field reads them as a step back). With the knob the closest approach of every
+	// failed step OF THE ANCHOR'S NODE CLASS (a rung >= 1 or exhausted, a real distance: not the side cap's 2,500-tile
+	// penalty) walls its 3 x 3 in the crumb field's level copy (the CEGAR's counterexample, as syncWalls walls the est
+	// walk; trigger tiles and the 5 x 5 around the anchor stay open), so the next crumb lies on another way; a walled
+	// field that cuts the anchor off is not used (the plain one then). Ordering only: a waypoint, never a gate or a proof.
+	const CRUMB_WALLS = process.env.EEAT_CRUMB_WALLS === '1';
+	const CRUMB_WALL_MAXD = 1000;
+	function crumbWallsOf(cls, at) {
+		if (!facts) return null;
+		const ax = at % W, ay = (at / W) | 0;
+		const stalls = [];
+		for (const f of facts.list()) {
+			if (f.kind !== 'fail' || f.nodeClass !== cls) continue;
+			if (!((f.rung | 0) >= 1 || f.why === 'exhausted')) continue;
+			const c = f.closest;
+			if (!c || c.tile === undefined || c.tile === null || !(c.tile >= 0) || !(c.dist >= 0) || c.dist >= CRUMB_WALL_MAXD) continue;
+			stalls.push(c.tile);
+		}
+		let set = null;
+		for (const t of stalls) {
+			const x = t % W, y = (t / W) | 0;
+			// (a stall the executor met twice or more (within a tile) walls its 5 x 5: the field funnels every leg there,
+			// and a 3 x 3 leaves it the way 2 tiles aside)
+			let n = 0;
+			for (const u of stalls) if (Math.max(Math.abs((u % W) - x), Math.abs(((u / W) | 0) - y)) <= 1) n++;
+			const r = n >= 2 ? 2 : 1;
+			for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+				const nx = x + dx, ny = y + dy;
+				if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+				if (Math.max(Math.abs(nx - ax), Math.abs(ny - ay)) <= 2) continue;
+				const j = ny * W + nx;
+				if (model.trigOf[j] >= 0) continue;
+				if (!set) set = new Set();
+				set.add(j);
+			}
+		}
+		return set;
+	}
 	const crumbCands = CRUMBS ?model.triggers.filter((X) => !X.relevant && (X.kind === 'coin' || X.kind === 'bcoin' || X.kind === 'cp') && X.tiles && X.tiles.length) : [];
 	const trophyTiles = model.trophyTiles;
 	const openS = { key: '__open__', dkey: '__open__', vals: [], feats: {} };
@@ -1243,19 +1288,35 @@ function createPlanner(model, facts, o = {}) {
 	 *  from (receding horizon: one crumb a plan). Ordering only: the crumb is a waypoint, never a gate. */
 	/** THE PHYSICS CRUMBS (EEAT_CRUMB_PHYS=1, see CRUMB_PHYS): the crumb step by the target's RCH3 goal field; null = no
 	 *  crumb, undefined = no field (the walk's crumbs then) */
+	function crumbField(S, tgt, walls) {
+		let tkey = S.pkey + '|' + (tgt.length > 8 ? tgt.length + ':' + tgt[0] + ':' + tgt[tgt.length - 1] : Array.from(tgt).join(','));
+		if (walls) tkey += '|w' + Array.from(walls).sort((p, q) => p - q).join(',');
+		let g = crumbGoalMemo.get(tkey);
+		if (g === undefined) {
+			const t0 = Date.now();
+			let Lc = model.levelOf(S);
+			if (walls) { const fg = Lc.fg.slice(); for (const j of walls) fg[j] = 9; Lc = Object.assign({}, Lc, { fg }); }
+			g = RFm.reachField(Lc, CRUMB_XA ? { goals: Array.from(tgt, (t) => ({ tile: t, cost: 0 })), deaths: false, exitApex: true } : { goals: Array.from(tgt, (t) => ({ tile: t, cost: 0 })), deaths: false });
+			ST.crumbPhysMs = (ST.crumbPhysMs || 0) + (Date.now() - t0);
+			crumbGoalMemo.set(tkey, g);
+			if (crumbGoalMemo.size > 8) crumbGoalMemo.delete(crumbGoalMemo.keys().next().value);
+		}
+		return g;
+	}
 	function crumbPhys(a, e, cls, S, tgt) {
 		let g;
+		const s0 = a.sim;
 		try {
 			if (!RFm) RFm = require('../reach.js');
-			const tkey = S.pkey + '|' + (tgt.length > 8 ? tgt.length + ':' + tgt[0] + ':' + tgt[tgt.length - 1] : Array.from(tgt).join(','));
-			g = crumbGoalMemo.get(tkey);
-			if (g === undefined) {
-				const t0 = Date.now();
-				g = RFm.reachField(model.levelOf(S), CRUMB_XA ? { goals: Array.from(tgt, (t) => ({ tile: t, cost: 0 })), deaths: false, exitApex: true } : { goals: Array.from(tgt, (t) => ({ tile: t, cost: 0 })), deaths: false });
-				ST.crumbPhysMs = (ST.crumbPhysMs || 0) + (Date.now() - t0);
-				crumbGoalMemo.set(tkey, g);
-				if (crumbGoalMemo.size > 8) crumbGoalMemo.delete(crumbGoalMemo.keys().next().value);
+			if (CRUMB_WALLS) {
+				const at = Math.floor((s0.py + 8) / 16) * W + Math.floor((s0.px + 8) / 16);
+				const walls = crumbWallsOf(cls, at);
+				if (walls && walls.size) {
+					const gw = crumbField(S, tgt, walls);
+					if (gw && RFm.costAt(gw, s0.px, s0.py, s0.speed_y, !!s0.on_ground) >= 0) { g = gw; ST.crumbWalled = (ST.crumbWalled || 0) + 1; ST.crumbWallTiles = walls.size; }
+				}
 			}
+			if (g === undefined) g = crumbField(S, tgt, null);
 		} catch (err) { return undefined; }
 		if (!g) return undefined;
 		const s = a.sim;
