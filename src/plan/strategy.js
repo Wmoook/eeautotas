@@ -767,7 +767,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 		let imported = 0;
 		bwlDone = new Promise((resolve) => {
 			let found = null, done = null, buf = '';
-			const childArgs = BW_CHAIN ? [path.join(__dirname, 'lab', 'bwchain_child.js'), String(opts.file), `--ms=${secs * 1000}`]
+			// (the chain with the stretch solver on: only a GATED level; the stretch child takes a one-leg level's whole-level solve)
+			const childArgs = BW_CHAIN ? [path.join(__dirname, 'lab', 'bwchain_child.js'), String(opts.file), `--ms=${secs * 1000}`, ...(ST_ON ? ['--gatedOnly=1'] : [])]
 				: [path.join(__dirname, 'lab', 'bwlevel_child.js'), String(opts.file), `--ms=${secs * 1000}`, ...(wpFile ? [`--wps=${wpFile}`] : []), ...(BW_CUTS ? ['--cuts=1'] : [])];
 			const ch = cp.spawn(process.execPath, ['--max-old-space-size=2000', ...childArgs], { stdio: ['ignore', 'pipe', 'ignore'] });
 			bwlChild = ch;

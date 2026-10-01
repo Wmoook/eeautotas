@@ -22,6 +22,7 @@ const argv = process.argv.slice(2);
 const opt = (k, d) => { const a = argv.find((s) => s.startsWith('--' + k + '=')); return a ? a.slice(k.length + 3) : d; };
 const file = argv.find((s) => !s.startsWith('--'));
 const ms = +opt('ms', 120000);
+const GATED_ONLY = opt('gatedOnly', '0') === '1';
 const IMPORT = process.env.EEAT_BWC_IMPORT !== undefined && process.env.EEAT_BWC_IMPORT !== '' ? +process.env.EEAT_BWC_IMPORT : 1;
 let topGain = 0;
 const t0 = Date.now();
@@ -47,6 +48,9 @@ try {
 	let r = B.solve(snap, tgt, { ms: 50 });
 	const gated = !r.ok && /walk/.test(r.why || '');
 	if (r.ok && finish(L, r.masks)) end = 'finish';
+	// (--gatedOnly=1: the compiler's stretch solver runs too (EEAT_STRETCH): it takes a one-leg level's whole-level solve, so
+	// this child works only on a GATED level)
+	if (end !== 'finish' && !gated && GATED_ONLY) { out({ ev: 'done', end: 'not gated', ms: Date.now() - t0, mode: 'none' }); process.exit(0); }
 	if (end !== 'finish' && !gated) {
 		// the whole-level stage's schedule (bwlevel_child.js): 0.4 of the clock, then the rest (at most half the clock here:
 		// the chain takes the other half)
