@@ -1463,7 +1463,7 @@ function createPlanner(model, facts, o = {}) {
 			ST.respDie = (ST.respDie || 0) + 1;
 			if (CRUMB_DBG) console.error('respCrumb die at', xy(c), 'for', e.X ? e.X.label : 'trophy', 'pass', best);
 			return { edge, nodeClass: cls, rung, estTicks: DEAD_TICKS, lb: DEAD_TICKS,
-				waypoint: dieField({ kind: 'region', tiles: [c], expect: { feat: 'deaths', value: deaths + 1 }, allowDeath: true, label: `die, back at a respawn (deaths ${deaths + 1}) ${xy(c)}` }) };
+				waypoint: dieField({ kind: 'region', tiles: [c], expect: { feat: 'deaths', value: deaths + 1 }, allowDeath: true, cpHold: c, label: `die, back at a respawn (deaths ${deaths + 1}) ${xy(c)}` }) };
 		}
 		const X = crumbCands.find((Y) => Y.tiles.includes(c));
 		if (!X) return null;

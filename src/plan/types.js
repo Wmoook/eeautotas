@@ -215,8 +215,12 @@ function goalOf(L, wp) {
 	const fv = ex ? featGetter(ex.feat) : null;
 	const okF = ex ? (ge ? (sim) => fv(sim) >= ex.value : (sim) => fv(sim) === ex.value) : null;
 	const onT = coin ? (sim, t) => t >= 0 && mask[t] === 1 && sim.is_coin_collected(t % W, (t / W) | 0) : (sim, t) => t >= 0 && mask[t] === 1;
-	const test = ex ? (sim) => !sim.is_dead && okF(sim) && (onT(sim, tileOf(sim, W, H)) || onT(sim, touchedTile(sim, W, H)))
+	const test0 = ex ? (sim) => !sim.is_dead && okF(sim) && (onT(sim, tileOf(sim, W, H)) || onT(sim, touchedTile(sim, W, H)))
 		: (sim) => !sim.is_dead && mask[tileOf(sim, W, H)] === 1;
+	// (wp.cpHold, the planner's respawn waypoint (EEAT_RESP_CRUMB): the engine's checkpoint must be that tile too: a death
+	// back at a respawn that touched another checkpoint on its way respawned there, not at the waypoint's)
+	const cpH = wp.cpHold >= 0 ? wp.cpHold : -1;
+	const test = cpH >= 0 ? (sim) => test0(sim) && sim.checkpoint.x >= 0 && sim.checkpoint.y * W + sim.checkpoint.x === cpH : test0;
 	// (fieldTiles: the tiles the ordering fields and bounds are built to, when not the goal's own (the executor's skeleton:
 	// a sub-level set of the waypoint's field, ordered by the waypoint's own fields, memoized across its sub-legs))
 	return { kind: wp.kind, tiles: Int32Array.from(wp.tiles), mask, test, allowDeath: !!wp.allowDeath,
