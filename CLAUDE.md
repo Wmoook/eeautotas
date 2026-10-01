@@ -884,6 +884,37 @@ ways in.
   after the first column pass (gain 34) only partial "most gain" plans: the route takes the 31-switch column AGAIN to toggle
   it back OFF (gain 34 -> 3) before the trophy, which the partial rule (the fewest landmarks, then the most gain) never
   proposes.
+- **STUCK-FIELD, block 4: the long plan call, the touch by its effect, the est walls** (C6 push 3 lane 1;
+  `src/out/n5/lanes/c6_lane1_b4.md`). THE EXACT REASONS: (1) First Person Maze's last stage (block 3): from the known
+  route's own state after the 31-switch column (tick 545) a 0.3-s plan call expands ~19 plan nodes and returns only PARTIAL
+  plans, while a whole trophy plan exists (est 808: the column toggled back down) and a 20-s plan search finds it WITH the
+  gain bonus (917 nodes), not without it (1,017): the plan search is SLOW on switch levels: `model.touch` was 48% of edgesOf
+  in the CPU profile (2,478 relevant triggers of 50 features, every tile component of a switch id making its own S2 at every
+  new abstract state), then the walks (`bfs`: from FPM's start 738 fields at 19 ms = 14 of 20 s). (2) THE EST WALLS
+  (planner.js `syncWalls`): every failed step's closest approach at rung >= 1 walls its 3 x 3 in the est walk for EVERY
+  state and position, and the walls only accumulate: in a compile the long search on The Memory Game and EX Crew Fall of
+  Zeal ran out of nodes in 3-7 ms with only relaxation-only (PENALTY) trophy plans (1,003,176-2,009,059) where the same
+  search with fresh facts finds est plans (6 coins -> the trophy, est 4,260; the trophy, est 1,344), and on FPM the walled
+  20-s long search found none (403 nodes) where the walls-lifted one found a 1,071-est plan in 1 s (30 nodes): block 3's
+  "the alternatives go through relaxation-only edges" is this. THE LONG PLAN CALL (planner.js `longPlan`, OPT-IN
+  `EEAT_PLAN_LONG=<ms>`, off = byte for byte; `EEAT_PLAN_LONG_MAX` 4 a compile, `_R` 1, `_GAIN` 1, `_EXPAND` 3 M): when every
+  plan of a call is partial (or PENALTY-priced) and the first plan's first step failed LONG_R rungs from the anchor's class,
+  one long plan search from that abstract state (once a state, at most a quarter of the compile's time left: strategy.js
+  passes `left`; a search that runs out of nodes in under a second does not count); a trophy plan along est walks goes
+  FIRST, in front of the near / crumb plans (a first version put it behind them: the strategy never ran it), its path kept
+  (a later anchor in a state on it gets the path's REST by a search guided along its edges); `EEAT_PLAN_LONG_NOWALL=1`: a
+  long search with nothing below the PENALTY runs once more with the est walls lifted (its first step at its next rung, not
+  its last); test/planplanner.js P-LONG (60/60). THE TOUCH BY ITS EFFECT (model.js, OPT-IN `EEAT_TOUCH_SIG=1`): the touch memo
+  keyed by (kind, feature, parameter) for the set / toggle kinds (touch0 reads nothing else of X there): exact; FPM's 20-s
+  long search 917 -> 1,150 nodes (tick 545), 556 -> 1,590 (tick 610). THE A/B (box 5, 300 s, W3, one run an arm, side by
+  side with the base n5-plan 9bcf651; box 5 at load 45-165): the long call fires only where every plan is partial (The
+  Memory Game, First Person Maze, Fall of Zeal, Weird Perfection); with the walls kept it ran no long plan in a compile (FPM
+  290-320 nodes per 20 s, none found; The Memory Game / Fall of Zeal only PENALTY plans; Weird Perfection 9,326 nodes,
+  none); with the walls lifted 39 long-plan picks, whose legs then failed at rungs 0-3 like the base's (The Memory Game's
+  coins and switch at 45 s: there the walls were real failures, the wall is the moves); compiled 0 of those 4 in every arm
+  (base 2 of 15 test levels: Just One More Time 2,898, A Dreary Day 4,141), triggers within one run's spread: NO GAIN SHOWN,
+  every knob OPT-IN. NEXT: scope the est walls (a wall only for the failed edge / class, or one that decays), the walks'
+  cost on switch levels (19 ms a field at FPM's start).
 - **The whole level as one leg, and the ONE-LEG walls** (C6 push 3 lane 4; `src/out/n5/lanes/c6_lane4_b2.md`): strategy.js
   `wholeLevel` (OPT-IN `EEAT_BW_LEVEL=1`: the lab's backward solver on the whole level in a child process next to the
   moves, `src/plan/lab/bwlevel_child.js`; with a gated trophy the plan's triggers as its legs, `EEAT_BW_LEGS`) now behind
