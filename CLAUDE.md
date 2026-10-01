@@ -1371,6 +1371,137 @@ ways in.
   gate with the default (60 s): exit 0, compiled 15 vs the baseline's 11, worse 1 (First Person Maze, the base's own).
   Tests that require src/plan/strategy.js directly read the environment (test/planstrategy.js's mock T-STALL fails with
   `EEAT_BW_LEVEL=1`: the child solves the real toy file).
+- **Bad EE Level 9's mini walls: the deep rung and the warm rung** (B7 lane b9, cycle 2, 2026-09-30, branch n5-b7-b9;
+  strategy.js, both OPT-IN, off = the compile byte for byte): `EEAT_RUNG_DEEP=<ms>` = one more rung of that many ms after
+  the 45-s one (the facts block an (edge, node class) after 5 failures instead of 4; the executor runs it at its top tier,
+  level 3, with the longer window; the relay start goes on from rung 3's closest); `EEAT_RUNG_WARM=1` = an edge that failed
+  rung r by its BUDGET from one node class starts at rung r from the next (never onto a triple already run in its epoch;
+  cleared at a deepening, as the facts are; a find at a lower rung lowers it). WHY: the 54-switch chain stops at minis whose
+  leg needs one long window. Mini 5 (switch 5 (227,264), a ladder maze between spike columns) from its own entrance
+  (tools/cmp/legab.js, box 7 at load 150-190, 6 knob arms x 3 reps: n5-plan's defaults, without the portfolio / the cover /
+  the field memo + corridor fields, with none, + EEAT_Q_CELL): 18 / 18 found, ALL at rung 3 (34-45 s, skel+leg /
+  skel+portfolio, 585-866 ticks), 0 at rungs 1-2 (closest 35.6 / 30.8 tiles in every rep): no knob matters, the WINDOW
+  does; in the compile the 45-s rung is the edge: switch 5's rung-3 steps over 9 runs of 900 s found it 3 of 61 (cycle 1's
+  c4X 0 of 23), its rung-0-2 steps ~0 of 200 (each new node class climbs rungs 0-2 again: 1.5 + 5 + 15 s spent before its
+  one 45-s window). MEASURED (box 7, 900 s, W3, cycle 1's best config FX_CELL + TRANSPLANT + FX_FIELD=0 + FX_STATE=0, one
+  run an arm): with `EEAT_RUNG_DEEP=135000` the 135-s steps on switch 5 found it **5 of 7** (c6D1 2 / 3, c6D2 2 / 3, +WARM
+  c7W2 1 / 1; at 298-427 s), where the same runs' 45-s steps found it 0 of 17; the deep rung took the next walls too: mini 7
+  (5,140) (a blue-spike course, closest (15,114) 39 tiles: 0 of ~50 steps at rungs 0-3, 2 of 7 at rung 4, at 856 / 859 s),
+  mini 13 (225,119) (closest (218,137) 20.8 since cycle 1: 1 of 2 at rung 4, 863 s), switch 10 2 of 2; the two runs'
+  rung-4 steps 9 of 18 found (mini 12 (73,99) 0 of 1); every run's rung-4 steps 17 of 33. CHAIN IDS (of 54, held by one
+  anchor) at 900 s, this cycle side by side (load 160-190): the config's base 4 / 6 (c5C, c9X1: mini 5 never passed; c9X1's
+  switch-5 steps 109, 0 found, 1,560 worker-s), + DEEP **11 / 10** (c6D1 1-11: wave 3 entered; c6D2 1-10), + DEEP + WARM 9 / 6;
+  n5-plan's defaults 11 (c5A: mini 5 passed at rung 3, 1 of 4; walls mini 7 and team 2 (59,194)), + DEEP 10, + DEEP + WARM 6
+  (cycle 1's base samples of the config 17 / 16 / 6 at load ~100-150). So the deep rung passes the wall where the config
+  stalls, and is a tie on the defaults; THE WARM RUNG IS NEGATIVE: it bumps every new class to the 45-s rung and those
+  classes, once failed there, wait behind the planner's lower-rung edges (nearPlans' rung order), so the 135-s rung came
+  late or never (c10DW: 28 rung-3 switch steps, no rung 4). SEEN ON THE WAY (not fixed): with
+  that config one run's main thread planned 3.6-11 s before every step from 56 s on (every plan 'budget: the most gain',
+  856 of 900 s planning; median 0.3 s in the 6 other runs of the config: c5C, 4 ids) and a rung-2 step of it held a worker
+  305 s on its 15-s budget (exec.reach 840 k sims: waiting, not searching); the warm rung's first version repeated a
+  bumped triple (79 transplant steps at rung 1 with no news: c7W1) until the guard above. The landmark rejoin of cycle 1
+  (`EEAT_PLAN_REJOIN=1`, the same branch) found no gain (15-44 hits a run, all on hub checkpoints and solved minis).
+- **Bad EE Level 9, cycle 3: the place rung, and the start is the wall** (B7 lane b9, 2026-10-01, branch n5-b7-b9 = cycle 2
+  + origin/n5-plan e08ad21; strategy.js, both OPT-IN, off = the compile byte for byte; test/planstrategy.js 27/0 with them
+  on and off). THE WALL, again purple switch 5 (227,264) (mini 5's ladder maze): the current compiler at 900 s (box 7, W3,
+  load ~150 beside the scoreboard's full compile, one run an arm, side by side) 6 chain ids (c11A: 1-4, 41, 101; switch 5
+  66 steps, 0 found, 1,038 worker-s), + `EEAT_RUNG_DEEP=135000` 5 (c11D: 1-5; switch 5 0 of 49 at rungs 0-3, 3 of 10 at
+  the 135-s rung, the finds at 91 / 119 / 124 s of their windows). EVERY LINEAGE ENTERS THE MINI IN THE SAME PHYSICAL
+  STATE (c11D a10 and c6D1 a21, other switch sets: px 4198.65, vx -1.37, standing; the door state and the goal field the
+  same, 48.2 tiles), and from it the leg is not found in a 45-s window: tools/cmp/legab.js (rung 3, `--defaults=1`: the
+  compiler's knobs) 0 / 3, and 0 / 1 each from it + one tick of jump, right, left, right + jump, left + jump, 0 / 2 with
+  `EEAT_FX_FIELD=0 EEAT_FX_STATE=0`, 0 / 2 with `EEAT_Q_CELL=1`, every one stuck at (250,255) 30.8 tiles; from cycle 2's
+  start (the entrance reached directly, jumping, 1.3 px right) 3 / 3 at 42.6 s (skel+portfolio, 564 ticks: down the
+  ladder at x 260, then UP the ladder at x 252 between its spike columns to (252,250) and out left, the x 244 ladder, the
+  pocket); that start one tick earlier (standing) 0 / 3. So the finders' 45-s window passes this leg only from a lucky
+  start, and identical arrivals make every new class's try the same failing search. THE PLACE RUNG (`EEAT_RUNG_PLACE=1`):
+  the rung ladder also kept per (edge, the anchor's first arrival tile): a step of an edge whose (edge, place) failed rung
+  r by the budget starts at rung r + 1 at least (the lowest rung its own (edge, class) has not run this epoch; none: the
+  anchor leaves the edge for the epoch); a find lowers the floor; cleared at a deepening. With the deep rung (c12P, the
+  same box and time, one run): **10 ids at 900 s (1-10: waves 1 and 2 complete)**, switch 5 at 424 s (a step bumped
+  r0 -> r3 found it; switch 5 28 steps vs 59-66), mini 7 (5,140) 3 of 3 at the 135-s rung (25 steps), the next wall
+  wave 3's switch 13 (225,119) (closest 15 tiles at rung 3); bumped steps 48, 33 found, 962 worker-s. THE START JITTER
+  (`EEAT_START_JITTER=1`: after a budget failure from a place the next try starts from the first arrival + k ticks of a
+  held input) gained nothing in the leg tests above (every one-tick jitter stuck at the same (250,255)), but IN THE COMPILE
+  (deep + place + jitter, c13J, round 2 of the same box, one run): **13 ids at 900 s (1-13: wave 3 entered, switches 11,
+  12, 13)**, 154 jittered steps 50 found: switch 5 at 162 s (a jittered rung-3 step, 45 s), mini 7 2 finds (a bumped
+  r1 -> r3 jittered step in 42 s, a rung-4 one in 124 s), switch 13 (225,119) (cycle 1's and 2's wall) at 891 s by a
+  jittered rung-3 step in 17 s; deep + place + `EEAT_PLAN_TRANSPLANT=1` (c13T) 10 ids (1-6, 8, 9, 41, 101; switch 5 at
+  618 s; 17 transplant hits of 201, every one a hub checkpoint leg: no mini leg reused); deep + place again (c14P2, a
+  replicate) **13 ids (1-12, 101)**, switch 5 at 157 s (a bumped r0 -> r3 step, 40 s), the walls then wave 3's switch 13
+  (225,119) (closest (218,137) 20.8, cycle 1's) and 15 (277,202). One run an arm on a loaded box (the same code's spread
+  was 4-17 ids in cycles 1-2): the place rung's arms 10 / 13 / 10 / 13 vs 5-6 without it, side by side; no gain shown on
+  any other level (not run
+  there); not merged (no shared gate). NEXT: the minis' legs are ladder exits between spike columns (the found route's
+  x 252 and x 244 climbs: the goal field falls along it, 48.2 -> 33.2 -> 34 -> 31.2 -> 23.6 -> 12.6, so (250,255) is no
+  false near, the finders stall on the way); a dedicated long solve of an (edge, place) that failed twice (the stretch
+  child's 40 / 80 s windows failed switch 5 from 3 anchors) and these knobs on the gate levels.
+- **The hard set at 900 s, cycle 3: the deep rung's cost, its gate, the floor rung** (B8 hard, 2026-10-01, branch
+  n5-b8-hard-c3 = origin/n5-plan 04ecf95 + origin/n5-b7-b9 4fc5666 merged; box 8, 900 s, W3, arms side by side, one run a
+  level, load 190-230; `src/out/n5/b8/hard_c3.txt`). THE KNOBS SPLIT (`EEAT_RUNG_DEEP=135000` alone = d vs + `EEAT_RUNG_PLACE=1
+  EEAT_START_JITTER=1` = dpj): compiled 0 / 0 of 5; triggers Egg Quest II base 23 / 23, NC Naos 10a3 4 / 4 (both stuck at
+  anchor 5 from ~260 s: coins (220,122) 404 tiles, (207,189) 338-364, (208,186) 354-371 at the 135-s rung; coin (111,113)
+  1 tile at rung 3, the 1 x 2 pocket), NC Naos de5f 9 / 11, Forgotten Veil 731 13 / 11, b7be 11 / 6: the place rung and the
+  jitter gave no gain on the hard set (B7's Bad EE Level 9 gain is that level's); cycle 2's deep + yield (f3aacdf) on four
+  of them 35 / 16 / 9 / 12 (10a3 16 vs 4: one 900-s run a level is noise-bound). THE DEEP RUNG'S COST (`src/out/b8hard/deep.js`
+  in the worktree; 16 compiles: cycle 2's deep + yield and this cycle's d / dpj): the 135-s rung found 33 legs and FAILED
+  123 times (13,737 worker-s, ~860 s of a compile's ~2,600); its (edge, class)'s rung-3 closest tells them apart: the finds
+  came after a rung-3 closest <= 80 tiles or under 0.9 x the rung-2 one (the leg nearing as the window grew) in 29 of 33,
+  the fails mostly stood still far away (Egg Quest II's red key (297,153) 994 / 994 tiles, green key 1,790 / 1,790, NC Naos
+  10a3's coins 269 / 269, 404 / 404). THE DEEP RUNG'S GATE (strategy.js, OPT-IN `EEAT_DEEP_GATE=<tiles>` with the deep rung,
+  `EEAT_DEEP_GATE_P` 0.9; off = byte for byte): a deep step of an (edge, class) whose rung-3 closest is known, above the
+  tiles and not under P x its rung-2 closest is not run (the anchor leaves the edge for the epoch; history cleared at a
+  deepening; a `deepgate` event). Offline on the 16 logs: at 80 tiles 29 / 33 finds kept, fails 44 / 123 (5,267 of 13,737
+  s); at 120 31 / 33, 51 (5,990 s); at 160 33 / 33, 63 (7,352 s: 6,385 s freed, ~400 worker-s a compile). THE LEVEL'S FLOOR
+  RUNG (OPT-IN `EEAT_RUNG_FLOOR=<n>`; off = byte for byte): a rung that ran n counted steps on the level (finds + budget
+  fails) at a find rate under 1 / n is dead and the steps proposed below the lowest live rung start there (never above the
+  45-s rung, cleared at a deepening, a `floor` event); its counterfactual on the 16 logs: 6.7% of the worker time in a dead
+  rung's fails (n 24), 8 finds there. ROUND 3, dpj vs dpj + `EEAT_RUNG_FLOOR=24 EEAT_DEEP_GATE=80` side by side (2 levels):
+  Egg Quest II base 32 vs **19** triggers, NC Naos de5f 9 vs **7**: NEGATIVE. The floor CASCADES: lifted to rung 1, the
+  hopeless edges the 1.5-s rung used to screen made rung 1's rate fall too (Egg Quest II rung 1 1 / 26 finds vs 17 / 93
+  without), so it died as well and every step ran at 15 s (rung 2 72 fails, 1,044 worker-s; 168 steps vs 389); the gate did
+  what it should there (12 deep steps not run; the deep rung 7 finds / 7 fails vs 3 / 8). Both stay OPT-IN, not merged.
+  NEXT: the floor's statistics from steps at their own rung only (a lifted step no evidence), at most rung 1; the gate
+  alone at 160 tiles vs the deep rung on the hard set, more runs a level.
+- **The hard set at 900 s, cycle 4: the deep gate alone, and NC Naos's stop is two walls** (B8 hard, 2026-10-01, branch
+  n5-b8-hard-c4 = n5-b8-hard-c3 + this note + `tools/cmp/relaykrt.js`; box 8 `~/b8_hard_c4`, code = 5f7d66d, 900 s, W3,
+  arms side by side, one run a level a round, load 135-220; `src/out/n5/b8/hard_c4.txt`). THE GATE ALONE (`EEAT_RUNG_DEEP=135000`
+  = d vs + `EEAT_DEEP_GATE=160` = g): ARE YOU A GOD compiled in both arms over the cycle: g 8,572 run ticks (first route
+  9,559 at 536 s, round 1), d 7,713 (first route 13,239 at 727 s, round 2; d's round-1 run none, 13 triggers) (best known
+  5,375; every .eetas replayed from the level file, 0 deaths); NC Naos de5f 12 (g) vs 9 (d) triggers; the deep rung's steps
+  g 2 finds / 7 fails (838 worker-s) vs d 3 / 15 (1,790 s) on the same two levels, 3 deep steps gated; round 3 (the same
+  pair again): d COMPILED AYAG 7,556 (first route at 511 s; 1.41 of the best known, this cycle's best) where g did not (20
+  triggers, 5 deep steps gated), NC Naos de5f 14 = 14; over the cycle AYAG d 2 of 3, g 1 of 2, de5f 9 / 14 vs 12 / 14:
+  NO GAIN SHOWN for the gate (it frees deep-rung time: g 4 finds / 3 fails vs d 6 / 8 in round 3), stays OPT-IN. THE
+  SKELETON'S DIRECT SHARE (`EEAT_SKEL_DIRECT=0.7`, an existing executor knob, vs the deep rung alone, round 2): AYAG none vs
+  7,713, Stupid Fox 4 vs 7 triggers: NEGATIVE. NC NAOS'S STOP (both versions stop at coins (207,189) / (208,186) /
+  (220,122)), from the known route's own states (`tools/cmp/legab.js` / `relaykrt.js`, `--defaults=1`; the 8,267-tick
+  route cut at a tick; the leg coin (254,174) -> coin (207,189), 385 route ticks): TWO WALLS. (1) The route's 120-tick
+  left+jump GLIDE (mask 18 held, to -6.5 px/tick) down-left through a dot / up-arrow lattice: with the 12-tile skeleton the
+  135-s window fails 4 / 4 from ticks 4125 / 4210 (closest 40.6 tiles at (246,189), every rep the same), rung 2 from 4250
+  (already gliding at -4.7) too; the executor's direct leg alone (`EEAT_SKEL=0`) finds it from 4250 / 4290 at rung 2 (8.2 /
+  8.8 s), `EEAT_SKEL_STEP=24` from 4250 (11.9 s); at rung 3 the default's own 15.75-s direct leg finds it from 4250 / 4290
+  (12.2 s); from the coin's own state (4125) the 45-s direct leg (`EEAT_SKEL=0`; the deep rung's direct share is 47 s)
+  carries the glide to (230,189) at tick 4391, the route's own place and time ((227.5,190.6) at 4390). (2) From that arrival
+  (vx -1.1, vy -0.6) the last 20 tiles (the route stops, drops to row 191 and takes three jumps left into the coin row) are
+  not found in 45 s (the relay: closest 23 at (228,188)), nor in the 135-s window from that state (`--save` + legab, with
+  the skeleton and with `EEAT_SKEL=0` alike: closest 21.6 at (226,188)), where the route's state 2-3 tiles away finds them
+  in 0.9 s (cycle 1's krt): the deep rung's 20.6-tile closest on de5f (cycle 2) is this second wall. Its mechanism (the
+  route's trace): the route enters (226,188) at tick 4368 still FALLING (vy +1.7 px/tick, the glide's own descent),
+  drops through the row of up arrows (226-229, 189) at px 3616-3632 (it stops dead at px 3632.00, vx 0, at 4380) into the
+  air pocket of row 190-191 and leaves it left with up+left and jumps; the finder's arrivals there are later and RISING
+  (vy -0.6): the up arrows hold them in row 188-189. Both walls are one thing: the speed the glide carries. Opt-in tried and dropped: a
+  GROWN RETRY (a sub-leg that failed by its budget retried with a doubled step): 41.6 / 42.6 tiles from 4210 / 4125, no
+  gain (the 12-tile sub-leg SUCCEEDS with a slow arrival; the next set fails from it). The skeleton on 6 more stuck legs
+  (krt, rung 2, base / `EEAT_SKEL=0` / `EEAT_SKEL_STEP=24`): Stupid Fox's checkpoint (55,46) from its previous trigger -- /
+  15.2 s / --, from 300 before -- / 8.4 s / 13.4 s; Are You A God's coin (93,114) from 300 before -- / 8.6 s / --; Egg
+  Quest II's green key prev closest 13.8 / 5 / 7; Forgotten Veil b7be's coin (315,175) prev 35.8 / 60.4 / 67.4 (worse);
+  FV 731, NC Naos de5f the same; at rung 3 the base finds the Stupid Fox legs (11.6 / 9.8 s): the 12-tile skeleton costs
+  rungs on momentum legs, it is not those compiles' wall. `tools/cmp/relaykrt.js <level> <start.eetas> "<label>" [--ms]
+  [--level] [--defaults=1]`: a reach from a state, then the same leg from its own closest state (the relay start; its
+  masks end at the reported closest tile: checked). NEXT: the second wall (the lattice row's last 20 tiles from the
+  glide's own arrival: the finder's state vs the route's, an exact search from it), the gate with more runs a level before
+  any shared gate (with B7's merge of the deep rung).
 - **THE ENDGAME and THE AIRBORNE ARRIVAL** (C6 push 3 lane 5 block 3; `src/out/n5/lanes/c6_lane5_b3.md`). THE ENDGAME
   (strategy.js after JOINS, its own clock; **DEFAULT ON since lane 5 block 4** (`src/out/n5/lanes/c6_lane5_b4.md`): compile.js
   gives it a fifth of the budget, at most 60 s (`ENDGAME_F`, `ENDGAME_MAX_S`); `--endgame=<s>` / `EEAT_ENDGAME_S=<s>` its
