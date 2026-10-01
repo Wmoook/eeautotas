@@ -1592,7 +1592,7 @@ function createPlanner(model, facts, o = {}) {
 				if (!es) es = edgesOf(a.S, a.pos, a.base, 'plan', true, cls, a);
 				let best = null;
 				for (const e of es) {
-					if (!e.X || e.relaxOnly || e.viaDeath || !e.S2 || e.S2.feats[n.feat] !== n.value) continue;
+					if (!e.X || e.relaxOnly || e.viaDeath || !e.S2 || e.S2.feats[n.feat] !== n.value || e.S2.gain < a.S.gain) continue;
 					const node1 = { S: e.S2, pos: e.pos2, e, parent: root };
 					const es2 = edgesOf(e.S2, e.pos2, a.base, 'plan', false, e.S2.key + '|*', null);
 					const E = es2.find((x) => x.edge === edge);
@@ -1966,6 +1966,10 @@ function createPlanner(model, facts, o = {}) {
 				const f = model.A.gateFeat[t];
 				const v = openValue(t, a.S);
 				if (!f || v === null || v === undefined || a.S.feats[f] === undefined || a.S.feats[f] === v) continue;
+				// (no need of a feature's start value: undoing progress (a switch toggled back off) is no opener; a door
+				// near the closest that only a reset opens is, on a chain level, another wave's: box 6's first run read
+				// 'purple switch 5 needs psw:4=0' at 39 s)
+				if (model.S0 && model.S0.feats && model.S0.feats[f] === v) continue;
 				const d = Math.max(Math.abs(dx), Math.abs(dy));
 				if (d < bd) { bd = d; bf = f; bv = v; }
 			}
