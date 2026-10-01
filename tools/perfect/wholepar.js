@@ -18,8 +18,9 @@
 // ours when below it (replayed, written to --out); C = U (our route's run ticks) closing = OUR ROUTE IS PROVEN OPTIMAL.
 //   node tools/perfect/wholepar.js <level.eelvl> [--route=<a.eetas>[,<b.eetas>]] [--U=<run ticks>] [--threads=8]
 //        [--seconds=1800] [--split=3] [--ttBits=23] [--tiers=kin,togo,rel,gate] [--from=<C>] [--out=<faster.eetas>]
-//        [--check=1] [--log=<tasks.jsonl>] [--resume=<tasks.jsonl>]
-// Prints JSON lines ({ev 'check' | 'C' | 'found' | 'result'}).
+//        [--check=1] [--log=<tasks.jsonl>] [--resume=<tasks.jsonl>] [--progress=60]
+// Prints JSON lines ({ev 'check' | 'C' | 'found' | 'result'}, and every --progress seconds of a C {ev 'progress', C, tasks,
+// done, nodes, s}; 0: none).
 const path = require('path');
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
 const E = require('../../src/eesim.js');
@@ -288,6 +289,8 @@ async function main() {
 	say({ ev: 'up', threads, h0, lb, U: out.U, ms: Date.now() - t0 });
 	const Cs = [];
 	let found = null;
+	const progressMs = 1000 * (args.progress !== undefined ? +args.progress : 60);
+	let lastProg = Date.now();
 	const top = Number.isFinite(U) ? U : Infinity;
 	for (let C = lb + 1; C <= top && Date.now() < deadline; C++) {
 		const tc = Date.now();
@@ -319,6 +322,8 @@ async function main() {
 						if (m.stopped) stopped++;
 						else if (logFd !== null && !m.found) fs.writeSync(logFd, JSON.stringify({ ev: 'task', C, k: taskKey(tasks[m.id]), nodes: m.nodes }) + '\n');
 						if (m.found && (hit === null || m.found.layer < hit.layer)) hit = m.found;
+						// (a C's progress every --progress seconds: a contour that runs for hours can be watched; output only)
+						if (progressMs > 0 && Date.now() - lastProg >= progressMs) { lastProg = Date.now(); say({ ev: 'progress', C, tasks: all.length, done, nodes, s: (Date.now() - tc) / 1000 }); }
 						give(w);
 					}
 				});

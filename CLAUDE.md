@@ -1145,3 +1145,28 @@ ways in.
   C 26 (6 tasks ran 22+ min, then 1); `--split=6` makes 2,700 tasks at C 27 (the pocket's idle starts 29-36: 2,600 of
   them; the falling starts 0-28 one or two each: in the shaft every input gives the same state), 5-7 M nodes a task, all
   13 workers busy, 1.8 M nodes/s on box 7 at load ~150. **SWITCH LABYRINTH IS PROVEN: THE FIRST WHOLE ROUTE PROVEN OPTIMAL** (box 7, 2026-10-01 01:11 EDT): C 26 closed (19 threads at load 140-175, 1,476,991,460 nodes, 2,159 s: every route >= 26 run ticks), then C 27 (`--split=6 --from=26`, 2,700 tasks) closed by two SEQUENTIAL runs on the task log: a 13-thread run (its 2,189 tasks logged before a helper was started on the same log) and the closing run (19 threads, the other 511 tasks, 434 s; 2,849,047,846 nodes in the C's report): NO ROUTE FINISHES IN FEWER THAN 27 RUN TICKS, so the 27-tick route (the best known = the compiler's route, 1.0 of the best known on the scoreboard) is TICK-PERFECT (verdict PROVEN, gap 0; the tiers checked on both known routes first, 0 violations). The proof rests on: the engine (exact), the tiers kin / rel / gate being admissible, the stateHash merge (53 bits), the shared table's and the task log's rules above. Box 7 `~/b7_proof_out/c3/` (switch_lab_c26.out, switch_lab_c27s.out, c27_seq.tasks.jsonl). ONE RUN AT A TIME on a log: two runs writing one log at once are NOT a proof by the union of their lines (each can prune on a task only the other finished: a subtree searched by neither); a closing run trusts only the lines of runs that ended before it started (cycle 3: a 5-thread helper on the same log, from the other end, was dropped: the C 27 close resumes from the first run's 2,189 lines written before the helper started).
+- **WHICH LEVELS A PROOF CAN CLOSE: the layer census, the gap report** (box 7 lane 'proof' cycle 4, 2026-10-01;
+  `tools/perfect/layercensus.js`, a tool): `node tools/perfect/layercensus.js <level.eelvl> [--C=<run ticks>] [--tiers=kin,rel,gate]
+  [--maxLayer=2000000] [--seconds=600]`: breadth first over exact engine states from every idle start with FULL stateHash dedup
+  across layers and wholepar.js's cut at C: the distinct states an exact proof must visit at each depth and their growth a
+  layer. Box 7 (one thread a level): Switch Labyrinth (C 27) 3.2x a layer (1.85 M states at run tick 12; it closed at 27);
+  NC Naos d3c6 (C 111) 2.9x (3.7 M at 14); **My level fef0 (C 59) and 730c (C 93): 8x a layer** (22 / 93 / 361 / 1,470 /
+  9,013 / 66 K / 522 K / 4.29 M at run ticks 1-8, the two levels' first layers the same chamber) with no cut at all: the
+  trophy is one tile above the spawn, so every tier reads ~4 ticks while the route needs 59 (fef0's route: a 12-tick fall into
+  the dots, a drift to the left arrow, 15 ticks in the up-arrow column to build -2 px/tick, a sideways jump off the left wall,
+  the rise into the trophy): with these bounds no exact search closes 40+ ticks of slack at 8x a layer. THE TOGO TIER after
+  n5-p4-perfect's two fixes (5dcea4c, 2265e58; merged here): ADMISSIBLE on all 44 known routes of the 8 small levels (Switch
+  Labyrinth, My level fef0 / 730c / de42, NC Naos d3c6, the precision puzzle, celeste x2: every tick checked, 0 violations;
+  cycle 2: 2.137 two ticks before the crown) but it CUTS NOTHING the other tiers do not: the same h at the start and the same
+  nodes in every closed C with and without it (Switch Labyrinth C 9-16, fef0 C 4-13, 730c C 19-20, celeste C 74-80; one box-7
+  thread each), at ~1.5x the context build. THE GAP REPORT of the scoreboard's 45 compiled routes (b7 score cycle 3, n5-plan
+  e08ad21, 300 s; `tools/perfect/gaprep.js`, routelb.js with both fixes, 20 s a level; the lb = the max of the compile's,
+  routelb's and the proven exhaustive lbs): PROVEN 1 (Switch Labyrinth 27); routelb raises the lb on 24 of 45 (Tutorial 1
+  372 -> 708, Bygone Tutorial 334 -> 633, Tutorial 2 367 -> 786, MIHB's Dream 1,138 -> 1,299); the exhaustive lbs on the
+  small levels: fef0 16 / 60, 730c 22 / 97, NC Naos d3c6 **57** (C 57 closed this cycle: 114.8 M nodes, 188 s, 3 threads) /
+  153, the precision puzzle 56 / 153, celeste x2 94 / 239-240; the gap median 89% of the route (the smallest after Switch
+  Labyrinth: NC Naos 62.7%, celeste 60.7%, Bygone Tutorial 68.1%, Tutorial 1 67.7%, Ruins 70.7%); at or under the best known
+  10 of the 40 with one. `wholepar.js --progress=<s>` (default 60): a `progress` line {C, tasks, done, nodes, s} during a long C
+  (output only; test/wholepar.js 54/0). NEXT: a bound that knows the time to BUILD speed (reach.js's R / F / C states with tick
+  costs from the exact per-axis recurrences of src/math/fields.js, x relaxed to the row's field classes; the jump only where
+  a real floor is under the box), the only way to close the chambers (fef0 / 730c) and the false-near pockets.
