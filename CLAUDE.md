@@ -1241,7 +1241,10 @@ ways in.
   4,132 -> 5,636, failed with 0 sims 1,118 -> 688; the skeleton deeper on MegaMan Dash (its least c / c0 0.67 -> 0.23) and
   Nirthophia (0.36 -> 0.08), shallower on Dreamland (0.29 -> 0.72) and Endless Pain (0.68 -> 0.86), the sum 8.94 vs 8.86;
   peak RSS median 5.29 -> 5.15 GB, max 7.33 -> 6.28; compiled 0 = 0, triggers 8 vs 10 (Happy Spookaween 2 vs 4); ok steps
-  67 vs 49 (TTL Spike 36 vs 15). Planexec 32/32 and planstrategy 27/0 with it on. NOT a default yet (no compile gain shown).
+  67 vs 49 (TTL Spike 36 vs 15). Planexec 32/32 and planstrategy 27/0 with it on. The shared gate side by side (gate20, 60 s, W3, box
+  8, one run an arm): exit 0, compiled 15 vs 16, better 7 / worse 2 (One Minute Descent lost its 60-s route, MIHB's Dream
+  progress 39 -> 35; Tutorial 1 2,797 -> 2,317, Fish Gods 4,396 -> 3,736; Tree Decorating 1,607 -> 2,080): one run, not
+  rerun. NOT a default (no compile gain shown; not merged into n5-plan).
   Not kept: THE SKELETON ACROSS WAYPOINTS (a call with no memo seeded from another waypoint's deepest level from the same
   start): on Phina the waypoints' skeletons diverge early (blue coin (145,7)'s level at 53 tiles is 4,267 of 4,375 on blue
   coin (35,234)'s field), on TEZ none gets below half its c0. WHAT IS LEFT on these levels: the skeleton STUCK at one hard
