@@ -248,6 +248,13 @@ const BWC_IMPORT = process.env.EEAT_BWC_IMPORT !== '0';
 // (THE GATE, as the one shot's: the chain's anchors are held until the executor needs them: a stall of the watchdog or the
 // loop's end with no route; EEAT_BWC_GATE=0: at once)
 const BWC_GATE = process.env.EEAT_BWC_GATE !== '0';   // (the child reads it too: 1 the chain's frontier only (the default), 2 every node)
+// THE LEAD GATE (P4 gated, OPT-IN EEAT_BWC_LEAD=<gain>, unset / 0 = the gate above alone, byte for byte): the watchdog's
+// stall never comes while the executor's failed rungs keep adding facts, so the chain's frontier stayed held for the whole
+// compile where the chain was far ahead (Weird Perfection, the laptop, 300 s, the nearest-first chain: the chain's frontier
+// gain 66 held, the executor's anchors gain 7 on its far 'most gain' plans, no route). With the knob the gate also opens
+// when a held frontier node's gain is BWC_LEAD over the most the executor's anchors hold and at least BWC_LEAD_F x it (the
+// chain far ahead; where the executor keeps up it opens as before, so its own routes are not slowed by the imports)
+const BWC_LEAD = Math.max(0, +process.env.EEAT_BWC_LEAD || 0), BWC_LEAD_F = +process.env.EEAT_BWC_LEAD_F > 0 ? +process.env.EEAT_BWC_LEAD_F : 2;
 // (THE GATE, with BW_LEVEL: the one shot's gate for the child's legs: their arrivals (a leg's new model state) are held until
 // the executor needs them, its watchdog's first stall or the loop's end with no route, then they go to it as they come; its
 // routes are taken at once. Given at once, the imported anchors outranked the executor's own (Ruins, local 100 s: 1,510 vs
@@ -848,7 +855,15 @@ async function compile(L, opts = {}, emit = () => {}) {
 						// (a chain node: the loop's import (replayed; a model state not seen yet is an anchor))
 						imported++;
 						if (bwcOpen) onLine('import ' + ev.inputs.replace(/[^0-O]/g, ''));
-						else bwcHeld.push(ev.inputs.replace(/[^0-O]/g, ''));
+						else {
+							bwcHeld.push(ev.inputs.replace(/[^0-O]/g, ''));
+							// (THE LEAD GATE: the chain's frontier far ahead of the executor's anchors)
+							if (BWC_LEAD > 0 && Number.isFinite(+ev.gain)) {
+								let exMax = 0;
+								for (const A of anchors.values()) if (A.gain > exMax) exMax = A.gain;
+								if (+ev.gain >= exMax + BWC_LEAD && +ev.gain >= BWC_LEAD_F * exMax) bwcRelease(`the chain leads: gain ${ev.gain} vs the executor's ${exMax}`);
+							}
+						}
 					} else if (ev.ev === 'chain') say({ ev: 'bwchain', ok: ev.ok, why: ev.why, legs: ev.legs, legsOk: ev.legsOk, nodes: ev.nodes, gain: ev.gain, imported, ms: Date.now() - t1 });
 					else if (ev.ev === 'leg') say({ ev: 'bwlevel', legTry: ev.n, of: ev.of, label: ev.label, ok: ev.ok, T: ev.T, why: ev.why, ms: Date.now() - t1 });
 					else if (ev.ev === 'done') done = ev.end;
