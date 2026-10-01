@@ -84,6 +84,16 @@ const RUNG_PLACE = process.env.EEAT_RUNG_PLACE === '1';
 // one a real state replayed from the level start (a death or a finish in the jitter: the arrival as it is).
 const START_JITTER = process.env.EEAT_START_JITTER === '1';
 const JITTER_MASKS = [1, 5, 3, 4, 2, 0];
+// THE LEVEL'S FLOOR RUNG (B8 hard, cycle 3; OPT-IN EEAT_RUNG_FLOOR=<n>, unset / 0: off, the steps' rungs as the facts give
+// them byte for byte): every new (edge, node class) climbs the ladder from rung 0, and on the hard set's levels the low
+// rungs almost never find a leg: NC Naos 10a3 at 900 s (box 8, the deep rung + the yield) ran 108 rung-0 steps (218
+// worker-s) with 0 finds and 46 rung-1 steps (228 s) with 1, of 2,575 worker-s; Egg Quest II's base route 260 rung-0 steps
+// (398 s) with 2. With the knob, once rung r has run n non-synthetic steps on this level with a find rate under 1 / n
+// (budget failures and finds counted; other failures not), r is DEAD for the level and a step proposed below the lowest
+// live rung starts there (the lowest such rung its (edge, class) has not run in this epoch; none: the anchor leaves the
+// edge for the epoch, as THE PLACE RUNG does). Never above the 45-s rung (the deep rung stays the facts' 5th try).
+// The floor only rises from counts: rungs below it stop being measured; cleared at a deepening (the windows double).
+const RUNG_FLOOR = +process.env.EEAT_RUNG_FLOOR > 0 ? Math.max(2, Math.round(+process.env.EEAT_RUNG_FLOOR)) : 0;
 // THE ONE SHOT (n5-oneshot part 3, OPT-IN EEAT_ONESHOT=1; off = the loop below byte for byte): the MOVES stage's first
 // tier: src/plan/oneshot/solve.js, ONE A* over (the move graph x the trigger state) from the level start with the
 // planner's plans and the bounds as its heuristic, for OS_SHARE of the time left before the loop; then in the loop's
@@ -1274,6 +1284,14 @@ async function compile(L, opts = {}, emit = () => {}) {
 	const tried = new Map();   // `${edge}|${nodeClass}|${rung}|${epoch}` -> {ok}
 	const warmRung = new Map();   // (EEAT_RUNG_WARM: edge -> the highest rung it failed by the budget (lowered by a find below it))
 	const placeRung = new Map();   // (EEAT_RUNG_PLACE: `${edge}|${place}` -> the rung a step from that place starts at)
+	// (EEAT_RUNG_FLOOR: per rung the level's counted steps n and finds k; the floor = the lowest rung not dead)
+	const floorStat = RUNG_MS.map(() => ({ n: 0, k: 0 }));
+	let floorSaid = 0;
+	const levelFloor = () => {
+		let f = 0;
+		while (f < RUNG_MS.length - 1 && floorStat[f].n >= RUNG_FLOOR && floorStat[f].k * RUNG_FLOOR < floorStat[f].n) f++;
+		return f;
+	};
 	const placeOf = (A) => (A && A.arrivals && A.arrivals[0] && Number.isFinite(A.arrivals[0].tile) ? A.arrivals[0].tile : null);
 	const placeKey = (step, A) => { const p = placeOf(A); return p === null ? null : `${step.edge}|${p}`; };
 	const placeFails = new Map();   // (EEAT_START_JITTER: `${edge}|${place}` -> the budget failures from there; the jitter's turn)
@@ -1394,6 +1412,17 @@ async function compile(L, opts = {}, emit = () => {}) {
 						for (let r = Math.min(rungMs.length - 1, f); r < rungMs.length; r++) if (!tried.has(`${ek}|${r}|${epoch}`)) { w = r; break; }
 						if (w < 0) { localBlock.add(`${A.key}|${ek}`); continue; }
 						step.placeFrom = step.rung | 0; step.rung = w;
+					}
+				}
+				// (THE LEVEL'S FLOOR RUNG: the lowest rung at or above the level's floor that this (edge, class) has not run in
+				// this epoch; none left: this anchor leaves the edge for the epoch)
+				if (RUNG_FLOOR && !step.synthetic && step.floorFrom === undefined) {
+					const f = Math.min(levelFloor(), rungMs.length - 1);
+					if (f > (step.rung | 0)) {
+						let w = -1;
+						for (let r = f; r < rungMs.length; r++) if (!tried.has(`${ek}|${r}|${epoch}`)) { w = r; break; }
+						if (w < 0) { localBlock.add(`${A.key}|${ek}`); continue; }
+						step.floorFrom = step.rung | 0; step.rung = w;
 					}
 				}
 				const tk = `${ek}|${step.rung}|${epoch}`;
@@ -1864,6 +1893,14 @@ async function compile(L, opts = {}, emit = () => {}) {
 			}
 			if (step.placeFrom !== undefined) { rec.placeFrom = step.placeFrom; delete step.placeFrom; }
 		}
+		// (THE LEVEL'S FLOOR RUNG: a find or a budget failure counts at its rung; the floor's rises are said once each)
+		if (RUNG_FLOOR && !step.synthetic) {
+			const r = step.rung | 0;
+			if (r < floorStat.length && (res.ok || rec.why === 'budget')) { floorStat[r].n++; if (res.ok) floorStat[r].k++; }
+			if (step.floorFrom !== undefined) { rec.floorFrom = step.floorFrom; delete step.floorFrom; }
+			const f = levelFloor();
+			if (f > floorSaid) { floorSaid = f; say({ ev: 'floor', rung: f, stat: floorStat.map((x) => `${x.k}/${x.n}`).join(' ') }); }
+		}
 		// (THE START JITTER: a budget failure from a place makes the next step from there start elsewhere)
 		if (START_JITTER && !step.synthetic) {
 			const pk = placeKey(step, A);
@@ -1972,6 +2009,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		deepenings++; epoch++; mult *= 2;
 		warmRung.clear();   // (THE WARM RUNG: the facts start over at a deepening, so does the warm start)
 		placeRung.clear();   // (THE PLACE RUNG: likewise)
+		if (RUNG_FLOOR) { for (const x of floorStat) { x.n = 0; x.k = 0; } floorSaid = 0; }   // (THE LEVEL'S FLOOR RUNG: the windows double)
 		try { if (facts && typeof facts.reset === 'function') facts.reset({ keepProofs: true, boost: 2 }); } catch (e) { bug('reset', { error: e.message }); }
 		for (const A of anchors.values()) { if (A.why !== 'bound') { A.exhausted = false; A.why = ''; } A.plans = null; }
 		localBlock.clear();
