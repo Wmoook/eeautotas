@@ -509,7 +509,13 @@ function createRouteLB(L, o = {}) {
 		const out = new Set();
 		for (const t0 of tiles) for (const t of touchersOf(t0)) {
 			const x = t % W, y = (t - x) / W;
-			for (let dj = 0; dj < 2; dj++) for (let di = 0; di < 2; di++) out.add((2 * y + dj) * LW + 2 * x + di);
+			// (3 x 3 nodes: the tile's own 2 x 2 and the next column / row. A path that enters the tile from the right / below
+			// is at x >= 16 X + 16 (y >= 16 Y + 16) just before: that point floors to node 2X + 2 (2Y + 2), while its first point
+			// inside floors to 2X + 1, 8 px further: with 2 x 2 regions a leftward / upward arrival paid up to 8 px more than it
+			// moved (T-ROUTELB-ADMISSIBLE dense: 2.137 two ticks before the crown, the precision puzzle / NC Naos d3c6). As a
+			// start region the next column / row covers a departure rightward / downward from anywhere in the tile (its floor
+			// node lies up to 8 px behind)
+			for (let dj = 0; dj < 3; dj++) for (let di = 0; di < 3; di++) { const nx = 2 * x + di, ny = 2 * y + dj; if (nx < LW && ny < LH) out.add(ny * LW + nx); }
 		}
 		return Int32Array.from(out);
 	}
@@ -554,7 +560,8 @@ function createRouteLB(L, o = {}) {
 		dist.fill(Infinity);
 		const lx = lam, ly = 1 - lam;
 		heap.clear();
-		for (const g of goalNodes) { if (dist[g] > 0) { dist[g] = 0; heap.push(0, g); } }
+		// (a blocked goal node is never the floor of a point on a path: skipped)
+		for (const g of goalNodes) { if (nb[g]) continue; if (dist[g] > 0) { dist[g] = 0; heap.push(0, g); } }
 		const fired = new Uint8Array(ports.length);
 		let dieFired = !resp || !dieNodes;
 		const respSet = resp ? resp.set : null;
@@ -568,13 +575,13 @@ function createRouteLB(L, o = {}) {
 					if (fired[k]) continue;
 					fired[k] = 1;
 					const v = d + 1;
-					for (const e of ports[k].entry) if (v < dist[e]) { dist[e] = v; heap.push(v, e); }
+					for (const e of ports[k].entry) if (!nb[e] && v < dist[e]) { dist[e] = v; heap.push(v, e); }
 				}
 			}
 			if (!dieFired && respSet.has(m)) {
 				dieFired = true;
 				const v = d + DEATH_MIN;
-				for (const e of dieNodes) if (v < dist[e]) { dist[e] = v; heap.push(v, e); }
+				for (const e of dieNodes) if (!nb[e] && v < dist[e]) { dist[e] = v; heap.push(v, e); }
 			}
 			// lattice moves into m from its 4 neighbours n (n -> m forward), n free
 			const i = m % LW, j = (m - i) / LW;
@@ -859,7 +866,7 @@ function createRouteLB(L, o = {}) {
 		dist.fill(Infinity);
 		const lx = lam, ly = 1 - lam;
 		heap.clear();
-		for (const s of sources) for (const g of s.nodes) if (s.v < dist[g]) { dist[g] = s.v; heap.push(s.v, g); }
+		for (const s of sources) for (const g of s.nodes) if (!nb[g] && s.v < dist[g]) { dist[g] = s.v; heap.push(s.v, g); }
 		const fired = new Uint8Array(ports.length);
 		let dieFired = !resp || !dieNodes;
 		const respSet = resp ? resp.set : null;
@@ -868,9 +875,9 @@ function createRouteLB(L, o = {}) {
 			if (d > dist[m]) continue;
 			if (ports.length) {
 				const l = exitOf.get(m);
-				if (l) for (const k of l) { if (fired[k]) continue; fired[k] = 1; const v = d + 1; for (const e of ports[k].entry) if (v < dist[e]) { dist[e] = v; heap.push(v, e); } }
+				if (l) for (const k of l) { if (fired[k]) continue; fired[k] = 1; const v = d + 1; for (const e of ports[k].entry) if (!nb[e] && v < dist[e]) { dist[e] = v; heap.push(v, e); } }
 			}
-			if (!dieFired && respSet.has(m)) { dieFired = true; const v = d + DEATH_MIN; for (const e of dieNodes) if (v < dist[e]) { dist[e] = v; heap.push(v, e); } }
+			if (!dieFired && respSet.has(m)) { dieFired = true; const v = d + DEATH_MIN; for (const e of dieNodes) if (!nb[e] && v < dist[e]) { dist[e] = v; heap.push(v, e); } }
 			const i = m % LW, j = (m - i) / LW;
 			if (i > 0) { const n = m - 1; if (!nb[n]) { const v = d + lx * hx[n]; if (v < dist[n]) { dist[n] = v; heap.push(v, n); } } }
 			if (i + 1 < LW) { const n = m + 1; if (!nb[n]) { const v = d + lx * hx[m]; if (v < dist[n]) { dist[n] = v; heap.push(v, n); } } }
