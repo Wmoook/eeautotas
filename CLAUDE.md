@@ -486,7 +486,8 @@ ways in.
   src/compile.js and src/plan.js turn on, unless the environment names them (=0 off; `EEAT_COMPILER_DEFAULTS=0` none),
   EEAT_COVER=3 (the coverage leg finder as the fallback), EEAT_CRUMBS=1 (coins no gate reads as breadcrumb relays),
   EEAT_FIELD_MEMO=1, EEAT_PLAN_ANY=1 (a set-kind trigger group = one edge), EEAT_PLAN_UNTOGGLE=1, EEAT_FX_FIELD=1 /
-  EEAT_FX_STATE=1 (physics goal fields on effect levels), EEAT_ICE_LOCAL=1, EEAT_PROT_LAYER=1, EEAT_BW_LEVEL=last (the chains-lab judge: the last bullet of this section), EEAT_PREC_STREAM=1 (the exact landing's routes as they come: THE FIRST ROUTE'S WAITS below); the modules themselves stay
+  EEAT_FX_STATE=1 (physics goal fields on effect levels), EEAT_ICE_LOCAL=1, EEAT_PROT_LAYER=1, EEAT_BW_LEVEL=last (the chains-lab judge: the last bullet of this section), EEAT_PREC_STREAM=1 (the exact landing's routes as they come: THE FIRST ROUTE'S WAITS below); on in the code itself (not
+  in defaults.js) THE WIDE LOOPS (polish.js, the LOOPS stage: `EEAT_LOOP_WIDE=0` off; below); the modules themselves stay
   opt-in (their tests and the truth checkers read them as before). Box 5, 300 s, W3, one run a level: all of them on (the
   combo, 22 levels) compiled 15 vs the base's 9, none lost (+K Underground, On And On And On, Crypts Of Anubis, Presto
   Penguins, The Witch's House; Vignettes, Perilous Endeavor and Stone Ruin Speedrun compiled in the single-group arms, not
@@ -563,7 +564,38 @@ ways in.
   never take a leg's answer away (leg() runs every tier as without them, below a trick's answer: `bres`); they solve
   more of the routes' own moves (tools/tricks/legab.js, fieldlegs.js) but not more compiles (25 vs 25 of 48 at 300 s).
   Mining tools: `tools/tricks/` (mine.js, fieldmine.js, legab.js, fieldlegs.js), `tools/cmp/tricks3.js`, `idleshift.js`.
-- **Where it stands** (2026-09-30 ~21:30, **300 s**, `--workers=3`, one full compile, every .eetas read back to its finish):
+- **Where it stands** (2026-10-01 ~01:40, the C6 chief's block 3, **300 s**, `--workers=3`, one full compile on boxes 5 + 6,
+  every .eetas read back to its finish; `src/out/n5/full_c6_b3.md` / `.jsonl`, gitignored): **47 / 230** with n5-plan 8fe57cb
+  (campaign 40 / 203, hard 7 / 25, Bad EE Level 9 and Cold World 0 / 2; 47 / 47 replayed; a verified route by 60 s 21, by
+  180 s 37, the first route's median 87 s; a compile's peak RSS median 5.08 GB, max 9.1 GB). Main took it as n5-plan 04ecf95
+  = 8fe57cb + B8 speed's `EEAT_PREC_STREAM=1` default (THE FIRST ROUTE'S WAITS; with the opt-in EEAT_PREC_ASYNC and
+  tools/cmp/firstab.js; its shared gate on box 6: exit 0, 15 vs 14, worse 0, 15 / 15 replayed). Other full
+  runs: block 2 (fc07366) 46, S99's run of main 23f1f3a 50, B7's run of e08ad21 45; 58 levels in some run. One run's count is
+  good to about +-4: the same code flips 7 of the 58 routed levels between two runs side by side. Versus block 2: new Buuwuu's
+  Stronghold, Santa's Workshop, TPs The Horror, Presto Penguins, YMCK Puzzle Parade and **Escape the Lava (its first compile
+  ever, 16,025 run ticks)**; lost Tutorial 2, Tutorial 4, A Dreary Day, Pinball Bloom, Relics Of Athena (late first routes).
+  THE MERGE A/B (main 23f1f3a vs n5-plan 8fe57cb side by side, 2 runs an arm, 300 s, W3, the 58 levels, 204 / 204 replayed):
+  compiled level-runs 101 vs **103** of 116; on the 45 levels both arms routed in every run **-1.8% run ticks** (faster 22 /
+  slower 15 / same 8): the count is main's within the spread, the gain is route time (THE WIDE LOOPS) and the precision
+  pair's first route (EEAT_PREC_STREAM). TAS (41 levels with a best known): ticks / best known median **1.050**, **12 AT OR
+  UNDER THE BEST KNOWN TAS** (Christmas Town 4,045 vs 6,340 = 0.638, Ruins 0.800, Vignettes 0.806, Summer Bee 0.860, Desolate
+  Caverns 0.861, Late christmas 0.883, Frostbitten 0.901, INFINITE 0.917, Gravity's Rainbow 0.919, My level 730c 93 vs 101,
+  On And On 2,364 vs 2,381 = 0.993 (block 2: 1.45), Switch Labyrinth 27 = 27), 24 within 10% (INVASION 1.009, Crypts Of
+  Anubis 1.010, Santa's Workshop 1.016, celeste x2 239 / 240 vs 235, My level fef0 60 vs 59, Presto 1.041, ...); the farthest
+  Tutorial 1 1.47, Buuwuu 1.46, the precision pair 153 vs 111. **PROVEN 1 / 230: Switch Labyrinth, 27 run ticks,
+  TICK-PERFECT** (B7 proof: an exhaustive search over exact engine states, no route finishes in fewer than 27); the
+  compile's own bounds prove 1,241 of its 5,501 legs and no other whole route. The 183 failures: STUCK-FIELD 65, RATE 64,
+  STUCK-PLAIN 31, ONE-LEG 18, NEAR 3, CLAIM-DEATH 2 (99 of them stop on a coin step); the 178 that failed in blocks 2 and 3
+  +3% triggers. **THE KNOBS ON BY DEFAULT** (main since this merge): the compiler's defaults (`src/plan/defaults.js`:
+  EEAT_COVER=3, EEAT_CRUMBS, EEAT_FIELD_MEMO, EEAT_PLAN_ANY, EEAT_PLAN_UNTOGGLE, EEAT_FX_FIELD, EEAT_FX_STATE, EEAT_ICE_LOCAL,
+  EEAT_PROT_LAYER, EEAT_BW_LEVEL=last, **EEAT_PREC_STREAM** (new)), THE STRETCH DEFAULTS (EEAT_PORTFOLIO, EEAT_CORR_FIELDS,
+  EEAT_STRETCH, EEAT_BW_CHAIN), and in the code the perfect pass, the braked rests (EEAT_PREC_FAST), the loop cuts and the
+  LOOPS stage with **THE WIDE LOOPS** (new; `EEAT_LOOP_WIDE=0` off), JOINS, the `idle` trick. Every lane knob of blocks 1-3
+  stays OPT-IN, off = the compile byte for byte (EEAT_PLAN_BYPASS, EEAT_FAR_TROPHY / EEAT_FAR_WALK, EEAT_WP_DIEFIELD,
+  EEAT_ANCHOR_DUMP, EEAT_PHYS_PRICE=sa, EEAT_RUNUP / EEAT_RUNUP_GAP, EEAT_ENDGAME_S, EEAT_PREC_AIR, EEAT_PREC_ASYNC,
+  EEAT_OS_BW_ST, EEAT_CRUMB_RANK, the one shot, the timer, ...). Its checks: the shared gate (gate20, 60 s, vs
+  gate_c6b2.json) exit 0, 16 vs 14, worse 0, 16 / 16 replayed; T-MODEL-EXACT 219 routes 0 unsound, T-PLAN-ORACLE 2 / 0,
+  msolve --quick 50 / 0, the unit tests. BEFORE IT (2026-09-30 ~21:30, main 23f1f3a):
   **50 / 230 with THE STRETCH DEFAULTS** (S99, n5-s99-ship 0e1d64e = n5-plan d674cb9 + the corridor's fields pass + the stretch
   solver + the gated chain + EEAT_PORTFOLIO / EEAT_CORR_FIELDS / EEAT_STRETCH / EEAT_BW_CHAIN on; boxes 5 + 6, the chief's
   block-1 split, par 12-22: campaign 42 / 203, hard 8 / 25, Bad EE Level 9 and Cold World 0 / 2; 50 / 50 replayed; a route by
@@ -1002,7 +1034,8 @@ ways in.
   that long leg, the crumbs (coins no gate reads) relay it round the level.
 - **Checks**: unit tests `test/plantypes.js`, `planmodel.js`, `planplanner.js`, `planbounds.js`, `planprims.js`,
   `planexec.js --only=unit,fail`, `planstrategy.js`, `plancompile.js` (the CLI and the Compile API with the mock parts
-  `test/planmock.js`), `plantruth.js`, `msolve.js --quick`, `kin.js --quick`, `mathsep.js`, `joins.js`, `precision.js`. The truth checkers on
+  `test/planmock.js`; run it WITHOUT `EEAT_TRUTH_ROOT`: with the real root set its truth.js part outlasts its 120-s
+  timeout, `exit null`, on main 23f1f3a too; without it the part takes ~4 s), `plantruth.js`, `msolve.js --quick`, `kin.js --quick`, `mathsep.js`, `joins.js`, `precision.js`. The truth checkers on
   the known routes (`src/plan/truthset.js`; a worktree sets `EEAT_TRUTH_ROOT` to a checkout with `src/jobs` / `src/out`): T-MODEL-EXACT
   `tools/n4u/modelexact.js`, T-PLAN-ORACLE `test/planoracle.js`, T-LB-ADMISSIBLE `test/planbounds.js --truth`. A full compile:
   `node tools/cmp/fullc.js <code dir> <levels dir> <out dir> [--par=] [--workers=3] [--seconds=60]`, then `tools/cmp/summ.js`
