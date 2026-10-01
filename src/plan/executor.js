@@ -2597,7 +2597,11 @@ async function createExecutor(L, opts) {
 		}
 		// (no memo for this waypoint: the levels other waypoints' skeletons reached from the same first start, nearest by this
 		// waypoint's field, EEAT_SKEL_XLV=1 above)
-		if (SKEL_XLV && !skelMemo.has(key) && skelXL.has(startStrs[0]) && f0) {
+		// (also over a memo whose deepest level the pool beats by the same factor: a call's first rungs leave a shallow memo
+		// long before the other waypoints' skeletons are deep)
+		const xlSt = SKEL_XLV ? skelMemo.get(key) : null;
+		const xlTop = xlSt && xlSt.length ? xlSt[xlSt.length - 1].c : c0;
+		if (SKEL_XLV && skelXL.has(startStrs[0]) && f0 && Number.isFinite(xlTop) && xlTop > SKEL_STEP * 4) {
 			const tX = Date.now(), m0 = tileMin(f0), lab = wp.label || '';
 			const cand = [];
 			for (const lv of skelXL.get(startStrs[0])) {
@@ -2616,12 +2620,16 @@ async function createExecutor(L, opts) {
 				let fw;
 				try { fw = fieldAt(own[0], goal, wp.allowDeath, wArr); } catch (e) { continue; }
 				if (!fw.f || !(fw.c >= 0) || !Number.isFinite(fw.c)) continue;
-				if (!(fw.c < XLV_F * c0) || (bestL && fw.c >= bestL.c)) continue;
+				if (!(fw.c < XLV_F * xlTop) || (bestL && fw.c >= bestL.c)) continue;
 				bestL = { c: fw.c, cur: own, xid: lv.id, from: lv.label };
 			}
 			S.xlvTry = (S.xlvTry || 0) + tries; S.xlvMs = (S.xlvMs || 0) + (Date.now() - tX);
-			if (bestL) { skelMemo.set(key, [{ c: bestL.c, cur: bestL.cur, xid: bestL.xid }]); S.xlv = (S.xlv || 0) + 1; }
-			if (emit) emit({ ev: 'exec.xlv', label: lab, c0: Math.round(c0), c: bestL ? Math.round(bestL.c) : null, from: bestL ? bestL.from : null, pool: cand.length, tries, ms: Date.now() - tX });
+			if (bestL) {
+				const ent = { c: bestL.c, cur: bestL.cur, xid: bestL.xid };
+				if (xlSt) xlSt.push(ent); else skelMemo.set(key, [ent]);
+				S.xlv = (S.xlv || 0) + 1;
+			}
+			if (emit) emit({ ev: 'exec.xlv', label: lab, c0: Math.round(c0), top: Math.round(xlTop), c: bestL ? Math.round(bestL.c) : null, from: bestL ? bestL.from : null, pool: cand.length, tries, ms: Date.now() - tX });
 		}
 		const memo = skelMemo.get(key);
 		// (a memo level no deeper than the starts' own cost is not resumed: a relay start (the strategy's nearest state of the
