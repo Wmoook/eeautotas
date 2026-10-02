@@ -3210,9 +3210,18 @@ function renderHybrid() {
 			${HYB.noClip ? '<div class="hint">The browser refused the clipboard: copy the line above.</div>' : ''}
 			<div id="hyMsg"></div></div>`;
 	} else if (!s.running && s.message) h += `<div class="msg ${s.stage === 'stopped' ? 'info' : 'err'}">Hybrid: ${esc(s.message)}</div>`;
-	if (s.running) h += `<div class="row" style="margin-top:6px"><button class="small" id="bHyStop"${s.stopping ? ' disabled' : ''}>${s.stopping ? 'Stopping…' : 'Stop the hybrid'}</button>` +
-		`${L.best ? '<button class="small" id="hyEetas" title="The best verified route so far">Download the best so far</button>' : ''}</div>`;
+	if (s.running) h += `<div class="row" style="margin-top:6px">` +
+		`${L.best ? '<button class="watch" id="hyWatchBest" title="Open the best verified route so far in the run viewer (a new run in your list)">&#9654; Watch the best so far</button>' : ''}` +
+		`<button class="small" id="bHyStop"${s.stopping ? ' disabled' : ''}>${s.stopping ? 'Stopping…' : 'Stop the hybrid'}</button>` +
+		`${L.best ? '<button class="small" id="hyEetas" title="The best verified route so far">Download the best so far</button>' : ''}</div>` +
+		`${L.best ? '<div id="hyMsg"></div>' : ''}`;
+	// (the panel is drawn again every second: keep where its log and the panel around it were scrolled, a log scrolled to
+	// its end follows its new lines)
+	const keep = hyScrollSave(el), msgKeep = $('hyMsg') && s.running ? $('hyMsg').innerHTML : '';
 	el.innerHTML = h;
+	hyScrollRestore(el, keep);
+	if (msgKeep && $('hyMsg')) $('hyMsg').innerHTML = msgKeep;
+	if ($('hyWatchBest')) $('hyWatchBest').onclick = () => hybridJob(false, true);
 	if ($('hyLog')) $('hyLog').ontoggle = () => { HYB.logOpen = $('hyLog').open; };
 	if ($('bHyStop')) $('bHyStop').onclick = async () => { try { HYB.st = await postJson('/api/editor/hybrid/stop', {}); } catch (e) { /* ignore */ } pollHybrid(); };
 	// (the files of the run this panel shows: another run since gives a 409, never its files under this one's name)
@@ -3230,10 +3239,31 @@ function renderHybrid() {
 		try { await navigator.clipboard.writeText(inp.value); toast('The /loadtas line is copied.'); } catch (e) { inp.focus(); inp.select(); try { document.execCommand('copy'); toast('The /loadtas line is copied.'); } catch (e2) { toast('Select the line and copy it (Ctrl+C).', true); } }
 	};
 }
+/** where the hybrid's log and the scrolled boxes around its panel are (renderHybrid draws the panel again every second):
+ *  the log's scroll (at its end: it follows the new lines), the nearest scrolled ancestor's and the window's */
+function hyScrollSave(el) {
+	try {
+		const lg = el.querySelector ? el.querySelector('#hyLog .cmpOut') : null;
+		let box = null;
+		if (typeof getComputedStyle === 'function') for (let p = el.parentElement; p; p = p.parentElement) { const o = getComputedStyle(p).overflowY; if ((o === 'auto' || o === 'scroll') && p.scrollHeight > p.clientHeight) { box = p; break; } }
+		return { lg: !!lg, lgTop: lg ? lg.scrollTop : 0, lgEnd: lg ? lg.scrollTop + lg.clientHeight >= lg.scrollHeight - 4 : false,
+			box, boxTop: box ? box.scrollTop : 0, winY: typeof window === 'object' ? window.scrollY : 0 };
+	} catch (e) { return null; }
+}
+function hyScrollRestore(el, k) {
+	if (!k) return;
+	try {
+		const lg = el.querySelector ? el.querySelector('#hyLog .cmpOut') : null;
+		if (lg && k.lg) lg.scrollTop = k.lgEnd ? lg.scrollHeight : k.lgTop;
+		if (k.box) k.box.scrollTop = k.boxTop;
+		if (typeof window === 'object' && window.scrollY !== k.winY) window.scrollTo(window.scrollX, k.winY);
+	} catch (e) { /* a stand-in element */ }
+}
 /** the hybrid's route as a job (Watch: the run viewer; Optimize: started): POST /api/editor/job with its level and route,
  *  as Find a route's routeJob */
-async function hybridJob(optimize) {
-	const s = HYB.st, r = s && s.result;
+async function hybridJob(optimize, live) {
+	// (live: the best verified route so far of a hybrid still running: route.eetas serves it until the run ends)
+	const s = HYB.st, r = s && (s.result || (live && s.running && s.live && s.live.best ? { runTicks: s.live.best.runTicks } : null));
 	if (!r) return;
 	const key = `${s.started}:${r.runTicks}`, known = HYB.jobs[key];
 	const win = !optimize ? window.open('', '_blank') : null;
