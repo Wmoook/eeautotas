@@ -103,6 +103,19 @@ const FAMS = ['m1', 'del', 'm2', 'pert', 'flip', 'sticky'];   // eegpu's family 
 const LIB_FAMS = [...FAMS, 'every', 'idle'];                   // (+ the every-move windows, the idle-start windows)
 const RANDOM_FAMS = ['pert', 'flip', 'sticky'];
 fs.mkdirSync(GDIR, { recursive: true });
+// the structured log of the GPU's work (src/events.js; docs/ui/DESIGN.md 11.1): gpu/events.jsonl, which the app's Optimizer view
+// reads (src/phases.js). Write-only: nothing here reads it, a failed write is silent (EEAT_EVENTS=0: none). Lines: gpuStart,
+// slot / slotEnd (one eegpu invocation: its arm, family, window), find (a run handed to the job, the families' credit),
+// pause / resume (Find a route has the GPU), fail.
+let evStart = null, evSlots = 0, evRound = 0;
+const EV = require('./events.js').open(path.join(GDIR, 'events.jsonl'), { head: () => evStart });
+const ev = (o) => EV.ev(o);
+/** a `slot` event (arm search / every / idle, fam, the window) -> its id; evSlotEnd(id, t0, r) after it */
+function evSlot(arm, fam, w0, w1) { const id = ++evSlots; ev({ ev: 'slot', id, round: evRound, arm, fam, w0, w1 }); return id; }
+function evSlotEnd(id, t0, r) {
+	ev({ ev: 'slotEnd', id, s: Math.round((Date.now() - t0) / 100) / 10, ticks: r && r.done ? r.done.ticks || 0 : 0, added: r ? r.added || 0 : 0,
+		err: r && !r.done ? String(r.err || `exit ${r.code}`).slice(0, 200) : null });
+}
 
 const log = (s) => {
 	const line = `[gpu ${new Date().toTimeString().slice(0, 8)}] ${s}`;
@@ -154,9 +167,11 @@ setInterval(() => { if (child && child.exitCode === null && editorBusy()) { try 
 async function yieldToEditor() {
 	if (!editorBusy()) return;
 	log('GPU: Find a route is running: the GPU searcher waits for it');
+	ev({ ev: 'pause', why: 'Find a route has the GPU' });
 	status({ state: 'waiting', ticksPerSec: 0 });
 	while (editorBusy() && !quitting) await new Promise((r) => setTimeout(r, 2000));
 	log('GPU: Find a route is done: searching again');
+	ev({ ev: 'resume', why: 'Find a route is done' });
 }
 process.on('SIGINT', () => quit(0));
 process.on('SIGTERM', () => quit(0));
@@ -471,6 +486,8 @@ async function offer(what) {
 	const others = [...u.runsUsed].filter((r) => r > 0).map((r) => g.tags[r]);
 	const sib = [...new Set(others.filter((t) => t.startsWith('job ')))];
 	const res = await J.tryCandidate(ID, bytes, { source: `gpu (${u.libUsed.length} shortcuts)`, wait: 0 });
+	ev({ ev: 'find', from: base.runTicks, to: cand.runTicks, saved, fams: Object.fromEntries(Object.entries(used).map(([f, x]) => [f, -x.saved])),
+		other: others.length && saved > credited ? saved - credited : 0, handed: res.handed, accepted: !!res.accepted, what: what || '' });
 	st.submitted++;
 	st.saved = Math.max(st.saved, saved);
 	const mine = { key, ms: cand.ms, ev: cand, inbox: res.handed === 'inbox' ? res.inboxFile : '' };
@@ -564,14 +581,16 @@ async function invoke(slot, seconds) {
 	const t0 = Date.now();
 	const seed = nextSeed();
 	saveState();   // (a restart never repeats a seed, also when this invocation is cut off)
+	const sid = evSlot('search', slot === 'sys' ? 'm1+del' : slot, from, to);
 	const r = await runSearch(tool, blobFile, path.join(GDIR, 'ref.eetas'), edgesFile, { seconds: secArg, seed, families, from, to });
-	if (!r.done) return { ok: false, err: r.err || `the GPU tool exited with code ${r.code}`, launchError: r.launchError };
+	if (!r.done) { evSlotEnd(sid, t0, r); return { ok: false, err: r.err || `the GPU tool exited with code ${r.code}`, launchError: r.launchError }; }
 	launchFails = 0; otherFails = 0;   // (a run that finished: the failures in a row start over)
 	const d = r.done;
 	if (d.gpu && d.gpu.memMB) gpuMemMB = +d.gpu.memMB;
 	if (!st.name && d.gpu && d.gpu.name) log(`GPU: ${d.gpu.name}, ${(d.ticksPerSec / 1e6).toFixed(1)} M ticks/s`);
 	let got = { added: 0, byFam: {} };
 	try { got = readEdges(edgesFile, ref); } catch (e) { log(`GPU: ${e.message}`); }
+	evSlotEnd(sid, t0, { done: d, added: got.added });
 	// per-family numbers of the done event
 	const fams = d.families || {};
 	let kernel = 0;
@@ -654,6 +673,7 @@ function runWindow(T, o = {}) {
 		const fam = o.fam || 'every';
 		const [cmd, argv] = toolCommand(tool, a);
 		clearStop();
+		const t0 = Date.now(), sid = evSlot(fam === 'idle' ? 'idle' : 'every', fam, T, Math.min(ref.n, T + EVERY_DEPTH));
 		child = spawn(cmd, argv, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: true });   // (EEGPU_OPTS)
 		let buf = '', done = null, err = '', added = 0, last = 0, launchError = false, best = -Infinity;
 		const base = st.ticks;
@@ -688,6 +708,7 @@ function runWindow(T, o = {}) {
 				const x = state.fam[fam];
 				x.ticks += done.ticks || last; x.seconds += +done.seconds || 0; x.edges += added;
 			}
+			evSlotEnd(sid, t0, { done, added, err: err.trim(), code });
 			resolve({ code, done, err: err.trim(), added, best, launchError: isLaunchFailure(code, launchError, done) });
 		});
 	});
@@ -814,6 +835,7 @@ async function failed(err, launchError) {
 			quit(5);
 		}
 		const wait = LAUNCH_WAIT_S * 2 ** (launchFails - 1);
+		ev({ ev: 'fail', err: String(err).slice(0, 200), wait, launch: true });
 		launchMs = Math.max(5, launchMs / 2);
 		status({ state: 'waiting', why: err, ticksPerSec: 0 });
 		log(`GPU: a GPU kernel launch failed (${err}); waiting ${wait} s, then launches of ${launchMs} ms (failure ${launchFails} in a row; the searcher stops after ${FAILS_IN_A_ROW})`);
@@ -825,6 +847,7 @@ async function failed(err, launchError) {
 	// to the display driver; waits that double up to 10 min, and fewer log lines while the same error repeats
 	otherFails++;
 	const wait = Math.min(FAIL_WAIT_MAX_S, FAIL_WAIT_S * 2 ** (otherFails - 1));
+	ev({ ev: 'fail', err: String(err).slice(0, 200), wait });
 	status({ state: 'waiting', why: err, ticksPerSec: 0 });
 	if (otherFails <= 3 || err !== otherErr || Date.now() - otherLogged >= 3600e3) {
 		log(`GPU: round failed: ${err}; trying again in ${wait >= 60 ? `${(wait / 60).toFixed(0)} min` : `${+wait.toFixed(1)} s`} (failure ${otherFails} in a row)`);
@@ -855,6 +878,9 @@ async function main() {
 	RANDOM = C.isRandom(level);
 	TC = S.traceCache(level, traceMode(), RANDOM);
 	fingerprint = libraryFingerprint(blob, nc);
+	const gb = (() => { try { return G.cachedBench(); } catch (e) { return null; } })();
+	evStart = { ev: 'gpuStart', v: 1, pid: process.pid, name: gb && gb.gpu ? gb.gpu.name : null, ticksPerSec: gb ? gb.ticksPerSec || null : null, coinMode: nc ? 'blind' : 'aware' };
+	ev(evStart);
 	const loaded = loadLibrary();
 	log(`GPU search started (${nc ? 'coin-blind' : 'coin-aware'}), rounds of ${ROUND_S} s` + (loaded ? `, ${loaded} shortcuts from the saved library` : ''));
 	while (!(await refresh())) await new Promise((r) => setTimeout(r, 5000));
@@ -863,6 +889,7 @@ async function main() {
 	for (;;) {
 		await yieldToEditor();
 		round++;
+		evRound = round;
 		followCoinMode();
 		if (!ref) while (!(await refresh())) await new Promise((r) => setTimeout(r, 5000));
 		// the idle start: once after the first round, again when the run's start changed (see the header)
