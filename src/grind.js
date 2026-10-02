@@ -41,6 +41,7 @@ const C = require('./common.js');
 const S = require('./splice.js');
 const LP = require('./loops.js');
 const SW = require('./sweep.js');
+const EVT = require('./events.js');
 const E = C.E;
 
 const a = { until: '', forever: '', level: '', workers: os.cpus().length, job: '', nocoins: 'auto', gpu: '0', roundMin: '10', anchored: '1', tails: '1' };
@@ -69,6 +70,14 @@ const LEVEL_ID = a.level || C.jobLevelId(JOB_ID);
 const LEVEL_JSON = C.levelData(LEVEL_ID);
 fs.mkdirSync(INBOX, { recursive: true });
 fs.mkdirSync(PIECES, { recursive: true });
+// the structured stage log (src/events.js; docs/ui/DESIGN.md 11.1): grind_events.jsonl, which the app's Optimizer view reads
+// (src/phases.js: GET /api/jobs/:id/phases). Write-only and extra: nothing in the grind reads it and a failed write is silent,
+// so the search is the same with or without it (EEAT_EVENTS=0: no file; test/phases.js grind). Lines: session, beat, round,
+// stage / stageEnd / stageResult (one span per tool run: its lane, key, name, threads, window), skip, best, roundEnd, end.
+let evSession = null, evSeq = 0, evEnded = false;
+const EV = EVT.open(path.join(OUT, 'grind_events.jsonl'), { head: () => evSession });
+const ev = (o) => EV.ev(o);
+const spanByName = new Map();   // a span's name -> its id (this session): a `best` event links the span whose name is its `what`
 const level = E.loadLevel(LEVEL_JSON);
 const W_ALL = +a.workers || os.cpus().length;
 // the corridor beam's own CPU share (--flybeamShare=K or EEAT_FLYBEAM_SHARE=K threads; flybeamLane): K threads run
@@ -239,10 +248,22 @@ function consider(file, what, opts) {
 	log(`${what}: ${fmt(best.runTicks)} -> ${fmt(r.runTicks)} (-${best.runTicks - r.runTicks})` + (RANDOM ? `, chance ${(r.chance * 100).toFixed(1)}%` : '') +
 		(r.deaths !== best.deaths ? `, ${r.deaths} death${r.deaths === 1 ? '' : 's'} (was ${best.deaths})` : ''));
 	status.history.push({ t: Date.now(), runTicks: r.runTicks, saved: best.runTicks - r.runTicks, what, chance: r.chance, deaths: r.deaths });
+	evBest(status.history[status.history.length - 1]);
 	best = r;
 	saveStatus({ chance: r.chance });
 	publish();
 	return { accepted: true, r, verdict: v };
+}
+/** the `best` event of an accepted run (h: its history entry, the same t): the span it came from (a stage's output: the span of
+ *  that name; a sweep window's phase.js pass: `<name>p`; a stale find spliced with the best: the find's span) and its source */
+function evBest(h) {
+	const w = String(h.what || '');
+	let span = spanByName.has(w) ? spanByName.get(w) : null;
+	let m;
+	if (span === null && (m = /^(\S+) \((?:time doors|coin-blind, replayed)\)$/.exec(w)) && spanByName.has(`${m[1]}p`)) span = spanByName.get(`${m[1]}p`);
+	if (span === null && (m = /^(.+?) \+ best \(splice/.exec(w)) && spanByName.has(m[1])) span = spanByName.get(m[1]);
+	const source = /^inbox \(/.test(w) ? 'inbox' : /\(splice/.test(w) ? 'splice' : /earlier runs? \(/.test(w) ? 'recover' : 'stage';
+	ev({ ev: 'best', t: h.t, runTicks: h.runTicks, saved: h.saved, what: w, span, source, chance: h.chance, deaths: h.deaths });
 }
 /**
  * A finishing run that was not accepted: the fastest combination of it and the best at equal states (it may still
@@ -356,6 +377,8 @@ function writeLive() {
 	const g = C.readJSON(GPU_STATUS, null);
 	const gpu = g && typeof g === 'object' && now - (+g.t || 0) < 5000 ? g : null;
 	try { C.writeAtomic(LIVE, JSON.stringify({ t: now, cpu: { ticks: ticksDone + ticksStage, ticksPerSec: ticksPerSec(), threads: W, model: CPU_MODEL }, gpu })); } catch (e) { /* ignore */ }
+	// (the events' heartbeat: a session's length when nothing else was written for a minute)
+	if (evSession && !evEnded && now - EV.last >= 60000) ev({ ev: 'beat' });
 }
 const liveTimer = setInterval(writeLive, 1000);
 liveTimer.unref();   // (never keeps the grind alive)
@@ -373,11 +396,13 @@ function tickLines(lane) {
 // ---------------------------------------------------------------- stages (child processes, awaited)
 /** Runs a tool; while it runs the inbox is checked every 3 s and the status heartbeat written every 30 s.
  *  Resolves { code, out (the stage's log text), killed (stopped by maxMs, or grown), grown (started on Find a route's
- *  CPU share, stopped when that share ended: the stage again with every thread, see stage()) }. */
-function runTool(script, args, maxMs, logFile) {
+ *  CPU share, stopped when that share ended: the stage again with every thread, see stage()), evId (its span in
+ *  grind_events.jsonl) }. meta (the events only): {lane, sub, key, name, w0, w1, note}. */
+function runTool(script, args, maxMs, logFile, meta) {
 	const sw = stageWorkers();
 	const cut = sw < W && args.includes(`--workers=${W}`);
 	if (cut) args = args.map((x) => (x === `--workers=${W}` ? `--workers=${sw}` : x));
+	const evId = evSpan(script, args, meta);
 	return new Promise((resolve) => {
 		const ch = spawn(process.execPath, [path.join(__dirname, script), ...args], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
 			env: C.heapEnv(12000) });
@@ -402,13 +427,27 @@ function runTool(script, args, maxMs, logFile) {
 			if (!end()) return;
 			const rest = out.end();
 			if (rest) keep(Buffer.from(rest));
+			ev({ ev: 'stageEnd', id: evId, code, killed, grown, ticks: laneTicks.get(lane) || 0 });
 			stageEnd(lane);
 			const text = Buffer.concat(chunks);
 			if (logFile) { try { fs.writeFileSync(logFile, text); } catch (e) { /* ignore */ } }
-			resolve({ code, out: text.toString('utf8'), killed, grown });
+			resolve({ code, out: text.toString('utf8'), killed, grown, evId });
 		});
-		ch.on('error', () => { if (!end()) return; stageEnd(lane); resolve({ code: -1, out: '', killed, grown }); });
+		ch.on('error', () => { if (!end()) return; ev({ ev: 'stageEnd', id: evId, code: -1, killed, grown, ticks: laneTicks.get(lane) || 0 }); stageEnd(lane); resolve({ code: -1, out: '', killed, grown, evId }); });
 	});
+}
+/** the `stage` event of a tool about to run (meta: lane (stages / sweep / fly), sub (a sweep lane), key, name, w0, w1, note;
+ *  its threads: the --workers / --threads it really got) -> its id (this session's counter) */
+function evSpan(script, args, meta) {
+	const m = meta || {};
+	const id = ++evSeq;
+	const name = m.name || script.replace(/\.js$/, '');
+	let threads = null;
+	for (const x of args) { const r = /^--(?:workers|threads)=(\d+)$/.exec(x); if (r) { threads = +r[1]; break; } }
+	spanByName.set(name, id);
+	ev({ ev: 'stage', id, lane: m.lane || 'stages', sub: m.sub, key: m.key || curStageKey || null, name, round: curRound, threads, w0: m.w0, w1: m.w1,
+		of: best && best.ms ? best.ms.length : null, note: m.note || undefined });
+	return id;
 }
 
 // stage outputs, spliced at the end of every round while they still have states the best lacks
@@ -445,7 +484,10 @@ function recoverOutputs() {
 	const runs = files.map((f) => TC.get(f)).filter((tr) => tr && tr.n >= 0);
 	if (!runs.length) return;
 	const what = `${runs.length} earlier run${runs.length > 1 ? 's' : ''} (stage outputs, pieces/)`;
+	const id = ++evSeq;
+	ev({ ev: 'stage', id, lane: 'stages', key: 'splice', name: 'recover', round: null, threads: 1, of: best.ms.length, note: what });
 	spliceWithBest(runs, what, `${what} + best`);
+	ev({ ev: 'stageEnd', id, code: 0 });
 }
 function pieceFiles() {
 	let out = [];
@@ -462,7 +504,8 @@ async function spliceAll() {
 	try { fs.unlinkSync(out); } catch (e) { /* none */ }
 	C.writeEetas(REF, best.ms);
 	saveStatus({ stage: 'splice' });
-	await runTool('splice.js', [out, REF, ...ex, `--level=${LEVEL_ID}`, ...(NC ? ['--nocoins'] : COINFREE ? ['--coinfree'] : [])], 3600e3, path.join(OUT, 'grind_splice.log'));
+	await runTool('splice.js', [out, REF, ...ex, `--level=${LEVEL_ID}`, ...(NC ? ['--nocoins'] : COINFREE ? ['--coinfree'] : [])], 3600e3, path.join(OUT, 'grind_splice.log'),
+		{ lane: 'stages', key: 'splice', name: 'splice', note: `${ex.length} run${ex.length === 1 ? '' : 's'}` });
 	// (the best itself when nothing is faster: not worth a "not accepted" line every round)
 	let same = false;
 	try { same = sha1(fs.readFileSync(out)) === sha1(C.eetasBytes(best.ms)); } catch (e) { /* no output */ }
@@ -471,11 +514,12 @@ async function spliceAll() {
 }
 const skip1 = new Set(String(a.skip || '').split(',').filter(Boolean));   // --skip=A,deep,beam: skipped in this session's first round
 let curRound = 0, firstRound = 0;
+let curStageKey = '';   // the round's stage (STAGES key) running now (the events' `key`)
 /** Runs one stage on a copy of the best; its output (if any) is offered. Resolves the runTool result, or null (skipped).
- *  note: shown in the log line (e.g. the window's ticks). */
-async function stage(name, script, args, outFile, maxMs, note) {
+ *  note: shown in the log line (e.g. the window's ticks). meta: the events' window {w0, w1} (runTool's meta). */
+async function stage(name, script, args, outFile, maxMs, note, meta) {
 	const tag = name.startsWith('shortcuts') ? 'A' : name.startsWith('deep') ? 'deep' : name.startsWith('beam') ? 'beam' : '';
-	if (curRound === firstRound && tag && skip1.has(tag)) { log(`${name}: skipped (--skip)`); return null; }
+	if (curRound === firstRound && tag && skip1.has(tag)) { log(`${name}: skipped (--skip)`); ev({ ev: 'skip', round: curRound, key: curStageKey, name, why: 'skipped in this session\'s first round (--skip)' }); return null; }
 	const left = deadline - Date.now();
 	if (left < 60000) return null;
 	checkInbox();
@@ -484,14 +528,16 @@ async function stage(name, script, args, outFile, maxMs, note) {
 	log(`${name}${note ? ` (${note})` : ''}...`);
 	saveStatus({ stage: name, round: curRound });
 	const logFile = path.join(OUT, `grind_${name.replace(/[^\w.-]/g, '_')}.log`);
-	let res = await runTool(script, args, Math.min(maxMs, left + 240e3), logFile);   // grace: stages with --deadline wrap up themselves
+	// (the events' span: the deep stage's pieces have keys of their own: loop, seg)
+	const sm = Object.assign({ lane: 'stages', name, key: /^deep\d+_loop/.test(name) ? 'loop' : /^deep\d+_seg/.test(name) ? 'seg' : curStageKey, note: note || undefined }, meta || {});
+	let res = await runTool(script, args, Math.min(maxMs, left + 240e3), logFile, sm);   // grace: stages with --deadline wrap up themselves
 	if (res.grown) {
 		// (Find a route's CPU share ended mid-stage: what it found so far, then the stage again on every thread)
 		if (fs.existsSync(outFile)) consider(outFile, name);
 		log(`${name}: Find a route's CPU share ended: again with ${stageWorkers()} threads`);
 		try { fs.unlinkSync(outFile); } catch (e) { /* none */ }
 		C.writeEetas(REF, best.ms);
-		res = await runTool(script, args, Math.min(maxMs, deadline - Date.now() + 240e3), logFile);
+		res = await runTool(script, args, Math.min(maxMs, deadline - Date.now() + 240e3), logFile, sm);
 	}
 	if (fs.existsSync(outFile)) consider(outFile, name);
 	return res;
@@ -555,14 +601,18 @@ function dirtyRanges() {
 	return out;
 }
 async function mutateLoop(tag) {
-	if (gpuBusy()) { log(`mutate_${tag}: skipped (the GPU searches these input changes)`); return; }
+	if (gpuBusy()) { log(`mutate_${tag}: skipped (the GPU searches these input changes)`); ev({ ev: 'skip', round: curRound, key: curStageKey, name: `mutate_${tag}`, why: 'the GPU searches these input changes' }); return; }
 	for (let k = 1; k <= 8; k++) {
 		if (k > 1 && gpuBusy()) { log(`mutate_${tag}: the GPU searcher is up, leaving the rest to it`); break; }
 		const before = best.runTicks;
 		// without the GPU: only the start ticks that changed since the last complete pass
 		const ms0 = best.ms, n0 = bestTrace().tr.n;
 		let ranges = gpuChild ? null : dirtyRanges();
-		if (ranges && ranges.length === 0) { log(`mutate_${tag}: nothing changed since the last pass`); break; }
+		if (ranges && ranges.length === 0) {
+			log(`mutate_${tag}: nothing changed since the last pass`);
+			if (k === 1) ev({ ev: 'skip', round: curRound, key: curStageKey, name: `mutate_${tag}`, why: 'nothing changed since its last full pass' });
+			break;
+		}
 		if (ranges && ranges.length > 4) ranges = [[ranges[0][0], ranges[ranges.length - 1][1]]];
 		if (ranges) {
 			const dirty = ranges.reduce((s, r) => s + r[1] - r[0], 0);
@@ -581,7 +631,7 @@ async function mutateLoop(tag) {
 			const whole = f === 0 && t >= bestTrace().tr.n;
 			const res = await stage(`mutate_${tag}_${k}${marks.length > 1 ? String.fromCharCode(97 + i) : ''}`, 'mutate.js', [TAS, `--out=${mo}`, `--horizon=${MUT_HORIZON}`,
 				`--workers=${W}`, LVL, `--nocoins=${ncAt(f)}`, ...(whole ? [] : [`--from=${f}`, `--to=${t}`]), ...MUT_EXTRA, ...dl()], mo, 1800e3,
-				!NC && ncAt(f) ? `ticks ${f}-${t}${CB}` : '');
+				!NC && ncAt(f) ? `ticks ${f}-${t}${CB}` : '', whole ? undefined : { w0: f, w1: t });
 			// (with --until, mutate stops at its --deadline without saying so)
 			if (!res || res.killed || res.code !== 0 || /worker error/.test(res.out) || (!FOREVER && Date.now() > deadline - 100e3)) complete = false;
 			if (res) addResult(mo);
@@ -823,7 +873,8 @@ async function sweepStage(round) {
 			const res = await runTool('explore.js', [`--tas=${ref}`, `--out=${out}`, `--from=${win.w0}`, `--join=${win.w0}`, `--until=${win.w1}`,
 				`--seconds=${secs}`, `--workers=${per}`, '--exact=1', ...mode, `--seed=${seed}`, `--nocoins=${cblind || propose ? 1 : 0}`,
 				'--maxEntries=1500000', LVL],
-				(secs + 300) * 1000, path.join(OUT, `grind_sweep${round}_${id}.log`));
+				(secs + 300) * 1000, path.join(OUT, `grind_sweep${round}_${id}.log`),
+				{ lane: 'sweep', sub: k, key: 'sweep', name, w0: win.w0, w1: win.w1, note: `${win.loop ? 'loop' : 'hunt'} window, ${win.why}` });
 			let saved = ownSaving(out, refTicks), runOut = out;
 			let got = fs.existsSync(out) ? consider(out, name) : null;
 			if (got) addResult(out);
@@ -833,7 +884,8 @@ async function sweepStage(round) {
 				try { fs.unlinkSync(po); } catch (e) { /* none */ }
 				await runTool('phase.js', [`--tas=${ref}`, `--out=${po}`, LVL, `--nocoins=${NC}`, `--edges=${out}.edges.json`, `--from=${win.w0}`, `--to=${win.w0 + 1}`,
 					'--random=0', '--seconds=5'], Math.max(30e3, Math.min(300e3, deadline - Date.now() - 30e3)),   // (not past the deadline)
-					path.join(OUT, `grind_sweep${round}_${id}p.log`));
+					path.join(OUT, `grind_sweep${round}_${id}p.log`),
+					{ lane: 'sweep', sub: k, key: 'sweep', name: `${name}p`, w0: win.w0, w1: win.w1, note: TD ? 'time doors' : 'coin-blind, replayed' });
 				const ps = ownSaving(po, refTicks);
 				if (fs.existsSync(po)) {
 					const pg = consider(po, `${name} (${TD ? 'time doors' : 'coin-blind, replayed'})`);
@@ -857,6 +909,7 @@ async function sweepStage(round) {
 				}
 			}
 			log(`${name}: ${saved > 0 ? `its window saves ${saved}` : 'nothing in this window'}${res && res.killed ? ' (stopped)' : ''}${again}`);
+			ev({ ev: 'stageResult', id: res ? res.evId : null, saved });
 			ran++; if (saved > 0) found++;
 		}
 	};
@@ -864,6 +917,11 @@ async function sweepStage(round) {
 	log(`sweep${round}: hunt windows of ${SWEEP_LEN} ticks over the whole run (${bestTrace().tr.n} ticks), up to ${lanes} at once x ${room().per} threads, ${secs} s each` +
 		`${TD ? ' (time doors: clock-blind rejoins, replayed by phase.js)' : ''}` +
 		`${first ? ', every window' : `, up to ${Math.round(budget / 60e3)} min`}`);
+	// (the sweep as a whole: a span of the stages lane, no tool of its own; its windows are the sweep lane's spans)
+	const swId = ++evSeq;
+	spanByName.set(`sweep${round}`, swId);
+	ev({ ev: 'stage', id: swId, lane: 'stages', key: 'deep', name: `sweep${round}`, round, threads: W, of: best.ms.length, whole: true, lanes,
+		windows: SW.windows(bestTrace().tr.n, SWEEP_LEN, SWEEP_STEP).length, note: first ? 'every window' : `up to ${Math.round(budget / 60e3)} min` });
 	await Promise.all(Array.from({ length: lanes }, (x, k) => lane(k)));
 	const o0 = order;
 	if (!covered) pick();   // (a look only: the frontier stays where it was)
@@ -875,6 +933,7 @@ async function sweepStage(round) {
 	log(`sweep${round}: ${ran} window${ran === 1 ? '' : 's'} searched, ${found} found time${stale ? ` (${stale} stale: searched again on the best)` : ''}` +
 		`${skipped.size ? `, ${skipped.size} resting (${[...new Set(skipped.values())].slice(0, 2).join('; ')})` : ''}` +
 		`${rest ? '; every window of the run covered' : ''} (${Math.round((Date.now() - t0) / 1000)} s)`);
+	ev({ ev: 'stageEnd', id: swId, code: 0, windows: ran, found, covered: rest });
 }
 
 /**
@@ -901,12 +960,14 @@ async function loopWindows(round, max = 5) {
 		const lp = path.join(OUT, `grind_deep_${round}_loop${ran}.eetas`);
 		const res = await stage(`deep${round}_loop${ran + 1}`, 'explore.js', [TAS, `--out=${lp}`, `--from=${w0}`, `--join=${w0}`, `--until=${w1}`,
 			`--seconds=${DEEP_S || 120}`, `--workers=${W}`, '--exact=1', '--roll=100', `--seed=${300 + (cur.seed = (cur.seed | 0) + 1)}`, `--nocoins=${ncAt(w0)}`,
-			'--maxEntries=1500000', ...EXP_EXTRA, LVL], lp, 600e3, `the run comes back to (${l.x}, ${l.y}) ${l.len} ticks later: ticks ${l.a}-${l.b}${!NC && ncAt(w0) ? CB : ''}`);
+			'--maxEntries=1500000', ...EXP_EXTRA, LVL], lp, 600e3, `the run comes back to (${l.x}, ${l.y}) ${l.len} ticks later: ticks ${l.a}-${l.b}${!NC && ncAt(w0) ? CB : ''}`,
+			{ w0, w1 });
 		if (!res) return ran;
 		addResult(lp);
 		const saved = ownSaving(lp, before);
 		if (searched(res, saved)) { memo.record(m.sig, saved, round); saveMemo(); }
 		log(`deep${round}_loop${ran + 1}: ${saved > 0 ? `a way around the loop, -${saved}` : 'no way around the loop found'}`);
+		ev({ ev: 'stageResult', id: res.evId, saved });
 		saveCursor();
 		ran++;
 	}
@@ -951,7 +1012,7 @@ async function deepStage(round, R) {
 			`--until=${w.w1}`, `--seconds=${DEEP_S || R([150, 180, 150, 210])}`, `--workers=${W}`, '--exact=1', '--roll=100',
 			`--seed=${seed}`, `--cell=${R([8, 6, 12, 8])}`, `--vcell=${R([2, 1.5, 3, 1])}`, `--ahead=${R([0.5, 0.6, 0.4, 0.7])}`,
 			`--nocoins=${ncAt(w.w0)}`, '--maxEntries=1500000', ...(hunt ? ['--hunt=1'] : EXP_EXTRA), LVL], dp, 900e3,
-			`window ${wi + 1}/${wins.length}, ticks ${w.w0}-${w.w1}${hunt ? ', skip hunting' : ''}${!NC && ncAt(w.w0) ? CB : ''}`);
+			`window ${wi + 1}/${wins.length}, ticks ${w.w0}-${w.w1}${hunt ? ', skip hunting' : ''}${!NC && ncAt(w.w0) ? CB : ''}`, { w0: w.w0, w1: w.w1 });
 		if (!res) return;
 		addResult(dp);
 		const saved = ownSaving(dp, before);
@@ -1091,7 +1152,8 @@ async function flybeamLane() {
 		const res = await runTool('flybeam.js', [`--tas=${ref}`, LVL, `--out=${fo}`, `--threads=${FLY_K}`, `--nocoins=${NC}`, `--seconds=${s}`,
 			`--starts=${+a.flybeamStep || 400}`, `--ext=${+a.flybeamExt || 1200}`, `--W=${+a.flybeamW || 2048}`, `--timeS=${s}`,
 			`--cfg=${JSON.stringify([{}, { convF: 0.25, vw: 64 }])}`, '--order=stretch', `--refine=${FLY_REFINE}`, '--wrap=0', `--axisTails=${FLY_AXIS}`,
-			`--state=${path.join(OUT, 'grind_flybeam.json')}`, ...(FOREVER ? [] : [`--deadline=${deadline.getTime() - 90e3}`])], (s + 120) * 1000, null);
+			`--state=${path.join(OUT, 'grind_flybeam.json')}`, ...(FOREVER ? [] : [`--deadline=${deadline.getTime() - 90e3}`])], (s + 120) * 1000, null,
+			{ lane: 'fly', key: 'fly', name: `flybeam lane ${k}`, note: `${s} s on ${fmt(from)}` });
 		// (every call's lines kept: the log grows by ~5 KB a call; past 4 MB it starts over)
 		try {
 			if (fs.existsSync(logFile) && fs.statSync(logFile).size > 4e6) fs.unlinkSync(logFile);
@@ -1118,7 +1180,7 @@ async function shortcutsStage(round, R) {
 	const res = await stage(`shortcuts${round}`, 'shortcuts.js', [TAS, `--out=${sc}`, '--step=10', `--from=${from + R([5, 2, 7, 4])}`, `--to=${to}`,
 		`--depth=${R([180, 150, 200, 160])}`, `--cap=${R([2000, 3000, 1800, 2500])}`, `--dist=${R([24, 16, 32, 40])}`, `--bcap=${R([8, 12, 16, 6])}`,
 		`--workers=${W}`, LVL, `--nocoins=${ncAt(from)}`, `--deadline=${Math.min(deadline.getTime() - 90e3, Date.now() + budget + 60e3)}`], sc, budget + 600e3,
-		`ticks ${from}-${to} of ${n}${!NC && ncAt(from) ? CB : ''}`);
+		`ticks ${from}-${to} of ${n}${!NC && ncAt(from) ? CB : ''}`, { w0: from, w1: to });
 	if (!res) return;
 	addResult(sc);
 	const sec = (Date.now() - t0) / 1000;
@@ -1148,7 +1210,17 @@ async function phaseStage(round, R, tag = '') {
 		level.hasTimeDoors ? 'time doors' : 'coin doors');
 }
 
+/** the events' end line (once): finished, error or exit */
+function evEnd(why, extra) {
+	if (evEnded || !evSession) return;
+	evEnded = true;
+	ev(Object.assign({ ev: 'end', why }, extra || {}));
+}
+process.on('exit', () => evEnd('exit'));
 async function main() {
+	evSession = { ev: 'session', v: 1, pid: process.pid, workers: W, flyK: FLY_K, gpu: a.gpu === '1', roundMin: ROUND_MS / 60e3, best: best.runTicks,
+		orig: (C.readJSON(path.join(OUT, 'meta.json'), {}).tas || {}).runTicks || null, phaseOrder: phaseOn(), forever: FOREVER, deadline: FOREVER ? null : deadline.getTime() };
+	ev(evSession);
 	if (a.gpu === '1') { log('GPU on: the GPU searcher runs next to the CPU stages'); startGpu(); }
 	checkInbox();
 	try { recoverOutputs(); } catch (e) { log(`earlier stage outputs: ${e && e.message || e}`); }
@@ -1166,8 +1238,10 @@ async function main() {
 		roundT0 = Date.now() - (resume ? Math.min(+cur.used || 0, ROUND_MS) : 0);
 		if (resume && resume !== 'mutA') log(`round ${round}: continuing at ${resume} (${Math.round(roundUsed() / 60e3)} of ${ROUND_MS / 60e3} min used)`);
 		const resumedAt = resume ? STAGES.indexOf(resume) : -1;
+		ev({ ev: 'round', round, order: STAGES, resume: resume || null });
 		for (let si = resume ? resumedAt : 0; si < STAGES.length && Date.now() < deadline - 120000; si++) {
 			const sname = STAGES[si];
+			curStageKey = sname;
 			saveCursor({ round, stage: sname, used: roundUsed() });
 			if (sname === 'mutA') await mutateLoop(`${round}a`);
 			else if (sname === 'endgame') await endgameStage(round);
@@ -1185,7 +1259,7 @@ async function main() {
 				// 3) beam with verified leads, every other round when there is time left, every 4th round anyway (it has
 				// no window: it runs to the finish, so one that a restart stopped is not started over: restarts more often
 				// than a beam lasts would repeat it forever)
-				if (si === resumedAt) log(`beam${round}: stopped by the restart; not repeated`);
+				if (si === resumedAt) { log(`beam${round}: stopped by the restart; not repeated`); ev({ ev: 'skip', round, key: 'beam', name: `beam${round}`, why: 'stopped by the restart; not repeated' }); }
 				else if (round % 4 === 0 || (round % 2 === 0 && roundUsed() < 0.9 * ROUND_MS)) {
 					const bm = path.join(OUT, `grind_beam_${round}.eetas`);
 					const res = await stage(`beam${round}`, 'optimize.js', [TAS, `--out=${bm}`, `--width=${R([4000, 6000, 3000, 8000])}`, `--dist=${R([24, 16, 32, 24])}`,
@@ -1198,10 +1272,12 @@ async function main() {
 		}
 		if (Date.now() >= deadline - 120000) break;
 		log(`round ${round} done (${Math.round(roundUsed() / 60e3)} min): best ${fmt(best.runTicks)}`);
+		ev({ ev: 'roundEnd', round, ms: roundUsed(), best: best.runTicks });
 		cur.stage = ''; cur.used = 0;
 		saveStatus({ rounds: round, cursor: cur });
 	}
 	log(`finished: best ${fmt(best.runTicks)} (run_ticks ${best.runTicks})`);
+	evEnd('finished', { best: best.runTicks });
 	saveStatus({ state: 'finished', stage: 'finished' });
 	// the deadline's end is the process's: the live timer kept it alive and its GPU searcher kept searching and handing
 	// runs in past --until (2026-09-28, the flybeam A/B: both arms' grinds and searchers still ran 2+ min after
@@ -1213,4 +1289,4 @@ async function main() {
 	setTimeout(() => process.exit(0), 10000).unref();
 	try { ch.kill(); } catch (e) { process.exit(0); }
 }
-main().catch((e) => { log(`error: ${e && e.stack || e}`); saveStatus({ state: 'error', error: String(e && e.message || e) }); process.exit(1); });
+main().catch((e) => { log(`error: ${e && e.stack || e}`); saveStatus({ state: 'error', error: String(e && e.message || e) }); evEnd('error', { error: String(e && e.message || e).slice(0, 300) }); process.exit(1); });
