@@ -8,7 +8,7 @@
 // usage: node tools/stats-import.js <file.csv> [--name="Hybrid, 220 test levels"] [--id=<slug>] [--json]
 //        node tools/stats-import.js --list
 //        node tools/stats-import.js --remove=<id>
-//        (EEAutoTAS.exe tools/stats-import.js <file.csv> with the exe)
+//        (EEAutoTAS.exe stats-import <file.csv> with the exe, from any folder)
 // The columns are found by their titles (case-insensitive); unknown columns are kept per row. A line whose first cell
 // says "TITLE: n of m ..." names that section (its counts are recomputed from the rows). An existing id is replaced.
 const fs = require('fs');

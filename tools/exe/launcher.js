@@ -109,10 +109,13 @@ function main() {
 		const src = path.join(APP, 'src');
 		if (args[0] === 'tas') { script = path.join(src, 'tas.js'); rest = args.slice(1); }
 		else if (args[0] === 'bench') { script = path.join(src, 'bench.js'); rest = args.slice(1); }
+		// (the Stats page's benchmark import, from any folder: the CSV's path as given, relative to where it was typed)
+		else if (args[0] === 'stats-import') { script = path.join(APP, 'tools', 'stats-import.js'); rest = args.slice(1).map((a) => (/^-/.test(a) ? a : path.resolve(a))); }
 		else if (args[0] === '--help' || args[0] === '-h' || args[0] === 'help') {
 			console.log(`EE Auto TAS ${manifest.version}\n\n  ${path.basename(EXE)}                  the web app (opens the browser); --port=N, --no-open\n` +
 				`  ${path.basename(EXE)} tas <command>    the command line (${path.basename(EXE)} tas help)\n` +
-				`  ${path.basename(EXE)} bench            measure the CPU's engine speed\n\nApp files: ${APP}\nYour runs: ${path.join(HOME, 'jobs')}`);
+				`  ${path.basename(EXE)} bench            measure the CPU's engine speed\n` +
+				`  ${path.basename(EXE)} stats-import <file.csv>   a results table for the Stats page (Benchmarks)\n\nApp files: ${APP}\nYour runs: ${path.join(HOME, 'jobs')}`);
 			return;
 		} else {
 			interactive = true;

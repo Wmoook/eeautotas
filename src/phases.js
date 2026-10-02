@@ -22,9 +22,10 @@ const path = require('path');
 const C = require('./common.js');
 const D = require('./app/phases.js');
 
-const { classify, classifySlot, recipeOf, fmt, dur, mmss, count, MINUS } = D;
+const { classify, classifySlot, recipeOf, fmt, dur, mmss, count, secTicks, MINUS } = D;
 const RANGES = { session: 0, '15m': 15 * 60e3, '1h': 3600e3, '6h': 6 * 3600e3, all: Infinity };
 const MAX_SPANS = 2000;
+const MAX_MARKS = 1200, MAX_HIST = 600;   // the finds drawn and the history classified, the newest
 const LANES = {
 	stages: { id: 'stages', label: 'Stages', explain: 'The round\'s stages, one after another (the route sweep\'s whole time, its windows below)' },
 	sweep: { id: 'sweep', label: 'Sweep', explain: 'The route sweep\'s windows, up to 4 at once (a row per lane)' },
@@ -39,7 +40,7 @@ const cache = new Map();   // file -> {off, ino, events}
 /** the lines of a JSONL file (only its new complete lines are parsed: the file's offset is kept; a shorter file = a new one) */
 function readJsonl(file) {
 	let st;
-	try { st = fs.statSync(file); } catch (e) { cache.delete(file); return []; }
+	try { st = fs.statSync(file); } catch (e) { if (cache.has(file)) { cacheBytes -= cache.get(file).off; cache.delete(file); } return []; }
 	let c = cache.get(file);
 	if (c && (st.size < c.off || (c.ino && st.ino && st.ino !== c.ino))) c = null;
 	if (!c) c = { off: 0, ino: st.ino, events: [] };
@@ -56,10 +57,21 @@ function readJsonl(file) {
 			}
 		} catch (e) { /* read again next time */ } finally { if (fd !== null) { try { fs.closeSync(fd); } catch (e) { /* closed */ } } }
 	}
+	// (the least recently used last in line; the cache is bounded by the bytes it has parsed, CACHE_BYTES, and by 400 files:
+	// a parsed event takes ~3x its line, so 96 MB of lines is ~300 MB of the server's heap at most)
+	if (cache.has(file)) cacheBytes -= cache.get(file).off;
+	cache.delete(file);
 	cache.set(file, c);
-	if (cache.size > 400) cache.delete(cache.keys().next().value);
+	cacheBytes += c.off;
+	while (cache.size > 1 && (cache.size > 400 || cacheBytes > CACHE_BYTES)) {
+		const k = cache.keys().next().value;
+		cacheBytes -= cache.get(k).off;
+		cache.delete(k);
+	}
 	return c.events;
 }
+const CACHE_BYTES = 96 << 20;
+let cacheBytes = 0;
 const sizeOf = (f) => { try { return fs.statSync(f).size; } catch (e) { return 0; } };
 const rot = (f) => f.replace(/\.jsonl$/, '.1.jsonl');
 const eventsOf = (f) => readJsonl(rot(f)).concat(readJsonl(f));
@@ -93,18 +105,43 @@ function dressSpan(s) {
 	if (s.lane === 'sweep' && Number.isFinite(s.w0) && Number.isFinite(s.w1)) s.short = `ticks ${count(s.w0)}–${count(s.w1)}`;
 	return s;
 }
-/** consecutive GPU blocks of one stage shorter than `minMs` merged into one block (a run of them) */
-function mergeGpu(spans, minMs) {
+/**
+ * The blocks of one row of the tape (a lane, or one of the sweep's lanes) for the figure: consecutive blocks shorter than
+ * `minMs` (a few pixels of the plot) merged into one band, whatever their stage (the GPU searcher's 3-30 s turns made a lane
+ * of hundreds of 1-px blocks, a barcode; a 48-h session's sweep windows the same): the band has the colour of the stage
+ * with the most time in it, its detail the stages and their runs. Drawing only: the score counts the blocks themselves. The
+ * spans are copied (the built parts are shared between calls).
+ */
+function mergeShort(spans, minMs) {
 	const out = [];
-	for (const s of spans) {
+	for (const s0 of spans) {
 		const last = out[out.length - 1];
-		const d = (s.t1 || Infinity) - s.t0;
-		if (last && last.lane === 'gpu' && s.lane === 'gpu' && last.key === s.key && last.t1 && s.t0 - last.t1 < Math.max(5000, minMs) && d < minMs && (last.t1 - last.t0) < minMs * 20) {
-			last.t1 = s.t1; last.n = (last.n || 1) + 1; last.ticks = (last.ticks || 0) + (s.ticks || 0); last.added = (last.added || 0) + (s.added || 0);
-			last.detail = '';
+		const d = (s0.t1 || Infinity) - s0.t0;
+		if (last && last.small && !s0.whole && last.t1 && s0.t0 - last.t1 < Math.max(5000, minMs) && d < minMs && (last.t1 - last.t0) < minMs * 20) {
+			last.t1 = s0.t1; last.n = (last.n || 1) + (s0.n || 1);
+			if (s0.saved !== undefined && s0.saved !== null) last.saved = (last.saved > 0 ? last.saved : 0) + (+s0.saved || 0);
+			const mx = last.mix.get(s0.key) || { ms: 0, n: 0, label: s0.label, fam: s0.fam };
+			mx.ms += d; mx.n += s0.n || 1; last.mix.set(s0.key, mx);
 			continue;
 		}
+		const s = Object.assign({}, s0);
+		if (!s.whole && d < minMs) { s.small = true; s.mix = new Map([[s.key, { ms: d, n: s.n || 1, label: s.label, fam: s.fam }]]); }
 		out.push(s);
+	}
+	for (const s of out) {
+		if (!s.mix) continue;
+		if (s.mix.size > 1 || s.n > 1) {
+			let top = null;
+			for (const [k, v] of s.mix) if (!top || v.ms > top[1].ms) top = [k, v];
+			s.key = top[0]; s.fam = top[1].fam;
+			const gpu = s.lane === 'gpu';
+			s.label = s.mix.size > 1 ? (gpu ? 'GPU search' : 'Several stages') : top[1].label;
+			s.short = undefined; s.w0 = undefined; s.w1 = undefined;
+			s.detail = [...s.mix.values()].sort((x, y) => y.ms - x.ms).map((v) => `${v.label.replace(/^GPU: /, '')} ×${v.n}`).join(', ');
+			if (s.mix.size > 1) s.explain = gpu ? 'The GPU searcher\'s turns, too short to draw one by one at this range: the colour is the one with the most time. A shorter range shows each.'
+				: 'Stages too short to draw one by one at this range: the colour is the one with the most time. A shorter range shows each.';
+		}
+		delete s.mix; delete s.small;
 	}
 	return out;
 }
@@ -138,22 +175,25 @@ function assemble(dir, b, o) {
 	}
 	else t0 = tNow - RANGES[range];
 	if (!(tNow - t0 >= 10e3)) t0 = tNow - 10e3;
-	// the spans in range (open ones run to now), GPU runs of short blocks merged, the newest MAX_SPANS
-	let spans = b.spans.filter((s) => (s.t1 || tNow) >= t0 && s.t0 <= tNow).sort((p, q) => p.t0 - q.t0);
-	const cpu = spans.filter((s) => s.lane !== 'gpu');
-	const gpu = mergeGpu(spans.filter((s) => s.lane === 'gpu'), (tNow - t0) / 600);
-	spans = cpu.concat(gpu).sort((p, q) => p.t0 - q.t0);
+	// the spans in range (open ones run to now); for the figure each row's runs of blocks under ~4 px of an 800-px plot merged
+	// into bands, then the newest MAX_SPANS
+	const inRange = b.spans.filter((s) => (s.t1 || tNow) >= t0 && s.t0 <= tNow).sort((p, q) => p.t0 - q.t0);
+	const rowsOf = new Map();
+	for (const sp of inRange) { const k = `${sp.lane}|${sp.sub | 0}`; if (!rowsOf.has(k)) rowsOf.set(k, []); rowsOf.get(k).push(sp); }
+	let spans = [];
+	for (const list of rowsOf.values()) spans = spans.concat(mergeShort(list, (tNow - t0) / 200));
+	spans.sort((p, q) => p.t0 - q.t0);
 	if (spans.length > MAX_SPANS) spans = spans.slice(spans.length - MAX_SPANS);
 	// the marks in range (the best runs: history; the hand-ins that were not accepted)
 	const marks = b.marks.concat(b.refused).filter((m) => m.t >= t0 - 1000 && m.t <= tNow + 1000).sort((p, q) => p.t - q.t);
 	// the best steps: the best at the range's start, then every find in range
 	const sorted = hist.slice().sort((p, q) => p.t - q.t);
 	let b0 = orig;
-	for (const h of sorted) if (h.t <= t0) b0 = h.runTicks;
+	for (const h of sorted) if (h.t < t0) b0 = h.runTicks;   // (a find AT the range's start is its first step: the "all" range starts there)
 	const best = b0 ? [[t0, b0, null, 'the best at the range\'s start']] : [];
 	const byT = new Map(b.marks.map((m) => [m.t, m]));
 	for (const h of sorted) {
-		if (h.t <= t0 || h.t > tNow + 1000) continue;
+		if (h.t < t0 || h.t > tNow + 1000) continue;
 		const m = byT.get(h.t);
 		best.push([h.t, h.runTicks, m ? m.fam : 'combine', m ? `${m.label}: ${MINUS}${count(h.saved)}` : h.what]);
 	}
@@ -167,13 +207,16 @@ function assemble(dir, b, o) {
 	// the score: per stage, the time of its runs in range (CPU: its threads' share of the session's threads), its finds
 	const W = (s) => { const ss = b.sessions[s.sess]; return (ss && ss.W) || 1; };
 	const rows = new Map();
-	const row = (k, fam, label, explain) => rows.get(k) || rows.set(k, { key: k, fam, label, explain: explain || '', ms: 0, runs: 0, finds: 0, saved: 0 }).get(k);
-	for (const s of spans) {
+	const row = (k, fam, label, explain) => rows.get(k) || rows.set(k, { key: k, fam, label, explain: explain || '', ms: 0, cpuMs: 0, gpuMs: 0, runs: 0, finds: 0, saved: 0 }).get(k);
+	for (const s of inRange) {
 		if (s.whole) continue;   // (the sweep's whole span: its windows count)
 		const a = Math.max(s.t0, t0), z = Math.min(s.t1 || tNow, tNow);
 		if (z <= a) continue;
 		const r = row(s.key, s.fam, s.label, s.explain);
-		r.ms += s.lane === 'gpu' ? z - a : (z - a) * Math.min(1, (s.threads || W(s)) / W(s));
+		// (the CPU's time weighted by its threads' share, the GPU's wall time: two machines, two columns; ms = both, the
+		// rate's base: a sum of the two can be longer than the session)
+		if (s.lane === 'gpu') r.gpuMs += z - a; else r.cpuMs += (z - a) * Math.min(1, (s.threads || W(s)) / W(s));
+		r.ms = r.cpuMs + r.gpuMs;
 		r.runs += s.n || 1;
 	}
 	for (const m of marks) {
@@ -197,16 +240,23 @@ function assemble(dir, b, o) {
 	const score = [...rows.values()].sort((p, q) => q.saved - p.saved || q.ms - p.ms);
 	// the rounds in range (the last one's recipe is the chips)
 	const rounds = b.rounds.filter((r) => !r.t0 || ((r.t1 || tNow) >= t0 && r.t0 <= tNow));
+	// (the payload: a long job's range holds thousands of finds; the view draws the newest MAX_MARKS, the Improvements table the
+	// newest MAX_HIST rows; the score above counted every one)
+	const marksOut = marks.length > MAX_MARKS ? marks.slice(marks.length - MAX_MARKS) : marks;
+	const histOut = b.history.length > MAX_HIST ? b.history.slice(b.history.length - MAX_HIST) : b.history;
+	const bestNow = b.status.bestRunTicks || (hist.length ? hist[hist.length - 1].runTicks : orig) || null;
 	const model = {
 		v: 1, kind: 'job', job: path.basename(dir), sig: o.sigNow, running: open, legacy: !!b.legacy, preview: false, range, t0, tNow, gpu: !!b.gpuOn,
 		speed: open && o.live && o.live.cpu ? { cpu: +o.live.cpu.ticksPerSec || 0, gpu: o.live.gpu ? +o.live.gpu.ticksPerSec || 0 : 0, threads: o.live.cpu.threads || null, gpuName: o.live.gpu ? o.live.gpu.name || null : null } : null,
-		lanes, spans: spans.map(clean), rounds, marks: marks.map(cleanMark), best, base: orig ? { runTicks: orig, time: fmt(orig), label: 'original' } : null, rangeFinds, score,
-		history: b.history,
+		lanes, spans: spans.map(clean), rounds, marks: marksOut.map(cleanMark), best, base: orig ? { runTicks: orig, time: fmt(orig), label: 'original' } : null, rangeFinds, score,
+		history: histOut, histTotal: b.history.length, marksTotal: marks.length, bestNow,
 	};
 	model.now = nowJob(model, { open, last, hist, status: b.status, spansAll: b.spans, gpuOpen: b.gpuOpen, paused: b.paused, now, best: b.status.bestRunTicks || (hist.length ? hist[hist.length - 1].runTicks : orig) });
 	return model;
 }
-const clean = (s) => ({ id: s.id, lane: s.lane, sub: s.sub | 0, key: s.key, fam: s.fam, label: s.label, short: s.short || undefined, explain: s.explain, detail: s.detail, name: s.name, round: s.round, t0: s.t0, t1: s.t1,
+// (a span's explanation is the dictionary's for its key: the page looks it up, D.STAGE[key].explain; a span whose key the
+// dictionary has not keeps its own)
+const clean = (s) => ({ id: s.id, lane: s.lane, sub: s.sub | 0, key: s.key, fam: s.fam, label: s.label, short: s.short || undefined, explain: D.STAGE[s.key] && D.STAGE[s.key].explain === s.explain ? undefined : s.explain, detail: s.detail, name: s.name, round: s.round, t0: s.t0, t1: s.t1,
 	threads: s.threads || null, w0: s.w0, w1: s.w1, saved: s.saved === undefined ? null : s.saved, killed: !!s.killed, whole: !!s.whole, n: s.n || 1 });
 const cleanMark = (m) => ({ t: m.t, lane: m.lane, sub: m.sub | 0, kind: m.kind, runTicks: m.runTicks, saved: m.saved, fam: m.fam, key: m.key, label: m.label, what: m.what, round: m.round, why: m.why });
 
@@ -249,7 +299,7 @@ function nowJob(model, x) {
 	const lastFind = () => {
 		if (!lastH) return '';
 		const c = (model.history || []).find((h) => h.t === lastH.t && h.runTicks === lastH.runTicks);
-		return ` Last find ${dur(x.now - lastH.t)} ago: ${MINUS}${count(lastH.saved)} tick${lastH.saved === 1 ? '' : 's'} by ${c ? c.label : classify(lastH.what).label}.`;
+		return ` Last find ${dur(x.now - lastH.t)} ago: ${MINUS}${secTicks(lastH.saved)} by ${c ? c.label : classify(lastH.what).label}.`;
 	};
 	if (model.preview) return { text: 'Not started yet. Press Start: the first minutes find the most time.', round: 1, key: null, label: null, fam: null, since: null };
 	if (!x.open) {
@@ -260,7 +310,7 @@ function nowJob(model, x) {
 		const found = hist.filter((h) => h.t >= s.t0 && h.t <= s.end + 1000).reduce((a, h) => a + (h.saved || 0), 0);
 		const ran = dur(Math.max(0, s.end - s.t0));
 		const word = st.state === 'finished' ? 'Finished (its deadline).' : 'Paused.';
-		return { text: `${word} The last session ran ${ran} and ${found > 0 ? `found ${count(found)} tick${found === 1 ? '' : 's'}` : 'found no faster run'}; the best is ${fmt(x.best)}.` };
+		return { text: `${word} The last session ran ${ran} and ${found > 0 ? `found ${secTicks(found)}` : 'found no faster run'}; the best is ${fmt(x.best)}.` };
 	}
 	// running: the stages lane's open span (the round's stage), the sweep's open windows, the GPU's open block
 	const openSp = (lane) => x.spansAll.filter((s) => s.lane === lane && !s.t1 && s.sess === x.last.i).sort((p, q) => p.t0 - q.t0);
@@ -410,20 +460,23 @@ function fromEvents(dir, evs, gevs, ctx) {
 		return { t: h.t, lane: sp ? sp.lane : laneOfWhat(h.what), sub: sp ? sp.sub : 0, kind: 'best', runTicks: h.runTicks, saved: h.saved, fam: h.fam, key: h.key, label: h.label, explainOf: h.explainOf,
 			what: h.what, round: h.round, find: h.find };
 	});
-	// the rounds' recipes
+	// the last round's recipe (the chips: the view shows only the round under way or the last one; a recipe for every round
+	// was 900 KB and seconds of the server's time on a long job)
 	const cursor = status.cursor || {};
-	for (const r of rounds) {
-		const ss = sessions[r.sess];
-		r.recipe = recipe(r, spans, skips, { open: running && r.sess === last.i, cursorStage: cursor.stage, cursorRound: cursor.round, flyK: ss.flyK });
-		r.title = `Round ${r.round}`;
-	}
-	const b = { sessions: sessions.map((s) => ({ t0: s.t0, end: s.end, W: s.W, gpu: s.gpu, i: s.i })), spans, rounds: rounds.map((r) => ({ round: r.round, t0: r.t0, t1: r.t1, order: r.order, recipe: r.recipe, title: r.title })),
-		marks, refused: refusedOf(dir), status, meta: ctx.meta, hist, history: history.map(stripHist), gpuOn: !!(last && last.gpu), paused: running && paused, legacy: false };
+	for (const r of rounds) r.title = `Round ${r.round}`;
+	const lr = rounds[rounds.length - 1];
+	const rctx = (r) => ({ open: running && r.sess === last.i, cursorStage: cursor.stage, cursorRound: cursor.round, flyK: sessions[r.sess].flyK });
+	if (lr) lr.recipe = recipe(lr, spans, skips, rctx(lr));
+	const recipeOf = (no) => { const r = rounds.filter((x) => x.round === no).pop(); return r ? r.recipe || recipe(r, spans, skips, rctx(r)) : null; };
+	const b = { sessions: sessions.map((s) => ({ t0: s.t0, end: s.end, W: s.W, gpu: s.gpu, i: s.i })), spans, rounds: rounds.map(roundOut),
+		marks, refused: refusedOf(dir), status, meta: ctx.meta, hist, history: history.map(stripHist), gpuOn: !!(last && last.gpu), paused: running && paused, legacy: false, recipeOf };
 	if (b.sessions.length) b.sessions[b.sessions.length - 1].end = running ? null : b.sessions[b.sessions.length - 1].end;
 	b.sessions.forEach((s, i) => { s.i = i; });
 	return b;
 }
 const stripHist = (h) => ({ t: h.t, runTicks: h.runTicks, saved: h.saved, what: h.what, key: h.key, fam: h.fam, label: h.label, round: h.round });
+/** a round as the model sends it: its order and recipe only on the round that has a recipe (the last) */
+const roundOut = (r) => (r.recipe ? { round: r.round, t0: r.t0, t1: r.t1, order: r.order, recipe: r.recipe, title: r.title } : { round: r.round, t0: r.t0, t1: r.t1, title: r.title });
 
 // ---------------------------------------------------------------- a job from before the events: its grind.log (11.3.1)
 /** grind.log's lines [{tag, sec (of its day), text}] with their times: the clock times anchored on status.json sessionStarted
@@ -581,11 +634,11 @@ function legacyJob(dir, ctx) {
 	for (const r of rounds) if (!r.t1 && !(running && r.sess === last.i)) r.t1 = Math.max(r.t0, ...spans.filter((s) => s.sess === r.sess && s.round === r.round).map((s) => s.t1 || s.t0));
 	const order = ctx.meta.timeDoors || spans.some((s) => /^phase/.test(s.name)) ? D.STAGES_PHASE : D.STAGES_ALL;
 	const cursor = status.cursor || {};
-	for (const r of rounds) {
-		r.order = order;
-		r.recipe = recipe(r, spans, skips, { open: running && r.sess === last.i, cursorStage: cursor.stage, cursorRound: cursor.round, flyK: spans.some((s) => s.lane === 'fly') ? 1 : 0 });
-		r.title = `Round ${r.round}`;
-	}
+	for (const r of rounds) { r.order = order; r.title = `Round ${r.round}`; }
+	const lr = rounds[rounds.length - 1];
+	const rctx = (r) => ({ open: running && r.sess === last.i, cursorStage: cursor.stage, cursorRound: cursor.round, flyK: spans.some((x) => x.lane === 'fly') ? 1 : 0 });
+	if (lr) lr.recipe = recipe(lr, spans, skips, rctx(lr));
+	const recipeOf = (no) => { const r = rounds.filter((x) => x.round === no).pop(); return r ? r.recipe || recipe(r, spans, skips, rctx(r)) : null; };
 	const hist = Array.isArray(status.history) ? status.history.filter((h) => h && Number.isFinite(+h.t)) : [];
 	const history = classifyHistory(hist, [], rounds, ctx.remote);
 	// a find's lane: the span of that name (the latest one that started before it), else by what it is
@@ -596,8 +649,8 @@ function legacyJob(dir, ctx) {
 			explainOf: h.explainOf, what: h.what, round: h.round };
 	});
 	if (last && running) last.end = null;
-	return { sessions: sessions.map((s) => ({ t0: s.t0, end: s.end, W: s.W, gpu: s.gpu, i: s.i })), spans, rounds: rounds.map((r) => ({ round: r.round, t0: r.t0, t1: r.t1, order: r.order, recipe: r.recipe, title: r.title })),
-		marks, refused: refusedOf(dir), status, meta: ctx.meta, hist, history: history.map(stripHist), gpuOn: !!(last && last.gpu), paused: false, legacy: true };
+	return { sessions: sessions.map((s) => ({ t0: s.t0, end: s.end, W: s.W, gpu: s.gpu, i: s.i })), spans, rounds: rounds.map(roundOut),
+		marks, refused: refusedOf(dir), status, meta: ctx.meta, hist, history: history.map(stripHist), gpuOn: !!(last && last.gpu), paused: false, legacy: true, recipeOf };
 }
 
 // ---------------------------------------------------------------- a job that never ran: the first round's stages, a preview
@@ -630,20 +683,46 @@ function jobTimeline(dir, o) {
 	const sig = [sizeOf(rot(evF)) + sizeOf(evF), sizeOf(rot(gF)) + sizeOf(gF), hl, o.running ? 1 : 0, sizeOf(path.join(dir, 'inbox', 'results.jsonl')), range,
 		status.state || '', status.stage || '', (status.cursor && status.cursor.stage) || '', o.running ? Math.floor(now / 20000) : sizeOf(path.join(dir, 'grind.log'))].join('-');
 	if (o.sig && o.sig === sig) return { unchanged: true, sig };
+	// (one model per state of the files: every open tab of the job, and every range of it, share the work; a running job's sig
+	// moves on every 20 s, so a cached model's "ago" texts are at most that old)
+	const mk = `${dir}|${sig}|${o.remote || ''}`;
+	if (models.has(mk)) { const m = models.get(mk); models.delete(mk); models.set(mk, m); return m; }
 	const meta = C.readJSON(path.join(dir, 'meta.json'), {}) || {};
 	const ctx = { status, meta, running: !!o.running, pid: o.pid || status.pid || null, remote: o.remote || null, now };
 	const oo = Object.assign({}, o, { range, now, sigNow: sig });
-	const evs = eventsOf(evF);
-	if (evs.some((e) => e && e.ev === 'session')) return assemble(dir, fromEvents(dir, evs, eventsOf(gF), ctx), oo);
-	const leg = legacyJob(dir, ctx);
-	if (leg) return assemble(dir, leg, oo);
-	if (!(Array.isArray(status.history) && status.history.length)) return previewJob(dir, ctx, oo);
-	// (finds but no log: the history alone)
-	const hist = status.history.filter((h) => h && Number.isFinite(+h.t));
-	const history = classifyHistory(hist, [], [], ctx.remote);
-	return assemble(dir, { sessions: [], spans: [], rounds: [], marks: history.map((h) => ({ t: h.t, lane: laneOfWhat(h.what), sub: 0, kind: 'best', runTicks: h.runTicks, saved: h.saved, fam: h.fam, key: h.key,
-		label: h.label, what: h.what, round: null })), refused: refusedOf(dir), status, meta, hist, history: history.map(stripHist), legacy: true }, oo);
+	// the built parts (b) by the files' state alone (not the range, not the clock): a range switch only assembles again
+	const bk = [sizeOf(rot(evF)) + sizeOf(evF), sizeOf(rot(gF)) + sizeOf(gF), hl, o.running ? 1 : 0, sizeOf(path.join(dir, 'inbox', 'results.jsonl')),
+		status.state || '', status.stage || '', (status.cursor && status.cursor.stage) || '', status.bestRunTicks || '', sizeOf(path.join(dir, 'grind.log')), o.remote || '', o.pid || ''].join('-');
+	const hit = built.get(dir);
+	let b = hit && hit.key === bk ? hit.b : undefined;
+	if (b === undefined) {
+		const evs = eventsOf(evF);
+		if (evs.some((e) => e && e.ev === 'session')) b = fromEvents(dir, evs, eventsOf(gF), ctx);
+		else b = legacyJob(dir, ctx);
+		if (!b && Array.isArray(status.history) && status.history.length) {
+			// (finds but no log: the history alone)
+			const hist = status.history.filter((h) => h && Number.isFinite(+h.t));
+			const history = classifyHistory(hist, [], [], ctx.remote);
+			b = { sessions: [], spans: [], rounds: [], marks: history.map((h) => ({ t: h.t, lane: laneOfWhat(h.what), sub: 0, kind: 'best', runTicks: h.runTicks, saved: h.saved, fam: h.fam, key: h.key,
+				label: h.label, what: h.what, round: null })), refused: refusedOf(dir), status, meta, hist, history: history.map(stripHist), legacy: false };   // (no optimizer run: nothing was rebuilt from a log)
+		}
+		built.delete(dir);
+		built.set(dir, { key: bk, b: b || null });
+		while (built.size > 24) built.delete(built.keys().next().value);
+	}
+	const model = b ? assemble(dir, b, oo) : previewJob(dir, ctx, oo);
+	models.set(mk, model);
+	while (models.size > 32) models.delete(models.keys().next().value);
+	return model;
 }
+const built = new Map();    // dir -> {key, b}: the last built parts of a job, by its files' state
+/** the recipe of any round of the job (the model carries only the last round's: tools, tests); o as jobTimeline's */
+function roundRecipe(dir, round, o) {
+	jobTimeline(dir, o);
+	const h = built.get(dir);
+	return h && h.b && typeof h.b.recipeOf === 'function' ? h.b.recipeOf(round) : null;
+}
+const models = new Map();   // dir|sig -> the model sent (the newest 32)
 
 // ---------------------------------------------------------------- the level editor's Hybrid (best) (11.4)
 /** the hybrid's now sentence (state: GET /api/editor/hybrid) */
@@ -773,4 +852,4 @@ function hybridTimeline(state, o) {
 	};
 }
 
-module.exports = { jobTimeline, hybridTimeline, nowJob, nowHybrid, legacyJob, classify, classifySlot, FAMS: D.FAMS, STAGES: D.STAGES, RANGES, readJsonl, dict: D };
+module.exports = { jobTimeline, roundRecipe, hybridTimeline, nowJob, nowHybrid, legacyJob, classify, classifySlot, FAMS: D.FAMS, STAGES: D.STAGES, RANGES, readJsonl, dict: D };

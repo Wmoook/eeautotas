@@ -65,6 +65,8 @@
 	const fetch0 = W.fetch ? W.fetch.bind(W) : null;
 	let fails = 0, offline = false, pingTimer = 0, lastNet = Date.now();
 	function banner(show) {
+		// (the page as a whole knows: live badges grey, the actions that need the app off, ui.css .offline)
+		root.classList.toggle('offline', !!show);
 		const el = D.getElementById('offline');
 		if (!el) return;
 		if (show) { el.innerHTML = OFFLINE_TEXT; el.setAttribute('role', 'status'); el.hidden = false; } else el.hidden = true;
@@ -255,14 +257,16 @@
 			`<path d="${d}" fill="none" style="stroke:${o.color || 'var(--ink-2)'}" stroke-width="${o.lw || 1.5}" stroke-linejoin="round" stroke-linecap="round"/>` +
 			`<circle cx="${num(lx)}" cy="${num(ly)}" r="4" style="fill:${o.dot || 'var(--coin-mark)'};stroke:var(--panel)" stroke-width="2"/></svg>`;
 	}
-	/** horizontal bars (HTML): items [{label, value, color, text, tip}]; o: {max} */
+	/** horizontal bars (HTML): items [{label, value, color, text, tip}]; o: {max}. Three columns: the label, a track whose bar is
+	 *  exactly value / max of it (every track the same length, so the bars compare), the value's text after it. */
 	function bars(items, o) {
 		o = o || {};
 		const max = o.max || Math.max(1, ...items.map((i) => Math.abs(i.value) || 0));
 		return `<div class="hbars">` + items.map((i) => {
 			const pct = Math.max(0, Math.min(100, (Math.abs(i.value) || 0) / max * 100));
 			return `<div class="hl"${attrTip(i.tip)}>${i.color ? `<i class="sw" style="background:${i.color}"></i>` : ''}${esc(i.label)}</div>` +
-				`<div class="hb"${attrTip(i.tip)}>${pct > 0 ? `<i style="width:calc(${pct.toFixed(2)}% - 80px);min-width:2px;background:${i.color || 'var(--ink-2)'}"></i>` : ''}<span>${esc(i.text === undefined ? count(i.value) : i.text)}</span></div>`;
+				`<div class="hb"${attrTip(i.tip)} role="img" aria-label="${esc(i.label)}: ${esc(i.text === undefined ? count(i.value) : i.text)}">${pct > 0 ? `<i style="width:${pct.toFixed(2)}%;background:${i.color || 'var(--ink-2)'}"></i>` : ''}</div>` +
+				`<div class="hv"${attrTip(i.tip)}>${esc(i.text === undefined ? count(i.value) : i.text)}</div>`;
 		}).join('') + `</div>`;
 	}
 	/** a histogram (SVG): bins [{label, n, tip}]; o: {w 360, h 150, color 'var(--ink-2)', label (aria)} */

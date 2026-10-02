@@ -137,7 +137,7 @@ button.watch::before { display: none; }   /* (the page's Watch buttons carry the
 .status b { color: var(--ink); font-weight: 600; font-family: var(--f-num); }
 .status .keys { margin-left: auto; flex: 0 1 auto; color: var(--muted); }
 /* the sheet: the Hybrid's full Optimizer view over the lower part of the map */
-.hysheet { position: absolute; left: 0; right: 0; bottom: 30px; height: 45%; min-height: 220px; z-index: 8; display: flex; flex-direction: column; background: var(--panel);
+.hysheet { position: absolute; left: 0; right: 0; bottom: 30px; top: 8%; min-height: 220px; z-index: 8; display: flex; flex-direction: column; background: var(--panel);
 	border-top: 1px solid var(--line); border-radius: var(--r3) var(--r3) 0 0; box-shadow: var(--shadow-float); }
 .hysh { display: flex; align-items: center; gap: 10px; padding: 6px 8px 6px 14px; border-bottom: 1px solid var(--line); }
 .hysh b { font: 600 15px var(--f-num); }
@@ -155,11 +155,11 @@ button.watch::before { display: none; }   /* (the page's Watch buttons carry the
 .setg { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; margin-top: 10px; }
 .setg select { width: 100%; }
 .setg .w2 { grid-column: 1 / -1; }
-.acts { display: grid; gap: 8px; margin-top: 14px; }
-.actrow { display: grid; grid-template-columns: 62px minmax(0, 1fr); align-items: center; gap: 8px; }
-.actrow .actk { font-size: 12px; color: var(--ink-2); }
-.actrow .row { gap: 6px; }
-.actrow .row button { flex: 1 1 auto; }
+.acts { display: grid; gap: 10px; margin-top: 14px; }
+.actrow { display: grid; gap: 5px; }
+.actrow .actk { font: 600 11px/14px var(--f-ui); color: var(--muted); letter-spacing: .02em; }
+.actrow .row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.actrow .row button { width: 100%; min-height: 34px; height: auto; padding: 6px 10px; white-space: normal; line-height: 1.2; }
 #bStop { width: 100%; }
 .prog { height: 6px; border-radius: 3px; background: var(--sunken); overflow: hidden; margin-top: 10px; }
 .prog i { display: block; height: 100%; background: var(--ahead); width: 0; transition: width .5s linear; border-radius: 3px; }
@@ -194,7 +194,10 @@ button.watch::before { display: none; }   /* (the page's Watch buttons carry the
 }
 @media (max-width: 599px) {
 	.main { padding: 8px; gap: 8px; }
-	.hysheet { height: 70%; }
+	.hysheet { position: fixed; top: 10vh; bottom: 0; z-index: 40; border-radius: var(--r4) var(--r4) 0 0; }
+	.hysb { padding: 10px 12px; }
+	/* the toolbar wraps: no divider left dangling at a row's start */
+	.tools .sep { display: none; }
 }
 </style>
 <script src="/phases.js" defer></script>
@@ -269,7 +272,7 @@ button.watch::before { display: none; }   /* (the page's Watch buttons carry the
 						<option value="0">never</option></select></div>
 				</div>
 				<div class="acts">
-					<div class="actrow"><span class="actk">Search</span><div class="row"><button class="go" id="bSolve">Find a route</button><button id="bAuto" title="Find a route, then optimize it at once as a run (the GPU goes to the optimizer when Find a route stops finding faster routes), for the time chosen above. Its run pauses any other running run (one at a time)">Find and optimize</button></div></div>
+					<div class="actrow"><span class="actk">Search</span><div class="row"><button id="bSolve">Find a route</button><button id="bAuto" title="Find a route, then optimize it at once as a run (the GPU goes to the optimizer when Find a route stops finding faster routes), for the time chosen above. Its run pauses any other running run (one at a time)">Find and optimize</button></div></div>
 					<div class="actrow"><span class="actk">Compile</span><div class="row"><button id="bCompile" title="Compile the level into a TAS: no search, no GPU (the level's model, a plan of which trigger to take next, moves derived from the physics, the engine's own replay as the check), for at most the time chosen above (10 min at most). The result becomes a run, and its /loadtas line is copied for eeo-tas">Compile</button><button class="go" id="bHybrid" title="Hybrid (best): the compiler and Find a route side by side, each handing its furthest point to the other; the first verified route wins, then a few minutes of polish (the optimizer, the compiler's polish). No time cap: it runs until it has a route, or until you stop it; when it is stuck it starts again fresh (the setting above). Every route is replayed before it counts. Uses the GPU like Find a route (CPU only without one)">Hybrid (best)</button></div></div>
 					<button class="stop" id="bStop" data-ic="stop" hidden>Stop</button>
 				</div>
@@ -3145,7 +3148,7 @@ async function copyHybrid(s) {
 function renderHybrid() {
 	const s = HYB.st, el = $('hybridSt');
 	$('bHybrid').disabled = !!(s && s.running);
-	if (!s || s.stage === 'none') { el.innerHTML = ''; return; }
+	if (!s || s.stage === 'none') { el.innerHTML = ''; $('hyTape').innerHTML = ''; return; }
 	const L = s.live || {}, c = L.compiler || {}, q = L.search || {}, routes = L.routes || [];
 	const bestRT = L.best ? L.best.runTicks : s.result ? s.result.runTicks : null;
 	const what = s.running ? (s.stopping ? 'stopping…' : s.stage === 'polish' ? 'route found: polishing it' : s.stage === 'ending' ? 'ending…' : s.stage === 'starting' ? 'starting…' : 'running')
@@ -3224,6 +3227,7 @@ function renderHybrid() {
 		try { await navigator.clipboard.writeText(inp.value); toast('The /loadtas line is copied.'); } catch (e) { inp.focus(); inp.select(); try { document.execCommand('copy'); toast('The /loadtas line is copied.'); } catch (e2) { toast('Select the line and copy it (Ctrl+C).', true); } }
 	};
 	if (typeof TL === 'object' && TL && s.timeline) { TL.render($('hyTape'), s.timeline, { compact: true, sheet: 'hySheet' }); if (typeof hySheetRender === 'function') hySheetRender(s); }
+	else $('hyTape').innerHTML = '';   // (a run that has no timeline yet: not the last run's)
 }
 /** where the hybrid's log and the scrolled boxes around its panel are (renderHybrid draws the panel again every second):
  *  the log's scroll (at its end: it follows the new lines), the nearest scrolled ancestor's and the window's */

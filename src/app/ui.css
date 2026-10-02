@@ -8,8 +8,8 @@
 	/* surfaces */
 	--ground: #eef1f6;  --panel: #ffffff;  --raise: #f3f5f9;  --sunken: #e6eaf1;
 	--line: #dde2ea;    --line-2: #c5ccd8;
-	/* ink (contrast on --panel: 17.4 / 9.0 / 5.3) */
-	--ink: #141a26;     --ink-2: #3e4a5e;  --muted: #5f6c82;
+	/* ink (contrast on --panel: 17.4 / 9.0 / 5.8; --muted on --sunken 4.8) */
+	--ink: #141a26;     --ink-2: #3e4a5e;  --muted: #5a6679;
 	/* meaning */
 	--coin: #f2b51c;      /* gold fills (buttons, bars); never text on day */
 	--coin-mark: #b98100; /* gold marks on day (3.4:1) */
@@ -21,7 +21,7 @@
 	--remote: #2a63d4; --remote-wash: #e8effc;
 	--focus: #2a63d4;
 	/* optimizer phase families (validated all-pairs on #ffffff: CVD dE 9.2, normal dE 16.3, all >= 3:1) */
-	--ph-tweak: #2a78d6; --ph-explore: #4a3aa7; --ph-path: #e0662f; --ph-local: #14a37a; --ph-finish: #b8489e;
+	--ph-tweak: #2470cc; --ph-explore: #4a3aa7; --ph-path: #e0662f; --ph-local: #14a37a; --ph-finish: #b8489e;
 	--ph-combine: #7d8799; --ph-outside: #3e4a5e;
 	/* elevation */
 	--shadow-card: 0 1px 0 rgba(20, 26, 38, .05);
@@ -40,7 +40,7 @@
 		color-scheme: dark;
 		--ground: #10151f;  --panel: #182031;  --raise: #212b40;  --sunken: #0c1018;
 		--line: #2b3750;    --line-2: #3a4866;
-		--ink: #e9eef7;     --ink-2: #b3bdd0;  --muted: #8391ab;   /* on --panel: 14.0 / 8.6 / 5.1 */
+		--ink: #e9eef7;     --ink-2: #b3bdd0;  --muted: #909db5;   /* on --panel: 14.0 / 8.6 / 5.9; on --raise 5.2 */
 		--coin: #ffc83d;    --coin-mark: #ffc83d; --coin-ink: #ffd76a; --coin-wash: rgba(255, 200, 61, .12); --on-coin: #1a1405;
 		--ahead: #3ddc84;   --ahead-wash: rgba(61, 220, 132, .12);
 		--behind: #ff7468;  --behind-wash: rgba(255, 116, 104, .12);
@@ -49,7 +49,7 @@
 		--focus: #7fb2ff;
 		/* validated all-pairs on #182031: CVD dE 9.8, normal dE 16.7, all >= 3:1 */
 		--ph-tweak: #2b99e7; --ph-explore: #7758bb; --ph-path: #da570b; --ph-local: #0a9068; --ph-finish: #d168a7;
-		--ph-combine: #6b7891; --ph-outside: #b3bdd0;
+		--ph-combine: #647089; --ph-outside: #b3bdd0;
 		--shadow-card: none;
 		--shadow-float: 0 16px 40px rgba(0, 0, 0, .5), 0 2px 8px rgba(0, 0, 0, .35);
 	}
@@ -58,7 +58,7 @@
 	color-scheme: dark;
 	--ground: #10151f;  --panel: #182031;  --raise: #212b40;  --sunken: #0c1018;
 	--line: #2b3750;    --line-2: #3a4866;
-	--ink: #e9eef7;     --ink-2: #b3bdd0;  --muted: #8391ab;   /* on --panel: 14.0 / 8.6 / 5.1 */
+	--ink: #e9eef7;     --ink-2: #b3bdd0;  --muted: #909db5;   /* on --panel: 14.0 / 8.6 / 5.9; on --raise 5.2 */
 	--coin: #ffc83d;    --coin-mark: #ffc83d; --coin-ink: #ffd76a; --coin-wash: rgba(255, 200, 61, .12); --on-coin: #1a1405;
 	--ahead: #3ddc84;   --ahead-wash: rgba(61, 220, 132, .12);
 	--behind: #ff7468;  --behind-wash: rgba(255, 116, 104, .12);
@@ -67,7 +67,7 @@
 	--focus: #7fb2ff;
 	/* validated all-pairs on #182031: CVD dE 9.8, normal dE 16.7, all >= 3:1 */
 	--ph-tweak: #2b99e7; --ph-explore: #7758bb; --ph-path: #da570b; --ph-local: #0a9068; --ph-finish: #d168a7;
-	--ph-combine: #6b7891; --ph-outside: #b3bdd0;
+	--ph-combine: #647089; --ph-outside: #b3bdd0;
 	--shadow-card: none;
 	--shadow-float: 0 16px 40px rgba(0, 0, 0, .5), 0 2px 8px rgba(0, 0, 0, .35);
 }
@@ -282,6 +282,10 @@ pre.log { margin: 8px 0 0; padding: 10px 12px; border-radius: var(--r2); backgro
 #offline { position: sticky; top: var(--nav-h); z-index: 19; padding: 8px 16px; background: var(--behind-wash); color: var(--behind); font-size: 13.5px; line-height: 19px;
 	border-bottom: 1px solid color-mix(in srgb, var(--behind) 30%, transparent); backdrop-filter: blur(8px); }
 #offline b { font-weight: 600; }
+/* the app not answering (ui.js sets .offline on the page): nothing looks live, the actions that need the app wait */
+.offline .pill.ok, .offline .chip.live, .offline .tl-speed, .offline .dot.run, .offline .tl-chip.now, .offline .live { filter: grayscale(1); opacity: .6; }
+.offline .chip.live > i, .offline .dot.run, .offline .pill > i.live, .offline .tl-speed .dot, .offline .tl-chip.now::after, .offline .live::before { animation: none; }
+.offline .jacts button, .offline .filesrow button, .offline #hySt button, .offline .ideas button.go { pointer-events: none; opacity: .45; }
 
 /* ---------------------------------------------------------------- page shells */
 .page { max-width: var(--page-max); margin: 0 auto; padding: 24px; }
@@ -296,11 +300,13 @@ pre.log { margin: 8px 0 0; padding: 10px 12px; border-radius: var(--r2); backgro
 .uic .hit { fill: transparent; }
 .uic [data-tip]:hover, .uic .mk:hover { filter: brightness(1.12); }
 .spark { display: inline-block; vertical-align: middle; overflow: visible; }
-.hbars { display: grid; grid-template-columns: max-content 1fr; gap: 8px 12px; align-items: center; font-size: 13px; }
-.hbars .hl { display: flex; align-items: center; gap: 8px; color: var(--ink-2); white-space: nowrap; }
-.hbars .hb { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.hbars .hb > i { display: block; height: 16px; min-width: 2px; border-radius: 0 4px 4px 0; flex: none; }
-.hbars .hb > span { font: 500 13px/1 var(--f-num); font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; }
+/* horizontal bars (UI.bars): label | a track (every row's the same length: the bars compare) | the value after it */
+.hbars { display: grid; grid-template-columns: max-content minmax(48px, 1fr) max-content; gap: 9px 12px; align-items: center; font-size: 13px; }
+.hbars .hl { display: flex; align-items: center; gap: 8px; color: var(--ink-2); white-space: nowrap; min-width: 0; }
+.hbars .hb { height: 14px; border-radius: 4px; background: var(--sunken); overflow: hidden; min-width: 0; }
+.hbars .hb > i { display: block; height: 100%; min-width: 2px; border-radius: 4px; }
+.hbars .hv { font: 600 13px/1 var(--f-num); font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; text-align: right; }
+@media (max-width: 599px) { .hbars { grid-template-columns: max-content minmax(36px, 1fr) max-content; gap: 8px; } .hbars .hl { white-space: normal; } }
 .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; flex: none; }
 .stackbar { display: flex; gap: 2px; height: 24px; border-radius: 4px; overflow: hidden; background: var(--panel); }
 .stackbar > i { display: block; height: 100%; min-width: 2px; }
@@ -430,11 +436,11 @@ pre.st-cmd { display: inline-block; margin: 12px 0; padding: 8px 12px; border-ra
 	.st-sheet, .st-headline { padding: 16px; }
 	.st-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 	.st-kpis .kpi .v { font-size: 28px; }
-	.st-mrow { grid-template-columns: minmax(0, 1fr) auto; }
+	.st-mrow { grid-template-columns: minmax(0, 1fr) 4.5em; }
 	.st-mrow .bar { grid-column: 1 / 2; }
 	.st-filters input[type=search] { width: auto; flex: 1 1 100%; }
 	.st-name { max-width: 150px; }
-	.st-scroll { max-height: none; }
+	.st-scroll { max-height: 70vh; }
 	.tbl.st-mini th, .tbl.st-mini td { padding: 6px 5px; }
 	.tbl.st-mini .st-name { max-width: 112px; }
 	.st-tbl th:first-child, .st-tbl td:first-child { box-shadow: 1px 0 0 var(--line); }

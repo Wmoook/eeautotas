@@ -135,6 +135,8 @@
 /* the improvements, the files, the report, the disclosures */
 .imps { max-height: 360px; overflow: auto; border-radius: var(--r2); }
 .imps .tbl td.w { max-width: 0; width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
+@media (max-width: 599px) { .imps .tbl td.w { white-space: normal; overflow-wrap: anywhere; width: auto; max-width: none; } .imps .tbl td.tnum { white-space: normal; } }
+.pickone .empty { padding: 56px 20px; }
 .imps .tbl td.d { color: var(--ahead); }
 .filesrow { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .filesrow .sp { flex: 1; }
@@ -355,6 +357,7 @@
 				inputs until you stop it. Every improvement is proven by a full replay.</p>
 			<div id="onboardSlot"></div>
 		</div>
+		<div class="sheet pickone" id="pickOne" hidden><div class="empty"><span class="et">Pick a run</span>Choose one of your runs on the left, or start a new one with <strong>New run</strong>.</div></div>
 		<div class="sheet" id="sheet" hidden>
 			<div class="sec" id="detail"></div>
 			<section class="sec opt" id="opt" aria-label="Optimizer"></section>
@@ -462,8 +465,11 @@ const fmt = (t) => `${Math.floor(t / 6000)}:${((t % 6000) / 100).toFixed(2).padS
 const store = { get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }, set(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* no storage */ } } };
 let state = { jobs: [], cpus: 0 };
 let selected = store.get('tasopt.sel');
-// #job=<id> picks the run (the back button walks between runs); without it the last run picked in this browser
-{ const m = location.hash.match(/(?:^#|&)job=([a-z0-9-]+)/); if (m) selected = m[1]; }
+// #job=<id> picks the run (the back button walks between runs); without it the last run picked in this browser. A run that came
+// by a link is checked once the runs are known (linkRun): it is remembered as the run picked here, or, gone, the list shows
+// with a note instead of another run (noAutoPick)
+let linkRun = null, noAutoPick = false;
+{ const m = location.hash.match(/(?:^#|&)job=([a-z0-9-]+)/); if (m) { selected = m[1]; linkRun = m[1]; } }
 let files = { eelvl: null, eetas: null };
 let busy = false;
 const START_LABEL = { reset: 'after /reset', load: 'right after loading the level' };
@@ -595,16 +601,40 @@ function notifyImprovements() {
 async function refresh() {
 	// (a network error is counted by /ui.js's fetch: the offline banner after 2 in a row; any answer clears it)
 	try { state = await api('/api/state'); } catch (e) { return; }
+	if (linkRun) {
+		if (state.jobs.some((j) => j.id === linkRun)) store.set('tasopt.sel', linkRun);
+		else {
+			toast(`That run is not here any more (it may have been deleted). Pick one from the list.`, 'err');
+			if (selected === linkRun) { selected = null; noAutoPick = true; }
+			try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { /* sandbox */ }
+			if (window.matchMedia && window.matchMedia('(max-width: 899px)').matches) rail(true);
+		}
+		linkRun = null;
+	}
 	notifyImprovements();
 	renderPills(); renderRented(); renderJobs(); renderShell(); renderDetail(); renderOpt(); renderIdeas();
 	syncHash();
+	selInView();
 	vwCheckNewer();
+}
+/** the rail scrolls the run on screen into view, once for each run picked (a link, a new best's toast, the page's own pick); the
+ *  rail's own scroll only (not the page), and not while the user scrolls it */
+let inViewFor = null, railScrolledAt = 0;
+function selInView() {
+	if (!selected || inViewFor === selected) return;
+	const rl = $('rail'), el = $('jobs').querySelector('.job.sel');
+	if (!rl || !el) return;
+	inViewFor = selected;
+	if (Date.now() - railScrolledAt < 1500 || rl.scrollHeight <= rl.clientHeight + 2) return;
+	const r = el.getBoundingClientRect(), rr = rl.getBoundingClientRect();
+	if (r.top < rr.top + 40 || r.bottom > rr.bottom - 8) rl.scrollTop += r.top - rr.top - Math.max(40, (rr.height - r.height) / 3);
 }
 /** the page as a whole: no runs = the onboarding (the New run card open under it), else the rail and the job sheet */
 function renderShell() {
 	const none = !state.jobs.length;
 	$('onboard').hidden = !none;
 	$('sheet').hidden = none || !selected;
+	$('pickOne').hidden = none || !!selected;
 	const card = $('newRun');
 	if (none && card.parentNode !== $('onboardSlot')) { $('onboardSlot').appendChild(card); card.hidden = false; }
 	if (!none && card.parentNode === $('onboardSlot')) { $('jobs').before(card); card.hidden = !newRunWanted; }
@@ -733,7 +763,7 @@ function jobCard(j) {
 		</button><button class="watch small jw" data-watch="${j.id}" title="Watch the current best run, with your original .eetas as a ghost">Watch</button></div>`;
 }
 function renderJobs() {
-	if (!state.jobs.some((j) => j.id === selected)) selected = state.jobs[0] ? state.jobs[0].id : null;
+	if (!state.jobs.some((j) => j.id === selected)) selected = typeof noAutoPick !== 'undefined' && noAutoPick ? null : (state.jobs[0] ? state.jobs[0].id : null);
 	// the rail's filter (#jobFilter): runs whose name holds the text, any case
 	const fq = String((($('jobFilter') || {}).value || '')).trim().toLowerCase();
 	const shown = fq ? state.jobs.filter((j) => String(j.name).toLowerCase().includes(fq)) : state.jobs;
@@ -749,7 +779,7 @@ function renderJobs() {
 }
 function selectJob(id, fromHash) {
 	const was = selected;
-	selected = id; store.set('tasopt.sel', selected);
+	selected = id; store.set('tasopt.sel', selected); noAutoPick = false;
 	// a run the user picks is a step the back button returns to; the page's own pick only replaces the address
 	if (!fromHash && was !== id && !/(?:^#|&)watch=/.test(location.hash)) { try { history.pushState(null, '', `#job=${id}`); } catch (e) { /* sandbox */ } }
 	renderRented(); renderJobs(); renderShell(); renderDetail(); renderOpt(); renderIdeas(); syncHash();
@@ -918,7 +948,8 @@ function renderDetail() {
 		const e = estimate(state.bench, n);
 		return `<option value="${n}" ${String(n) === workersDefault ? 'selected' : ''}>${n}${e ? ` · ${mts(e)}/s` : ''}${n === peak && peak < state.cpus ? ' (fastest)' : ''}</option>`;
 	}).join('');
-	const hist = (j.history || []).slice().reverse();
+	const histAll = (j.history || []);
+	const hist = histAll.slice(Math.max(0, histAll.length - IMP_ROWS)).reverse();
 	// the sheet is rebuilt on every poll: its scrolling boxes (the improvements, the logs) keep their place; one scrolled to its
 	// end stays at the end, so new lines show
 	const scrolled = ['.feed', '#logBox pre.log', '#rlogBox pre.log'].map((sel) => { const el = $('sheet').querySelector(sel); return el && { sel, top: el.scrollTop, end: el.scrollTop > 0 && el.scrollTop + el.clientHeight >= el.scrollHeight - 4 }; }).filter(Boolean);
@@ -938,7 +969,7 @@ function renderDetail() {
 				<button class="watch" id="watchBtn" title="Play the current best run in the level, with your original .eetas as a ghost (the optimizer keeps running)">Watch</button>
 				${j.running ? `<button class="stop" id="stopBtn" data-ic="pause">Pause</button><button class="primary" id="finishBtn">Finish run</button>`
 					: `<label class="lab">processor <select id="proc" title="${esc(GPU_HOW)}">${procOptions()}</select></label>` +
-					`<label class="lab">threads <select id="workers">${opts}</select></label><button class="go" id="startBtn" data-ic="play">${j.round || j.savedTicks > 0 ? 'Resume' : 'Start'}</button>` +
+					`<label class="lab">threads <select id="workers">${opts}</select></label><button class="go" id="startBtn" data-ic="play">${j.round || (j.history || []).some((h) => !/^(inbox \(|try: )/.test(String(h.what || ''))) ? 'Resume' : 'Start'}</button>` +
 					(j.savedTicks > 0 || j.report ? `<button class="primary" id="finishBtn">Finish run</button>` : '')}
 			</div>
 		</div>
@@ -947,11 +978,11 @@ function renderDetail() {
 		<div class="times">
 			<span class="big" id="heroTime" title="the best run's time">${j.best.time}</span>
 			${j.savedTicks > 0 ? `<span class="was" title="your original .eetas">${j.original.time}</span>` : ''}
-			<span class="tchips">${j.savedTicks > 0 ? `<span class="chip ahead" title="${j.savedTicks} ticks saved (1 tick = 0.01 s)">${UI_MINUS}${(j.savedTicks / 100).toFixed(2)} s · ${j.savedTicks.toLocaleString('en-US')} ticks</span><span class="chip" title="of the original's time">${pct}</span>`
+			<span class="tchips">${j.savedTicks > 0 ? `<span class="chip ahead" title="${j.savedTicks} ticks saved (1 tick = 0.01 s)">${UI_MINUS}${(j.savedTicks / 100).toFixed(2)} s · ${j.savedTicks.toLocaleString('en-US')} ticks</span><span class="chip" title="of the original's time">${pct} faster than the original</span>`
 				: '<span class="chip">no improvement yet</span>'}${deathsHtml(j)}${chance}</span>
 		</div>
 		${typeof TL === 'object' && TL && TL.mount ? '' : liveHtml(j)}${remoteHtml(j)}`;
-	$('detail2').innerHTML = `<div class="sec-h"><h2>Improvements</h2><span class="t-small">${hist.length ? `${hist.length.toLocaleString('en-US')} found` : ''}</span></div>
+	$('detail2').innerHTML = `<div class="sec-h"><h2>Improvements</h2><span class="t-small">${histAll.length ? `${histAll.length.toLocaleString('en-US')} found${histAll.length > IMP_ROWS ? ` · the newest ${IMP_ROWS} here` : ''}` : ''}</span></div>
 		${hist.length ? `<div class="imps feed"><table class="tbl"><thead><tr><th>When</th><th class="n">Saved</th><th class="n">New best</th><th>Found by</th>${impRounds() ? '<th class="n">Round</th>' : ''}</tr></thead><tbody>${hist.map(impRow).join('')}</tbody></table></div>`
 			: `<div class="msg info">Improvements show up here as the optimizer finds them. The first minutes usually find the most.</div>`}
 		<div class="sec-h" style="margin-top:24px"><h2>Files</h2></div>
@@ -1007,11 +1038,18 @@ function renderDetail() {
 }
 /** a row of the Improvements table; phases.js classifies it when it is there (TL.classify(entry) -> {label, color, round}:
  *  the family's swatch, the plain label, the round), else the raw `what` in plain words */
+const IMP_ROWS = 400;
+/** an improvement's time: the clock today, else the day and the clock (rows from different days looked like one day) */
+function impWhen(t) {
+	const d = new Date(t), n = new Date();
+	if (d.toDateString() === n.toDateString()) return UI_CLOCK(t);
+	try { return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${UI_CLOCK(t)}`; } catch (e) { return UI_CLOCK(t); }
+}
 function impRow(p) {
 	const c = typeof TL === 'object' && TL && typeof TL.classify === 'function' ? TL.classify(p, selected) : null;
 	const label = c && c.label ? c.label : friendlyStage(p.what);
 	const sw = c && c.color ? `<i class="sw" style="background:${c.color}"></i>` : '';
-	return `<tr><td class="tnum" title="${esc(new Date(p.t).toLocaleString())}">${UI_CLOCK(p.t)}</td>` +
+	return `<tr><td class="tnum" title="${esc(new Date(p.t).toLocaleString())}">${impWhen(p.t)}</td>` +
 		`<td class="n d">${UI_MINUS}${p.saved.toLocaleString('en-US')} tick${p.saved === 1 ? '' : 's'}</td><td class="n">${fmt(p.runTicks)}</td>` +
 		`<td class="w" title="${esc(p.what)}">${sw}${esc(label)}</td>${impRounds() ? `<td class="n">${c && c.round ? c.round : ''}</td>` : ''}</tr>`;
 }
@@ -2731,12 +2769,17 @@ $('jobFilter').addEventListener('input', () => renderJobs());
 $('jobFilter').addEventListener('keydown', (e) => { if (e.key === 'Escape') { $('jobFilter').value = ''; renderJobs(); } });
 $('newBtn').onclick = () => newRunOpen($('newRun').hidden);
 $('railToggle').onclick = () => rail($('rail').classList.contains('shut'));
+$('rail').addEventListener('wheel', () => { railScrolledAt = Date.now(); }, { passive: true });
+$('rail').addEventListener('touchmove', () => { railScrolledAt = Date.now(); }, { passive: true });
 $('drop').onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('pick').click(); } };
-if (window.matchMedia && window.matchMedia('(max-width: 899px)').matches && store.get('tasopt.sel')) rail(false);
+if (window.matchMedia && window.matchMedia('(max-width: 899px)').matches && (store.get('tasopt.sel') || /(?:^#|&)job=/.test(location.hash))) rail(false);
 // the Optimizer section's chart follows the page's width and theme
 let optResize = 0;
 window.addEventListener('resize', () => { clearTimeout(optResize); optResize = setTimeout(renderOpt, 200); });
-window.addEventListener('eeat-theme', () => { optSig = ''; renderOpt(); });
+window.addEventListener('eeat-theme', () => {
+	if (optSig === 'TL' && typeof TL === 'object' && TL && typeof TL.redraw === 'function' && TL.redraw($('opt'))) return;
+	optSig = ''; renderOpt();
+});
 // phases.js comes with defer: once it has defined TL the Optimizer section is its
 window.addEventListener('DOMContentLoaded', () => { if (typeof TL === 'object' && TL) { optSig = ''; renderOpt(); renderDetail(); } });
 renderFiles();

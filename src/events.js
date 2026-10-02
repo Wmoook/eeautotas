@@ -21,7 +21,7 @@ function open(file, o) {
 	o = o || {};
 	const maxBytes = Math.max(1024, +o.maxBytes || (8 << 20));
 	const off = !!o.off || process.env.EEAT_EVENTS === '0';
-	let size = -1;
+	let size = -1, retryAt = 0;   // (a rename that failed is tried again once the file has grown 64 KB more (a 16th of the limit at most), not at every line)
 	const w = {
 		file,
 		last: 0,
@@ -32,13 +32,19 @@ function open(file, o) {
 				const rec = obj.t === undefined ? Object.assign({ t: Date.now() }, obj) : obj;
 				let line = JSON.stringify(rec) + '\n';
 				if (size < 0) { try { size = fs.statSync(file).size; } catch (e) { size = 0; } }
-				if (size > 0 && size + Buffer.byteLength(line) > maxBytes) {
-					try { fs.renameSync(file, rotatedName(file)); } catch (e) { /* in use: it grows on */ }
-					size = 0;
-					if (typeof o.head === 'function') {
-						let h = null;
-						try { h = o.head(); } catch (e) { h = null; }
-						if (h && typeof h === 'object') line = JSON.stringify(Object.assign({ t: rec.t }, h, { cont: true })) + '\n' + line;
+				if (size > 0 && size + Buffer.byteLength(line) > maxBytes && size >= retryAt) {
+					let moved = true;
+					try { fs.renameSync(file, rotatedName(file)); } catch (e) { moved = false; }
+					// (in use, e.g. a reader on Windows: the file grows on and the rename is tried again later; the size stays the
+					// file's, so the limit holds again once a rename works)
+					if (!moved) retryAt = size + Math.min(64 << 10, maxBytes >> 4);
+					else {
+						size = 0; retryAt = 0;
+						if (typeof o.head === 'function') {
+							let h = null;
+							try { h = o.head(); } catch (e) { h = null; }
+							if (h && typeof h === 'object') line = JSON.stringify(Object.assign({ t: rec.t }, h, { cont: true })) + '\n' + line;
+						}
 					}
 				}
 				fs.appendFileSync(file, line);

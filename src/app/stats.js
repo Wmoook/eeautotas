@@ -59,14 +59,16 @@
 		if (min < 60) return `${min} min`;
 		const h = Math.floor(min / 60), m = min % 60;
 		if (h >= 100) return `${h} h`;
-		return compact ? `${h} h ${pad2(m)}` : `${h} h ${pad2(m)} min`;
+		return `${h} h ${pad2(m)} min`;
 	}
-	/** seconds as m:ss or h:mm:ss (a solve time) */
+	/** a solve time in short words (a wall-clock time: 20 s, 1 min 28 s, 27 min, 1 h 49 min), never m:ss next to the run times */
 	function solveText(s) {
 		if (!Number.isFinite(s)) return '';
 		s = Math.round(s);
-		const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, x = s % 60;
-		return h ? `${h}:${pad2(m)}:${pad2(x)}` : `${m}:${pad2(x)}`;
+		if (s < 60) return `${s} s`;
+		if (s < 600) return `${Math.floor(s / 60)} min ${pad2(s % 60)} s`;
+		if (s < 3600) return `${Math.round(s / 60)} min`;
+		return `${Math.floor(s / 3600)} h ${pad2(Math.round(s / 60) % 60)} min`;
 	}
 	/** seconds in words: 45 s, 4 min 01 s, 39 min, 1 h 49 min */
 	const secWords = (s) => (Number.isFinite(s) ? UI.dur(s * 1000) : '');
@@ -86,6 +88,16 @@
 		try { return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + UI.clock(t); } catch (e) { return UI.clock(t); }
 	}
 	const savedTicks = (t) => (t > 0 ? `${MINUS}${count(t)} ${t === 1 ? 'tick' : 'ticks'}` : '0 ticks');
+	/** run time saved in words: 7 min 56 s, 41.30 s */
+	function savedWords(t) {
+		if (!(t > 0)) return '0 s';
+		const sec = t / 100;
+		if (sec < 60) return `${sec.toFixed(2)} s`;
+		const m = Math.floor(sec / 60), x = Math.round(sec - m * 60);
+		return m >= 60 ? `${Math.floor(m / 60)} h ${pad2(m % 60)} min` : `${m} min ${pad2(x)} s`;
+	}
+	/** a saving with its sign, in run time: −0.03 s, −5 min 01 s (its ticks in the cell's title) */
+	const savedSec = (t) => (t > 0 ? `${MINUS}${savedWords(t)}` : '0 s');
 	const savedTime = (t) => (t > 0 ? UI.delta(-t) : t < 0 ? UI.delta(-t) : '0.00 s');
 	const pct = (a, b) => (b > 0 ? Math.round(a / b * 1000) / 10 : 0);
 
@@ -132,6 +144,7 @@
 	}
 	function setHash(h) {
 		if (('#' + h) === location.hash) return;
+		lastHash = null;
 		try { history.pushState(null, '', '#' + h); } catch (e) { location.hash = h; return; }
 		onHash();
 	}
@@ -151,7 +164,10 @@
 		const at = S.view === 'bench' ? S.bench.at : S.runs.at;
 		el.textContent = at ? `Updated ${Date.now() - at < 5000 ? 'just now' : UI.ago(Date.now() - at)}` : '';
 	}
+	let lastHash = null;
 	function onHash() {
+		if (location.hash === lastHash) return;   // (a step back fires both hashchange and popstate: handled once)
+		lastHash = location.hash;
 		const was = S.view, wasId = S.benchId;
 		parseHash();
 		markSeg();
@@ -202,7 +218,7 @@
 		// the stat tiles
 		const tiles = [];
 		tiles.push(kpi('Runs', count(T.runs), T.running ? `<span class="chip ahead live"><i></i>${count(T.running)} optimizing</span>` : 'none optimizing now'));
-		tiles.push(kpi('Time saved', fmt(T.savedTicks), T.originalTicks ? `${pct(T.savedTicks, T.originalTicks).toFixed(1)}% of the originals` : '', `${count(T.savedTicks)} ticks saved over all runs`));
+		tiles.push(kpi('Time saved', savedWords(T.savedTicks), T.originalTicks ? `${pct(T.savedTicks, T.originalTicks).toFixed(1)}% faster than the originals` : '', `${count(T.savedTicks)} ticks (1 tick = 0.01 s of the run) saved over all runs: ${fmt(T.savedTicks)} of run time`));
 		tiles.push(kpi('Improvements', count(T.improvements), `${count(T.today)} today`));
 		tiles.push(kpi('Optimizer time', `${T.optimizedApprox ? '≈ ' : ''}${hoursText(T.optimizedMs, true)}`, T.since ? `since ${dateText(T.since)}` : '',
 			`${hoursText(T.optimizedMs)}${T.optimizedApprox ? ', some of it estimated from the optimizer logs (their times have no dates)' : ', from the optimizer\'s own records'}`));
@@ -225,8 +241,8 @@
 			const f = famOf(d, k), b = by[k];
 			const finds = (v) => (typeof v === 'object' && v ? v.finds : +v || 0);
 			const st = Object.entries(b.stages || {}).sort((x, y) => finds(y[1]) - finds(x[1])).slice(0, 6).map(([l, v]) => `${esc(l)} ${count(finds(v))}`).join(', ');
-			return { label: f.label, value: b.saved, color: f.color, text: savedTicks(b.saved),
-				tip: `<b>${esc(f.label)}</b><br><span class="tv">${count(b.finds)}</span> ${b.finds === 1 ? 'find' : 'finds'}, ${esc(savedTicks(b.saved))}${st ? `<br><span class="muted">${st}</span>` : ''}` };
+			return { label: f.label, value: b.saved, color: f.color, text: savedSec(b.saved),
+				tip: `<b>${esc(f.label)}</b><br><span class="tv">${count(b.finds)}</span> ${b.finds === 1 ? 'find' : 'finds'}, ${esc(savedSec(b.saved))} (${esc(savedTicks(b.saved))})${st ? `<br><span class="muted">${st}</span>` : ''}` };
 		}).sort((x, y) => y.value - x.value);
 		if (!items.length) return `<div class="st-none">No improvements yet. They show up here as the optimizer finds them.</div>`;
 		return UI.bars(items) + stagesHtml(d);
@@ -238,7 +254,7 @@
 		const tot = (d.byStage || []).reduce((a, x) => a + Math.max(0, x.saved), 0) || 1;   // of all the time saved
 		return `<div class="st-stages"><div class="st-mini-h">The phases that found the most</div><table class="tbl st-mini"><thead><tr><th>Phase</th><th class="n">Finds</th><th class="n">Saved</th><th class="n">Share</th></tr></thead><tbody>` +
 			st.map((x) => `<tr><td class="st-by"><i class="sw" style="background:${famOf(d, x.fam).color}"></i>${esc(x.label)}</td><td class="n">${count(x.finds)}</td>` +
-				`<td class="n good">${esc(savedTicks(x.saved))}</td><td class="n">${Math.round(x.saved / tot * 100)}%</td></tr>`).join('') +
+				`<td class="n good" title="${esc(savedTicks(x.saved))}">${esc(savedSec(x.saved))}</td><td class="n">${Math.round(x.saved / tot * 100)}%</td></tr>`).join('') +
 			`</tbody></table></div>`;
 	}
 	function recentHtml(d) {
@@ -249,13 +265,12 @@
 				const f = famOf(d, e.fam);
 				return `<tr><td class="tnum" title="${esc(fullDate(e.t))}">${esc(whenText(e.t))}</td>` +
 					`<td class="st-name"><a href="/#job=${esc(e.job)}" title="${esc(e.name)}">${esc(e.name)}</a></td>` +
-					`<td class="n good">${esc(savedTicks(e.saved))}</td><td class="n">${esc(e.time)}</td>` +
+					`<td class="n good" title="${esc(savedTicks(e.saved))}">${esc(savedSec(e.saved))}</td><td class="n">${esc(e.time)}</td>` +
 					`<td class="st-by" title="${esc(e.what)}"><i class="sw" style="background:${f.color}"></i>${esc(e.label)}</td></tr>`;
 			}).join('') + `</tbody></table></div>`;
 	}
 	const RUN_COLS = [
 		{ k: 'name', t: 'Run', v: (j) => j.name.toLowerCase() },
-		{ k: 'section', t: 'Section', v: (j) => j.section },
 		{ k: 'orig', t: 'Original', n: true, v: (j) => j.original.runTicks },
 		{ k: 'best', t: 'Best', n: true, v: (j) => j.best.runTicks },
 		{ k: 'saved', t: 'Saved', n: true, v: (j) => j.savedTicks },
@@ -309,7 +324,6 @@
 		const imp = j.savedTicks > 0;
 		return `<tr><td class="st-name"><a href="/#job=${esc(j.id)}" title="${esc(j.name)}">${esc(j.name)}</a>${j.running ? ' <span class="chip ahead live st-run"><i></i>optimizing</span>' : ''}` +
 			`${j.campaign ? `<div class="st-sub">${esc(j.campaign)}</div>` : ''}</td>` +
-			`<td>${j.section === 'campaign' ? 'Campaign' : 'Other'}</td>` +
 			`<td class="n${imp ? ' st-was' : ''}">${esc(j.original.time)}</td><td class="n st-best">${esc(j.best.time)}</td>` +
 			`<td class="n${imp ? ' good' : ' muted'}">${imp ? esc(savedTime(j.savedTicks)) : 'none yet'}</td>` +
 			`<td class="n">${imp ? esc(j.pct.toFixed(1)) : ''}</td><td class="n">${count(j.improvements)}</td>` +
@@ -325,7 +339,7 @@
 		if (!B.list) return B.listErr ? errHtml('the benchmarks', B.listErr) : loadingHtml('the benchmarks');
 		if (!B.list.length) {
 			return `<div class="sheet"><div class="empty st-empty"><b>No benchmarks yet</b>Import a results table to compare runs of the whole level set:` +
-				`<pre class="st-cmd">node tools/stats-import.js &lt;file.csv&gt;</pre>(or <code>EEAutoTAS.exe tools/stats-import.js &lt;file.csv&gt;</code>). It is copied into the app's data folder and shows up here.</div></div>`;
+				`<pre class="st-cmd">node tools/stats-import.js &lt;file.csv&gt;</pre>(in the app's folder; with the exe, from any folder: <code>EEAutoTAS.exe stats-import &lt;file.csv&gt;</code>). It is copied into the app's data folder and shows up here.</div></div>`;
 		}
 		const b = B.data;
 		if (!b) return B.err ? errHtml('this benchmark', B.err) : loadingHtml('the benchmark');
@@ -375,10 +389,12 @@
 		if (c.hasCompiler) items.push({ label: 'Compiler alone', value: c.compiler, color: 'var(--ph-explore)', tip: `<b>Compiler alone</b><br><span class="tv">${count(c.compiler)}</span> levels routed` });
 		if (c.hasSearch && c.hasCompiler) {
 			items.push({ label: 'Either alone', value: c.either, color: 'var(--muted)', tip: `<b>Either alone</b><br><span class="tv">${count(c.either)}</span> levels the search or the compiler routed on its own` });
-			items.push({ label: 'Only the hybrid', value: 0, text: count(c.onlyHybrid), tip: `<b>Only the hybrid</b><br><span class="tv">${count(c.onlyHybrid)}</span> levels routed by the hybrid and by neither alone` });
+			items.push({ label: 'Only the hybrid', value: c.onlyHybrid, color: 'var(--coin-mark)', text: count(c.onlyHybrid), tip: `<b>Only the hybrid</b><br><span class="tv">${count(c.onlyHybrid)}</span> levels routed by the hybrid and by neither alone` });
 		}
-		const notes = [aloneNote(b.columns && b.columns.searchAlone, 'Search alone'), aloneNote(b.columns && b.columns.compilerAlone, 'Compiler alone')].filter(Boolean).join(' ');
-		return UI.bars(items, { max: Math.max(1, n.levels) }) + (notes ? `<div class="hint">${esc(notes)}</div>` : '');
+		const lostAlone = c.hasSearch && c.hasCompiler ? Math.max(0, c.either - (c.hybrid - c.onlyHybrid)) : 0;
+		const why = c.hasSearch && c.hasCompiler ? `Only the hybrid = routed by the hybrid and by neither alone.${lostAlone ? ` ${count(lostAlone)} ${lostAlone === 1 ? 'level was' : 'levels were'} routed alone but not by the hybrid, so ${count(c.hybrid)} − ${count(c.either)} is not ${count(c.onlyHybrid)}.` : ''}` : '';
+		const notes = [why, aloneNote(b.columns && b.columns.searchAlone, 'Search alone'), aloneNote(b.columns && b.columns.compilerAlone, 'Compiler alone')].filter(Boolean).join(' ');
+		return UI.bars(items, { max: Math.max(1, n.levels) }) + `<div class="hint">Bars out of all ${count(n.levels)} levels.${notes ? ` ${esc(notes)}` : ''}</div>`;
 	}
 	function byHtml(b, n) {
 		const keys = BY_ORDER.concat(Object.keys(n.by).filter((k) => !BY_ORDER.includes(k)).sort()).filter((k) => n.by[k] > 0);
@@ -511,7 +527,7 @@
 		{ k: 'ratio', t: 'vs known', n: true, v: (r) => (Number.isFinite(r.ratio) ? r.ratio : null) },
 		{ k: 'search', t: 'Search alone', v: (r) => (r.searchAlone && r.searchAlone.routed ? (Number.isFinite(r.searchAlone.solveS) ? r.searchAlone.solveS : 1e9) : r.searchAlone ? 2e9 : null) },
 		{ k: 'compiler', t: 'Compiler alone', v: (r) => (r.compilerAlone === true ? 0 : r.compilerAlone === false ? 1 : null) },
-		{ k: 'run', t: 'Run', v: (r) => (r.run || '').toLowerCase() || null },
+		{ k: 'run', t: 'Hybrid run', v: (r) => (r.run || '').toLowerCase() || null },
 	];
 	function levelRows(b) {
 		const u = S.bu, q = u.q.trim().toLowerCase(), jobs = b.jobs || {};

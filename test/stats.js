@@ -86,6 +86,9 @@ section('the import');
 	check('an empty file: an error', /empty/.test(throws(() => ST.importCsv('\ufeff\r\n\r\n')) || ''));
 	check('a header alone: an error', /no level rows/.test(throws(() => ST.importCsv('Level,Hybrid result\n')) || ''));
 	check('a bad id: an error', /bad id/.test(throws(() => ST.importCsv(CSV, { id: '../x' })) || ''));
+	check('a quote never closed: an error (not the rest of the file in one cell)', /never closed/.test(throws(() => ST.importCsv('Level,Result\n"B,routed,0:20.00\nC,routed,0:21.00\n')) || ''));
+	check('minutes or seconds past 59: no time', ST.timeTicks('1:99.99') === null && ST.timeTicks('1:60.00') === null && ST.timeTicks('1:61:00.00') === null && ST.timeTicks('1:59.99') === 11999);
+	check('a table past the row cap: an error', /at most 20000/.test(throws(() => ST.importCsv('Level,Result\n' + 'A,routed\n'.repeat(20001))) || ''));
 	check('the section column alone (no title lines)', J(ST.importCsv('Section,Level,Result\ncampaign,A,Routed\nother,B,no route\n').sections) === J([{ key: 'campaign', title: 'Campaign', routed: 1, total: 1 }, { key: 'other', title: 'Other', routed: 0, total: 1 }]));
 }
 
@@ -187,7 +190,7 @@ section("the runs' numbers");
 	check('an other run, an untouched run', d.jobs[1].section === 'other' && d.jobs[2].savedTicks === 0 && d.jobs[2].firstT === null && d.jobs[2].spark.length === 1);
 	check('the families dictionary and order', d.famOrder.length === 7 && d.fams.tweak.label === 'Input tweaks');
 	check('downsample keeps the first and the last', (() => { const p = Array.from({ length: 500 }, (_, k) => [k, k]); const s = ST.downsample(p, 48); return s.length <= 48 && s[0][0] === 0 && s[s.length - 1][0] === 499; })());
-	check('classify: rules', ST.classify('mutate_1').fam === 'tweak' && ST.classify('endgame').fam === 'finish' && ST.classify('try: me').fam === 'outside' && ST.classify('sweep3_4p').key !== 'sweep' && ST.classify('???').key === 'other');
+	check('classify: the dictionary of the Optimizer view (a window phase pass and a spliced stage find are the stage)', ST.classify('mutate_1').fam === 'tweak' && ST.classify('endgame').fam === 'finish' && ST.classify('try: me').fam === 'outside' && ST.classify('sweep3_4p').key === 'sweep' && ST.classify('sweep3_4 (time doors)').key === 'sweep' && ST.classify('sweep3_4 (coin-blind, replayed) + best (splice, 2 runs)').fam === 'explore' && ST.classify('5 earlier runs (splice)').key === 'splice' && ST.classify('nothing known + best (splice, 1 run)').key === 'splice' && ST.classify('???').key === 'other');
 	check('empty input', ST.jobsStats([], { now }).totals.runs === 0 && ST.jobsStats(null, { now }).jobs.length === 0);
 }
 
@@ -217,6 +220,22 @@ function writeJob(id, meta, status) {
 	t = ST.jobTime('timed-run-aaaaaa');
 	check('with the events: the event session + the log sessions before it', t.ms === 60000 + 300000 && t.approx === true && t.simTicks === 5100 && t.sessions === 2, J(t));
 	check('a GPU find by its family', t.finds.length === 1 && ST.classify('inbox (gpu round 3)', { t: 60000, gpuFinds: t.finds }).fam === 'explore' && ST.classify('inbox (gpu round 3)', { t: 90000, gpuFinds: t.finds }).fam === 'tweak');
+	fs.rmSync(dir, { recursive: true, force: true });
+}
+{
+	// a grind whose events file rotated at 8 MB (src/events.js: the older half renamed .1.jsonl, the new file opens with the
+	// session line again, cont: true): ONE session, read incrementally (new lines only, the sums kept)
+	const dir = writeJob('rotated-run-aaaaaa', { name: 'Rotated run', created: 1, tas: { runTicks: 100 } }, { state: 'running' });
+	fs.writeFileSync(path.join(dir, 'grind_events.1.jsonl'), [J({ ev: 'session', t: 1000 }), J({ ev: 'stageEnd', t: 31000, ticks: 7 })].join('\n') + '\n');
+	fs.writeFileSync(path.join(dir, 'grind_events.jsonl'), [J({ ev: 'session', t: 31000, cont: true }), J({ ev: 'stageEnd', t: 61000, ticks: 3 })].join('\n') + '\n');
+	let t = ST.jobTime('rotated-run-aaaaaa');
+	check('a rotated grind is one session (its cont: true line goes on)', t.sessions === 1 && t.ms === 60000 && t.simTicks === 10 && t.approx === false, J(t));
+	fs.appendFileSync(path.join(dir, 'grind_events.jsonl'), J({ ev: 'stageEnd', t: 121000, ticks: 5 }) + '\n');
+	t = ST.jobTime('rotated-run-aaaaaa');
+	check('a running job\'s new lines are added to the sums (no re-read from the start)', t.sessions === 1 && t.ms === 120000 && t.simTicks === 15, J(t));
+	fs.appendFileSync(path.join(dir, 'grind_events.jsonl'), J({ ev: 'session', t: 200000 }) + '\n' + J({ ev: 'beat', t: 230000 }) + '\n');
+	t = ST.jobTime('rotated-run-aaaaaa');
+	check('a new grind after it is a second session', t.sessions === 2 && t.ms === 150000, J(t));
 	fs.rmSync(dir, { recursive: true, force: true });
 }
 

@@ -63,9 +63,9 @@ if (want('dict')) {
 		['sweep3', 'sweep', 'explore'], ['sweep3_4', 'sweep', 'explore'], ['sweep3_4p', 'sweep', 'explore'], ['sweep3_4 (time doors)', 'sweep', 'explore'],
 		['sweep3_4 (coin-blind, replayed)', 'sweep', 'explore'], ['deep3_loop2', 'loop', 'explore'], ['deep3_seg2.1', 'seg', 'explore'], ['skips3', 'skips', 'path'],
 		['flybeam2', 'flyb', 'local'], ['flybeam lane 4', 'flyb', 'local'], ['shortcuts5', 'sc', 'local'], ['phase3', 'phase', 'finish'], ['phaseb3', 'phase', 'finish'],
-		['beam4', 'beam', 'local'], ['splice', 'splice', 'combine'], ['sweep3_4 + best (splice, 2 switches)', 'splice', 'combine'],
+		['beam4', 'beam', 'local'], ['splice', 'splice', 'combine'], ['sweep3_4 + best (splice, 2 switches)', 'sweep', 'explore'],
 		['3 earlier runs (stage outputs, pieces/) + best (splice, 1 switch)', 'splice', 'combine'], ['recover', 'splice', 'combine'],
-		['inbox (gpu (12 shortcuts))', 'gpu', 'tweak'], ['try: gpu (3 shortcuts)', 'gpu', 'tweak'], ['inbox (gpu (12 shortcuts)) + best (splice, 1 switch)', 'splice', 'combine'],
+		['inbox (gpu (12 shortcuts))', 'gpu', 'tweak'], ['try: gpu (3 shortcuts)', 'gpu', 'tweak'], ['inbox (gpu (12 shortcuts)) + best (splice, 1 switch)', 'gpu', 'tweak'], ['nothing named + best (splice, 1 switch)', 'splice', 'combine'],
 		['inbox (focus 1:10.00-1:14.00)', 'focus', 'explore'], ['try: focus 0:10-0:20', 'focus', 'explore'], ['inbox (Find a route (one search))', 'fr', 'outside'],
 		['try: Find a route', 'fr', 'outside'], ['inbox (hybrid: compiler (trophy))', 'hybrid', 'outside'], ['try: h100 farm', 'remote', 'outside'],
 		['try: endgame solver', 'endgame', 'finish'], ['inbox (endgame solver)', 'endgame', 'finish'], ['inbox (probe 1:10.40)', 'in', 'outside'], ['try: api', 'in', 'outside'],
@@ -101,6 +101,19 @@ if (want('events')) {
 		fs.existsSync(path.join(dir, 'x.1.jsonl')) && curOnly[0].ev === 'session' && curOnly[0].cont === true && cur.every((e) => Number.isFinite(e.t)) &&
 		cur.filter((e) => e.ev === 'stage').length >= 4 && fs.statSync(f).size <= 600, `${cur.length} lines, first of the current file ${JSON.stringify(curOnly[0])}`);
 	check('rotatedName', EVT.rotatedName('/a/grind_events.jsonl') === '/a/grind_events.1.jsonl' && EVT.rotatedName('/a/events') === '/a/events.1');
+	{
+		// a rename that fails (the rotated name taken by a folder): the file grows on, no session line repeated, and the rotation
+		// is tried again a little later: once it works the file is back under its limit
+		const g = path.join(dir, 'y.jsonl');
+		const wy = EVT.open(g, { maxBytes: 2048, head: () => ({ ev: 'session', v: 1 }) });
+		fs.mkdirSync(path.join(dir, 'y.1.jsonl', 'busy'), { recursive: true });
+		for (let i = 0; i < 120; i++) wy.ev({ ev: 'stage', id: i });
+		const grew = fs.statSync(g).size, heads = fs.readFileSync(g, 'utf8').split('\n').filter((l) => /"cont":true/.test(l)).length;
+		fs.rmSync(path.join(dir, 'y.1.jsonl'), { recursive: true, force: true });
+		for (let i = 0; i < 40; i++) wy.ev({ ev: 'stage', id: 200 + i });
+		check('a rotation whose rename fails: the file grows on (no session line repeated), and rotates once the rename works', grew > 2048 && heads === 0 &&
+			fs.statSync(path.join(dir, 'y.1.jsonl')).isFile() && fs.statSync(g).size <= 2048, `${grew} ${heads} ${fs.statSync(g).size}`);
+	}
 	const off = EVT.open(path.join(dir, 'off.jsonl'), { off: true });
 	const was = process.env.EEAT_EVENTS;
 	process.env.EEAT_EVENTS = '0';
@@ -216,11 +229,12 @@ if (want('model')) {
 	check('the recipe of the round under way: mutA done, endgame passed (skipped), deep now (the cursor and the open sweep), the rest to come; no chip for the opt-in skip finder and corridor-beam stage that never ran here, nor for the time-door pass of the plain order',
 		r2.round === 2 && st('mutA') === 'done' && st('skipfA') === undefined && st('flyb') === undefined && st('phase') === undefined && st('endgame') === 'skipped' && st('deep') === 'now' && st('skips') === 'next' && st('splice') === 'next',
 		r2.recipe.map((c) => `${c.key}:${c.state}`).join(' '));
-	const r1 = m.rounds.find((r) => r.round === 1);
+	const r1 = { recipe: PH.roundRecipe(jobRun, 1, { range: 'session', running: true, pid: 4242, now: sec(700) }) || [] };
+	check('the model carries the recipe of its last round only (the chips), not every round\'s', m.rounds.filter((r) => r.recipe).length === 1 && !!m.rounds[m.rounds.length - 1].recipe);
 	check('a round that ended: its skip event\'s why, its passed stages skipped (never "to come")', r1.recipe.find((c) => c.key === 'beam').why === 'test skip' && !r1.recipe.some((c) => c.state === 'next') &&
 		r1.recipe.find((c) => c.key === 'deep').state === 'done' && r1.recipe.find((c) => c.key === 'beam').state === 'skipped');
 	check('the now sentence while it runs: the round, the sweep\'s windows at once and its lanes, what the GPU does, the last find',
-		/^Round 2: Route sweep, exploring ticks 1,800–2,600, 2,400–3,200 at once on 2 lanes \(16 windows in the run\)\. The GPU tries every move in short windows\. Last find 5 min 00 s ago: −46 ticks by Find a route\.$/.test(m.now.text),
+		/^Round 2: Route sweep, exploring ticks 1,800–2,600, 2,400–3,200 at once on 2 lanes \(16 windows in the run\)\. The GPU tries every move in short windows\. Last find 5 min 00 s ago: −0\.46 s \(46 ticks\) by Find a route\.$/.test(m.now.text),
 		m.now.text);
 	check('the speed (live.json: CPU and GPU ticks per second, the threads, the GPU\'s name)', m.speed && m.speed.cpu === 13.1e6 && m.speed.gpu === 384e6 && m.speed.gpuName === 'Test GPU');
 	check('every history entry classified, with its round', m.history.length === 4 && m.history[0].round === 1 && m.history[2].round === 1 && m.history[3].key === 'fr', JSON.stringify(m.history.map((h) => [h.key, h.round])));
@@ -237,12 +251,14 @@ if (want('model')) {
 	const stopped = PH.jobTimeline(jobRun, { range: 'session', running: false, now: sec(5000) });
 	// (the session's last line: the beat at 706 s appended above)
 	check('stopped: no open span (they end at the session\'s last line, killed), not running, the paused sentence', !stopped.running && stopped.spans.every((s) => s.t1) &&
-		/^Paused\. The last session ran 12 min and found 200 ticks; the best is 1:33\.00\.$/.test(stopped.now.text), stopped.now.text);
+		/^Paused\. The last session ran 12 min and found 2\.00 s \(200 ticks\); the best is 1:33\.00\.$/.test(stopped.now.text), stopped.now.text);
 	// the cap; the GPU merge
 	const many = [ses, { t: sec(1), ev: 'round', round: 1, order: D.STAGES_ALL }];
 	for (let i = 0; i < 2500; i++) many.push({ t: sec(2 + i), ev: 'stage', id: 100 + i, lane: 'stages', key: 'mutA', name: `mutate_1a_${i}`, round: 1, threads: 8 }, { t: sec(2.5 + i), ev: 'stageEnd', id: 100 + i, code: 0 });
 	const mm = PH.jobTimeline(mkJob('ev-many', { events: many, history: [] }), { range: 'all', running: false, now: sec(3000) });
-	check('at most 2,000 spans: the newest', mm.spans.length === 2000 && mm.spans[mm.spans.length - 1].name === 'mutate_1a_2499' && mm.spans[0].name === 'mutate_1a_500', `${mm.spans.length} spans`);
+	check('2,500 runs too short to draw one by one: bands (each its runs\' count), every run in one, from the first run\'s start to the last one\'s end; the score still counts each run',
+		mm.spans.length < 2000 && mm.spans.reduce((a, x) => a + x.n, 0) === 2500 && mm.spans[0].t0 === sec(2) && mm.spans[mm.spans.length - 1].t1 === sec(2501.5) &&
+		mm.spans.every((x) => x.n === 1 || /Input tweaks ×\d+/.test(x.detail)) && mm.score.find((x) => x.key === 'mut').runs === 2500, `${mm.spans.length} spans`);
 	const gm = [{ t: sec(1), ev: 'gpuStart', v: 1, name: 'g' }];
 	for (let i = 0; i < 600; i++) gm.push({ t: sec(2 + 0.5 * i), ev: 'slot', id: i + 1, arm: 'search', fam: i < 300 ? 'pert' : 'm2' }, { t: sec(2.4 + 0.5 * i), ev: 'slotEnd', id: i + 1 });
 	const mg = PH.jobTimeline(mkJob('ev-gpu', { events: [ses, { t: sec(1), ev: 'round', round: 1, order: D.STAGES_ALL }], gpu: gm, history: [] }), { range: 'all', running: false, now: sec(3000) });
@@ -396,8 +412,9 @@ if (want('view')) {
 			dm.some((y) => y > lanesY[1] && y < lanesY[1] + 6), `${dm.join(',')} lanes ${lanesY.join(',')}`);
 		check('the lane labels and the best time\'s axis in the label column (the original, the best now)', /<span style="top:[\d.]+px" title="[^"]*">Stages<\/span>/.test(h) && />Handed in<\/span>/.test(h) && />1:40\.00<\/span>/.test(h) && /class="ax cur"[^>]*>1:38\.00</.test(h));
 		check('the legend: the families present as toggles, "a find", the refused hand-in', /data-lg="explore"/.test(h) && /data-lg="tweak"/.test(h) && /a find<\/span>/.test(h) && /handed in, not accepted/.test(h) && !/data-lg="path"/.test(h));
-		check('the scoreboard by family (Route explore saved 24 of the sweep), "Show every stage", the phase guide', /What found time \(this range\)/.test(h) && /Show every stage/.test(h) && /<details class="tl-guide"><summary>What the phases do/.test(h) &&
-			/Route explore<\/td><td class="n">[^<]+<\/td><td class="n">\d+<\/td><td class="n">1<\/td><td class="n d">−24<\/td>/.test(h));
+		check('the scoreboard by family (Route explore saved 0.24 s of the sweep; the CPU\'s and the GPU\'s time in their own columns), "Show every stage", the phase guide', /What found time \(this range\)/.test(h) && /Show every stage/.test(h) && /<details class="tl-guide"><summary>What the phases do/.test(h) &&
+			/Route explore<\/td><td class="n">[^<]+(?:<span class="sm-only">GPU [^<]+<\/span>)?<\/td><td class="n sm-hide">(?:<span class="muted">—<\/span>|[^<]+)<\/td><td class="n sm-hide">\d+<\/td><td class="n">1<\/td><td class="n d" title="24 ticks">−0\.24 s<\/td>/.test(h) &&
+			/<th class="n"[^>]*>CPU<\/th><th class="n sm-hide"[^>]*>GPU<\/th>/.test(h) && /Per hour<\/th>/.test(h));
 		const every = TL.html(mRun, { width: 1100, every: true }).html;
 		check('"Show every stage": a row per stage (GPU: random variations, Route sweep, Input tweaks, ...)', /GPU: random variations<\/td>/.test(every) && /Route sweep<\/td>/.test(every) && /Loop cutter<\/td>/.test(every));
 		const stoppedH = TL.html(PH.jobTimeline(jobRun, { range: 'session', running: false, now: sec(5000) }), { width: 900 }).html;
@@ -407,7 +424,7 @@ if (want('view')) {
 		const pv = TL.html(PH.jobTimeline(path.join(HOME, 'jobs', 'never'), { now: sec(10) }), { width: 900 }).html;
 		check('never started: the chips as a preview (every one "to come"), no figure', /Not started yet/.test(pv) && /tl-chip next/.test(pv) && !/<svg/.test(pv) && /tl-empty/.test(pv));
 		const narrow = TL.html(mRun, { width: 390 }).html;
-		check('a phone: the plot keeps 544 px (it scrolls inside its section), the labels a column of their own', /<div class="tl-plot"><svg width="544"/.test(narrow) && /--tl-lab:78px/.test(narrow), (narrow.match(/<svg width="\d+"/) || [''])[0]);
+		check('a phone: the plot fits its screen (no sideways scroll), the labels a narrower column of their own (the corridor beam "Corridor")', /<div class="tl-plot"><svg width="320"/.test(narrow) && /--tl-lab:70px/.test(narrow) && />Corridor<\/span>/.test(narrow), (narrow.match(/<svg width="\d+"/) || [''])[0]);
 		const c = TL.html(mHy, { width: 300, compact: true, sheet: 'hySheet' }).html;
 		check('the compact view (the editor\'s Hybrid): the now sentence, the figure (no labels inside blocks), the lane names, "Open the full view"',
 			/class="tl-now"/.test(c) && /<svg/.test(c) && !/class="bl"/.test(c) && /data-sheet="1">Open the full view/.test(c) && /Prefix search<\/span>/.test(c) && !/class="tl-score"/.test(c));

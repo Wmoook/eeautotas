@@ -5,7 +5,7 @@
 // - jobsStats(summaries, {now}): /api/stats from the job summaries (src/jobs.js summary(): the history, the original and
 //   the best) and each job's files: the optimizer's time (the sessions of grind_events.jsonl, else of grind.log's
 //   "start:" lines: approximate), the simulated ticks (the events' stageEnd / slotEnd ticks), every improvement by the
-//   phase family that found it (src/phases.js classify when it is there, else this file's copy of its dictionary).
+//   phase family that found it (the Optimizer view's dictionary, src/app/phases.js: one set of names for both pages).
 // - benchmarks: an imported results table (the hybrid CSV format: tools/stats-import.js) kept as
 //   <DATA>/benchmarks/<id>.json (src/data/benchmarks/ in the repo: never in git), its numbers (benchNumbers) and the jobs
 //   of the app that are runs of its levels (matchJobs).
@@ -19,79 +19,32 @@ const ID_RE = /^[a-z0-9-]{1,64}$/;
 const LOG_MAX = 8 << 20;   // the end of grind.log read for the sessions before the events (bytes)
 
 // ---------------------------------------------------------------- the phase dictionary (DESIGN.md 11.2)
-// The families and the stages' rules of src/phases.js (the Optimizer view's builder owns that file); this copy classifies
-// the history when src/phases.js is not there (or answers nothing sensible), so the Stats page never depends on it.
-const FAMS = {
-	tweak: { label: 'Input tweaks', color: 'var(--ph-tweak)', explain: 'Changing one or two inputs, or random variations of the run, and keeping changes that meet the run again sooner.' },
-	explore: { label: 'Route explore', color: 'var(--ph-explore)', explain: 'Trying every move in a window of the run.' },
-	path: { label: 'Path changes', color: 'var(--ph-path)', explain: 'Taking another way from somewhere along the run.' },
-	local: { label: 'Local search', color: 'var(--ph-local)', explain: 'Small searches along the run: shortcuts, beams, the corridor beam.' },
-	finish: { label: 'Finish & timing', color: 'var(--ph-finish)', explain: 'The exact ending and the timing of time doors and the start.' },
-	combine: { label: 'Combine', color: 'var(--ph-combine)', explain: 'Joining the best run with other runs\' faster stretches.' },
-	outside: { label: 'Handed in', color: 'var(--ph-outside)', explain: 'Runs handed in from outside the optimizer: Find a route, you, a rented machine.' },
-};
-const FAM_ORDER = Object.keys(FAMS);
-// first match wins; a history entry's `what` (the grind's stage names, "inbox (...)", "try: ...")
-const RULES = [
-	{ key: 'mut', re: /^mutate_/, label: 'Input tweaks', fam: 'tweak', explain: 'Changes one or two inputs at every tick and keeps every change that rejoins the run sooner.' },
-	{ key: 'skipf', re: /^skipfind/, label: 'Skip finder', fam: 'path', explain: 'From states all along the run, searches for a later point it can reach sooner another way.' },
-	{ key: 'endgame', re: /^endgame/, label: 'Exact finish', fam: 'finish', explain: 'Tries every input over the run\'s last ticks; when nothing is faster, the ending is proven.' },
-	// "sweep3_4" and its find as the history writes it ("sweep3_4 (coin-blind, replayed) + best (splice, ...)"), not
-	// the window's phase pass "sweep3_4p"
-	{ key: 'sweep', re: /^sweep\d+(_\d+)?(?![\w])/, label: 'Route sweep', fam: 'explore', explain: 'Tries every move in 8-second windows across the whole run, up to 4 windows at once.' },
-	{ key: 'loop', re: /^deep\d+_loop/, label: 'Loop cutter', fam: 'explore', explain: 'Looks for a way around a stretch where the run comes back to where it was.' },
-	{ key: 'seg', re: /^deep\d+_seg/, label: 'Coin-to-coin explore', fam: 'explore', explain: 'Tries every move between coins, one window after another.' },
-	{ key: 'skips', re: /^skips\d/, label: 'Skip search', fam: 'path', explain: 'Finds spots the run passes early and only uses later, and tries every move from there.' },
-	{ key: 'flyb', re: /^flybeam/, label: 'Corridor beam', fam: 'local', explain: 'Follows long flying, falling or sliding stretches with thousands of variations at once.' },
-	{ key: 'sc', re: /^shortcuts/, label: 'Local shortcuts', fam: 'local', explain: 'Searches many small shortcuts from a cursor that moves along the run.' },
-	{ key: 'phase', re: /^phaseb?\d/, label: 'Time doors', fam: 'finish', explain: 'Shifts the run so time and coin doors open sooner, with free idle ticks before the first input.' },
-	{ key: 'beam', re: /^beam\d/, label: 'Beam search', fam: 'local', explain: 'Plays thousands of runs side by side and keeps the ones furthest ahead.' },
-	{ key: 'splice', re: /^splice$| \+ best \(splice|^\d+ earlier runs/, label: 'Combine', fam: 'combine', explain: 'Joins the best run with every other run\'s faster stretches where they reach the same state.' },
-	{ key: 'gpu', re: /^inbox \(gpu |^try: gpu/i, label: 'GPU search', fam: 'tweak', explain: 'The GPU searcher\'s find, checked by the optimizer.' },
-	{ key: 'focus', re: /^(inbox \(|try: )focus/i, label: 'Search harder', fam: 'explore', explain: 'Your "Search harder" range, searched next to the optimizer.' },
-	{ key: 'fr', re: /^(inbox \(|try: )Find a route/i, label: 'Find a route', fam: 'outside', explain: 'A route from Find a route, handed to the optimizer.' },
-	{ key: 'remote', re: /^try: .*farm/i, label: 'Rented machine', fam: 'outside', explain: 'A faster run from the copy on a rented machine.' },
-	{ key: 'in', re: /^inbox \(|^try: /, label: 'Handed in', fam: 'outside', explain: 'A run handed in from outside (a script, tas.js try).' },
-];
-// the GPU searcher's families (gpu/events.jsonl `find` fams) -> the phase family
-const GPU_FAM = { m1: 'tweak', del: 'tweak', m2: 'tweak', pert: 'tweak', flip: 'tweak', sticky: 'tweak', every: 'explore', idle: 'finish' };
-
-let PH;   // src/phases.js (the Optimizer view's data), when it is there
-function phases() {
-	if (PH === undefined) { try { PH = require('./phases.js'); if (!PH || typeof PH.classify !== 'function') PH = null; } catch (e) { PH = null; } }
-	return PH;
-}
-/** the family of a GPU find: the largest saving of the `find` event within 5 s before t (gpu/events.jsonl), else null */
+// ONE set of names: the Optimizer view's dictionary (src/app/phases.js: in Node it is the dictionary alone), so the Stats
+// page's "where the time came from" and the Optimizer view name every find the same way (a stage's find spliced with the
+// best is its stage's, as grind.js credits its span; a sweep window's phase pass "sweep3_4p" is the sweep's).
+const DICT = require('./app/phases.js');
+const FAMS = Object.fromEntries(DICT.FAMS.map((f) => [f.fam, { label: f.label, color: DICT.colorOf(f.fam), explain: f.explain }]));
+const FAM_ORDER = DICT.FAMS.map((f) => f.fam);
+/** the GPU searcher's family of a GPU find: the family with the largest credit of the `find` event within 5 s before t
+ *  (gpu/events.jsonl), else null; the dictionary names it (m1 / del / m2 / pert / flip / sticky / every / idle) */
 function gpuFamAt(finds, t) {
 	if (!finds || !finds.length || !Number.isFinite(t)) return null;
-	let best = null;
 	for (let i = finds.length - 1; i >= 0; i--) {
 		const f = finds[i];
 		if (f.t > t + 1000) continue;
 		if (f.t < t - 5000) break;
 		let top = null, topV = 0;
 		for (const [k, v] of Object.entries(f.fams || {})) if (Math.abs(+v || 0) > topV) { topV = Math.abs(+v || 0); top = k; }
-		if (top && GPU_FAM[top]) { best = GPU_FAM[top]; break; }
+		if (top) return top;
 	}
-	return best;
+	return null;
 }
 /** a history entry's `what` (or a span's name) -> {key, fam, label, explain}; ctx: {t, gpuFinds} */
 function classify(what, ctx) {
 	const s = String(what === undefined || what === null ? '' : what);
-	const ph = phases();
-	if (ph) {
-		try {
-			const r = ph.classify(s, ctx || {});
-			if (r && FAMS[r.fam]) return { key: r.key || 'other', fam: r.fam, label: r.label || s, explain: r.explain || '' };
-		} catch (e) { /* this file's copy */ }
-	}
-	for (const r of RULES) {
-		if (!r.re.test(s)) continue;
-		let fam = r.fam;
-		if (r.key === 'gpu') fam = gpuFamAt(ctx && ctx.gpuFinds, ctx && ctx.t) || fam;
-		return { key: r.key, fam, label: r.label, explain: r.explain };
-	}
-	return { key: 'other', fam: 'combine', label: s || 'other', explain: '' };
+	const gpuFam = ctx && ctx.gpuFinds ? gpuFamAt(ctx.gpuFinds, ctx.t) : null;
+	const r = DICT.classify(s, gpuFam ? { gpuFam } : {});
+	return { key: r.key || 'other', fam: FAMS[r.fam] ? r.fam : 'combine', label: r.key === 'other' ? (s || 'other') : r.label, explain: r.explain || '' };
 }
 
 // ---------------------------------------------------------------- a job's optimizer time and simulated ticks
@@ -117,32 +70,74 @@ function jsonLines(text) {
 	}
 	return out;
 }
+// The events files are read INCREMENTALLY (a file's new complete lines only; a shorter file or another inode = a new file):
+// a running job's 30-s polls read the lines written since, not up to 2 x 8 MB again, and only small sums stay in memory
+// (the sessions, the simulated ticks, the GPU finds), never the events.
+const AGG_MAX = 2000;   // files kept (each a few hundred bytes plus its GPU finds)
+const aggs = new Map();   // file -> {ino, off, sessions [{t0, t1, cont}], cur, sim, finds, any}
+function aggOf(file) {
+	let st;
+	try { st = fs.statSync(file); } catch (e) { aggs.delete(file); return null; }
+	let a = aggs.get(file);
+	if (a && (st.size < a.off || (a.ino && st.ino && st.ino !== a.ino))) a = null;
+	if (!a) a = { ino: st.ino, off: 0, sessions: [], cur: null, sim: 0, finds: [], any: false };
+	if (st.size > a.off) {
+		let fd = null;
+		try {
+			fd = fs.openSync(file, 'r');
+			const buf = Buffer.alloc(Math.min(st.size - a.off, 64 << 20));
+			const n = fs.readSync(fd, buf, 0, buf.length, a.off);
+			const cut = buf.lastIndexOf(10, n - 1);
+			if (cut >= 0) {
+				for (const e of jsonLines(buf.toString('utf8', 0, cut))) fold(a, e);
+				a.off += cut + 1;
+			}
+		} catch (e) { /* read again next time */ } finally { if (fd !== null) { try { fs.closeSync(fd); } catch (e) { /* closed */ } } }
+	}
+	aggs.delete(file); aggs.set(file, a);   // (the least recently used first: dropped past AGG_MAX)
+	while (aggs.size > AGG_MAX) aggs.delete(aggs.keys().next().value);
+	return a;
+}
+/** one event into a file's sums: a session line starts a session, except the one src/events.js writes again at the top of a
+ *  rotated file (cont: true) while one runs: the same grind goes on (one rotated grind is one session, not two) */
+function fold(a, e) {
+	a.any = true;
+	const t = +e.t;
+	if (e.ev === 'session') {
+		if (e.cont && a.cur) return;
+		a.cur = { t0: t, t1: t, cont: !!e.cont };
+		a.sessions.push(a.cur);
+		return;
+	}
+	if (a.cur && Number.isFinite(t) && t > a.cur.t1) a.cur.t1 = t;
+	if ((e.ev === 'stageEnd' || e.ev === 'slotEnd') && Number.isFinite(+e.ticks)) a.sim += +e.ticks;
+	else if (e.ev === 'find' && Number.isFinite(t)) a.finds.push({ t, fams: e.fams || {}, saved: +e.saved || 0 });
+}
+/** a log and its rotated older half as one: {sessions, sim, finds, any} (a session the newer file opens with cont: true goes
+ *  on from the older file's last one) */
+function aggPair(file) {
+	const older = aggOf(file.replace(/\.jsonl$/, '.1.jsonl')), newer = aggOf(file);
+	const sessions = older ? older.sessions.map((x) => Object.assign({}, x)) : [];
+	if (newer) {
+		for (const x of newer.sessions) {
+			const last = sessions[sessions.length - 1];
+			if (x.cont && last) { last.t1 = Math.max(last.t1, x.t1); continue; }
+			sessions.push(Object.assign({}, x));
+		}
+	}
+	const finds = (older ? older.finds : []).concat(newer ? newer.finds : []);
+	return { sessions, sim: (older ? older.sim : 0) + (newer ? newer.sim : 0), finds, any: !!((older && older.any) || (newer && newer.any)) };
+}
 /** grind_events.jsonl (and its rotated .1.jsonl): {sessions: [{t0, t1}], simTicks, hasEvents} */
 function grindEvents(dir) {
-	const evs = [];
-	for (const f of ['grind_events.1.jsonl', 'grind_events.jsonl']) evs.push(...jsonLines(readTail(path.join(dir, f), 64 << 20)));
-	const sessions = [];
-	let cur = null, sim = 0;
-	for (const e of evs) {
-		const t = +e.t;
-		if (e.ev === 'session') { cur = { t0: t, t1: t }; sessions.push(cur); continue; }
-		if (cur && Number.isFinite(t) && t > cur.t1) cur.t1 = t;
-		if (e.ev === 'stageEnd' && Number.isFinite(+e.ticks)) sim += +e.ticks;
-	}
-	return { sessions, simTicks: sim, hasEvents: evs.length > 0 };
+	const p = aggPair(path.join(dir, 'grind_events.jsonl'));
+	return { sessions: p.sessions.map((x) => ({ t0: x.t0, t1: x.t1 })), simTicks: p.sim, hasEvents: p.any };
 }
 /** gpu/events.jsonl: {simTicks, finds: [{t, fams, saved}] (by t), hasEvents} */
 function gpuEvents(dir) {
-	const evs = [];
-	for (const f of ['events.1.jsonl', 'events.jsonl']) evs.push(...jsonLines(readTail(path.join(dir, 'gpu', f), 64 << 20)));
-	let sim = 0;
-	const finds = [];
-	for (const e of evs) {
-		if (e.ev === 'slotEnd' && Number.isFinite(+e.ticks)) sim += +e.ticks;
-		else if (e.ev === 'find' && Number.isFinite(+e.t)) finds.push({ t: +e.t, fams: e.fams || {}, saved: +e.saved || 0 });
-	}
-	finds.sort((a, b) => a.t - b.t);
-	return { simTicks: sim, finds, hasEvents: evs.length > 0 };
+	const p = aggPair(path.join(dir, 'gpu', 'events.jsonl'));
+	const finds = p.finds.slice().sort((x, y) => x.t - y.t);
+	return { simTicks: p.sim, finds, hasEvents: p.any };
 }
 /** the sessions of grind.log: one per "start:" line, its length = the clock time from it to the session's last [grind] /
  *  [gpu] line (the lines hold the time of day only: each step forward modulo a day) -> [ms, ...] in the file's order */
@@ -286,6 +281,8 @@ function parseCsv(text) {
 		}
 		cell += ch; i++;
 	}
+	// (a quote never closed would swallow the rest of the file into one cell: refuse it)
+	if (q) throw new Error(`a quoted cell is never closed (line ${rows.length + 1}): check the file's quotes`);
 	if (cell !== '' || row.length) { row.push(cell); rows.push(row); }
 	return rows;
 }
@@ -319,13 +316,14 @@ function mapColumns(header) {
 	}
 	return { idx, titles, taken };
 }
-/** "0:19.63", "1:02:03.45", "19.63" -> run ticks; null when it is not a time */
+/** "0:19.63", "1:02:03.45", "19.63" -> run ticks; null when it is not a time (minutes and seconds past 59 are no time:
+ *  "1:99.99" is not 2:39.99) */
 function timeTicks(v) {
 	const s = String(v || '').trim();
 	let m = /^(\d+):(\d{1,2}):(\d{1,2}(?:\.\d{1,2})?)$/.exec(s);
-	if (m) return (+m[1]) * 360000 + (+m[2]) * 6000 + Math.round(parseFloat(m[3]) * 100);
+	if (m) return +m[2] < 60 && parseFloat(m[3]) < 60 ? (+m[1]) * 360000 + (+m[2]) * 6000 + Math.round(parseFloat(m[3]) * 100) : null;
 	m = /^(\d+):(\d{1,2}(?:\.\d{1,2})?)$/.exec(s);
-	if (m) return (+m[1]) * 6000 + Math.round(parseFloat(m[2]) * 100);
+	if (m) return parseFloat(m[2]) < 60 ? (+m[1]) * 6000 + Math.round(parseFloat(m[2]) * 100) : null;
 	m = /^(\d+(?:\.\d{1,2})?)\s*s?$/.exec(s);
 	if (m && s.includes('.')) return Math.round(parseFloat(m[1]) * 100);
 	return null;
@@ -374,9 +372,12 @@ function slug(s) {
 	return String(s || '').toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64).replace(/-+$/, '') || 'benchmark';
 }
 /** CSV text -> the benchmark JSON (DESIGN.md 11.6); o: {name, id, source, now} */
+const CSV_MAX_BYTES = 8 << 20, CSV_MAX_ROWS = 20000;   // a results table of a level set, not a log: the page serves it whole
 function importCsv(text, opts) {
 	const o = opts || {};
+	if (Buffer.byteLength(String(text || ''), 'utf8') > CSV_MAX_BYTES) throw new Error(`the file is over ${CSV_MAX_BYTES >> 20} MB: a results table of a level set is far smaller`);
 	const rows = parseCsv(text);
+	if (rows.length > CSV_MAX_ROWS + 1000) throw new Error(`the table has ${rows.length} lines: at most ${CSV_MAX_ROWS} levels`);
 	const blank = (r) => !r || r.every((c) => !String(c || '').trim());
 	let h = 0;
 	while (h < rows.length && blank(rows[h])) h++;
@@ -427,6 +428,7 @@ function importCsv(text, opts) {
 		});
 	}
 	if (!out.length) throw new Error('no level rows in the table');
+	if (out.length > CSV_MAX_ROWS) throw new Error(`the table has ${out.length} levels: at most ${CSV_MAX_ROWS}`);
 	const columns = {};
 	for (const [key] of COLS) if (idx[key] !== undefined) columns[key] = titles[idx[key]];
 	const secs = [...sections.values()].filter((s) => out.some((r) => r.section === s.key)).map((s) => {
@@ -571,7 +573,7 @@ function matchJobs(b, jobs, o) {
 }
 
 module.exports = {
-	BENCH_DIR, ID_RE, FAMS, FAM_ORDER, RULES, BINS,
+	BENCH_DIR, ID_RE, FAMS, FAM_ORDER, BINS,
 	classify, jobsStats, jobTime, logSessions, grindEvents, gpuEvents, downsample,
 	parseCsv, importCsv, mapColumns, timeTicks, durSeconds, benchNumbers, quantile, median,
 	writeBenchmark, readBenchmark, listBenchmarks, removeBenchmark, matchJobs, rowHexes, jobMd5, slug,

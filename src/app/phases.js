@@ -47,8 +47,10 @@
 	// the stages: matched on a span's name, a history entry's `what`, or a GPU slot's family (`slot`); the first match wins
 	const W_IN = '^(?:inbox \\(|try: )';
 	const STAGES = [
+		// ("<a stage's run> + best (splice ...)": a stage's find spliced with the best is that stage's find, as grind.js credits
+		// its span: classify() names it by its leading stage, and only a lead it cannot name is the combine's)
 		{ key: 'splice', label: 'Combine', fam: 'combine', explain: 'Joins the best run with every other run\'s faster stretches where they reach the same state.',
-			re: [/^splice$/, / \+ best \(splice/, /^\d+ earlier runs?\b/, /^recover$/] },
+			re: [/^splice$/, /^\d+ earlier runs?\b/, /^recover$/] },
 		{ key: 'gpu', label: 'GPU search', fam: 'tweak', explain: 'The GPU searcher\'s find, checked by the optimizer.', re: [/^inbox \(gpu\b/, /^try: gpu\b/] },
 		{ key: 'endgame', label: 'Exact finish', fam: 'finish', explain: 'Tries every input over the run\'s last ticks; when nothing is faster, the ending is proven.',
 			re: [/^endgame/, new RegExp(W_IN + 'endgame', 'i')] },
@@ -91,6 +93,9 @@
 	function classify(s, ctx) {
 		s = String(s === undefined || s === null ? '' : s);
 		if (ctx && ctx.slot) return classifySlot(s);
+		// a stage's find spliced with the best (grind.js spliceNow: "<what> + best (splice, n runs)") is its stage's find
+		const sp = /^(.+?) \+ best \(splice/.exec(s);
+		if (sp) { const c = classify(sp[1], ctx); return c.key === 'other' ? brief(STAGE.splice) : c; }
 		if (ctx && ctx.remote && (s === `try: ${ctx.remote}` || s === `inbox (${ctx.remote})`)) return brief(STAGE.remote);
 		for (const st of STAGES) {
 			if (!st.re || !st.re.some((r) => r.test(s))) continue;
@@ -171,9 +176,11 @@
 	}
 	function clock(t) { try { return new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); } catch (e) { return ''; } }
 	const ticksText = (n) => `${count(n)} tick${Math.abs(n) === 1 ? '' : 's'}`;
+	/** an amount of run time: "0.81 s (81 ticks)" (1 tick = 0.01 s; the seconds first, as the game's timer counts) */
+	const secTicks = (n) => `${(Math.abs(n) / 100).toFixed(2)} s (${ticksText(Math.abs(n))})`;
 
 	const DICT = { FAMS, FAM, STAGES, STAGE, GPU_DOES, RECIPE, STAGES_ALL, STAGES_PHASE, SKIP_WHY, HY_PARTS, HY_STAGES, HY_ORDER, HY_STATES,
-		classify, classifySlot, recipeOf, colorOf, fmt, dur, mmss, count, rate, clock, esc, ticksText, MINUS };
+		classify, classifySlot, recipeOf, colorOf, fmt, dur, mmss, count, rate, clock, esc, ticksText, secTicks, MINUS };
 	if (typeof module === 'object' && module && module.exports) module.exports = DICT;
 	if (!root || !root.document) return;
 
@@ -228,6 +235,7 @@
 .tl-now .n, .tl-score .n, .tl-recipe .rk { font-family: var(--f-num); font-variant-numeric: tabular-nums; font-weight: 600; }
 .tl-recipe { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 12px; }
 .tl-recipe .rk { font-size: 14px; line-height: 24px; color: var(--ink); margin-right: 4px; white-space: nowrap; }
+.tl-recipe .rk .rp { font: 500 12px var(--f-ui); color: var(--muted); margin-left: 4px; }
 .tl-chip { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px; border-radius: var(--r1); font: 600 12px/1 var(--f-ui);
 	background: var(--raise); color: var(--ink-2); border: 1px solid transparent; white-space: nowrap; cursor: default; }
 .tl-chip i { width: 8px; height: 8px; border-radius: 2px; flex: none; }
@@ -251,6 +259,7 @@
 .tl svg .rl { stroke: var(--line-2); stroke-width: 1; shape-rendering: crispEdges; }
 .tl svg .rt { fill: var(--muted); font: 600 11px var(--f-num); }
 .tl svg .bestl { fill: none; stroke: var(--ink-2); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.tl svg .bestl.later { stroke-dasharray: 4 4; pointer-events: stroke; }
 .tl svg .drop { stroke-width: 3; stroke-linecap: butt; }
 .tl svg .dot { stroke: var(--panel); stroke-width: 2; }
 .tl svg .ph { stroke: var(--coin); stroke-width: 2; pointer-events: none; }
@@ -287,6 +296,7 @@
 .tl-score .tbl td.d { color: var(--ahead); }
 .tl-score .tbl td.lb { white-space: nowrap; }
 .tl-score .tw { overflow-x: auto; }
+.tl-score .sm-only { display: none; font-size: 11.5px; line-height: 15px; color: var(--muted); font-weight: 400; }
 .tl-guide { margin-top: 14px; }
 .tl-guide .gfam { margin-top: 12px; }
 .tl-guide .gfam > b { display: flex; align-items: center; gap: 8px; font: 600 13.5px/20px var(--f-num); color: var(--ink); }
@@ -303,7 +313,9 @@
 .tl-compact .tl-foot .legend { margin-top: 0; font-size: 11px; gap: 4px 10px; }
 .tl-sheetv .tl-now { font-size: 14px; line-height: 21px; }
 @media (max-width: 599px) {
-	.tl-full { --tl-lab: 78px; }
+	.tl-full { --tl-lab: 70px; }
+	.tl-score .sm-hide { display: none; }
+	.tl-score .sm-only { display: block; }
 	.tl-full .tl-now { font-size: 15px; line-height: 22px; }
 	.tl-full .tl-h .tools { width: 100%; justify-content: space-between; }
 }
@@ -344,16 +356,17 @@
 		if (s.threads) bits.push(`${s.threads} thread${s.threads === 1 ? '' : 's'}`);
 		bits.push(`${clock(s.t0)}${s.t1 ? `–${clock(s.t1)}` : ', running'} (${dur(t1 - s.t0)})`);
 		if (s.n > 1) bits.push(`${s.n} runs merged`);
-		if (s.saved > 0) bits.push(`<span class="up">its window saved ${count(s.saved)}</span>`);
+		if (s.saved > 0) bits.push(`<span class="up">${s.n > 1 ? 'they saved' : 'its window saved'} ${secTicks(s.saved)}</span>`);
 		else if (s.saved === 0 && s.t1) bits.push('found nothing here');
 		if (s.killed && s.t1) bits.push('stopped');
-		return `<b>${esc(c)}</b>${s.name && s.name !== c ? ` <span class="muted">${esc(s.name)}</span>` : ''}` +
-			`${s.explain ? `<div class="muted" style="margin-top:2px">${esc(s.explain)}</div>` : ''}<div style="margin-top:4px">${bits.join(' · ')}</div>`;
+		const ex = s.explain || (STAGE[s.key] ? STAGE[s.key].explain : '');
+		return `<b>${esc(c)}</b>${s.name && s.name !== c && s.n <= 1 ? ` <span class="muted">${esc(s.name)}</span>` : ''}` +
+			`${ex ? `<div class="muted" style="margin-top:2px">${esc(ex)}</div>` : ''}<div style="margin-top:4px">${bits.join(' · ')}</div>`;
 	}
 	function markTip(m) {
 		if (m.kind === 'refused') return `<b>Handed in, not accepted</b><div>${esc(m.what || '')}${m.runTicks ? `: ${fmt(m.runTicks)}` : ''}</div><div class="muted">${clock(m.t)}${m.why ? ` · ${esc(m.why)}` : ''}</div>`;
 		if (m.kind === 'route') return `<b>${esc(m.label || 'route')}</b><div>${m.runTicks ? `<span class="tv">${fmt(m.runTicks)}</span>` : ''}${m.how ? ` · ${esc(m.how)}` : ''}</div><div class="muted">${m.at || clock(m.t)}${m.best ? '' : ' · not faster than the best then'}</div>`;
-		return `<b>${esc(m.label || 'a find')}</b><div><span class="up">${MINUS}${ticksText(m.saved || 0)}</span> → <span class="tv">${fmt(m.runTicks)}</span></div>` +
+		return `<b>${esc(m.label || 'a find')}</b><div><span class="up">${MINUS}${secTicks(m.saved || 0)}</span> → <span class="tv">${fmt(m.runTicks)}</span></div>` +
 			`<div class="muted">${m.at || clock(m.t)}${m.round ? ` · round ${m.round}` : ''}${m.what && m.what !== m.label ? ` · ${esc(m.what)}` : ''}</div>`;
 	}
 	/**
@@ -373,14 +386,20 @@
 		const running = !!model.running;
 		const tNow = model.tNow || Date.now();
 		const x0 = model.t0;
-		const pad = running ? Math.max(4000, (tNow - x0) * 0.025) : 0;
+		// (room past "now" while it runs: at least 30 s, more than the server's 20-s step, so the playhead moves until the next
+		// model comes; and 6 px at both ends, so a find at the very start or end is a whole diamond)
+		const pad = running ? Math.max(30000, (tNow - x0) * 0.025) : 0;
 		const x1 = Math.max(x0 + 1000, tNow + pad);
-		const X = (t) => (t - x0) / (x1 - x0) * W;
+		const IN = 6;
+		const X = (t) => IN + (t - x0) / (x1 - x0) * (W - 2 * IN);
 		const clampX = (x) => Math.max(0, Math.min(W, x));
 		let s = '', lab = '';
 		// the best time (the step line; every drop in the colour of the family that found it)
 		const pts = (model.best || []).filter((p) => p && isFinite(p[1]));
-		const vs = pts.map((p) => p[1]);
+		// (a stopped run's best found after the range ends, a run handed in later: the line ends with a dashed step to it, so the
+		// lowest label is the best the run has now, as the big time above says)
+		const later = Number.isFinite(model.bestNow) && pts.length && model.bestNow < pts[pts.length - 1][1] && !running ? model.bestNow : null;
+		const vs = pts.map((p) => p[1]).concat(later !== null ? [later] : []);
 		const yHi = vs.length ? Math.max(...vs) : 0, yLo = vs.length ? Math.min(...vs) : 0;
 		const top = compact ? 6 : 10, bot = chartH - (compact ? 6 : 12);
 		const Y = (v) => (yHi > yLo ? top + (yHi - v) / (yHi - yLo) * (bot - top) : (top + bot) / 2);
@@ -390,6 +409,10 @@
 			for (let i = 1; i < pts.length; i++) d += `H${num(clampX(X(pts[i][0])))}V${num(Y(pts[i][1]))}`;
 			d += `H${num(clampX(X(Math.min(tNow, x1))))}`;
 			s += `<path class="bestl" d="${d}"/>`;
+			if (later !== null) {
+				const xl = clampX(X(Math.min(tNow, x1)));
+				s += `<path class="bestl later" d="M${num(xl)},${num(Y(pts[pts.length - 1][1]))}V${num(Y(later))}H${W}"${attrTip(`<b>${fmt(later)}</b><div>the best now: found after this range (a run handed in later)</div>`)}/>`;
+			}
 			// (drops: a 3-px segment in the family colour and a dot; dots closer than 10 px are one, the newest)
 			let lastDot = null;
 			const dots = [];
@@ -413,12 +436,15 @@
 			s += `<text class="none" x="${num(W / 2)}" y="${num((top + bot) / 2 + 4)}" text-anchor="middle">${compact ? 'no route yet' : 'No best time yet'}</text>`;
 			lab += `<span class="ax" style="top:${num((top + bot) / 2)}px">${compact ? 'best' : 'best time'}</span>`;
 		}
-		// the tape: a row per lane, the blocks in their family colour, labels inside where they fit
+		// the tape: a row per lane, the blocks in their family colour, labels inside where they fit (and clear of the finds)
 		const lanesIdx = new Map(lanes.map((l, i) => [l.id, i]));
+		const SHORT = { fly: 'Corridor', in: 'Handed in' };
 		lanes.forEach((l, i) => {
 			s += `<rect class="ln" x="0" y="${laneY(i)}" width="${W}" height="${laneH}" rx="3"/>`;
-			lab += `<span style="top:${num(laneY(i) + laneH / 2)}px" title="${esc(l.explain || l.label)}">${esc(l.label)}</span>`;
+			lab += `<span style="top:${num(laneY(i) + laneH / 2)}px" title="${esc(l.explain || l.label)}">${esc(o.narrow && SHORT[l.id] ? SHORT[l.id] : l.label)}</span>`;
 		});
+		const markX = new Map();   // lane -> the x of its finds (a label never covers one)
+		for (const m of model.marks || []) { if (m.t < x0 || m.t > x1) continue; const a = markX.get(m.lane) || []; a.push(X(m.t)); markX.set(m.lane, a); }
 		const open = [];
 		for (const sp of model.spans || []) {
 			const i = lanesIdx.get(sp.lane);
@@ -436,7 +462,8 @@
 				`${isOpen ? ` data-open="${sp.t0}" data-x0="${num(a)}"` : ''}${attrTip(spanTip(sp, model))}/>`;
 			if (isOpen) open.push({ a, y, h });
 			const text = sp.short || sp.label || '';
-			if (!compact && !rows && text && w > text.length * 6.3 + 10) {
+			const tw = text.length * 6.3;
+			if (!compact && !rows && text && w > tw + 10 && !(markX.get(sp.lane) || []).some((mx) => mx >= a - 1 && mx <= a + 5 + tw + 7)) {
 				s += `<text class="bl" x="${num(a + 5)}" y="${num(y + h / 2 + 4)}" style="fill:${inkOn(fam, o.el)}">${esc(text)}</text>`;
 			}
 		}
@@ -455,7 +482,9 @@
 		for (const r of model.restarts || []) {
 			if (!r.t || r.t <= x0 || r.t >= x1) continue;
 			const x = X(r.t);
-			s += `<line class="rs" x1="${num(x)}" x2="${num(x)}" y1="0" y2="${axisY}"/><text class="rst" x="${num(x + 3)}" y="10"${attrTip(`<b>Restart ${r.n}</b><div>${esc(r.why || '')}</div>`)}>restart ${r.n}</text>`;
+			// (its label on the side away from the playhead when they are close)
+			const nearNow = running && Math.abs(x - X(Math.min(tNow, x1))) < 60;
+			s += `<line class="rs" x1="${num(x)}" x2="${num(x)}" y1="0" y2="${axisY}"/><text class="rst" x="${num(nearNow ? x - 3 : x + 3)}" y="10"${nearNow ? ' text-anchor="end"' : ''}${attrTip(`<b>Restart ${r.n}</b><div>${esc(r.why || '')}</div>`)}>restart ${r.n}</text>`;
 		}
 		// the axis: clock times (the hybrid: the time since its start, as its panel counts it)
 		if (lanes.length || pts.length) {
@@ -472,6 +501,7 @@
 			for (const t of ticks) {
 				const x = X(t), text = label(t), w = text.length * 6.2;
 				if (x < w / 2 + 2 || x > W - w / 2 - 2 || x - lastX < (w + lastW) / 2 + 12) continue;
+				if (running && !compact && Math.abs(x - xn) < w / 2 + 16) continue;   // (the playhead's "now" label there)
 				s += `<line class="gl" x1="${num(x) + 0.5}" x2="${num(x) + 0.5}" y1="${axisY - 3}" y2="${axisY}"/><text class="ax" x="${num(x)}" y="${axisY + 12}" text-anchor="middle">${esc(text)}</text>`;
 				lastX = x; lastW = w;
 			}
@@ -496,7 +526,7 @@
 			for (const q of g) {
 				const cls = q.m.kind === 'refused' ? 'dm ref' : q.m.kind === 'route' && !q.m.best ? 'dm alt' : 'dm';
 				const isNew = o.newT && q.newest === o.newT && q.m.kind !== 'refused';
-				const tip = markTip(q.m) + (q.n > 1 ? `<div class="muted">+ ${q.n - 1} more here${q.saved ? ` (${MINUS}${ticksText(q.saved)} in all)` : ''}</div>` : '');
+				const tip = markTip(q.m) + (q.n > 1 ? `<div class="muted">+ ${q.n - 1} more here${q.saved ? ` (${MINUS}${secTicks(q.saved)} in all)` : ''}</div>` : '');
 				s += `<path class="${cls}${isNew ? ' tl-new' : ''}" d="M${num(q.cx)},${num(q.cy - r)}L${num(q.cx + r)},${num(q.cy)}L${num(q.cx)},${num(q.cy + r)}L${num(q.cx - r)},${num(q.cy)}Z" data-fam="${q.m.fam || 'combine'}"${attrTip(tip)}/>`;
 				if (isNew) s += `<circle class="tl-ring" cx="${num(q.cx)}" cy="${num(q.cy)}" r="${r}"/>`;
 			}
@@ -524,7 +554,7 @@
 			const when = model.kind === 'hybrid' ? `${mmss((t - x0) / 1000)} in` : clock(t);
 			return `<div><b>${esc(when)}</b>${b ? ` · best <span class="tv">${fmt(b[1])}</span>` : ''}</div>${rows.join('')}`;
 		};
-		return { svg, lab, h: H, w: W, hover, X, x0, x1, axisY, inv: (px) => x0 + px / W * (x1 - x0) };
+		return { svg, lab, h: H, w: W, hover, X, x0, x1, axisY, inv: (px) => x0 + (px - IN) / (W - 2 * IN) * (x1 - x0) };
 	}
 
 	// ---------------------------------------------------------------- the parts around the figure
@@ -532,13 +562,21 @@
 		const rs = model.rounds || [];
 		const r = rs[rs.length - 1];
 		if (!r || !r.recipe || !r.recipe.length) return '';
+		const paused = model.kind !== 'hybrid' && !model.running && !model.preview;
+		const total = new Map(), seen = new Map();
+		for (const c of r.recipe) total.set(c.label, (total.get(c.label) || 0) + 1);
 		const chips = r.recipe.map((c) => {
 			const st = c.state || 'next';
-			const word = st === 'now' ? 'running now' : st === 'done' ? 'done' : st === 'skipped' ? `skipped${c.why ? `: ${c.why}` : ''}` : 'to come';
-			const tip = `<b>${esc(c.label)}</b> <span class="muted">${esc(word)}</span>${c.explain ? `<div>${esc(c.explain)}</div>` : ''}${c.detail ? `<div class="muted">${esc(c.detail)}</div>` : ''}`;
-			return `<span class="tl-chip ${st}"${attrTip(tip)}><i style="background:${colorOf(c.fam)}"></i>${esc(c.label)}</span>`;
+			const k = (seen.get(c.label) || 0) + 1;
+			seen.set(c.label, k);
+			const name = total.get(c.label) > 1 ? `${c.label} ${k}/${total.get(c.label)}` : c.label;
+			const word = st === 'now' ? 'running now' : st === 'done' ? 'done' : st === 'skipped' ? `skipped${c.why ? `: ${c.why}` : ''}` : paused ? 'to come when it resumes' : 'to come';
+			const pass = total.get(c.label) > 1 ? `<div class="muted">pass ${k} of ${total.get(c.label)} this round</div>` : '';
+			const tip = `<b>${esc(c.label)}</b> <span class="muted">${esc(word)}</span>${c.explain ? `<div>${esc(c.explain)}</div>` : ''}${pass}${c.detail ? `<div class="muted">${esc(c.detail)}</div>` : ''}`;
+			return `<span class="tl-chip ${st}"${attrTip(tip)}><i style="background:${colorOf(c.fam)}"></i>${esc(name)}</span>`;
 		}).join('');
-		return `<div class="tl-recipe" aria-label="the stages of this round"><span class="rk">${esc(r.title || `Round ${r.round}`)}</span>${chips}</div>`;
+		const title = esc(r.title || `Round ${r.round}`) + (paused ? ' <span class="rp">paused here</span>' : '');
+		return `<div class="tl-recipe" aria-label="the stages of this round"><span class="rk">${title}</span>${chips}</div>`;
 	}
 	/** the families (and marks) in the figure, as toggles */
 	function legendHtml(model, o) {
@@ -563,24 +601,31 @@
 			const by = new Map();
 			for (const x of rows) {
 				const k = x.fam;
-				const g = by.get(k) || { key: k, fam: k, label: (FAM[k] || {}).label || k, ms: 0, runs: 0, finds: 0, saved: 0 };
-				g.ms += x.ms; g.runs += x.runs; g.finds += x.finds; g.saved += x.saved;
+				const g = by.get(k) || { key: k, fam: k, label: (FAM[k] || {}).label || k, explain: (FAM[k] || {}).explain || '', ms: 0, cpuMs: 0, gpuMs: 0, runs: 0, finds: 0, saved: 0 };
+				g.ms += x.ms; g.cpuMs += x.cpuMs || 0; g.gpuMs += x.gpuMs || 0; g.runs += x.runs; g.finds += x.finds; g.saved += x.saved;
 				by.set(k, g);
 			}
 			rows = [...by.values()];
 		}
 		rows.sort((p, q) => q.saved - p.saved || q.finds - p.finds || q.ms - p.ms);
+		const mins = (ms) => (ms > 0 ? esc(dur(ms)) : '<span class="muted">—</span>');
 		const body = rows.map((x) => {
-			const perMin = x.ms > 0 && x.saved > 0 ? (x.saved / (x.ms / 60000)) : 0;
+			// (the rate: run time saved per hour of its machine time, the CPU's and the GPU's together)
+			const perH = x.ms > 0 && x.saved > 0 ? (x.saved / 100) / (x.ms / 3600000) : 0;
+			const saved = x.saved > 0 ? `${MINUS}${(x.saved / 100).toFixed(2)} s` : '0';
+			const gpuLine = !hy && x.gpuMs > 0 ? `<span class="sm-only">GPU ${esc(dur(x.gpuMs))}</span>` : '';
+			const time = hy ? `<td class="n">${mins(x.ms)}</td>` : `<td class="n">${mins(x.cpuMs !== undefined ? x.cpuMs : x.ms)}${gpuLine}</td><td class="n sm-hide">${mins(x.gpuMs || 0)}</td>`;
 			return `<tr${attrTip(x.explain ? `<b>${esc(x.label)}</b><div>${esc(x.explain)}</div>` : '')}><td class="lb"><i class="sw" style="background:${colorOf(x.fam)}"></i>${esc(x.label)}</td>` +
-				`<td class="n">${x.ms > 0 ? esc(dur(x.ms)) : '—'}</td><td class="n">${count(x.runs)}</td><td class="n">${count(x.finds)}</td>` +
-				`<td class="n${x.saved > 0 ? ' d' : ''}">${x.saved > 0 ? `${MINUS}${count(x.saved)}` : '0'}</td><td class="n">${perMin ? perMin.toFixed(1) : '—'}</td></tr>`;
+				`${time}<td class="n sm-hide">${count(x.runs)}</td><td class="n">${count(x.finds)}</td>` +
+				`<td class="n${x.saved > 0 ? ' d' : ''}" title="${x.saved > 0 ? esc(ticksText(x.saved)) : ''}">${saved}</td><td class="n sm-hide">${perH ? `${perH.toFixed(perH < 10 ? 2 : 1)} s` : '—'}</td></tr>`;
 		}).join('');
 		const title = hy ? 'What found routes' : `What found time (${o.rangeLabel ? `the last ${o.rangeLabel}` : 'this range'})`;
 		const tools = hy ? '' : `<div class="tools"><button type="button" class="ghost small" data-every="1" aria-pressed="${!!o.every}">${o.every ? 'By family' : 'Show every stage'}</button></div>`;
+		const th = hy ? `<th class="n" title="its own time in the run (the parts run side by side)">Running</th>`
+			: `<th class="n" title="the CPU time of its runs, as its threads' share of the machine">CPU</th><th class="n sm-hide" title="the GPU's time on it (the GPU runs next to the CPU: the two columns are two machines, so their sum can be longer than the session)">GPU</th>`;
 		return `<div class="tl-score"><div class="sec-h"><h3>${esc(title)}</h3>${tools}</div><div class="tw"><table class="tbl"><thead><tr>` +
-			`<th>${hy ? 'Part' : 'Phase'}</th><th class="n" title="${hy ? 'its time in the run' : 'the CPU time of its runs (its threads\' share of the machine) or the GPU time'}">Time</th><th class="n">Runs</th>` +
-			`<th class="n">${hy ? 'Routes' : 'Finds'}</th><th class="n" title="${hy ? 'ticks its routes took off the best route' : 'ticks taken off the best run'}">Saved</th><th class="n" title="ticks saved per minute of its time">Per minute</th></tr></thead>` +
+			`<th>${hy ? 'Part' : 'Phase'}</th>${th}<th class="n sm-hide">Runs</th>` +
+			`<th class="n">${hy ? 'Routes' : 'Finds'}</th><th class="n" title="${hy ? 'run time its routes took off the best route' : 'run time taken off the best run'}">Saved</th><th class="n sm-hide" title="run time saved per hour of its CPU and GPU time">Per hour</th></tr></thead>` +
 			`<tbody>${body}</tbody></table></div></div>`;
 	}
 	function guideHtml(model, open) {
@@ -619,9 +664,10 @@
 		o = o || {};
 		if (!model || typeof model !== 'object') return { html: '<div class="loading"><span class="spin"></span>Loading the optimizer\'s timeline…</div>', fig: null };
 		const compact = !!o.compact, hy = model.kind === 'hybrid';
-		const labW = compact ? 72 : (o.width && o.width < 600 ? 78 : 96);
-		const width = Math.max(compact ? 160 : 320, (o.width || (compact ? 300 : 900)));
-		const plotW = Math.max(compact ? 120 : 544, width - labW);
+		const narrow = !!(o.width && o.width < 600);
+		const labW = compact ? 72 : (narrow ? 70 : 96);
+		const width = Math.max(compact ? 160 : 260, (o.width || (compact ? 300 : 900)));
+		const plotW = Math.max(compact ? 120 : (narrow ? 180 : 544), width - labW);
 		let h = '';
 		if (!compact && !hy) {
 			const seg = `<div class="seg" role="group" aria-label="time range">${RANGES.map(([k, l]) => `<button type="button" data-range="${k}" aria-pressed="${(o.range || 'session') === k}">${l}</button>`).join('')}</div>`;
@@ -632,7 +678,7 @@
 		let fig = null;
 		const hasTime = model.t0 && model.tNow && ((model.spans || []).length || (model.best || []).length > 0) && !model.preview;
 		if (hasTime) {
-			fig = figure(model, { width: plotW, compact, sel: o.sel, newT: o.newT, el: o.el, rangeFinds: model.rangeFinds });
+			fig = figure(model, { width: plotW, compact, sel: o.sel, newT: o.newT, el: o.el, rangeFinds: model.rangeFinds, narrow });
 			h += `<div class="tl-fig${o.sel ? ' hl' : ''}" style="--tl-lab:${labW}px"><div class="tl-lab" style="height:${fig.h}px">${fig.lab}</div><div class="tl-plot">${fig.svg}</div></div>`;
 			if (model.legacy) h += `<div class="tl-note">Built from the log (times to the second). Restart the run for the full view.</div>`;
 		} else if (!compact && model.preview) {
@@ -771,7 +817,9 @@
 		fetchNow(v);
 		v.tick = setInterval(() => {
 			if (!v.alive || !v.model || !v.model.running || !visible()) return;
-			if (advance(v.el, v.fig, true) === false) fetchNow(v);
+			// (past the room the figure left: the figure grows here, from the model it has; the server's model comes on the
+			// 3-s schedule, which is the only thing that fetches)
+			if (advance(v.el, v.fig, true) === false) { v.model.tNow = Date.now(); draw(v); }
 		}, 1000);
 		if (typeof ResizeObserver === 'function') {
 			let t = 0;
@@ -837,18 +885,46 @@
 		const newest = (model && model.marks || []).filter((m) => m.best).reduce((a, m) => Math.max(a, m.t), 0);
 		const motion = !UIx() || !UIx().motion || UIx().motion();
 		const newT = prev.seen && newest > (prev.lastBestT || 0) && motion ? newest : 0;
-		const width = el.clientWidth || (compact ? 300 : 900);
+		const cs = root.getComputedStyle ? root.getComputedStyle(el) : null;
+		const inner = (el.clientWidth || 0) - (cs ? (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0) : 0);
+		const width = inner > 0 ? inner : (compact ? 300 : 900);
 		const r = html(model, { width, compact, sheet: o.sheet, newT, el, guide: prev.guide, every: false });
-		const state = { html: r.html, seen: true, lastBestT: Math.max(prev.lastBestT || 0, newest), guide: prev.guide };
+		const state = { html: r.html, seen: true, lastBestT: Math.max(prev.lastBestT || 0, newest), guide: prev.guide, model, o, width: inner, ro: prev.ro };
 		rendered.set(el, state);
-		if (prev.html === r.html) return;
+		// (drawn while hidden, or its box changed: drawn again at its size)
+		if (!state.ro && typeof ResizeObserver === 'function') {
+			let t = 0;
+			state.ro = new ResizeObserver(() => {
+				clearTimeout(t);
+				t = setTimeout(() => {
+					const st = rendered.get(el);
+					if (!st || !st.model) return;
+					const c2 = root.getComputedStyle ? root.getComputedStyle(el) : null;
+					const w2 = (el.clientWidth || 0) - (c2 ? (parseFloat(c2.paddingLeft) || 0) + (parseFloat(c2.paddingRight) || 0) : 0);
+					if (w2 > 0 && Math.abs(w2 - (st.width || 0)) > 4) { st.html = ''; render(el, st.model, st.o); }
+				}, 120);
+			});
+			state.ro.observe(el);
+		}
+		if (prev.html === r.html && el.firstChild) return;   // (cleared by the page meanwhile: drawn again)
 		el.innerHTML = r.html;
 		wireFigure(el, r.fig);
+		const pl = el.querySelector('.tl-plot');
+		if (pl && pl.scrollWidth > pl.clientWidth) pl.scrollLeft = pl.scrollWidth;
 		const b = el.querySelector('[data-sheet]');
 		if (b) b.onclick = () => { if (typeof root.hySheetOpen === 'function') root.hySheetOpen(); };
 		const g = el.querySelector('.tl-guide');
 		if (g) g.ontoggle = () => { state.guide = g.open; };
 	}
 
-	root.TL = { mount, update, unmount, classify: classifyEntry, render, html, dict: DICT };
+	/** draw a view again from what it has (the theme changed: the blocks' label ink); no fetch */
+	function redraw(el) {
+		inkCache.clear();
+		const v = views.get(el);
+		if (v && v.model) { draw(v); return true; }
+		const st = rendered.get(el);
+		if (st && st.model) { st.html = ''; render(el, st.model, st.o); return true; }
+		return false;
+	}
+	root.TL = { mount, update, unmount, classify: classifyEntry, render, redraw, html, dict: DICT };
 })(typeof window !== 'undefined' ? window : (typeof globalThis !== 'undefined' ? globalThis : this));
