@@ -157,7 +157,7 @@ const R = { level: NAME, file: LEVEL, seconds: NOCAP ? null : SECONDS, cseconds:
 	...(NOCAP || RESTART_S || CPU_ONLY ? { noCap: NOCAP, restartOnStallS: RESTART_S, cpu: CPU_ONLY, restarts: [] } : {}),
 	pid: process.pid, home: HOME, started: new Date(T0).toISOString(), stop: null, lastProgress: null,
 	first: null, routes: [], best: null, final: null, polish: null,
-	compiler: { firstRoute: null, routes: 0, anchors: 0, maxGain: 0, furthest: null, stalls: 0, imports: 0, stages: [], end: null, exit: null, report: null },
+	compiler: { firstRoute: null, routes: 0, anchors: 0, maxGain: 0, furthest: null, stalls: 0, imports: 0, stages: [], rounds: [], end: null, exit: null, report: null },
 	search: { firstRoute: null, job: null, jobFrom: null, handoff: null, bests: [], end: null, nearest: null },
 	hints: [], feeds: [], prefix: [], joins: null, errors: [] };
 const writeReport = () => { R.updated = new Date().toISOString(); R.sec = sec(); try { fs.writeFileSync(path.join(OUT, 'hybrid.json'), JSON.stringify(R, null, 1)); } catch (e) { /* next */ } };
@@ -256,6 +256,7 @@ function compStart() {
 	try { fs.closeSync(fdErr); } catch (e) { /* (the child has its own) */ }
 	compAlive = true; compStartAt = Date.now(); lastBoundTicks = Infinity;
 	R.compiler.round = k;
+	R.compiler.rounds.push([sec(), k]);   // (the app's Optimizer view: the compiler's rounds on its timeline)
 	comp.stdin.on('error', () => { /* ended */ });
 	const rl = readline.createInterface({ input: comp.stdout, crlfDelay: Infinity });
 	rl.on('line', (line) => { let e; try { e = JSON.parse(line); } catch (x) { return; } try { compOn(e); } catch (x) { R.errors.push(`compiler event: ${x.message}`); } });
@@ -302,7 +303,7 @@ function compOn(e) {
 		return;
 	}
 	if (e.ev === 'import') R.compiler.imports++;
-	if (e.ev === 'stage') R.compiler.stages.push([sec(), e.name, e.ms]);
+	if (e.ev === 'stage') R.compiler.stages.push([sec(), e.name, e.ms, compRound]);
 	if (e.ev === 'stall') R.compiler.stalls++;
 	if (e.ev === 'done') R.compiler.end = { end: e.end, sec: e.sec, anchors: e.anchors, runTicks: e.runTicks };
 	if (e.ev === 'error') R.errors.push(`compiler: ${e.error}`);
@@ -614,23 +615,29 @@ function onFatal(e) {
 }
 process.on('uncaughtException', onFatal);
 process.on('unhandledRejection', onFatal);
-/** --json=1: the live state (the app's page: src/app/editor.html renderHybrid) */
+/** --json=1: the live state (the app's page: src/app/editor.html renderHybrid; its Optimizer view, src/phases.js
+ *  hybridTimeline: the compiler's stages [t, name, ms, round] and rounds [t, round], the search's states [t, state, run] as
+ *  they changed, the prefix searches) */
+const searchStates = [];
 function liveOf() {
 	const now = Date.now();
 	const ok = R.routes.filter((r) => r.verified);
 	const f = R.compiler.furthest, st = R.compiler.stages.length ? R.compiler.stages[R.compiler.stages.length - 1] : null;
 	let s = null;
 	try { s = ctl && !atEnded ? ctl.state() : null; } catch (e) { s = null; }
+	const sNow = s ? s.state : 'ended', sLast = searchStates[searchStates.length - 1];
+	if (!sLast || sLast[1] !== sNow || sLast[2] !== searchRun) { searchStates.push([sec(), sNow, searchRun]); if (searchStates.length > 40) searchStates.shift(); }
 	return { ev: 'state', t: sec(), noCap: NOCAP, cpu: CPU_ONLY, seconds: NOCAP ? null : SECONDS, polishS: POLISH_S, restartOnStallS: RESTART_S,
 		end: Number.isFinite(END) ? Math.round((END - T0) / 100) / 10 : null, ending, restarting,
 		sinceProgress: Math.round((now - progAt) / 100) / 10, lastProgress: progWhy,
 		compiler: { alive: compAlive, round: compRound, anchors: R.compiler.anchors, maxGain: R.compiler.maxGain,
 			furthest: f ? { gain: f.gain, dist: Number.isFinite(f.dist) ? f.dist : null, desc: f.desc, t: f.t } : null,
 			routes: R.compiler.routes, firstRoute: R.compiler.firstRoute, stage: st ? st[1] : null, exit: R.compiler.exit, stalls: R.compiler.stalls, imports: R.compiler.imports,
-			stopped: R.compiler.stopped || null },
+			stopped: R.compiler.stopped || null, endAt: R.compiler.endAt || null, stages: R.compiler.stages.slice(-80), rounds: R.compiler.rounds.slice(-20) },
 		search: { run: searchRun, seed: R.search.seed, state: s ? s.state : 'ended', nearest: R.search.nearest, rooms: tick.rooms.size, front: tick.front, job: !!R.search.job,
-			firstRoute: R.search.firstRoute, escapes: R.search.escapes || 0, handoff: R.search.handoff, end: R.search.end },
+			firstRoute: R.search.firstRoute, escapes: R.search.escapes || 0, handoff: R.search.handoff, end: R.search.end, states: searchStates.slice() },
 		prefix: pre ? { k: pre.rec.k, why: pre.rec.why, nearest: pre.rec.nearest } : null,
+		prefixes: R.prefix.slice(-20).map((p) => ({ k: p.k, t: p.t, end: p.end, why: p.why, nearest: p.nearest, routed: p.routed })),
 		restarts: (R.restarts || []).slice(-20), hints: R.hints.length, feeds: R.feeds.length,
 		routes: ok.slice(-40).map((r) => ({ t: r.t, by: r.by, runTicks: r.runTicks, time: C.fmt(r.runTicks), how: r.how || '' })), nRoutes: ok.length,
 		first: R.first, best: R.best ? Object.assign({ time: C.fmt(R.best.runTicks) }, R.best) : null, joins: R.joins, stop: R.stop, final: R.final };

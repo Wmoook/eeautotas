@@ -22,6 +22,7 @@ const GFX = require('./eegfx.js');
 const ED = require('./editor.js');
 const LC = require('./levelcheck.js');
 const ST = require('./stats.js');
+const PH = require('./phases.js');
 
 const APP = path.join(__dirname, 'app', 'index.html');
 const EDITOR = path.join(__dirname, 'app', 'editor.html');
@@ -128,6 +129,9 @@ const ENDPOINTS = [
 	['GET', '/api/jobs/:id/best.eetas', 'download the best run (also original.eetas)'],
 	['GET', '/api/jobs/:id/original.eelvl', 'the job\'s level file, byte for byte as imported (404 when it is missing); the level editor opens it: /editor#job=<id>'],
 	['GET', '/api/jobs/:id/log', 'the last 300 lines of grind.log'],
+	['GET', '/api/jobs/:id/phases?range=session&sig=', 'the Optimizer view\'s timeline (src/phases.js): what the optimizer did and does, from grind_events.jsonl and gpu/events.jsonl ' +
+		'(older runs: grind.log): now (a sentence), lanes, spans (a block per stage run, sweep window, GPU invocation), rounds (with the stage chips), marks (the finds), best (the best ' +
+		'time\'s steps), score (what found time), history (every find, classified); range = session | 15m | 1h | 6h | all; ?sig= (the last answer\'s sig): {unchanged: true} when nothing changed'],
 	['GET', '/api/jobs/:id/where?t=1:10.00', 'state at a run time (m:ss.cc) or tick: position, velocity, tiles, coins, next inputs/events, ASCII map (&format=text)'],
 	['GET', '/api/jobs/:id/render.png?from=1:10&to=1:14', 'PNG of the level around the path in that range (&scale=px per tile, &margin=tiles)'],
 	['GET', '/api/jobs/:id/replay', 'summary + timeline of the best run (coins, random portals, odds) (&format=text)'],
@@ -489,6 +493,14 @@ const server = http.createServer(async (req, res) => {
 				return res.end(fs.readFileSync(f));
 			}
 			if (req.method === 'GET' && what === 'log') return send(res, 200, { lines: J.logTail(id, 300) });
+			// the Optimizer view's timeline (src/phases.js; docs/ui/DESIGN.md 11.3)
+			if (req.method === 'GET' && what === 'phases') {
+				const ch = children.get(id), pid = J.runningPid(id) || (ch && ch.exitCode === null ? ch.pid : 0);
+				const lv = pid ? C.readJSON(path.join(dir, 'live.json'), null) : null;
+				const rm = C.readJSON(path.join(dir, 'remote.json'), null);
+				return send(res, 200, PH.jobTimeline(dir, { range: q('range') || 'session', sig: q('sig') || '', running: !!pid, pid,
+					live: lv && Date.now() - (+lv.t || 0) < 5000 ? lv : null, remote: rm && rm.source ? String(rm.source) : null }));
+			}
 			if (req.method === 'GET' && what === 'where') {
 				const w = J.where(J.loadJobLevel(id), C.readEetas(path.join(dir, 'best.eetas')), q('t') || q('time') || q('tick') || '0');
 				if (q('format') === 'text') return send(res, 200, J.formatWhere(w), 'text/plain; charset=utf-8');

@@ -4672,9 +4672,12 @@ function hybridRecover() {
 function hybridState() {
 	if (!HY) { try { hybridRecover(); } catch (e) { /* none */ } }
 	if (!HY) return { running: false, stage: 'none', live: null, log: [], result: null, loadtas: null, message: '' };
-	return { running: HY.running, stage: HY.stage, started: HY.started, elapsed: Math.round(((HY.ended || Date.now()) - HY.started) / 100) / 10, name: HY.name,
+	const s = { running: HY.running, stage: HY.stage, started: HY.started, elapsed: Math.round(((HY.ended || Date.now()) - HY.started) / 100) / 10, name: HY.name,
 		workers: HY.workers, cpu: HY.cpu, restartS: HY.restartS, polishS: HY.polishS, live: HY.live, log: HY.log.slice(-14), result: HY.result, loadtas: HY.loadtas,
 		message: HY.message, stopping: HY.stopping, ...(HY.recovered ? { recovered: true } : {}) };
+	// (the page's Optimizer view of the run: its lanes, stages, routes and restarts on a timeline; src/phases.js)
+	try { s.timeline = require('./phases.js').hybridTimeline(s); } catch (e) { s.timeline = null; }
+	return s;
 }
 /** the forced stop (HY_KILL_MS after Stop, the hybrid still running): the GPU stop files of its jobs first (as jobs.js
  *  stopGpuSearcher: their eegpu ends between two launches), then its node process alone, never a tree kill (Windows:
