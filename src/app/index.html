@@ -1050,7 +1050,7 @@ function impRow(p) {
 	const label = c && c.label ? c.label : friendlyStage(p.what);
 	const sw = c && c.color ? `<i class="sw" style="background:${c.color}"></i>` : '';
 	return `<tr><td class="tnum" title="${esc(new Date(p.t).toLocaleString())}">${impWhen(p.t)}</td>` +
-		`<td class="n d">${UI_MINUS}${p.saved.toLocaleString('en-US')} tick${p.saved === 1 ? '' : 's'}</td><td class="n">${fmt(p.runTicks)}</td>` +
+		`<td class="n d" title="${p.saved.toLocaleString('en-US')} tick${p.saved === 1 ? '' : 's'} (1 tick = 0.01 s)">${UI_MINUS}${(p.saved / 100).toFixed(2)} s</td><td class="n">${fmt(p.runTicks)}</td>` +
 		`<td class="w" title="${esc(p.what)}">${sw}${esc(label)}</td>${impRounds() ? `<td class="n">${c && c.round ? c.round : ''}</td>` : ''}</tr>`;
 }
 /** the Round column only where phases.js tells each find's round (TL.classify) */

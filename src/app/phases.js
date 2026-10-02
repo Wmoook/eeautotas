@@ -438,7 +438,7 @@
 		}
 		// the tape: a row per lane, the blocks in their family colour, labels inside where they fit (and clear of the finds)
 		const lanesIdx = new Map(lanes.map((l, i) => [l.id, i]));
-		const SHORT = { fly: 'Corridor', in: 'Handed in' };
+		const SHORT = { fly: 'Corridor', in: 'Handed in', prefix: 'Prefix' };
 		lanes.forEach((l, i) => {
 			s += `<rect class="ln" x="0" y="${laneY(i)}" width="${W}" height="${laneH}" rx="3"/>`;
 			lab += `<span style="top:${num(laneY(i) + laneH / 2)}px" title="${esc(l.explain || l.label)}">${esc(o.narrow && SHORT[l.id] ? SHORT[l.id] : l.label)}</span>`;
@@ -471,12 +471,14 @@
 		const xn = clampX(X(Math.min(tNow, x1)));
 		if (running) for (const q of open) s += `<line class="oe" x1="${num(xn)}" x2="${num(xn)}" y1="${num(q.y)}" y2="${num(q.y + q.h)}" data-oe="1"/>`;
 		// rounds: a hairline through the tape, "R3" just above it (clear of the axis' labels)
-		let lastRx = -1e9;
+		// (a long range's hundreds of rounds: a line only where it stands 6 px from the last one, a label only where it fits)
+		let lastRx = -1e9, lastLx = -1e9, lastW = 0;
 		for (const r of model.rounds || []) {
 			if (!r.t0 || r.t0 <= x0 || r.t0 >= x1) continue;
 			const x = X(r.t0);
-			s += `<line class="rl" x1="${num(x) + 0.5}" x2="${num(x) + 0.5}" y1="${tapeTop - (compact ? 4 : 13)}" y2="${axisY}"/>`;
-			if (!compact && x - lastRx > 26) { s += `<text class="rt" x="${num(x + 3)}" y="${tapeTop - 3}">${esc(r.tag || `R${r.round}`)}</text>`; lastRx = x; }
+			if (x - lastLx >= 6) { s += `<line class="rl" x1="${num(x) + 0.5}" x2="${num(x) + 0.5}" y1="${tapeTop - (compact ? 4 : 13)}" y2="${axisY}"/>`; lastLx = x; }
+			const tag = r.tag || `R${r.round}`;
+			if (!compact && x - lastRx > Math.max(26, lastW + 8)) { s += `<text class="rt" x="${num(x + 3)}" y="${tapeTop - 3}">${esc(tag)}</text>`; lastRx = x; lastW = tag.length * 6.6 + 3; }
 		}
 		// restarts (the hybrid): a dashed red line through everything
 		for (const r of model.restarts || []) {
