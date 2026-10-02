@@ -36,8 +36,9 @@ function appFiles() {
 	walk('src');
 	walk('docs');
 	for (const f of ['README.md', 'CLAUDE.md', 'AGENTS.md', 'package.json']) files.push(f);
-	// (the level editor's "Hybrid (best)" runs tools/hybrid.js, which runs tools/perfect/joins.js: src/editor.js hybridStart)
-	for (const f of ['tools/hybrid.js', 'tools/perfect/joins.js']) files.push(f);
+	// (the level editor's "Hybrid (best)" runs tools/hybrid.js, which runs tools/perfect/joins.js: src/editor.js hybridStart;
+	// `EEAutoTAS.exe tools/stats-import.js <file.csv>` imports a benchmark for the Stats page)
+	for (const f of ['tools/hybrid.js', 'tools/perfect/joins.js', 'tools/stats-import.js']) files.push(f);
 	return files.sort();
 }
 

@@ -21,6 +21,7 @@ const BENCH = require('./bench.js');
 const GFX = require('./eegfx.js');
 const ED = require('./editor.js');
 const LC = require('./levelcheck.js');
+const ST = require('./stats.js');
 
 const APP = path.join(__dirname, 'app', 'index.html');
 const EDITOR = path.join(__dirname, 'app', 'editor.html');
@@ -142,6 +143,9 @@ const ENDPOINTS = [
 	['POST', '/api/eegfx', 'set the eeo-tas folder for EE graphics: JSON {dir} (checked: media/blocks.png and src/items/ItemManager.as; "" = find it automatically)'],
 	['GET', '/api/eegfx/sheet/<name>.png', 'one sprite sheet from the eeo-tas media folder (only the sheets the map lists)'],
 	['GET', '/stats', 'the Stats page (your runs; imported benchmarks)'],
+	['GET', '/api/stats', 'the Stats page\'s numbers of your runs (src/stats.js): totals (runs, running, savedTicks, originalTicks, improvements, today, optimizedMs (the optimizer\'s sessions; optimizedApprox: some from grind.log), simTicks (null without events), since), byFam (the time saved by the phase family that found it: {saved, finds, stages}), byStage ([{key, label, fam, finds, saved}], the most saved first), recent (the newest 20 improvements: {t, job, name, runTicks, time, saved, what, fam, label}), jobs [{id, name, section, campaign, created, running, original, best, savedTicks, pct, improvements, firstT, lastT, optimizedMs, approx, spark}]'],
+	['GET', '/api/stats/benchmarks', 'the imported benchmarks (tools/stats-import.js <file.csv>: <data>/benchmarks/<id>.json), newest first: {benchmarks: [{id, name, source, imported, levels, routed, confirmed, sections}]}'],
+	['GET', '/api/stats/benchmarks/:id', 'one benchmark: {v, id, name, source, imported, columns, sections, rows [{i, section, level, result (routed / unconfirmed / none), solveS, by, best, run, known, ratio, searchAlone, compilerAlone, merged}], numbers (the counts, the time-to-solve bins, the quality against the best known), jobs: {"<row i>": "<job id>"} (the runs of its levels in the app)}; 404 JSON for an unknown id'],
 	['GET', '/ui.css', 'the pages\' shared files: ui.css, ui.js (theme, nav, offline banner, tooltip, formats, small charts), phases.js (the Optimizer view), stats.js (the Stats page)'],
 	['GET', '/editor', 'the level editor (place blocks, a start and the trophy; the GPU and the CPU find a route); /editor#job=<id> opens a job\'s level (&path=1: with its best run\'s path)'],
 	['GET', '/api/editor/blocks?ids=9,121,...', 'block info for the editor: names, kinds ([kind, dir/sub, solid]), EE minimap colors, argument kinds'],
@@ -400,6 +404,16 @@ const server = http.createServer(async (req, res) => {
 			}
 		}
 		if (parts[1] === 'editor') return await editorRoute(req, res, parts, q);
+		// the Stats page's data (src/stats.js; docs/ui/DESIGN.md 11.5, 11.6): your runs, the imported benchmarks (ids by ST.ID_RE only)
+		if (req.method === 'GET' && parts[1] === 'stats') {
+			if (parts.length === 2) return send(res, 200, ST.jobsStats(listJobs(), { now: Date.now() }));
+			if (parts[2] === 'benchmarks' && parts.length === 3) return send(res, 200, { benchmarks: ST.listBenchmarks() });
+			if (parts[2] === 'benchmarks' && parts.length === 4) {
+				const b = ST.readBenchmark(parts[3]);
+				if (!b) return send(res, 404, { error: `no benchmark ${JSON.stringify(parts[3].slice(0, 64))} (tools/stats-import.js imports one)` });
+				return send(res, 200, { ...b, numbers: ST.benchNumbers(b), jobs: ST.matchJobs(b, listJobs()) });
+			}
+		}
 		// the level check (src/levelcheck.js): EEO's own copy of a campaign level, effect blocks that do nothing, the md5
 		if (parts[1] === 'levelcheck') {
 			if (req.method === 'POST' && parts.length === 2) {
