@@ -139,6 +139,7 @@ const ENDPOINTS = [
 	['GET', '/api/eegfx/sheet/<name>.png', 'one sprite sheet from the eeo-tas media folder (only the sheets the map lists)'],
 	['GET', '/editor', 'the level editor (place blocks, a start and the trophy; the GPU and the CPU find a route); /editor#job=<id> opens a job\'s level (&path=1: with its best run\'s path)'],
 	['GET', '/api/editor/blocks?ids=9,121,...', 'block info for the editor: names, kinds ([kind, dir/sub, solid]), EE minimap colors, argument kinds'],
+	['GET', '/api/editor/levels', 'the editor\'s "Open a level", in two sections: campaign (EEO\'s campaign levels from campaigns.zip, in EEO\'s order: {entry, name, title, campaign, tier, tiers, width, height}; GET /api/levelcheck/eeo-copy opens one) and other (the levels of your runs that are no campaign level, one per file: {job, name, jobName, width, height}); why (no campaigns.zip)'],
 	['POST', '/api/editor/eelvl', 'the editor\'s level JSON {name, width, height, cells: [[x, y, id, ...args]]} -> .eelvl bytes (what EE Offline opens)'],
 	['POST', '/api/editor/parse', 'an .eelvl -> the editor\'s level JSON: JSON {eelvlB64}'],
 	['POST', '/api/editor/check', 'what stands in the way of a route search: JSON {eelvlB64} or {level}: problems (no start, no trophy, walled in), notes, start, trophies'],
@@ -154,6 +155,10 @@ const ENDPOINTS = [
 	['POST', '/api/editor/compile', 'the compiler (src/compile.js: the level -> a verified .eetas; no search, no GPU; one at a time, in the background): JSON {eelvlB64 (or level), seconds (60), workers, name}'],
 	['GET', '/api/editor/compile', 'the compile: running, stage, stages [{name, ms, text}] (parse, model, bounds, plan, moves, verify, polish), detail, notes, result {runTicks, time, lb, gap, legs, known, ...}, job (the run made from its route), loadtas (the eeo-tas line: /loadtas <its best.eetas>), message'],
 	['POST', '/api/editor/compile/stop', 'stop the compile'],
+	['POST', '/api/editor/hybrid', 'Hybrid (best) (tools/hybrid.js: the compiler and the search side by side, every route replayed; no time cap: until a route and its polish, or stop; before any route a fresh restart after restartS (1800) s with no progress; the workers and the GPU as Find a route takes them; one at a time, in the background): JSON {eelvlB64 (or level), name, source, workers, restartS (0: none), polishS (180)}'],
+	['GET', '/api/editor/hybrid', 'the hybrid: running, stage (none / starting / running / polish / ending / done / stopped / no route / error), elapsed, workers, cpu, restartS, polishS, live (the compiler: anchors, gain, furthest, round; the search: nearest, rooms, run; restarts; routes [{t, by, runTicks, time}]; best), log, result {runTicks, time, by, first, polish}, loadtas (/loadtas <its route file>), message'],
+	['POST', '/api/editor/hybrid/stop', 'stop the hybrid (its best route so far is its result)'],
+	['GET', '/api/editor/hybrid/route.eetas', 'download the hybrid\'s route (the final, else the best so far; also level.eelvl: the level it ran on)'],
 ];
 
 // ---------------------------------------------------------------- http helpers
@@ -255,6 +260,8 @@ const editorLevel = (b) => (b.eelvlB64 ? Buffer.from(String(b.eelvlB64), 'base64
 async function editorRoute(req, res, parts, q) {
 	const what = parts[2] || '', sub = parts[3] || '';
 	if (req.method === 'GET' && what === 'blocks' && !sub) return send(res, 200, ED.blockInfo(String(q('ids') || '').split(',').filter(Boolean)));
+	// (the page's "Open a level": its campaign section and its other section)
+	if (req.method === 'GET' && what === 'levels' && !sub) return send(res, 200, ED.levelList());
 	if (req.method === 'POST' && what === 'eelvl' && !sub) {
 		const b = await readJsonBody(req, 64 << 20);
 		const lv = b.level || b;
@@ -312,6 +319,23 @@ async function editorRoute(req, res, parts, q) {
 		if (req.method === 'POST' && !sub) {
 			const b = await readJsonBody(req, 64 << 20);
 			try { return send(res, 200, ED.compileStart(b)); } catch (e) { return send(res, 400, { error: e.message, problems: e.problems }); }
+		}
+	}
+	// the HYBRID action (tools/hybrid.js: the compiler and the search side by side, no time cap, a fresh restart after a
+	// stall; one at a time): its live state, then its best route (route.eetas) and the eeo-tas line for it (loadtas); the
+	// workers and the GPU as Find a route takes them (no GPU: CPU only)
+	if (what === 'hybrid') {
+		if (req.method === 'GET' && !sub) return send(res, 200, ED.hybridState());
+		if (req.method === 'POST' && sub === 'stop') return send(res, 200, ED.hybridStop());
+		if (req.method === 'POST' && !sub) {
+			const b = await readJsonBody(req, 64 << 20);
+			try { return send(res, 200, ED.hybridStart(b, systemInfo().processors[1])); } catch (e) { return send(res, 400, { error: e.message, problems: e.problems }); }
+		}
+		if (req.method === 'GET' && (sub === 'route.eetas' || sub === 'level.eelvl')) {
+			const f = ED.hybridFile(sub);
+			if (!f) return send(res, 404, { error: sub === 'route.eetas' ? 'the hybrid has no route yet' : 'no hybrid yet' });
+			res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': `attachment; filename="${f.name}"`, 'Cache-Control': 'no-store' });
+			return res.end(fs.readFileSync(f.file));
 		}
 	}
 	if (req.method === 'POST' && what === 'job' && !sub) {

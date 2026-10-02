@@ -5,6 +5,7 @@
 //   node tools/hybrid.js <level.eelvl> [--seconds=600] [--out=<dir>] [--gpu=<id>] [--cworkers=3] [--sworkers=4]
 //        [--pworkers=2] [--stallS=60] [--hint=1] [--feed=1] [--bound=1] [--joins=1] [--cseconds=<the compiler's budget>]
 //        [--seed=1] [--name=<label>] [--keep=0] [--quiet=0] [--leg=1] [--polishS=0] [--stallStopS=0]
+//        [--noCap=0] [--restartOnStallS=0] [--cpu=0] [--json=0] [--stdin=0]
 // - THE LEG (n5-hy-best, --leg=1 by default): the compiler child runs with EEAT_HYBRID=1 (src/plan/hybrid.js: a leg the
 //   executor failed goes to goexplore --goalTiles from the anchor's state); --leg=0: the compiler alone, as n5-hy-race.
 // - THE EARLY STOPS (the measurement, n5-hy-best; 0 = off, the run to --seconds): --polishS=<s>: the first verified route,
@@ -13,6 +14,28 @@
 //   compiler anchor (a higher gain, or the same gain 3 tiles nearer), no search attempt a tile nearer the trophy, no new
 //   room that opens territory, no more coins / switches on the search's progress front): the end. hybrid.json's stop:
 //   {why: 'polish' | 'stall' | 'cap' | <signal>, t}.
+// - THE APP (n5-hy-editor: the level editor's "Hybrid (best)", src/editor.js hybridStart; each option off = the run as
+//   before, so the batch's runs are unchanged):
+//   --noCap=1: NO TIME CAP: the run goes on until a verified route and its polish (--polishS, NOCAP_POLISH_S 180 s unless
+//   given), a 'stop' line (--stdin=1) or a signal; the compiler runs in ROUNDS of --cseconds (NOCAP_CSECONDS 3600 unless
+//   given; a round that ends without a route: its CPU to a prefix search from its furthest anchor as before, else, after a
+//   round of 60+ s, the next round at once with the next seed); the AutoTASer gets no budget of its own (Find a route ends
+//   itself at its 3-h cap: then the search starts again, below; a PROOF that no route exists ends the run).
+//   --restartOnStallS=<s> (0 = off): before any route, NO PROGRESS of either side for that long (the early stops' measure:
+//   a new furthest compiler anchor, a search attempt a tile nearer, a new room that opens territory, more coins /
+//   switches on the search's front) RESTARTS the run FRESH instead of ending it: the search (the AutoTASer: Find a route,
+//   its job) stopped and started again with a new seed (+1000 a restart; its out dir search_r<k>), the prefix search
+//   stopped, the hand-overs (hint, feed) and the search's progress measures start over; the compiler GOES ON while its
+//   round runs (its anchors, closures and hand-overs are what it has; its own stall shows in its anchors), a round that
+//   has ended starts again with the next seed (compile_r<k>.*). With --noCap a search that ended by itself without a route
+//   starts again at once (a restart too; 3 of them within 60 s of their start in a row end the run). hybrid.json:
+//   restarts [{n, t, why, seed, compiler: 'continues' | 'restarted', nearest}], compiler.round.
+//   --cpu=1: no GPU anywhere (the AutoTASer's cpu, the compiler's leg searches EEAT_HY_GPU=0).
+//   --json=1: stdout carries JSON lines only: {ev: 'log', t, text} (every log line), {ev: 'state', ...} (the live state,
+//   liveOf: every 2 s and at every route), {ev: 'route', t, by, runTicks, time, how, best} (every verified route), {ev:
+//   'end', why, t, final, first, polish} (the human lines stay in hybrid.log).
+//   --stdin=1: control lines on stdin: 'stop' ends the run as a signal does (its stop why 'stopped'); the end of stdin
+//   (the app went away) too.
 // - The compiler: its own child process (--json --stdin=1 --sourceDist=1), its budget fitted so that its stages after the
 //   moves (joins, loops, endgame: compile.js) end before the hybrid's (--cseconds). Every route it announces ('result') is
 //   replayed here (common.js evaluate on the level file, the loader of tools/cmp/verify.js) before it counts.
@@ -52,7 +75,10 @@ if (!pos.length) { console.log('usage: node tools/hybrid.js <level.eelvl> [--sec
 const on = (k, d) => (opt[k] === undefined ? d : opt[k] !== '0');
 const LEVEL = path.resolve(pos[0]);
 const NAME = opt.name || path.basename(LEVEL).replace(/\.[^.]+$/, '');
-const SECONDS = Math.max(30, +(opt.seconds || 600));
+// (THE APP's options: --noCap, --restartOnStallS, --cpu, --json, --stdin; the header)
+const NOCAP = on('noCap', false);
+const NOCAP_POLISH_S = 180, NOCAP_CSECONDS = 3600, NOCAP_MINUTES = 1e5, NOCAP_PREFIX_S = 3600;
+const SECONDS = NOCAP ? Infinity : Math.max(30, +(opt.seconds || 600));
 const ROOT = path.resolve(__dirname, '..');
 const SRC = path.join(ROOT, 'src');
 const OUT = path.resolve(opt.out || path.join(SRC, 'out', 'hybrid', NAME));
@@ -61,12 +87,14 @@ const STALL_S = Math.max(5, +(opt.stallS || 60));
 const HINT = on('hint', true), FEED = on('feed', true), BOUND = on('bound', true), JOINS = on('joins', true);
 const QUIET = on('quiet', false);
 const LEG = on('leg', true);
-const POLISH_S = Math.max(0, +(opt.polishS || 0)), STALL_STOP_S = Math.max(0, +(opt.stallStopS || 0));
+const POLISH_S = Math.max(0, +(opt.polishS !== undefined ? opt.polishS : NOCAP ? NOCAP_POLISH_S : 0) || 0), STALL_STOP_S = Math.max(0, +(opt.stallStopS || 0));
+const RESTART_S = +opt.restartOnStallS > 0 ? Math.max(5, +opt.restartOnStallS) : 0;
+const CPU_ONLY = on('cpu', false), JSON_OUT = on('json', false), STDIN = on('stdin', false);
 // the compiler's budget: its moves' seconds S, its stages after them (compile.js: joins min(60, S/2), loops min(10, S/6),
-// endgame min(60, S/5)) ending 15 s before the hybrid's end
+// endgame min(60, S/5)) ending 15 s before the hybrid's end (--noCap: a round of NOCAP_CSECONDS)
 const tailOf = (s) => Math.min(60, 0.5 * s) + Math.min(10, s / 6) + Math.min(60, 0.2 * s);
-let CSECONDS = +opt.cseconds > 0 ? +opt.cseconds : SECONDS;
-if (!(+opt.cseconds > 0)) while (CSECONDS > 10 && CSECONDS + tailOf(CSECONDS) > SECONDS - 15) CSECONDS--;
+let CSECONDS = +opt.cseconds > 0 ? +opt.cseconds : NOCAP ? NOCAP_CSECONDS : SECONDS;
+if (!NOCAP && !(+opt.cseconds > 0)) while (CSECONDS > 10 && CSECONDS + tailOf(CSECONDS) > SECONDS - 15) CSECONDS--;
 if (opt.gpu !== undefined && opt.gpu !== '') process.env.CUDA_VISIBLE_DEVICES = String(opt.gpu);
 fs.mkdirSync(OUT, { recursive: true });
 // (a home of its own for the job and the editor's files, as atrun.js: its data/gpu-cache linked to this checkout's)
@@ -82,19 +110,27 @@ const ED = require(path.join(SRC, 'editor.js'));
 const J = require(path.join(SRC, 'jobs.js'));
 const AT = require(path.join(SRC, 'autotas.js'));
 
-const T0 = Date.now(), END0 = T0 + SECONDS * 1000;
+const T0 = Date.now(), END0 = NOCAP ? Infinity : T0 + SECONDS * 1000;
 let END = END0;   // (--polishS: the first route's time + polishS, when sooner)
-let progAt = T0, progWhy = 'the start';   // (--stallStopS: the last progress of either side)
+let progAt = T0, progWhy = 'the start';   // (--stallStopS, --restartOnStallS: the last progress of either side)
 const progress = (why) => { progAt = Date.now(); progWhy = why; };
 const sec = () => Math.round((Date.now() - T0) / 100) / 10;
 const logF = path.join(OUT, 'hybrid.log');
-const log = (s) => { const l = `[hy ${sec().toFixed(1).padStart(6)}s] ${s}`; if (!QUIET) console.log(l); try { fs.appendFileSync(logF, l + '\n'); } catch (e) { /* read-only */ } };
+/** --json=1: a JSON line on stdout (the app's child: src/editor.js hybridStart reads them) */
+const jsonOut = (o) => { if (!JSON_OUT) return; try { process.stdout.write(JSON.stringify(o) + '\n'); } catch (e) { /* closed */ } };
+const log = (s) => {
+	const l = `[hy ${sec().toFixed(1).padStart(6)}s] ${s}`;
+	if (JSON_OUT) jsonOut({ ev: 'log', t: sec(), text: String(s) }); else if (!QUIET) console.log(l);
+	try { fs.appendFileSync(logF, l + '\n'); } catch (e) { /* read-only */ }
+};
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const L = T.loadLevelFile(LEVEL);
 const buf = fs.readFileSync(LEVEL);
 
 // ---- the report
-const R = { level: NAME, file: LEVEL, seconds: SECONDS, cseconds: CSECONDS, gpu: opt.gpu !== undefined ? String(opt.gpu) : null, host: os.hostname(),
+const R = { level: NAME, file: LEVEL, seconds: NOCAP ? null : SECONDS, cseconds: CSECONDS, gpu: opt.gpu !== undefined ? String(opt.gpu) : null, host: os.hostname(),
 	workers: { compiler: CW, search: SW, prefix: PW }, stallS: STALL_S, flags: { hint: HINT, feed: FEED, bound: BOUND, joins: JOINS, leg: LEG }, polishS: POLISH_S, stallStopS: STALL_STOP_S,
+	...(NOCAP || RESTART_S || CPU_ONLY ? { noCap: NOCAP, restartOnStallS: RESTART_S, cpu: CPU_ONLY, restarts: [] } : {}),
 	started: new Date(T0).toISOString(), stop: null, lastProgress: null,
 	first: null, routes: [], best: null, final: null, polish: null,
 	compiler: { firstRoute: null, routes: 0, anchors: 0, maxGain: 0, furthest: null, stalls: 0, imports: 0, stages: [], end: null, exit: null, report: null },
@@ -133,6 +169,7 @@ function route(by, masks, how) {
 	if (faster && by !== 'compiler') boundCompiler(ev.ms);
 	if (faster && finalized) { finalize(); log(`after the end: the final is now ${ev.runTicks} by ${by}`); }
 	writeReport();
+	if (JSON_OUT) { jsonOut({ ev: 'route', t: rec.t, by, runTicks: ev.runTicks, time: C.fmt(ev.runTicks), how: how || '', best: faster }); jsonOut(liveOf()); }
 	return ev;
 }
 let ownJob = null;   // (the AutoTASer ended without a job (Find a route ended): a job of our own for a later route)
@@ -166,8 +203,10 @@ function guardGrind(pid) {
 
 // ---- the compiler
 let comp = null, compAlive = false, lastProgAt = Date.now(), furthest = null, lastBoundTicks = Infinity;
+let compRound = 0, compStartAt = 0;   // (--noCap / --restartOnStallS: the compiler's rounds, 0 = the first: its files as before)
 const anchors = new Map();
 const compEv = fs.createWriteStream(path.join(OUT, 'compile_events.jsonl'));
+compEv.on('error', () => { /* closed */ });
 function compSend(line) { if (compAlive && comp && comp.stdin && !comp.stdin.destroyed) { try { comp.stdin.write(line + '\n'); return true; } catch (e) { /* gone */ } } return false; }
 function boundCompiler(ms) {
 	if (!BOUND || !compAlive) return;
@@ -176,27 +215,31 @@ function boundCompiler(ms) {
 	if (compSend(`route ${strOf(ev.ms)}`)) lastBoundTicks = ev.runTicks;
 }
 function compStart() {
+	const k = compRound, tag = k ? `_r${k}` : '';
+	const fEetas = path.join(OUT, `compile${tag}.eetas`), fJson = path.join(OUT, `compile${tag}.json`), fErr = path.join(OUT, `compile${tag}.err`);
+	// (a later round: the next seed, a fresh compile; its bound starts over)
 	const args = [path.join(SRC, 'compile.js'), LEVEL, `--seconds=${CSECONDS}`, `--workers=${CW}`, '--json', '--stdin=1', '--sourceDist=1',
-		`--out=${path.join(OUT, 'compile.eetas')}`, `--report=${path.join(OUT, 'compile.json')}`];
+		`--out=${fEetas}`, `--report=${fJson}`, ...(k ? [`--seed=${1 + k}`] : [])];
 	const env = Object.assign({}, process.env);
 	if (LEG) env.EEAT_HYBRID = '1'; else delete env.EEAT_HYBRID;
-	comp = spawn(process.execPath, args, { cwd: ROOT, env, stdio: ['pipe', 'pipe', fs.openSync(path.join(OUT, 'compile.err'), 'w')] });
-	compAlive = true;
+	if (CPU_ONLY) env.EEAT_HY_GPU = '0';
+	const me = comp = spawn(process.execPath, args, { cwd: ROOT, env, stdio: ['pipe', 'pipe', fs.openSync(fErr, 'w')] });
+	compAlive = true; compStartAt = Date.now(); lastBoundTicks = Infinity;
+	R.compiler.round = k;
 	comp.stdin.on('error', () => { /* ended */ });
 	const rl = readline.createInterface({ input: comp.stdout, crlfDelay: Infinity });
 	rl.on('line', (line) => { let e; try { e = JSON.parse(line); } catch (x) { return; } try { compOn(e); } catch (x) { R.errors.push(`compiler event: ${x.message}`); } });
 	comp.on('exit', (code, sig) => {
-		compAlive = false;
+		if (comp === me) compAlive = false;
 		R.compiler.exit = code != null ? code : sig;
 		R.compiler.endAt = sec();
-		try { R.compiler.report = compactReport(JSON.parse(fs.readFileSync(path.join(OUT, 'compile.json'), 'utf8'))); } catch (e) { /* none */ }
+		try { R.compiler.report = compactReport(JSON.parse(fs.readFileSync(fJson, 'utf8'))); } catch (e) { /* none */ }
 		// (the written route, replayed: the compiler's final, after its perfect pass)
-		try { const ms = C.readEetas(path.join(OUT, 'compile.eetas')); const ev = C.evaluate(L, ms); if (ev && (!best || ev.runTicks < best.runTicks)) route('compiler', ms, 'its written route'); } catch (e) { /* none */ }
-		log(`the compiler ended (exit ${R.compiler.exit}${R.compiler.report ? `, ${R.compiler.report.ok ? `${R.compiler.report.runTicks} run ticks` : R.compiler.report.why || 'no route'}` : ''})`);
-		try { compEv.end(); } catch (e) { /* closed */ }
+		try { const ms = C.readEetas(fEetas); const ev = C.evaluate(L, ms); if (ev && (!best || ev.runTicks < best.runTicks)) route('compiler', ms, 'its written route'); } catch (e) { /* none */ }
+		log(`the compiler${k ? ` (round ${k + 1})` : ''} ended (exit ${R.compiler.exit}${R.compiler.report ? `, ${R.compiler.report.ok ? `${R.compiler.report.runTicks} run ticks` : R.compiler.report.why || 'no route'}` : ''})`);
 		writeReport();
 	});
-	log(`the compiler: --seconds=${CSECONDS} --workers=${CW} (pid ${comp.pid})`);
+	log(`the compiler${k ? ` round ${k + 1} (seed ${1 + k})` : ''}: --seconds=${CSECONDS} --workers=${CW} (pid ${comp.pid})`);
 }
 function compactReport(r) {
 	const cut = (x) => { if (x == null || typeof x !== 'object') return x == null ? null : x; const o = {}; for (const [k, v] of Object.entries(x)) if (v === null || typeof v !== 'object') o[k] = v; return o; };
@@ -243,7 +286,8 @@ function compOn(e) {
 let pre = null;
 function prefixStart(a, workers, why) {
 	prefixStop('a newer start');
-	const left = Math.floor((END - Date.now()) / 1000) - 15;
+	const left0 = Math.floor((END - Date.now()) / 1000) - 15;
+	const left = Number.isFinite(left0) ? left0 : NOCAP_PREFIX_S;   // (--noCap: no end, an hour a prefix search)
 	if (left < 20) return;
 	const k = R.prefix.length + 1, file = path.join(OUT, `prefix_${k}.eetas`), w = workers || PW;
 	C.writeEetas(file, T.masksOf(a.inputs));
@@ -314,15 +358,23 @@ function jobBestIn() {
 
 // ---- the search: the AutoTASer in this process
 let lastBestRead = 0;
+// (--restartOnStallS / --noCap: the search's runs; run k has the seed SEED0 + 1000 k and its own out dir; the events of an
+// earlier run are dropped: atGen)
+const SEED0 = +(opt.seed || 1) || 1;
+let atGen = 0, searchRun = 0, atStartAt = 0;
 function atStart() {
-	ctl = AT.run({ eelvl: buf, minutes: SECONDS / 60, workers: SW, name: NAME, out: path.join(OUT, 'search'), seed: +(opt.seed || 1) || 1,
+	const gen = ++atGen, k = searchRun, sOut = path.join(OUT, k ? `search_r${k}` : 'search');
+	atEnded = false; atStartAt = Date.now();
+	R.search.run = k; R.search.seed = SEED0 + 1000 * k;
+	ctl = AT.run({ eelvl: buf, minutes: NOCAP ? NOCAP_MINUTES : SECONDS / 60, workers: SW, name: NAME, out: sOut, seed: SEED0 + 1000 * k, ...(CPU_ONLY ? { cpu: true } : {}),
 		onEvent: (e) => {
+			if (gen !== atGen) return;
 			try {
 				if (e.ev === 'route' && e.verified) {
 					if (!R.search.firstRoute) R.search.firstRoute = { t: e.t, runTicks: e.runTicks, strategy: e.strategy };
 					const n = ctl ? ctl.state().routes : 0;
 					setImmediate(() => {
-						const f = path.join(OUT, 'search', `route_${n}_${e.runTicks}.eetas`);
+						const f = path.join(sOut, `route_${n}_${e.runTicks}.eetas`);
 						try { route('search', C.readEetas(f), `Find a route (${e.strategy || 'route'})`); } catch (x) { R.errors.push(`search route file: ${x.message}`); }
 					});
 				} else if (e.ev === 'job') {
@@ -338,15 +390,60 @@ function atStart() {
 				else if (e.ev === 'escape') R.search.escapes = (R.search.escapes || 0) + 1;
 			} catch (x) { R.errors.push(`search event: ${x.message}`); }
 		},
-		onEnd: () => { atEnded = true; } });
-	log(`the search: Find a route on ${SW} workers${process.env.CUDA_VISIBLE_DEVICES !== undefined ? `, GPU ${process.env.CUDA_VISIBLE_DEVICES}` : ''}`);
+		onEnd: () => { if (gen === atGen) atEnded = true; } });
+	log(`the search${k ? ` (run ${k + 1}, seed ${SEED0 + 1000 * k})` : ''}: Find a route on ${SW} workers${CPU_ONLY ? ', CPU only' : process.env.CUDA_VISIBLE_DEVICES !== undefined ? `, GPU ${process.env.CUDA_VISIBLE_DEVICES}` : ''}`);
+}
+
+// ---- THE RESTART (--restartOnStallS; --noCap: a search that ended by itself): the search again, fresh (the header)
+let restarting = false, quickEnds = 0;
+async function restart(why) {
+	if (restarting || ending || R.first) return;
+	restarting = true;
+	const n = (R.restarts || []).length + 1, prevNearest = R.search.nearest;
+	log(`RESTART ${n}: ${why}; the search starts again fresh (seed ${SEED0 + 1000 * n})${compAlive ? ', the compiler goes on' : ', the compiler too (its next round)'}`);
+	prefixStop('a restart');
+	const old = ctl, oldEnded = atEnded;
+	atGen++;   // (the old run's late events are dropped from here on)
+	try { if (old && !oldEnded) old.stop(); } catch (e) { R.errors.push(`restart: stop: ${e.message}`); }
+	// (the editor's search ends as its processes end: ED.start refuses while one runs)
+	for (let i = 0; i < 120 && !ending; i++) {
+		let st = null;
+		try { st = ED.state(); } catch (e) { st = null; }
+		if (!st || !st.running) break;
+		await sleep(500);
+	}
+	if (ending) { restarting = false; return; }
+	searchRun = n;
+	tick.progTiles = Infinity; tick.rooms = new Set(); tick.front = 0;
+	R.search.nearest = null; R.search.end = null; R.search.handoff = null; R.search.escapes = 0;
+	hintedKey = null; lastHintAt = 0; lastFeedAt = 0; lastFedTiles = Infinity;
+	let started = false, err = '';
+	for (let i = 0; i < 30 && !ending && !started; i++) {
+		try { atStart(); started = true; } catch (e) { err = String(e && e.message || e); await sleep(2000); }
+	}
+	if (!started) {
+		restarting = false;
+		R.errors.push(`restart: ${err}`);
+		if (!ending) finishAll(`the search could not start again (${err.slice(0, 200)})`);
+		return;
+	}
+	const compiler = compAlive ? 'continues' : 'restarted';
+	if (!compAlive && !R.first) { compRound++; compStart(); }
+	(R.restarts || (R.restarts = [])).push({ n, t: sec(), why, seed: SEED0 + 1000 * n, compiler, nearest: prevNearest ? prevNearest.tiles : null });
+	progress(`restart ${n}`);
+	restarting = false;
+	writeReport();
 }
 
 // ---- the loop: the stall hand-over, the feed back, the joins, the end
 tick.progTiles = Infinity; tick.rooms = new Set(); tick.front = 0;
-let lastHintAt = 0, hintedKey = null, lastFeedAt = 0, lastFedTiles = Infinity, compStopAt = 0;
+let lastHintAt = 0, hintedKey = null, lastFeedAt = 0, lastFedTiles = Infinity, compStopAt = 0, prefixRound = -1;
 function tick() {
 	if (ending) return;
+	tickBody();
+	if (JSON_OUT && !ending) jsonOut(liveOf());
+}
+function tickBody() {
 	const now = Date.now();
 	let st = null;
 	try { st = ED.state(); } catch (e) { st = null; }
@@ -358,6 +455,20 @@ function tick() {
 	const pf = st && st.progressFront;
 	if (pf && (+pf.coins || 0) + (+pf.switches || 0) > tick.front) { tick.front = (+pf.coins || 0) + (+pf.switches || 0); progress(`the search's front ${pf.coins} coins / ${pf.switches} switches`); }
 	if (!R.first && STALL_STOP_S > 0 && now - progAt >= STALL_STOP_S * 1000) { R.lastProgress = { t: Math.round((progAt - T0) / 100) / 10, why: progWhy }; finishAll('stall'); return; }
+	if (restarting) return;
+	// (--restartOnStallS: no progress of either side for that long: the run again, fresh)
+	if (!R.first && RESTART_S > 0 && now - progAt >= RESTART_S * 1000) { restart(`no progress of either side for ${Math.round((now - progAt) / 1000)} s (the last: ${progWhy})`); return; }
+	// (--noCap: the search ended by itself without a route: again at once, unless no route exists (the editor's proof) or it
+	// keeps ending within a minute of its start)
+	if (NOCAP && !R.first && atEnded && ctl) {
+		let es = null;
+		try { es = ED.state(); } catch (e) { es = null; }
+		if (es && es.impossible) { finishAll(`no route: ${String(es.message || 'proven').slice(0, 300)}`); return; }
+		quickEnds = now - atStartAt < 60e3 ? quickEnds + 1 : 0;
+		if (quickEnds >= 3) { finishAll(`the search keeps ending at once (${R.search.end ? R.search.end.why : 'no route'})`); return; }
+		restart(`the search ended (${R.search.end ? String(R.search.end.why).slice(0, 200) : 'no route'})`);
+		return;
+	}
 	const stalled = compAlive && now - lastProgAt >= STALL_S * 1000;
 	if (!R.first && HINT && stalled && furthest && furthest.gain >= 1 && furthest.id !== hintedKey && now - lastHintAt >= 30e3 && now < END - 45e3) {
 		const a = furthest;
@@ -387,8 +498,16 @@ function tick() {
 	if (!compAlive && comp && best && !R.joins) joinsStart();
 	// (the compiler ended without a route, none known, a minute or more left: its CPU share to a prefix search of our own
 	// from its furthest anchor (a fresh archive, another seed than the search's escape))
-	if (!compAlive && comp && !R.first && HINT && !pre && !R.prefix.some((p) => p.why === 'the compiler ended') && furthest && furthest.gain >= 1 && now < END - 60e3) {
+	// (once a compiler round: --noCap runs it in rounds)
+	if (!compAlive && comp && !R.first && HINT && !pre && prefixRound !== compRound && furthest && furthest.gain >= 1 && now < END - 60e3) {
+		prefixRound = compRound;
 		prefixStart(furthest, CW, 'the compiler ended');
+	}
+	// (--noCap: a compiler round that ended without a route and gave no prefix search: the next round at once, when it ran
+	// a minute or more (else the next restart starts it))
+	if (NOCAP && !compAlive && comp && !R.first && !pre && prefixRound !== compRound && now - compStartAt >= 60e3) {
+		log(`the compiler's round ${compRound + 1} ended without a route: round ${compRound + 2}`);
+		compRound++; compStart();
 	}
 	if (now >= END - 3000) { finishAll(END < END0 ? 'polish' : 'cap'); return; }
 	if (now - (tick.lastW || 0) > 15e3) { tick.lastW = now; writeReport(); }
@@ -426,17 +545,48 @@ async function finishAll(why) {
 	finalize();
 	R.ended = new Date().toISOString();
 	writeReport();
+	try { compEv.end(); } catch (e) { /* closed */ }
 	log(`RESULT ${NAME}: ${R.first ? `first route by ${R.first.by} after ${R.first.t} s (${R.first.runTicks}), final ${R.final ? `${R.final.runTicks} by ${R.final.by}${R.final.verified ? ', verified' : ', NOT VERIFIED'}` : '-'}` : 'no route'}`);
+	if (JSON_OUT) { jsonOut(liveOf()); jsonOut({ ev: 'end', why, t: sec(), first: R.first, final: R.final, polish: R.polish, restarts: (R.restarts || []).length }); }
 	finished = true;
 	setTimeout(() => {
 		if (!on('keep', false)) { try { fs.unlinkSync(path.join(HOME, 'data', 'gpu-cache')); } catch (e) { /* */ } try { fs.rmSync(HOME, { recursive: true, force: true }); } catch (e) { /* */ } }
 		process.exit(best && R.final && R.final.verified ? 0 : best ? 1 : 2);
 	}, 4000);
 }
+/** --json=1: the live state (the app's page: src/app/editor.html renderHybrid) */
+function liveOf() {
+	const now = Date.now();
+	const ok = R.routes.filter((r) => r.verified);
+	const f = R.compiler.furthest, st = R.compiler.stages.length ? R.compiler.stages[R.compiler.stages.length - 1] : null;
+	let s = null;
+	try { s = ctl && !atEnded ? ctl.state() : null; } catch (e) { s = null; }
+	return { ev: 'state', t: sec(), noCap: NOCAP, cpu: CPU_ONLY, seconds: NOCAP ? null : SECONDS, polishS: POLISH_S, restartOnStallS: RESTART_S,
+		end: Number.isFinite(END) ? Math.round((END - T0) / 100) / 10 : null, ending, restarting,
+		sinceProgress: Math.round((now - progAt) / 100) / 10, lastProgress: progWhy,
+		compiler: { alive: compAlive, round: compRound, anchors: R.compiler.anchors, maxGain: R.compiler.maxGain,
+			furthest: f ? { gain: f.gain, dist: Number.isFinite(f.dist) ? f.dist : null, desc: f.desc, t: f.t } : null,
+			routes: R.compiler.routes, firstRoute: R.compiler.firstRoute, stage: st ? st[1] : null, exit: R.compiler.exit, stalls: R.compiler.stalls, imports: R.compiler.imports,
+			stopped: R.compiler.stopped || null },
+		search: { run: searchRun, seed: R.search.seed, state: s ? s.state : 'ended', nearest: R.search.nearest, rooms: tick.rooms.size, front: tick.front, job: !!R.search.job,
+			firstRoute: R.search.firstRoute, escapes: R.search.escapes || 0, handoff: R.search.handoff, end: R.search.end },
+		prefix: pre ? { k: pre.rec.k, why: pre.rec.why, nearest: pre.rec.nearest } : null,
+		restarts: (R.restarts || []).slice(-20), hints: R.hints.length, feeds: R.feeds.length,
+		routes: ok.slice(-40).map((r) => ({ t: r.t, by: r.by, runTicks: r.runTicks, time: C.fmt(r.runTicks), how: r.how || '' })), nRoutes: ok.length,
+		first: R.first, best: R.best ? Object.assign({ time: C.fmt(R.best.runTicks) }, R.best) : null, joins: R.joins, stop: R.stop, final: R.final };
+}
 for (const s of ['SIGINT', 'SIGTERM']) process.on(s, () => { log(`${s}`); finishAll(s); setTimeout(() => process.exit(130), 60e3); });
 process.on('SIGHUP', () => { /* (nohup: an ssh drop does not stop it) */ });
+// (--stdin=1: the app's control lines; on Windows a signal from the app would end this process at once, its children with
+// it, no final written)
+if (STDIN) {
+	const rlIn = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+	rlIn.on('line', (l) => { if (String(l).trim() === 'stop' && !ending) { log('stop (the app)'); finishAll('stopped'); } });
+	rlIn.on('close', () => { if (!ending) { log('the end of stdin (the app went away)'); finishAll('stopped'); } });
+}
 
-log(`${NAME}: the hybrid for ${SECONDS} s (the compiler ${CSECONDS} s + its stages after the moves), out ${OUT}, home ${HOME}`);
+log(`${NAME}: the hybrid ${NOCAP ? `with no time cap (the compiler in rounds of ${CSECONDS} s; a route, then ${POLISH_S} s of polish)` : `for ${SECONDS} s (the compiler ${CSECONDS} s + its stages after the moves)`}` +
+	`${RESTART_S ? `, restarts after ${RESTART_S} s with no progress` : ''}${CPU_ONLY ? ', CPU only' : ''}, out ${OUT}, home ${HOME}`);
 compStart();
 atStart();
 setInterval(tick, 2000);

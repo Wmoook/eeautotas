@@ -73,6 +73,21 @@ button.small { padding: 4px 9px; font-size: 12px; }
 .cmpOut .dim { color: var(--muted); }
 .cmpLine { display: flex; gap: 6px; margin-top: 8px; align-items: center; }
 .cmpLine input { flex: 1; min-width: 0; font: 11.5px var(--mono); }
+/* Hybrid (best) (tools/hybrid.js): its two sides, the restarts, every verified route as it came, the best so far */
+.hyBox { margin-top: 10px; padding: 9px 11px; border-radius: 10px; background: var(--panel2); border: 1px solid var(--line); font-size: 12.5px; }
+.hyBox .hyH { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.hyBox .hyH b { font-size: 13px; }
+.hyBox .hyT { font: 600 13px var(--mono); color: var(--ink); white-space: nowrap; }
+.hyBox .hyS { display: grid; grid-template-columns: auto 1fr; gap: 3px 8px; margin-top: 7px; color: var(--muted); }
+.hyBox .hyS > span:nth-child(odd) { font-weight: 600; color: var(--ink); }
+.hyBox .hyBest { margin-top: 8px; display: flex; align-items: baseline; gap: 8px; }
+.hyBox .hyBest b { font: 700 22px var(--mono); color: var(--good); letter-spacing: -.02em; }
+.hyRoutes { width: 100%; margin-top: 7px; border-collapse: collapse; font: 11.5px var(--mono); }
+.hyRoutes th { text-align: left; font: 600 10.5px "Segoe UI", system-ui, sans-serif; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; padding: 2px 4px; border-bottom: 1px solid var(--line); }
+.hyRoutes td { padding: 2px 4px; color: var(--muted); white-space: nowrap; }
+.hyRoutes td.rt { color: var(--ink); }
+.hyRoutes tr.best td.rt { color: var(--good); font-weight: 700; }
+.hyWrap { max-height: 168px; overflow: auto; }
 .spin { display: inline-block; width: 12px; height: 12px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
 	animation: sp .8s linear infinite; vertical-align: -2px; margin-right: 6px; }
 @keyframes sp { to { transform: rotate(360deg); } }
@@ -273,15 +288,22 @@ kbd { font: 11px var(--mono); background: var(--panel2); border: 1px solid var(-
 					<label class="lab" title="How many states the search keeps per tick (more: more thorough, fewer ticks per second)">states <select id="sWidth">
 						<option value="4096">4 k</option><option value="8192">8 k</option><option value="16384">16 k</option><option value="32768" selected>32 k</option>
 						<option value="65536">64 k</option></select></label>
+					<label class="lab" title="Hybrid (best) has no time cap. Before its first route, when neither the compiler nor the search gets any further for this long, it starts again fresh (a new random search; the compiler goes on). It never stops by itself without a route.">hybrid restarts after <select id="sHyStall">
+						<option value="600">10 min</option><option value="1200">20 min</option><option value="1800" selected>30 min</option><option value="3600">1 hour</option>
+						<option value="0">never</option></select> stuck</label>
 				</div>
-				<div class="row" style="margin-top:10px"><button class="go" id="bSolve">Find a route</button><button class="go" id="bAuto" title="Find a route, then optimize it at once as a run (the GPU goes to the optimizer when Find a route stops finding faster routes), for the time chosen above. Its run pauses any other running run (one at a time)">Find and optimize</button><button class="stop" id="bStop" hidden>Stop</button><button class="go" id="bCompile" title="Compile the level into a TAS: no search, no GPU (the level's model, a plan of which trigger to take next, moves derived from the physics, the engine's own replay as the check), for at most the time chosen above (10 min at most). The result becomes a run, and its /loadtas line is copied for eeo-tas">Compile</button></div>
+				<div class="row" style="margin-top:10px"><button class="go" id="bSolve">Find a route</button><button class="go" id="bAuto" title="Find a route, then optimize it at once as a run (the GPU goes to the optimizer when Find a route stops finding faster routes), for the time chosen above. Its run pauses any other running run (one at a time)">Find and optimize</button><button class="stop" id="bStop" hidden>Stop</button><button class="go" id="bCompile" title="Compile the level into a TAS: no search, no GPU (the level's model, a plan of which trigger to take next, moves derived from the physics, the engine's own replay as the check), for at most the time chosen above (10 min at most). The result becomes a run, and its /loadtas line is copied for eeo-tas">Compile</button><button class="go" id="bHybrid" title="Hybrid (best): the compiler and Find a route side by side, each handing its furthest point to the other; the first verified route wins, then a few minutes of polish (the optimizer, the compiler's polish). No time cap: it runs until it has a route, or until you stop it; when it is stuck it starts again fresh (the setting above). Every route is replayed before it counts. Uses the GPU like Find a route (CPU only without one)">Hybrid (best)</button></div>
 				<div id="compileSt"></div>
+				<div id="hybridSt"></div>
 				<div id="autoSt"></div>
 				<div class="hint" id="solveWhy"></div>
 				<div id="solveSt"></div>
 			</div>
 			<div class="card">
 				<h2>Level</h2>
+				<label class="f" for="lvPick">Open a level</label>
+				<select id="lvPick" style="width:100%" title="EEO's campaign levels (from your eeo-tas folder's campaigns.zip) and the levels of your other runs: the level opens here (Ctrl+Z brings back the one you had)">
+					<option value="">Campaign or one of your runs' levels…</option></select>
 				<label class="f" for="lvName">Name</label>
 				<input type="text" id="lvName" maxlength="80" spellcheck="false">
 				<label class="f">Size (tiles)</label>
@@ -2717,6 +2739,33 @@ function jobFromHash() {
 	try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { /* sandbox */ }
 	return openJob(id, /(?:^|&)path=1(?:&|$)/.test(h));
 }
+// ------------------------------------------------------------ "Open a level": a campaign section and another (GET /api/editor/levels)
+// Campaign: EEO's campaign levels (its campaigns.zip in the eeo-tas folder), in EEO's order, opened as EEO's own copy
+// (useEeoCopy); Other: the levels of your runs that are none of them, one per level file, opened through their run
+// (openJob). One undo step each; the list is asked for at the start and again when the list gets the focus.
+const PICK = { at: 0, busy: false };
+async function loadLevelList() {
+	if (PICK.busy || Date.now() - PICK.at < 15000) return;
+	PICK.busy = true;
+	try {
+		const d = await api('/api/editor/levels');
+		PICK.at = Date.now();
+		const camp = d.campaign.map((l) => `<option value="c:${esc(l.entry)}" data-name="${esc(l.name)}">${esc(`${l.title || `campaign ${l.campaign}`} ${l.tier}${l.tiers ? `/${l.tiers}` : ''} · ${l.name}`)}</option>`).join('');
+		const oth = d.other.map((l) => `<option value="j:${esc(l.job)}">${esc(l.name)}${l.jobName && l.jobName !== l.name ? ` (${esc(l.jobName)})` : ''}</option>`).join('');
+		$('lvPick').innerHTML = '<option value="">Campaign or one of your runs\' levels…</option>' +
+			(d.campaign.length ? `<optgroup label="Campaign (${d.campaign.length})">${camp}</optgroup>` : `<optgroup label="Campaign: ${esc(d.why || 'EEO\'s campaigns.zip was not found')}"></optgroup>`) +
+			(d.other.length ? `<optgroup label="Other (${d.other.length})">${oth}</optgroup>` : '<optgroup label="Other: none (import a run first)"></optgroup>');
+	} catch (e) { /* the next focus asks again */ }
+	PICK.busy = false;
+}
+$('lvPick').onfocus = loadLevelList;
+$('lvPick').onchange = () => {
+	const sel = $('lvPick'), v = sel.value, o = sel.selectedOptions && sel.selectedOptions[0];
+	const name = o && o.dataset ? o.dataset.name : '';
+	sel.value = '';
+	if (v.startsWith('c:')) useEeoCopy(v.slice(2), name || 'level');
+	else if (v.startsWith('j:')) openJob(v.slice(2), false);
+};
 /** the level as .eelvl bytes (src/eelvl.js on the server: the one writer) */
 async function eelvlBytes() {
 	const r = await fetch('/api/editor/eelvl', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ level: levelJson() }) });
@@ -3052,6 +3101,170 @@ function renderCompile() {
 	if ($('cmpOpen')) $('cmpOpen').onclick = () => store.set('tasopt.sel', s.job);
 }
 $('bCompile').onclick = compileLevel;
+// ------------------------------------------------------------ Hybrid (best) (POST / GET /api/editor/hybrid: tools/hybrid.js)
+// The compiler and Find a route side by side (each hands its furthest point to the other; the first verified route wins,
+// then a few minutes of polish), with NO time cap: before its first route, when neither side gets further for the time
+// chosen in "hybrid restarts after", it starts again fresh (a new random search) instead of stopping. Live: the time since
+// it started, the compiler's anchors and gain, the search's nearest attempt, the restarts, every verified route as it came
+// (when, its run time, which part found it) and the best so far. Done (or stopped) with a route: its time, Download
+// .eetas, its eeo-tas line copied to the clipboard with a toast (as Compile), Watch and Optimize (a job from it: POST
+// /api/editor/job, as "Optimize this route" does for Find a route's).
+const HYB = { st: null, poll: 0, mine: 0, told: 0, jobs: {}, noClip: false, logOpen: false };
+try { HYB.jobs = JSON.parse(store.get('eeat.editor.hyJobs') || '{}') || {}; } catch (e) { HYB.jobs = {}; }
+const HY_BY = { compiler: 'the compiler', search: 'Find a route', optimizer: 'the optimizer', prefix: 'a prefix search', joins: 'the joins' };
+const hyBy = (b) => HY_BY[b] || String(b || '?');
+/** seconds as m:ss (h:mm:ss from an hour) */
+function mmss(sec) {
+	const s = Math.max(0, Math.floor(+sec || 0)), h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, x = s % 60;
+	return `${h ? `${h}:${String(m).padStart(2, '0')}` : m}:${String(x).padStart(2, '0')}`;
+}
+async function hybridLevel() {
+	$('bHybrid').disabled = true;
+	try {
+		const bytes = await eelvlBytes();
+		HYB.st = await postJson('/api/editor/hybrid', { eelvlB64: b64(bytes), name: LV.name, source: fileSource(), restartS: +$('sHyStall').value });
+		HYB.mine = HYB.st.started || 0;
+		HYB.noClip = false;
+		renderHybrid();
+		pollHybrid();
+	} catch (e) {
+		$('hybridSt').innerHTML = `<div class="msg err">Hybrid: ${esc(e.message)}</div>`;
+		$('bHybrid').disabled = false;
+	}
+}
+async function pollHybrid() {
+	clearTimeout(HYB.poll);
+	try { HYB.st = await api('/api/editor/hybrid'); } catch (e) { /* keep the last */ }
+	renderHybrid();
+	const s = HYB.st;
+	if (s && s.running) { HYB.poll = setTimeout(pollHybrid, 1000); return; }
+	// (done: once per hybrid this page started, the eeo-tas line to the clipboard and a toast)
+	if (s && s.started && s.started === HYB.mine && HYB.told !== s.started) {
+		HYB.told = s.started;
+		if (s.loadtas) copyHybrid(s);
+		else toast(`Hybrid: ${esc(s.message || s.stage)}`, s.stage !== 'stopped');
+	}
+}
+async function copyHybrid(s) {
+	const r = s.result || {};
+	const what = `Hybrid: <b>${esc(r.time || '')}</b> (by ${esc(hyBy(r.by))})`;
+	try {
+		await navigator.clipboard.writeText(s.loadtas);
+		toast(`${what}, /loadtas line copied. In eeo-tas: paste it, then /reset and /playtas.`);
+	} catch (e) {
+		HYB.noClip = true;
+		renderHybrid();
+		toast(`${what}. Copy the /loadtas line below (the browser refused the clipboard).`);
+	}
+}
+function renderHybrid() {
+	const s = HYB.st, el = $('hybridSt');
+	$('bHybrid').disabled = !!(s && s.running);
+	if (!s || s.stage === 'none') { el.innerHTML = ''; return; }
+	const L = s.live || {}, c = L.compiler || {}, q = L.search || {}, routes = L.routes || [];
+	const bestRT = L.best ? L.best.runTicks : s.result ? s.result.runTicks : null;
+	const what = s.running ? (s.stopping ? 'stopping…' : s.stage === 'polish' ? 'route found: polishing it' : s.stage === 'ending' ? 'ending…' : s.stage === 'starting' ? 'starting…' : 'running')
+		: s.stage === 'done' ? 'done' : s.stage;
+	let h = `<div class="hyBox"><div class="hyH"><span>${s.running ? '<span class="spin"></span>' : ''}<b>Hybrid (best)</b> · ${esc(what)}</span><span class="hyT" title="time since it started">${mmss(s.elapsed)}</span></div>`;
+	const w = s.workers || {};
+	h += `<div class="hint">${s.cpu ? 'CPU only' : 'GPU + CPU'} · threads: compiler ${w.compiler || '?'}, search ${w.search || '?'} · no time cap · ${s.restartS ? `restarts fresh after ${mmss(s.restartS)} stuck` : 'never restarts'} · ${mmss(s.polishS)} of polish after its first route</div>`;
+	const rows = [];
+	const f = c.furthest;
+	rows.push(['Compiler', c.alive === undefined ? 'starting…' : `${(c.anchors || 0).toLocaleString('en-US')} anchors · gain ${c.maxGain || 0}` +
+		// (its distance: the steer field's tiles; 6000 and more = no value there)
+		`${f ? ` (furthest: ${esc(f.desc || `gain ${f.gain}`)}${f.dist !== null && f.dist !== undefined && +f.dist < 6000 ? `, ${(+f.dist).toFixed(1)} tiles to go` : ''})` : ''}` +
+		`${c.routes ? ` · ${c.routes} route${c.routes > 1 ? 's' : ''}` : ''}${c.round ? ` · round ${c.round + 1}` : ''}` +
+		`${c.alive === false ? ` · ended${c.exit !== null && c.exit !== undefined ? ` (exit ${esc(String(c.exit))})` : ''}` : c.stage ? ` · ${esc(c.stage)}` : ''}`]);
+	const nr = q.nearest;
+	rows.push(['Search', q.state === undefined ? 'starting…' : `${nr ? `nearest <b>${(+nr.tiles).toFixed(1)}</b> tiles from the trophy${nr.strategy ? ` (${esc(nr.strategy)})` : ''}` : 'no attempt yet'}` +
+		`${q.rooms ? ` · ${q.rooms} room${q.rooms > 1 ? 's' : ''}` : ''}${q.run ? ` · run ${q.run + 1}` : ''}${q.state === 'optimizing' ? ' · optimizing its route' : ''}`]);
+	if (L.prefix) rows.push(['Prefix', `a search from ${esc(L.prefix.why)}${L.prefix.nearest !== null && L.prefix.nearest !== undefined ? ` · nearest ${esc(String(L.prefix.nearest))} tiles` : ''}`]);
+	const rs = L.restarts || [];
+	if (s.restartS || rs.length) {
+		const last = rs[rs.length - 1];
+		rows.push(['Restarts', `${rs.length ? `${rs.length} (the last at ${mmss(last.t)}: ${esc(last.why)})` : 'none yet'}` +
+			`${!L.first && L.sinceProgress !== undefined && L.sinceProgress !== null ? ` · last progress ${mmss(L.sinceProgress)} ago` : ''}`]);
+	}
+	h += `<div class="hyS">${rows.map(([k, v]) => `<span>${k}</span><span>${v}</span>`).join('')}</div>`;
+	// (every verified route as it came, the newest first; the best one in green)
+	if (routes.length) {
+		h += `<div class="hyWrap"><table class="hyRoutes"><tr><th>found at</th><th>run time</th><th>by</th></tr>` +
+			routes.slice().reverse().map((r) => `<tr class="${r.runTicks === bestRT ? 'best' : ''}"><td>${mmss(r.t)}</td><td class="rt">${esc(r.time)}</td><td title="${esc(r.how || '')}">${esc(hyBy(r.by))}</td></tr>`).join('') +
+			`</table></div>`;
+	}
+	if (L.best && s.running) h += `<div class="hyBest"><span>best so far</span><b>${esc(L.best.time)}</b><span>${esc(hyBy(L.best.by))}, verified by replay</span></div>`;
+	if (s.log && s.log.length) h += `<details id="hyLog"${HYB.logOpen ? ' open' : ''}><summary class="hint">its log</summary><div class="cmpOut">${s.log.map((l) => `<span class="dim">${esc(mmss(l.t))}</span> ${esc(l.text)}`).join('\n')}</div></details>`;
+	h += '</div>';
+	const r = s.result;
+	if (r && !s.running) {
+		const known = HYB.jobs[`${s.started}:${r.runTicks}`];
+		h += `<div class="result"><div class="rk">Hybrid route${s.stage === 'stopped' ? ' (stopped)' : ''}</div><div class="rt">${esc(r.time)}</div>
+			<div class="rm">${r.runTicks.toLocaleString('en-US')} run ticks · by ${esc(hyBy(r.by))} at ${mmss(r.t)}${r.first ? ` · the first route ${fmt(r.first.runTicks)} by ${esc(hyBy(r.first.by))} at ${mmss(r.first.t)}` : ''}` +
+			`${r.polish && r.polish.saved > 0 ? ` · the polish saved ${(r.polish.saved / 100).toFixed(2)} s` : ''}${r.restarts ? ` · ${r.restarts} restart${r.restarts > 1 ? 's' : ''}` : ''} · verified by replay` +
+			`${r.deaths ? ` · ${r.deaths} death${r.deaths > 1 ? 's' : ''}` : ''}${r.chance < 1 ? ` · works in ${(r.chance * 100).toFixed(0)}% of EEO plays (random portals)` : ''}</div>
+			<div class="row"><button class="watch" id="hyWatch" title="Open it in the run viewer (a new run in your list)">&#9654; Watch</button>
+				<button class="${known && known.started ? 'primary' : 'go'}" id="hyOpt" title="Make it a run and start the optimizer on it (GPU if available)">${known && known.started ? 'Open the run →' : 'Optimize'}</button>
+				<button class="small" id="hyEetas">Download .eetas</button></div>
+			${s.loadtas ? `<div class="cmpLine"><input type="text" id="hyLine" readonly value="${esc(s.loadtas)}" title="the eeo-tas line: paste it in eeo-tas, then /reset and /playtas"><button class="small" id="bHyCopy">Copy</button></div>` : ''}
+			${HYB.noClip ? '<div class="hint">The browser refused the clipboard: copy the line above.</div>' : ''}
+			<div id="hyMsg"></div></div>`;
+	} else if (!s.running && s.message) h += `<div class="msg ${s.stage === 'stopped' ? 'info' : 'err'}">Hybrid: ${esc(s.message)}</div>`;
+	if (s.running) h += `<div class="row" style="margin-top:6px"><button class="small" id="bHyStop"${s.stopping ? ' disabled' : ''}>${s.stopping ? 'Stopping…' : 'Stop the hybrid'}</button>` +
+		`${L.best ? '<button class="small" id="hyEetas" title="The best verified route so far">Download the best so far</button>' : ''}</div>`;
+	el.innerHTML = h;
+	if ($('hyLog')) $('hyLog').ontoggle = () => { HYB.logOpen = $('hyLog').open; };
+	if ($('bHyStop')) $('bHyStop').onclick = async () => { try { HYB.st = await postJson('/api/editor/hybrid/stop', {}); } catch (e) { /* ignore */ } pollHybrid(); };
+	if ($('hyEetas')) $('hyEetas').onclick = () => { location.href = '/api/editor/hybrid/route.eetas'; };
+	if ($('hyWatch')) $('hyWatch').onclick = () => hybridJob(false);
+	if ($('hyOpt')) $('hyOpt').onclick = () => hybridJob(true);
+	if ($('bHyCopy')) $('bHyCopy').onclick = async () => {
+		const inp = $('hyLine');
+		try { await navigator.clipboard.writeText(inp.value); toast('The /loadtas line is copied.'); } catch (e) { inp.focus(); inp.select(); try { document.execCommand('copy'); toast('The /loadtas line is copied.'); } catch (e2) { toast('Select the line and copy it (Ctrl+C).', true); } }
+	};
+}
+/** the hybrid's route as a job (Watch: the run viewer; Optimize: started): POST /api/editor/job with its level and route,
+ *  as Find a route's routeJob */
+async function hybridJob(optimize) {
+	const s = HYB.st, r = s && s.result;
+	if (!r) return;
+	const key = `${s.started}:${r.runTicks}`, known = HYB.jobs[key];
+	const win = !optimize ? window.open('', '_blank') : null;
+	const go = (url) => { if (win) win.location.href = url; else location.href = url; };
+	const msg = (h, err) => { if ($('hyMsg')) $('hyMsg').innerHTML = h ? `<div class="msg ${err ? 'err' : 'info'}">${h}</div>` : ''; };
+	const name = `${s.name || LV.name} (hybrid)`;
+	try {
+		if (known && (!optimize || known.started)) {
+			if (optimize) { store.set('tasopt.sel', known.id); location.href = '/'; return; }
+			go(`/#watch=${known.id}&zoom=fit`); return;
+		}
+		msg('<span class="spin"></span>Making it a run (replayed in the exact physics)…');
+		let id = known && known.id, proc = null;
+		if (id && optimize) {
+			proc = GPU && GPU.available ? 'gpu' : 'cpu';
+			await postJson(`/api/jobs/${id}/start`, { processor: proc });
+		} else {
+			const [lv, rt] = await Promise.all([fetch('/api/editor/hybrid/level.eelvl'), fetch('/api/editor/hybrid/route.eetas')]);
+			if (!lv.ok || !rt.ok) throw new Error('the hybrid\'s level or route is gone (run it again)');
+			const j = await postJson('/api/editor/job', { eelvlB64: b64(await lv.arrayBuffer()), eetasB64: b64(await rt.arrayBuffer()), name, start: !!optimize });
+			id = j.job.id; proc = j.processor;
+		}
+		HYB.jobs[key] = { id, started: !!optimize };
+		store.set('eeat.editor.hyJobs', JSON.stringify(HYB.jobs));
+		if (optimize) {
+			store.set('tasopt.sel', id);
+			renderHybrid();
+			msg(`Optimizing on the ${proc === 'gpu' ? 'GPU + CPU' : 'CPU'}. <a href="/">Open your runs</a> to follow it.`);
+			toast(`<b>${esc(name)}</b> is optimizing. <a href="/">Open your runs</a>`);
+		} else { msg(''); go(`/#watch=${id}&zoom=fit`); }
+	} catch (e) {
+		if (win) win.close();
+		msg(esc(e.message), true);
+	}
+}
+$('bHybrid').onclick = hybridLevel;
+$('sHyStall').value = store.get('eeat.editor.hyStall') || '1800';
+if (!$('sHyStall').value) $('sHyStall').value = '1800';
+$('sHyStall').onchange = () => store.set('eeat.editor.hyStall', $('sHyStall').value);
 // (while Find and optimize runs, Stop ends it: Find a route stops and its run pauses with its best)
 $('bStop').onclick = async () => {
 	if (AUTO.st && AUTO.st.running) { try { AUTO.st = await postJson('/api/editor/autotas/stop', {}); } catch (e) { /* ignore */ } pollAuto(); pollSolve(); return; }
@@ -3103,6 +3316,8 @@ function demoLevel() {
 	pollSolve();
 	pollAuto();
 	pollCompile();   // (a compile running or done: its lines; no clipboard or toast for one this page did not start)
+	pollHybrid();    // (a hybrid running or done: its live state, its route; no clipboard or toast for one this page did not start)
+	setTimeout(loadLevelList, 1500);   // ("Open a level": its campaign and other sections)
 	jobFromHash();   // #job=<id>: "Open in level editor" (the run viewer, the job page)
 	window.addEventListener('hashchange', jobFromHash);
 })();

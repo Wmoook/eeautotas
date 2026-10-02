@@ -430,6 +430,29 @@ function rentedMachines(jobs, now, extras) {
 	for (const m of by.values()) m.jobs.sort((x, y) => (y.running - x.running) || gi(x) - gi(y) || String(x.name).localeCompare(String(y.name)));
 	return { since: tonightStart(now), machines: [...by.values()].sort((x, y) => x.machine.localeCompare(y.machine)) };
 }
+// The campaign level a job's level is (the page's runs list: its Campaign and Other sections): the level check's match at
+// import (meta.level.check.campaign: a file with the name and size of one of EEO's campaign levels, the same blocks or
+// not), EEO's own copy imported in its place (meta.level.eeoCopy), else (a job imported before the level check) a
+// campaign level of the level's name and size in EEO's campaigns.zip (src/levelcheck.js campaignLevelsFor; its index read
+// again at most every CAMP_MS). -> {entry, campaign, title, tier, tiers} | null
+const CAMP_MS = 60e3;
+let campMemo = { at: 0, map: new Map() };
+function campaignOfMeta(meta) {
+	const lv = meta && meta.level;
+	if (!lv) return null;
+	const k = (lv.check && lv.check.campaign) || lv.eeoCopy;
+	const of = (x) => ({ entry: x.entry, campaign: String(x.entry).split('/')[0], title: x.title || '', tier: +x.tier || 0, tiers: +x.tiers || 0 });
+	if (k && k.entry) return of(k);
+	if (!lv.name || !lv.width || !lv.height) return null;
+	if (Date.now() - campMemo.at > CAMP_MS) campMemo = { at: Date.now(), map: new Map() };
+	const key = `${lv.name}|${lv.width}|${lv.height}`;
+	if (!campMemo.map.has(key)) {
+		let l = null;
+		try { l = LC.campaignLevelsFor(lv.name, lv.width, lv.height)[0] || null; } catch (e) { l = null; }
+		campMemo.map.set(key, l ? of(l) : null);
+	}
+	return campMemo.map.get(key);
+}
 /** Everything the web app and `tas.js status` show about a job. extraPid: a grind the caller started itself. */
 function summary(id, extraPid) {
 	const dir = jobDir(id);
@@ -459,7 +482,7 @@ function summary(id, extraPid) {
 		savedTicks: orig - bestTicks, history: st.history || [], stage: pid ? (st.stage || '') : '', round: st.rounds || 0,
 		coinsOptional: st.coinsOptional, optimizingSince: pid ? st.sessionStarted : null, lastUpdate: st.updated || null, workers: st.workers,
 		chance: st.chance !== undefined ? st.chance : (meta.rng ? meta.rng.chance : 1), report, live, remote,
-		inbox: inboxPending(id), focus: focusState(id), logTail: logTail(id, 14),
+		inbox: inboxPending(id), focus: focusState(id), logTail: logTail(id, 14), campaign: campaignOfMeta(meta),
 		files: { dir, best: path.join(dir, 'best.eetas'), level: levelJsonOf(id) } };
 }
 const listJobs = (extraPids) => C.jobIds().map((id) => summary(id, extraPids && extraPids.get(id))).sort((x, y) => (y.created || 0) - (x.created || 0));
@@ -1012,7 +1035,7 @@ module.exports = {
 	formatWhere, formatReplay, formatStatus, evText, liveText, remoteText, remoteView, rentedMachines, REMOTE_FRESH_MS,
 	JOBS, DATA, RUNNING_FILE, jobDir, slug, resolve, levelJsonOf, loadJobLevel, pct,
 	pidAlive, runningPid, killTree, stopGpuSearcher, updateStatus, startJob, stopJob, deleteJob, importJob,
-	summary, listJobs, focusState, finishReport, tryCandidate, inboxResult, prunePieces, where, replayInfo, renderJob, focus, logTail,
+	summary, listJobs, campaignOfMeta, focusState, finishReport, tryCandidate, inboxResult, prunePieces, where, replayInfo, renderJob, focus, logTail,
 	parseInputs, probe, probeContext, stamp, START_MODES, normStart,
 	MAX_BLOCK_ID, MAX_CELLS, MAX_TICKS, MAX_PROBE_INPUTS,
 };

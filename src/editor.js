@@ -4441,6 +4441,167 @@ function compileStop() {
 	return compileState();
 }
 
+// ---------------------------------------------------------------- the HYBRID action (tools/hybrid.js, "Hybrid (best)")
+// The page's "Hybrid (best)" button (POST /api/editor/hybrid): the level -> tools/hybrid.js in its own process, as the
+// compile action runs src/compile.js, one at a time: the compiler (src/compile.js with its leg searches, EEAT_HYBRID=1)
+// and the search product (Find a route, a job from its first route and the optimizer) side by side, hand-overs both ways,
+// every route replayed before it counts. With NO TIME CAP (--noCap=1): it runs until a verified route and its polish
+// (polishS, HYBRID_POLISH_S 180 s: the optimizer, the compiler's polish, the joins), or Stop. THE RESTART
+// (--restartOnStallS=restartS, the page's setting, HYBRID_RESTART_S 1800 s; 0 = none): before any route, no progress of
+// either side for that long starts the run again FRESH (the search with a new seed; the compiler goes on in its rounds),
+// it never stops it. The workers: the app's count as Find a route takes it (cpuWorkers: the request's, else N - 1, at
+// most the benchmark's fastest, half while a job runs), split by hybridWorkers (the compiler 3/8, the search the rest,
+// the prefix searches half the search's); the GPU as Find a route uses it (the app's GPU benchmark found one), else
+// --cpu=1: CPU only. Its JSON lines (--json=1) are the live state (GET: `live`); the page's Stop is its 'stop' line
+// (--stdin=1: its end is written as a signal's; a tree kill HY_KILL_MS later if it has not ended). At its end the best
+// verified route (its final, read back and replayed there) is replayed once more here and kept in
+// <data>/editor/hybrid/routes/ (route.eetas; the eeo-tas line /loadtas <that file>, which the page copies); the page's
+// Optimize makes a job of it (POST /api/editor/job). (tests: EEAT_HYBRID_TOOL=<a stand-in for tools/hybrid.js>)
+const HYBRID_RESTART_S = 1800, HYBRID_POLISH_S = 180, HY_KILL_MS = 120000, HY_LOG_KEEP = 60;
+let HY = null;
+const hybridDir = () => path.join(dir(), 'hybrid');
+const hybridTool = () => (process.env.EEAT_HYBRID_TOOL ? path.resolve(process.env.EEAT_HYBRID_TOOL) : path.join(__dirname, '..', 'tools', 'hybrid.js'));
+/** W workers -> {compiler, search, prefix, total}: the compiler 3/8 (at least 1), the search the rest (at least 1), its
+ *  prefix searches half the search's (at least 1) */
+function hybridWorkers(W) {
+	const total = Math.max(1, Math.round(+W) || 1);
+	const compiler = Math.max(1, Math.round(total * 3 / 8)), search = Math.max(1, total - compiler);
+	return { compiler, search, prefix: Math.max(1, Math.floor(search / 2)), total };
+}
+/** POST /api/editor/hybrid: b {eelvlB64 (or level), name, source, workers, restartS (1800; 0: no restart), polishS (180)},
+ *  gpu: the server's GPU record (systemInfo().processors[1]) -> hybridState() */
+function hybridStart(b, gpu) {
+	if (HY && HY.running) throw new Error('the hybrid is already running (one at a time): wait for it, or stop it');
+	const buf = b.eelvlB64 ? Buffer.from(String(b.eelvlB64), 'base64') : b.level ? eelvlOf(b.level) : null;
+	if (!buf || !buf.length) throw new Error('missing eelvlB64 (the level as .eelvl bytes, base64)');
+	const ins = inspect(buf, { source: b.source });
+	if (ins.problems.length) { const e = new Error(ins.problems.map((q) => q.text).join(' ')); e.problems = ins.problems; throw e; }
+	const tool = hybridTool();
+	if (!fs.existsSync(tool)) throw new Error(`the hybrid is not part of this app (${tool} is missing)`);
+	const d = hybridDir(), run = path.join(d, 'run');
+	fs.mkdirSync(d, { recursive: true });
+	try { fs.rmSync(run, { recursive: true, force: true }); } catch (e) { /* in use: hybrid.js writes over it */ }
+	fs.mkdirSync(run, { recursive: true });
+	const lf = path.join(d, 'level.eelvl');
+	fs.writeFileSync(lf, buf);
+	const name = String(b.name || ins.json.world_name || 'level').slice(0, 80);
+	const workers = hybridWorkers(cpuWorkers(b.workers));
+	const cpu = !(gpu && gpu.available);
+	const restartS = b.restartS !== undefined && b.restartS !== null && +b.restartS === 0 ? 0 : Math.max(60, Math.min(86400, Math.round(+b.restartS || HYBRID_RESTART_S)));
+	const polishS = Math.max(20, Math.min(3600, Math.round(+b.polishS || HYBRID_POLISH_S)));
+	const args = [tool, lf, '--noCap=1', `--restartOnStallS=${restartS}`, `--polishS=${polishS}`, `--cworkers=${workers.compiler}`, `--sworkers=${workers.search}`,
+		`--pworkers=${workers.prefix}`, `--out=${run}`, `--name=${name}`, '--json=1', '--stdin=1', ...(cpu ? ['--cpu=1'] : [])];
+	// (POSIX: its own process group, so the forced stop ends its children too; Windows: they end with it, Node's job object)
+	const ch = spawn(process.execPath, args, { cwd: path.resolve(__dirname, '..'), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: C.workerHeapEnv(),
+		detached: process.platform !== 'win32' });
+	const me = HY = { running: true, started: Date.now(), name, buf, workers, cpu, restartS, polishS, stage: 'starting', live: null, log: [], result: null, routeFile: null,
+		loadtas: null, message: '', kid: ch, err: '', stopping: false, stopped: false, end: null, killT: null };
+	ch.stdin.on('error', () => { /* ended */ });
+	let out = '';
+	const onEvent = (ev) => {
+		if (ev.ev === 'state') { me.live = ev; if (me.running) me.stage = ev.ending ? 'ending' : ev.first ? 'polish' : 'running'; }
+		else if (ev.ev === 'log') { me.log.push({ t: +ev.t || 0, text: String(ev.text || '').slice(0, 400) }); if (me.log.length > HY_LOG_KEEP) me.log.shift(); }
+		else if (ev.ev === 'end') me.end = ev;
+	};
+	ch.stdout.on('data', (chunk) => {
+		out += chunk;
+		const k = out.lastIndexOf('\n');
+		if (k < 0) return;
+		const lines = out.slice(0, k).split('\n');
+		out = out.slice(k + 1);
+		for (const l of lines) { const s = l.trim(); if (!s.startsWith('{')) continue; try { onEvent(JSON.parse(s)); } catch (e) { /* a partial line */ } }
+	});
+	ch.stderr.on('data', (c) => { me.err = (me.err + c).slice(-4000); });
+	ch.on('error', (e) => { me.message = `the hybrid could not start: ${e.message}`; });
+	ch.on('close', (code) => {
+		me.running = false; me.kid = null; me.code = code; me.ended = Date.now();
+		if (me.killT) { clearTimeout(me.killT); me.killT = null; }
+		let R = null;
+		try { R = JSON.parse(fs.readFileSync(path.join(run, 'hybrid.json'), 'utf8')); } catch (e) { R = null; }
+		me.report = R ? { stop: R.stop, first: R.first, final: R.final, polish: R.polish, restarts: R.restarts || [], routes: (R.routes || []).filter((r) => r.verified).length } : null;
+		const why = (R && R.stop && R.stop.why) || (me.end && me.end.why) || '';
+		const best = path.join(run, 'best.eetas');
+		if (R && R.final && R.final.verified && fs.existsSync(best)) {
+			try {
+				// (the route replayed once more here; kept next to the runs of earlier hybrids: the eeo-tas line reads it)
+				const L = require('./cleanroute.js').editorLevel(me.buf), ms = C.readEetas(best), ev = C.evaluate(L, ms);
+				if (!ev) throw new Error('the route does not finish on its replay here');
+				const rd = path.join(d, 'routes');
+				fs.mkdirSync(rd, { recursive: true });
+				const f = path.join(rd, `${safeName(me.name).replace(/[^\w.-]+/g, '_')}_${ev.runTicks}_${new Date(me.started).toISOString().replace(/[-:]/g, '').slice(0, 15)}.eetas`);
+				C.writeEetas(f, ev.ms);
+				me.routeFile = f;
+				me.loadtas = `/loadtas ${f}`;
+				me.result = { runTicks: ev.runTicks, time: C.fmt(ev.runTicks), ticks: ev.complete, deaths: ev.deaths, chance: ev.chance, by: R.final.by, t: R.final.t,
+					first: R.first || null, polish: R.polish || null, routes: me.report.routes, restarts: me.report.restarts.length };
+				me.stage = me.stopped ? 'stopped' : 'done';
+				me.message = `Hybrid: ${C.fmt(ev.runTicks)} (${ev.runTicks} run ticks, by the ${R.final.by})${me.stopped ? ', stopped' : ''}`;
+			} catch (e) { me.stage = 'error'; me.message = `the hybrid's route could not be kept: ${e.message}`; }
+		} else {
+			me.stage = me.stopped ? 'stopped' : code === 2 ? 'no route' : 'error';
+			me.message = me.stopped ? 'stopped before a route' : why ? `no route (${why})` : me.message || `the hybrid ended with exit code ${code}${me.err.trim() ? `: ${me.err.trim().split('\n').pop().slice(0, 300)}` : ''}`;
+		}
+	});
+	return hybridState();
+}
+/** GET /api/editor/hybrid: {running, stage (none / starting / running / polish / ending / done / stopped / no route /
+ *  error), started, elapsed (s), name, workers, cpu, restartS, polishS, live (hybrid.js's last state line: liveOf), log
+ *  [{t, text}] (the last lines), result {runTicks, time, ticks, deaths, chance, by, t, first, polish, routes, restarts},
+ *  loadtas, message, stopping} */
+function hybridState() {
+	if (!HY) return { running: false, stage: 'none', live: null, log: [], result: null, loadtas: null, message: '' };
+	return { running: HY.running, stage: HY.stage, started: HY.started, elapsed: Math.round(((HY.ended || Date.now()) - HY.started) / 100) / 10, name: HY.name,
+		workers: HY.workers, cpu: HY.cpu, restartS: HY.restartS, polishS: HY.polishS, live: HY.live, log: HY.log.slice(-14), result: HY.result, loadtas: HY.loadtas,
+		message: HY.message, stopping: HY.stopping };
+}
+/** POST /api/editor/hybrid/stop: its 'stop' line (it ends as a signal ends it: the best route so far is its final), a
+ *  tree kill HY_KILL_MS later if it is still running */
+function hybridStop() {
+	const me = HY;
+	if (me && me.running && me.kid && !me.stopping) {
+		me.stopping = true; me.stopped = true;
+		try { me.kid.stdin.write('stop\n'); } catch (e) { /* gone */ }
+		me.killT = setTimeout(() => { if (me.running && me.kid) { try { require('./jobs.js').killTree(me.kid.pid); } catch (e) { /* gone */ } } }, HY_KILL_MS);
+		if (me.killT.unref) me.killT.unref();
+	}
+	return hybridState();
+}
+/** GET /api/editor/hybrid/route.eetas (its route: the final, else the best so far) | level.eelvl -> {file, name} | null */
+function hybridFile(sub) {
+	if (!HY) return null;
+	if (sub === 'level.eelvl') { const f = path.join(hybridDir(), 'level.eelvl'); return fs.existsSync(f) ? { file: f, name: `${safeName(HY.name)}.eelvl` } : null; }
+	if (sub !== 'route.eetas') return null;
+	const f = HY.routeFile || (HY.running ? path.join(hybridDir(), 'run', 'best.eetas') : null);
+	return f && fs.existsSync(f) ? { file: f, name: `${safeName(HY.name)} hybrid.eetas` } : null;
+}
+
+// ---------------------------------------------------------------- the page's "Open a level": a campaign section and another
+/** GET /api/editor/levels: the levels the page offers in two sections: campaign (EEO's campaign levels from its
+ *  campaigns.zip, src/levelcheck.js campaignIndex, in EEO's order: the campaign's number, then the tier; the page opens one
+ *  through GET /api/levelcheck/eeo-copy) and other (the levels of your runs that are none of them (jobs.js
+ *  campaignOfMeta), one per level file (its md5), by name; the page opens one through the job: GET
+ *  /api/jobs/<id>/original.eelvl) -> {campaign: [{entry, name, title, campaign, tier, tiers, width, height}], other: [{job,
+ *  name, jobName, width, height}], why (no campaigns.zip: why)} */
+function levelList() {
+	let idx;
+	try { idx = LC.campaignIndex(); } catch (e) { idx = { levels: [], why: e.message }; }
+	const num = (l) => { const n = parseInt(String(l.campaign), 10); return (Number.isFinite(n) ? n : 9999) * 100 + (+l.tier || 0); };
+	const campaign = idx.levels.slice().sort((a, b) => num(a) - num(b) || String(a.entry).localeCompare(String(b.entry)))
+		.map((l) => ({ entry: l.entry, name: l.name, title: l.title, campaign: l.campaign, tier: l.tier, tiers: l.tiers, width: l.width, height: l.height }));
+	const J = require('./jobs.js');
+	const seen = new Set(), other = [];
+	for (const id of C.jobIds()) {
+		const m = C.readJSON(path.join(J.jobDir(id), 'meta.json'), null);
+		if (!m || !m.level || J.campaignOfMeta(m) || !fs.existsSync(path.join(J.jobDir(id), 'original.eelvl'))) continue;
+		const key = m.level.md5 || `${m.level.name}|${m.level.width}|${m.level.height}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		other.push({ job: id, name: String(m.level.name || m.name || id), jobName: String(m.name || ''), width: m.level.width, height: m.level.height });
+	}
+	other.sort((a, b) => a.name.localeCompare(b.name) || a.jobName.localeCompare(b.jobName));
+	return { campaign, other, why: idx.why || null };
+}
+
 // ---------------------------------------------------------------- a job from a found route (Watch / Optimize)
 /** b: { eelvlB64, eetasB64 } (else the last search's level and route), name. Returns the job's meta (jobs.importJob). */
 function makeJob(b) {
@@ -4458,6 +4619,7 @@ function makeJob(b) {
 /** stops a running search (the server is shutting down) */
 function shutdown() {
 	if (CMP && CMP.running) compileStop();
+	if (HY && HY.running) hybridStop();   // (its 'stop' line; the end of its stdin, as this process ends, too)
 	if (S) { S.halted = true; saveNow(); }
 	for (const ch of kids) halt(ch, 'stopped');
 	if (alive(proofKid)) { try { proofKid.kill(); } catch (e) { /* gone */ } }
@@ -4465,6 +4627,7 @@ function shutdown() {
 
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown, heatState, hint,
 	compileStart, compileState, compileStop, PLAN_STRATEGY, stratOf, planOn,
+	hybridStart, hybridState, hybridStop, hybridFile, hybridWorkers, HYBRID_RESTART_S, HYBRID_POLISH_S, levelList,
 	EXP_REPLAY_MS, EXP_TIP, IMPROVE_KEEP,
 	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, burstSizeArgs, breakShareOpen, breakDryAfter, rollsDryAfter, sourcesOf, classRoutes, coinsOfDesc, progOfDesc, progGt, progressCands, breakCmp, evictVictim, gateEnter, reachInfo, reachBase,
 	escRotOf, escFromOf, escTurnOf, rollsOf, rollsNext, rollsFresh, STRATEGIES, GX_DEFAULTS, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S,
