@@ -30,14 +30,15 @@ function appFiles() {
 	const walk = (rel) => {
 		for (const e of fs.readdirSync(path.join(ROOT, rel), { withFileTypes: true })) {
 			const r = `${rel}/${e.name}`;
-			if (e.isDirectory()) { if (!skip.has(r)) walk(r); } else if (/\.(js|json|html|md)$/.test(e.name)) files.push(r);
+			if (e.isDirectory()) { if (!skip.has(r)) walk(r); } else if (/\.(js|json|html|md|css)$/.test(e.name)) files.push(r);
 		}
 	};
 	walk('src');
 	walk('docs');
 	for (const f of ['README.md', 'CLAUDE.md', 'AGENTS.md', 'package.json']) files.push(f);
-	// (the level editor's "Hybrid (best)" runs tools/hybrid.js, which runs tools/perfect/joins.js: src/editor.js hybridStart)
-	for (const f of ['tools/hybrid.js', 'tools/perfect/joins.js']) files.push(f);
+	// (the level editor's "Hybrid (best)" runs tools/hybrid.js, which runs tools/perfect/joins.js: src/editor.js hybridStart;
+	// `EEAutoTAS.exe stats-import <file.csv>` imports a benchmark for the Stats page: tools/exe/launcher.js)
+	for (const f of ['tools/hybrid.js', 'tools/perfect/joins.js', 'tools/stats-import.js']) files.push(f);
 	return files.sort();
 }
 

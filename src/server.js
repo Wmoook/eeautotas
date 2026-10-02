@@ -21,9 +21,15 @@ const BENCH = require('./bench.js');
 const GFX = require('./eegfx.js');
 const ED = require('./editor.js');
 const LC = require('./levelcheck.js');
+const ST = require('./stats.js');
+const PH = require('./phases.js');
 
 const APP = path.join(__dirname, 'app', 'index.html');
 const EDITOR = path.join(__dirname, 'app', 'editor.html');
+const STATS = path.join(__dirname, 'app', 'stats.html');
+// the pages' shared files (docs/ui/DESIGN.md section 4): only these names, never a path from the URL
+const APP_FILES = { 'ui.css': 'text/css; charset=utf-8', 'ui.js': 'text/javascript; charset=utf-8',
+	'phases.js': 'text/javascript; charset=utf-8', 'stats.js': 'text/javascript; charset=utf-8' };
 const args = C.parseArgs(process.argv.slice(2));
 const PORT = +(args.port || 47823);
 
@@ -123,6 +129,9 @@ const ENDPOINTS = [
 	['GET', '/api/jobs/:id/best.eetas', 'download the best run (also original.eetas)'],
 	['GET', '/api/jobs/:id/original.eelvl', 'the job\'s level file, byte for byte as imported (404 when it is missing); the level editor opens it: /editor#job=<id>'],
 	['GET', '/api/jobs/:id/log', 'the last 300 lines of grind.log'],
+	['GET', '/api/jobs/:id/phases?range=session&sig=', 'the Optimizer view\'s timeline (src/phases.js): what the optimizer did and does, from grind_events.jsonl and gpu/events.jsonl ' +
+		'(older runs: grind.log): now (a sentence), lanes, spans (a block per stage run, sweep window, GPU invocation), rounds (with the stage chips), marks (the finds), best (the best ' +
+		'time\'s steps), score (what found time), history (every find, classified); range = session | 15m | 1h | 6h | all; ?sig= (the last answer\'s sig): {unchanged: true} when nothing changed'],
 	['GET', '/api/jobs/:id/where?t=1:10.00', 'state at a run time (m:ss.cc) or tick: position, velocity, tiles, coins, next inputs/events, ASCII map (&format=text)'],
 	['GET', '/api/jobs/:id/render.png?from=1:10&to=1:14', 'PNG of the level around the path in that range (&scale=px per tile, &margin=tiles)'],
 	['GET', '/api/jobs/:id/replay', 'summary + timeline of the best run (coins, random portals, odds) (&format=text)'],
@@ -137,6 +146,11 @@ const ENDPOINTS = [
 	['GET', '/api/eegfx', 'EE graphics for the viewer, read from your eeo-tas folder: {available, dir, why, sheets, blocks: {id: [sheet, frame, y, layer, shadow]}, sprites, rot, smiley, ...}'],
 	['POST', '/api/eegfx', 'set the eeo-tas folder for EE graphics: JSON {dir} (checked: media/blocks.png and src/items/ItemManager.as; "" = find it automatically)'],
 	['GET', '/api/eegfx/sheet/<name>.png', 'one sprite sheet from the eeo-tas media folder (only the sheets the map lists)'],
+	['GET', '/stats', 'the Stats page (your runs; imported benchmarks)'],
+	['GET', '/api/stats', 'the Stats page\'s numbers of your runs (src/stats.js): totals (runs, running, savedTicks, originalTicks, improvements, today, optimizedMs (the optimizer\'s sessions; optimizedApprox: some from grind.log), simTicks (null without events), since), byFam (the time saved by the phase family that found it: {saved, finds, stages}), byStage ([{key, label, fam, finds, saved}], the most saved first), recent (the newest 20 improvements: {t, job, name, runTicks, time, saved, what, fam, label}), jobs [{id, name, section, campaign, created, running, original, best, savedTicks, pct, improvements, firstT, lastT, optimizedMs, approx, spark}]'],
+	['GET', '/api/stats/benchmarks', 'the imported benchmarks (tools/stats-import.js <file.csv>: <data>/benchmarks/<id>.json), newest first: {benchmarks: [{id, name, source, imported, levels, routed, confirmed, sections}]}'],
+	['GET', '/api/stats/benchmarks/:id', 'one benchmark: {v, id, name, source, imported, columns, sections, rows [{i, section, level, result (routed / unconfirmed / none), solveS, by, best, run, known, ratio, searchAlone, compilerAlone, merged}], numbers (the counts, the time-to-solve bins, the quality against the best known), jobs: {"<row i>": "<job id>"} (the runs of its levels in the app)}; 404 JSON for an unknown id'],
+	['GET', '/ui.css', 'the pages\' shared files: ui.css, ui.js (theme, nav, offline banner, tooltip, formats, small charts), phases.js (the Optimizer view), stats.js (the Stats page)'],
 	['GET', '/editor', 'the level editor (place blocks, a start and the trophy; the GPU and the CPU find a route); /editor#job=<id> opens a job\'s level (&path=1: with its best run\'s path)'],
 	['GET', '/api/editor/blocks?ids=9,121,...', 'block info for the editor: names, kinds ([kind, dir/sub, solid]), EE minimap colors, argument kinds'],
 	['GET', '/api/editor/levels', 'the editor\'s "Open a level", in two sections: campaign (EEO\'s campaign levels from campaigns.zip, in EEO\'s order: {entry, name, title, campaign, tier, tiers, width, height}; GET /api/levelcheck/eeo-copy opens one) and other (the levels of your runs that are no campaign level, one per file: {job, name, jobName, width, height}); why (no campaigns.zip)'],
@@ -367,6 +381,11 @@ const server = http.createServer(async (req, res) => {
 		const q = (k) => u.searchParams.get(k);
 		if (req.method === 'GET' && (u.pathname === '/' || u.pathname === '/index.html')) return send(res, 200, fs.readFileSync(APP), 'text/html; charset=utf-8');
 		if (req.method === 'GET' && (u.pathname === '/editor' || u.pathname === '/editor.html')) return send(res, 200, fs.readFileSync(EDITOR), 'text/html; charset=utf-8');
+		if (req.method === 'GET' && (u.pathname === '/stats' || u.pathname === '/stats.html')) return send(res, 200, fs.readFileSync(STATS), 'text/html; charset=utf-8');
+		if (req.method === 'GET' && parts.length === 1 && Object.prototype.hasOwnProperty.call(APP_FILES, parts[0])) {
+			res.writeHead(200, { 'Content-Type': APP_FILES[parts[0]], 'Cache-Control': 'no-cache' });
+			return res.end(fs.readFileSync(path.join(__dirname, 'app', parts[0])));
+		}
 		if (parts[0] !== 'api') return send(res, 404, { error: 'not found' });
 		if (req.method === 'GET' && parts.length === 1) return send(res, 200, { app: 'EE Auto TAS', endpoints: ENDPOINTS.map(([m, p, d]) => ({ method: m, path: p, what: d })) });
 		if (req.method === 'GET' && parts[1] === 'state') {
@@ -389,6 +408,16 @@ const server = http.createServer(async (req, res) => {
 			}
 		}
 		if (parts[1] === 'editor') return await editorRoute(req, res, parts, q);
+		// the Stats page's data (src/stats.js; docs/ui/DESIGN.md 11.5, 11.6): your runs, the imported benchmarks (ids by ST.ID_RE only)
+		if (req.method === 'GET' && parts[1] === 'stats') {
+			if (parts.length === 2) return send(res, 200, ST.jobsStats(listJobs(), { now: Date.now() }));
+			if (parts[2] === 'benchmarks' && parts.length === 3) return send(res, 200, { benchmarks: ST.listBenchmarks() });
+			if (parts[2] === 'benchmarks' && parts.length === 4) {
+				const b = ST.readBenchmark(parts[3]);
+				if (!b) return send(res, 404, { error: `no benchmark ${JSON.stringify(parts[3].slice(0, 64))} (tools/stats-import.js imports one)` });
+				return send(res, 200, { ...b, numbers: ST.benchNumbers(b), jobs: ST.matchJobs(b, listJobs()) });
+			}
+		}
 		// the level check (src/levelcheck.js): EEO's own copy of a campaign level, effect blocks that do nothing, the md5
 		if (parts[1] === 'levelcheck') {
 			if (req.method === 'POST' && parts.length === 2) {
@@ -464,6 +493,14 @@ const server = http.createServer(async (req, res) => {
 				return res.end(fs.readFileSync(f));
 			}
 			if (req.method === 'GET' && what === 'log') return send(res, 200, { lines: J.logTail(id, 300) });
+			// the Optimizer view's timeline (src/phases.js; docs/ui/DESIGN.md 11.3)
+			if (req.method === 'GET' && what === 'phases') {
+				const ch = children.get(id), pid = J.runningPid(id) || (ch && ch.exitCode === null ? ch.pid : 0);
+				const lv = pid ? C.readJSON(path.join(dir, 'live.json'), null) : null;
+				const rm = C.readJSON(path.join(dir, 'remote.json'), null);
+				return send(res, 200, PH.jobTimeline(dir, { range: q('range') || 'session', sig: q('sig') || '', running: !!pid, pid,
+					live: lv && Date.now() - (+lv.t || 0) < 5000 ? lv : null, remote: rm && rm.source ? String(rm.source) : null }));
+			}
 			if (req.method === 'GET' && what === 'where') {
 				const w = J.where(J.loadJobLevel(id), C.readEetas(path.join(dir, 'best.eetas')), q('t') || q('time') || q('tick') || '0');
 				if (q('format') === 'text') return send(res, 200, J.formatWhere(w), 'text/plain; charset=utf-8');

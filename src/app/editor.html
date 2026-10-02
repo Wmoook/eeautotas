@@ -4,124 +4,80 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Level editor · EE Auto TAS</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 16 16%27%3E%3Ccircle cx=%278%27 cy=%278%27 r=%277.5%27 fill=%27%23b98100%27/%3E%3Ccircle cx=%278%27 cy=%278%27 r=%275.6%27 fill=%27%23ffc928%27/%3E%3Ccircle cx=%276.2%27 cy=%275.8%27 r=%271.6%27 fill=%27%23fff2b8%27/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/ui.css">
+<script src="/ui.js"></script>
 <style>
-:root {
-	--bg: #f4f2ec; --panel: #ffffff; --panel2: #f8f6f1; --ink: #1d1b16; --muted: #6b665b; --line: #e4dfd3;
-	--gold: #c9900f; --gold-soft: #fbf0d4; --good: #1f8a4c; --good-soft: #e3f4ea; --bad: #b3362b; --bad-soft: #fbe7e4;
-	--accent: #2c5fd6; --shadow: 0 1px 2px rgba(40, 32, 10, .06), 0 6px 20px rgba(40, 32, 10, .06);
-	--mono: ui-monospace, "Cascadia Mono", "Consolas", monospace;
-	color-scheme: light;
-}
-@media (prefers-color-scheme: dark) {
-	:root {
-		--bg: #15140f; --panel: #1e1c16; --panel2: #25221b; --ink: #f1ede2; --muted: #a39d8e; --line: #343026;
-		--gold: #f0b93a; --gold-soft: #3a2f14; --good: #4fcf86; --good-soft: #173424; --bad: #ff7a6b; --bad-soft: #3b1d19;
-		--accent: #7aa2ff; --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 8px 24px rgba(0, 0, 0, .25);
-		color-scheme: dark;
-	}
-}
-* { box-sizing: border-box; }
-[hidden] { display: none !important; }
+/* the level editor (docs/ui/DESIGN.md section 8); the shared system is /ui.css. The map column is always night (.stagewrap.night). */
 html, body { height: 100%; }
-body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 "Segoe UI", system-ui, sans-serif; }
-.app { display: grid; grid-template-rows: auto minmax(0, 1fr); height: 100vh; height: 100dvh; }
-header { display: flex; align-items: center; justify-content: space-between; gap: 10px 16px; flex-wrap: wrap; padding: 12px 16px 10px; }
-h1 { margin: 0; font-size: 21px; letter-spacing: -.02em; display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
-h1 a { color: inherit; text-decoration: none; display: inline-flex; align-items: center; gap: 9px; }
-h1 a:hover { color: var(--gold); }
-h1 .coin { width: 19px; height: 19px; border-radius: 50%; background: radial-gradient(circle at 35% 35%, #ffe28a, var(--gold) 60%, #8a5e05);
-	box-shadow: inset 0 0 0 2px rgba(0, 0, 0, .12); }
-h1 .sl { color: var(--muted); font-weight: 400; }
-.sub { color: var(--muted); margin-top: 2px; font-size: 12.5px; }
-.pills { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-.pill { font-size: 12px; padding: 4px 10px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
-.pill.ok { color: var(--good); border-color: color-mix(in srgb, var(--good) 35%, var(--line)); }
-.pill.no { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 35%, var(--line)); }
-a.pill { color: var(--ink); text-decoration: none; }
-a.pill:hover { border-color: var(--gold); }
-.main { display: grid; grid-template-columns: 262px minmax(0, 1fr) 318px; gap: 12px; padding: 0 12px 12px; min-height: 0; }
-.col { min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 12px; padding-bottom: 2px; }
-.card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); padding: 12px 13px; }
-.card h2 { margin: 0 0 9px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
-.card h2 small { text-transform: none; letter-spacing: 0; font-weight: 400; }
-label.f { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 4px; }
-.hint { font-size: 12px; color: var(--muted); margin-top: 6px; line-height: 1.4; }
-input[type=text], input[type=number], select { padding: 6px 9px; border-radius: 9px; border: 1px solid var(--line); background: var(--panel2); color: var(--ink); font: inherit; min-width: 0; }
+.app { display: grid; grid-template-rows: auto auto minmax(0, 1fr); height: 100vh; height: 100dvh; }
+.main { display: grid; grid-template-columns: 262px minmax(0, 1fr) 340px; gap: 12px; padding: 12px; min-height: 0; }
+.col { min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 12px; padding-bottom: 2px; scrollbar-width: thin; scrollbar-color: var(--line-2) transparent; }
+.col .card { padding: 12px; }
+.card > h2 { margin-bottom: 10px; }
+#rcSub { font: 600 12px/22px var(--f-ui); }
 input[type=text] { width: 100%; }
-input[type=number] { width: 76px; font-family: var(--mono); font-size: 13px; }
-button { font: 600 13px "Segoe UI", system-ui, sans-serif; border-radius: 9px; border: 1px solid var(--line); background: var(--panel2); color: var(--ink);
-	padding: 7px 12px; cursor: pointer; transition: .12s; }
-button:hover:not(:disabled) { border-color: var(--muted); }
-button:disabled { opacity: .45; cursor: default; }
-button.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
-button.go { background: var(--good); color: #fff; border-color: var(--good); }
-button.stop { background: var(--bad-soft); color: var(--bad); border-color: color-mix(in srgb, var(--bad) 30%, var(--line)); }
-button.watch { background: var(--gold-soft); color: var(--gold); border-color: color-mix(in srgb, var(--gold) 40%, var(--line)); }
-button.small { padding: 4px 9px; font-size: 12px; }
-.row { display: flex; gap: 7px; flex-wrap: wrap; align-items: center; }
-.lab { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
-.msg { margin-top: 10px; padding: 9px 11px; border-radius: 9px; font-size: 13px; }
-.msg.err { background: var(--bad-soft); color: var(--bad); }
-.msg.info { background: var(--panel2); color: var(--muted); }
-/* the level check (src/levelcheck.js): a file that differs from EEO's own copy, effect blocks that do nothing */
-.msg.warn { background: var(--gold-soft); color: var(--ink); border: 1px solid color-mix(in srgb, var(--gold) 40%, var(--line)); overflow-wrap: anywhere; }
-.msg.warn b.w { color: var(--gold); }
+input[type=number] { width: 76px; font-family: var(--f-num); }
+button.watch::before { display: none; }   /* (the page's Watch buttons carry their triangle in their text) */
 .msg.warn > div + div { margin-top: 5px; }
-.md5 { font: 11.5px var(--mono); color: var(--muted); overflow-wrap: anywhere; }
 /* the Compile action (src/compile.js): its stage lines like a compiler's, the eeo-tas line */
-.cmpOut { margin-top: 10px; padding: 8px 10px; border-radius: 9px; background: var(--panel2); font: 11.5px var(--mono); color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; }
+.cmpOut { margin-top: 10px; padding: 8px 10px; border-radius: var(--r2); background: var(--sunken); font: 11.5px/1.5 var(--f-mono); color: var(--ink); white-space: pre-wrap;
+	overflow-wrap: anywhere; max-height: 240px; overflow: auto; }
 .cmpOut .dim { color: var(--muted); }
 .cmpLine { display: flex; gap: 6px; margin-top: 8px; align-items: center; }
-.cmpLine input { flex: 1; min-width: 0; font: 11.5px var(--mono); }
-/* Hybrid (best) (tools/hybrid.js): its two sides, the restarts, every verified route as it came, the best so far */
-.hyBox { margin-top: 10px; padding: 9px 11px; border-radius: 10px; background: var(--panel2); border: 1px solid var(--line); font-size: 12.5px; }
+.cmpLine input { flex: 1; min-width: 0; height: 28px; font: 11.5px var(--f-mono); }
+/* a run panel: Hybrid (best) (tools/hybrid.js): its two sides, the restarts, every verified route as it came, the best so far */
+.hyBox { margin-top: 10px; padding: 10px 12px; border-radius: var(--r2); background: var(--raise); font-size: 12.5px; }
 .hyBox .hyH { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
-.hyBox .hyH b { font-size: 13px; }
-.hyBox .hyT { font: 600 13px var(--mono); color: var(--ink); white-space: nowrap; }
-.hyBox .hyS { display: grid; grid-template-columns: auto 1fr; gap: 3px 8px; margin-top: 7px; color: var(--muted); }
+.hyBox .hyH b { font: 600 14px var(--f-num); }
+.hyBox .hyT { font: 600 13px var(--f-num); font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; }
+.hyBox .hyS { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; margin-top: 8px; color: var(--ink-2); }
 .hyBox .hyS > span:nth-child(odd) { font-weight: 600; color: var(--ink); }
-.hyBox .hyBest { margin-top: 8px; display: flex; align-items: baseline; gap: 8px; }
-.hyBox .hyBest b { font: 700 22px var(--mono); color: var(--good); letter-spacing: -.02em; }
-.hyRoutes { width: 100%; margin-top: 7px; border-collapse: collapse; font: 11.5px var(--mono); }
-.hyRoutes th { text-align: left; font: 600 10.5px "Segoe UI", system-ui, sans-serif; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; padding: 2px 4px; border-bottom: 1px solid var(--line); }
-.hyRoutes td { padding: 2px 4px; color: var(--muted); white-space: nowrap; }
+.hyBox .hyS b { font-family: var(--f-num); color: var(--ink); }
+.hyBox .hyBest { margin-top: 8px; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; color: var(--ink-2); }
+.hyBox .hyBest b { font: 600 24px var(--f-num); font-variant-numeric: tabular-nums; color: var(--ahead); }
+.hyBox details { margin-top: 8px; }
+.hyRoutes { width: 100%; margin-top: 8px; border-collapse: collapse; font: 12px/18px var(--f-num); font-variant-numeric: tabular-nums; }
+.hyRoutes th { text-align: left; font: 600 11px/16px var(--f-ui); color: var(--ink-2); padding: 3px 6px; border-bottom: 1px solid var(--line-2); position: sticky; top: 0; background: var(--raise); }
+.hyRoutes td { padding: 3px 6px; color: var(--ink-2); white-space: nowrap; border-bottom: 1px solid var(--line); }
 .hyRoutes td.rt { color: var(--ink); }
-.hyRoutes tr.best td.rt { color: var(--good); font-weight: 700; }
+.hyRoutes tr.best td.rt { color: var(--ahead); font-weight: 600; }
 .hyWrap { max-height: 168px; overflow: auto; }
-.spin { display: inline-block; width: 12px; height: 12px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
-	animation: sp .8s linear infinite; vertical-align: -2px; margin-right: 6px; }
-@keyframes sp { to { transform: rotate(360deg); } }
-kbd { font: 11px var(--mono); background: var(--panel2); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+/* the Hybrid's Optimizer view (phases.js TL.render): compact under its panel (#hyTape), the full view in the sheet over the map */
+.tl:empty { display: none; }
+#hyTape { margin-top: 10px; }
 
 /* palette */
 .pgroup + .pgroup { margin-top: 10px; }
-.pgroup .gt { font-size: 11.5px; color: var(--muted); margin-bottom: 5px; }
+.pgroup .gt { font-size: 12px; color: var(--ink-2); margin-bottom: 5px; }
 .pgrid { display: grid; grid-template-columns: repeat(auto-fill, 36px); gap: 5px; }
-.pb { width: 36px; height: 36px; padding: 1px; border-radius: 8px; background: #0b0c10; border: 2px solid transparent; display: flex; align-items: center; justify-content: center; }
-.pb:hover:not(:disabled) { border-color: #6b7384; }
+.pb { width: 36px; height: 36px; padding: 1px; border-radius: var(--r2); background: #0b0c10; border: 2px solid transparent; display: flex; align-items: center; justify-content: center; }
+.pb:hover:not(:disabled) { background: #0b0c10; border-color: var(--line-2); }
 .pb canvas, .icon { width: 30px; height: 30px; display: block; image-rendering: pixelated; }
-.pb.sel { border-color: var(--gold); box-shadow: 0 0 0 2px var(--gold-soft); }
+.pb.sel { border-color: var(--coin); box-shadow: 0 0 0 2px var(--coin-wash); }
 .insp .cur { display: flex; gap: 10px; align-items: center; min-width: 0; }
-.insp .cur .big { width: 44px; height: 44px; border-radius: 9px; background: #0b0c10; padding: 4px; flex: none; }
+.insp .cur .big { width: 44px; height: 44px; border-radius: var(--r2); background: #0b0c10; padding: 4px; flex: none; }
 .insp .cur .big canvas { width: 36px; height: 36px; display: block; image-rendering: pixelated; }
 .insp .nm { min-width: 0; }
 .insp .nm b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.insp .nm span { color: var(--muted); font-size: 12px; }
+.insp .nm span { color: var(--ink-2); font-size: 12px; }
 .rots { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
-.rots button { padding: 2px; background: #0b0c10; border: 2px solid transparent; border-radius: 8px; }
-.rots button.sel { border-color: var(--gold); }
+.rots button { width: auto; height: auto; padding: 2px; background: #0b0c10; border: 2px solid transparent; border-radius: var(--r2); }
+.rots button:hover:not(:disabled) { background: #0b0c10; border-color: var(--line-2); }
+.rots button.sel { border-color: var(--coin); }
 .rots button canvas { width: 28px; height: 28px; display: block; image-rendering: pixelated; }
-.pf { display: grid; grid-template-columns: auto 1fr; gap: 6px 8px; align-items: center; margin-top: 8px; font-size: 12.5px; color: var(--muted); }
+.pf { display: grid; grid-template-columns: auto 1fr; gap: 6px 8px; align-items: center; margin-top: 8px; font-size: 12.5px; color: var(--ink-2); }
 
-/* the map */
-.stagewrap { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: #101217; border: 1px solid #262a33; border-radius: 14px; overflow: hidden;
-	box-shadow: var(--shadow); color: #e9ecf2; }
-.tools { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px 10px; border-bottom: 1px solid #22262e; }
-.stagewrap button { background: #1b1e25; color: #e9ecf2; border-color: #2f3440; padding: 6px 10px; font-size: 13px; }
-.stagewrap button:hover:not(:disabled) { border-color: #6b7384; }
-.stagewrap button.on { background: #3a2f14; border-color: #7a6220; color: #ffd76a; }
-.tools .sep { width: 1px; align-self: stretch; background: #2a2f3a; margin: 0 3px; }
-.tools .ck { font-size: 12.5px; color: #b8bfcc; display: inline-flex; align-items: center; gap: 5px; }
+/* the map (always night) */
+.stagewrap { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--panel); border: 1px solid var(--line);
+	border-radius: var(--r3); overflow: hidden; box-shadow: var(--shadow-card); color: var(--ink); }
+.tools { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+.tgroup { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.stagewrap button { height: 30px; padding: 0 10px; font-size: 13px; }
+.stagewrap button.on { background: var(--coin-wash); border-color: var(--coin-mark); color: var(--coin-ink); }
+.tools .sep { width: 1px; align-self: stretch; background: var(--line); margin: 0 3px; }
+.tools .ck { font-size: 12.5px; color: var(--ink-2); display: inline-flex; align-items: center; gap: 5px; height: 30px; padding: 0 7px; border-radius: var(--r2); cursor: pointer; }
+.tools .ck:hover { background: var(--raise); color: var(--ink); }
 .stage { position: relative; flex: 1; min-height: 240px; background: #0b0c10; overflow: hidden; touch-action: none; outline: none; }
 .stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 .stage canvas.fx { pointer-events: none; }   /* the search frontier's layer: the clicks go to the map under it */
@@ -132,91 +88,102 @@ kbd { font: 11px var(--mono); background: var(--panel2); border: 1px solid var(-
    map repaints nothing of it */
 .stage canvas.heat { inset: auto; left: 0; top: 0; width: auto; height: auto; transform-origin: 0 0; will-change: transform; }
 /* the exploration's legend (bottom left) and Follow's panel (bottom centre) */
-.exleg { position: absolute; left: 10px; bottom: 10px; z-index: 5; pointer-events: none; min-width: 172px; max-width: 270px; padding: 7px 10px 8px; border-radius: 10px;
-	background: rgba(10, 12, 18, .82); border: 1px solid #242a36; box-shadow: 0 6px 22px rgba(0, 0, 0, .45); font: 11.5px/1.4 "Segoe UI", system-ui, sans-serif; color: #c3cad8; }
+.exleg { position: absolute; left: 10px; bottom: 10px; z-index: 5; pointer-events: none; min-width: 172px; max-width: 270px; padding: 7px 10px 8px; border-radius: var(--r2);
+	background: rgba(12, 16, 24, .84); border: 1px solid var(--line); box-shadow: var(--shadow-float); font: 11.5px/1.4 var(--f-ui); color: var(--ink-2); }
 .exleg.up { bottom: 54px; }   /* (above Follow's panel) */
-.exleg .et { display: flex; justify-content: space-between; gap: 12px; font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: #7d88a0; }
-.exleg .et b { letter-spacing: 0; text-transform: none; font-weight: 600; color: #9fe9ff; }
+.exleg .et { display: flex; justify-content: space-between; gap: 12px; font-size: 11px; font-weight: 600; color: var(--muted); }
+.exleg .et b { font-weight: 600; color: #9fe9ff; font-family: var(--f-num); }
 .exleg .eg { height: 6px; margin: 5px 0 2px; border-radius: 3px; background: linear-gradient(90deg, #aafcff, #46e1ff 12%, #3296ff 35%, #5a5fff 60%, #8c46f0 80%, #7332cd);
 	box-shadow: 0 0 12px rgba(90, 225, 255, .35); }
-.exleg .ea { display: flex; justify-content: space-between; font-size: 10px; color: #7d88a0; margin-bottom: 4px; }
+.exleg .ea { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--muted); margin-bottom: 4px; }
 .exleg .er { display: flex; align-items: center; gap: 7px; white-space: nowrap; }
 .exleg .er i { width: 15px; height: 3px; border-radius: 2px; flex: none; box-shadow: 0 0 6px currentColor; }
-.exleg .er span { overflow: hidden; text-overflow: ellipsis; color: #c3cad8; }
-.exleg .er b { margin-left: auto; padding-left: 8px; font-weight: 600; color: #e9edf5; }
+.exleg .er span { overflow: hidden; text-overflow: ellipsis; color: var(--ink-2); }
+.exleg .er b { margin-left: auto; padding-left: 8px; font-weight: 600; color: var(--ink); font-family: var(--f-num); }
 /* the best route (top right, once a route is known): its time, the improvements, the latest one, a step chart of the best
    time since the first route; a click folds it to its title line (the map's corner under it: a trophy there) */
-.bestp { position: absolute; right: 10px; top: 10px; z-index: 5; cursor: pointer; width: 232px; padding: 7px 10px 8px; border-radius: 10px;
-	background: rgba(10, 12, 18, .84); border: 1px solid #4a3d18; box-shadow: 0 6px 22px rgba(0, 0, 0, .45); font: 11.5px/1.4 "Segoe UI", system-ui, sans-serif; color: #c3cad8; }
-.bestp .bt { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: #9a8a5a; }
-.bestp .bt b { font: 700 17px var(--mono); letter-spacing: -.01em; text-transform: none; color: #ffd23f; }
-.bestp .bs { color: #9aa3b5; font-size: 11px; }
+.bestp { position: absolute; right: 10px; top: 10px; z-index: 5; cursor: pointer; width: 232px; padding: 7px 10px 8px; border-radius: var(--r2);
+	background: rgba(12, 16, 24, .86); border: 1px solid color-mix(in srgb, var(--coin-mark) 50%, transparent); box-shadow: var(--shadow-float); font: 11.5px/1.4 var(--f-ui); color: var(--ink-2); }
+.bestp .bt { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-size: 11px; font-weight: 600; color: var(--muted); }
+.bestp .bt b { font: 600 18px var(--f-num); font-variant-numeric: tabular-nums; color: var(--coin); }
+.bestp .bs { color: var(--ink-2); font-size: 11px; }
 .bestp .bl { margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.bestp .bl b { color: #ffe08a; font-weight: 600; }
-.bestp.new { border-color: #ffd23f; box-shadow: 0 6px 22px rgba(0, 0, 0, .45), 0 0 16px rgba(255, 210, 63, .35); }
+.bestp .bl b { color: var(--coin-ink); font-weight: 600; }
+.bestp.new { border-color: var(--coin); box-shadow: var(--shadow-float), 0 0 16px rgba(255, 200, 61, .35); }
 .bestp canvas { position: static; display: block; width: 212px; height: 42px; margin-top: 5px; }
 .bestp.min { width: auto; padding: 4px 10px; } .bestp.min .bs, .bestp.min .bl, .bestp.min canvas { display: none; }
 .fhud { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); z-index: 5; display: flex; align-items: center; gap: 9px; max-width: calc(100% - 24px);
-	padding: 4px 5px 4px 12px; border-radius: 999px; background: rgba(10, 12, 18, .88); border: 1px solid #4a3d18; white-space: nowrap;
-	box-shadow: 0 6px 22px rgba(0, 0, 0, .5), 0 0 18px rgba(255, 210, 63, .12); font: 12px "Segoe UI", system-ui, sans-serif; color: #e9ecf2; }
-.fhud .fw { color: #ffd23f; font-weight: 600; }
-.fhud .fl { color: #9aa3b5; overflow: hidden; text-overflow: ellipsis; min-width: 0; max-width: 250px; }
-.fhud .ft { font: 600 13px var(--mono); color: #fff; }
-.fhud .ft small { font-weight: 400; color: #7d88a0; }
-.fhud .fs { display: inline-flex; padding: 1px; border-radius: 999px; background: #181b22; border: 1px solid #2f3440; }
-.stagewrap .fhud button { padding: 2px 8px; border: 0; border-radius: 999px; background: transparent; color: #9aa3b5; font-size: 11.5px; }
-.stagewrap .fhud button.on { background: #3a2f14; color: #ffd76a; }
-.stagewrap .fhud button:hover:not(.on) { color: #e9ecf2; }
-.fhud input[type=range] { width: 130px; min-width: 60px; flex: 0 1 130px; height: 14px; margin: 0; padding: 0; accent-color: #ffd23f; cursor: pointer; background: transparent; border: 0; }
+	padding: 4px 5px 4px 12px; border-radius: 999px; background: rgba(12, 16, 24, .9); border: 1px solid color-mix(in srgb, var(--coin-mark) 50%, transparent); white-space: nowrap;
+	box-shadow: var(--shadow-float); font: 12px var(--f-ui); color: var(--ink); }
+.fhud .fw { color: var(--coin); font-weight: 600; }
+.fhud .fl { color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; min-width: 0; max-width: 250px; }
+.fhud .ft { font: 600 13px var(--f-num); font-variant-numeric: tabular-nums; color: var(--ink); }
+.fhud .ft small { font-weight: 400; color: var(--muted); }
+.fhud .fs { display: inline-flex; padding: 1px; border-radius: 999px; background: var(--sunken); }
+.stagewrap .fhud button { height: 24px; padding: 0 8px; border: 0; border-radius: 999px; background: transparent; color: var(--ink-2); font-size: 11.5px; }
+.stagewrap .fhud button.on { background: var(--coin-wash); color: var(--coin-ink); }
+.stagewrap .fhud button:hover:not(.on) { color: var(--ink); background: transparent; }
+.fhud input[type=range] { width: 130px; min-width: 60px; flex: 0 1 130px; height: 14px; margin: 0; padding: 0; accent-color: var(--coin); cursor: pointer; background: transparent; border: 0; }
 .stage.pan canvas { cursor: grab; } .stage.panning canvas { cursor: grabbing; }
 .stage.guide canvas, .stage.paint canvas, .stage.erase canvas, .stage.rect canvas { cursor: crosshair; }
 .stage.pick canvas { cursor: copy; }
-.ghint { position: absolute; left: 50%; top: 10px; transform: translateX(-50%); background: rgba(58, 47, 16, .92); color: #ffd76a; border: 1px solid #7a6220;
-	border-radius: 9px; font-size: 12px; padding: 4px 10px; max-width: calc(100% - 40px); pointer-events: none; }
+.ghint { position: absolute; left: 50%; top: 10px; transform: translateX(-50%); background: var(--coin-wash); color: var(--coin-ink); border-radius: var(--r2);
+	font-size: 12px; padding: 4px 10px; max-width: calc(100% - 40px); pointer-events: none; backdrop-filter: blur(6px); }
 /* (one line, whatever it says: a status line that wrapped to two lines or back as the mouse moved over the map resized the
    map's canvases, which clears them) */
-.status { display: flex; gap: 6px 16px; flex-wrap: nowrap; padding: 6px 12px; border-top: 1px solid #22262e; font: 12px var(--mono); color: #9aa3b5; height: 30px; align-items: center;
+.status { display: flex; gap: 6px 16px; flex-wrap: nowrap; padding: 6px 12px; border-top: 1px solid var(--line); font: 12px var(--f-ui); color: var(--ink-2); height: 30px; align-items: center;
 	white-space: nowrap; overflow: hidden; }
 .status > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.status b { color: #e9ecf2; font-weight: 600; }
-.status .keys { margin-left: auto; flex: 0 1 auto; font-family: "Segoe UI", system-ui, sans-serif; }
+.status b { color: var(--ink); font-weight: 600; font-family: var(--f-num); }
+.status .keys { margin-left: auto; flex: 0 1 auto; color: var(--muted); }
+/* the sheet: the Hybrid's full Optimizer view over the lower part of the map */
+.hysheet { position: absolute; left: 0; right: 0; bottom: 30px; top: 8%; min-height: 220px; z-index: 8; display: flex; flex-direction: column; background: var(--panel);
+	border-top: 1px solid var(--line); border-radius: var(--r3) var(--r3) 0 0; box-shadow: var(--shadow-float); }
+.hysh { display: flex; align-items: center; gap: 10px; padding: 6px 8px 6px 14px; border-bottom: 1px solid var(--line); }
+.hysh b { font: 600 15px var(--f-num); }
+.hysh .sp { flex: 1; }
+.hysb { flex: 1; min-height: 0; overflow: auto; padding: 12px 16px; }
 
 /* route search */
-.checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 13px; }
+.checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 13.5px; }
 .checks li { display: flex; gap: 8px; align-items: flex-start; line-height: 1.35; }
 .ic { width: 18px; height: 18px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; flex: none; margin-top: 1px; }
-.ic.ok { background: var(--good-soft); color: var(--good); }
-.ic.no { background: var(--bad-soft); color: var(--bad); }
-.ic.warn { background: var(--gold-soft); color: var(--gold); }
-.ic.opt { background: var(--panel2); color: var(--muted); border: 1px solid var(--line); }
-.prog { height: 6px; border-radius: 99px; background: var(--panel2); border: 1px solid var(--line); overflow: hidden; margin-top: 10px; }
-.prog i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .5s linear; }
-.sst { margin-top: 8px; font: 12.5px/1.5 var(--mono); color: var(--muted); }
-.sst b { color: var(--ink); }
-.result { margin-top: 12px; border-radius: 12px; padding: 12px; background: var(--good-soft); border: 1px solid color-mix(in srgb, var(--good) 30%, var(--line)); }
-.result .rk { font-size: 12px; color: var(--good); font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }
-.result .rt { font: 700 36px/1.1 var(--mono); color: var(--good); letter-spacing: -.02em; margin: 2px 0 4px; }
-.result .rm { font-size: 12.5px; color: var(--muted); }
+.ic.ok { background: var(--ahead-wash); color: var(--ahead); }
+.ic.no { background: var(--behind-wash); color: var(--behind); }
+.ic.warn { background: var(--warn-wash); color: var(--warn); }
+.ic.opt { background: var(--raise); color: var(--muted); }
+.setg { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; margin-top: 10px; }
+.setg select { width: 100%; }
+.setg .w2 { grid-column: 1 / -1; }
+.acts { display: grid; gap: 10px; margin-top: 14px; }
+.actrow { display: grid; gap: 5px; }
+.actrow .actk { font: 600 11px/14px var(--f-ui); color: var(--muted); letter-spacing: .02em; }
+.actrow .row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.actrow .row button { width: 100%; min-height: 34px; height: auto; padding: 6px 10px; white-space: normal; line-height: 1.2; }
+#bStop { width: 100%; }
+.prog { height: 6px; border-radius: 3px; background: var(--sunken); overflow: hidden; margin-top: 10px; }
+.prog i { display: block; height: 100%; background: var(--ahead); width: 0; transition: width .5s linear; border-radius: 3px; }
+.sst { margin-top: 8px; font: 12.5px/1.5 var(--f-ui); color: var(--ink-2); }
+.sst b { color: var(--ink); font-weight: 600; }
+.result { margin-top: 12px; border-radius: var(--r2); padding: 12px; background: var(--ahead-wash); }
+.result .rk { font-size: 12px; color: var(--ahead); font-weight: 600; }
+.result .rt { font: 600 36px/1.1 var(--f-num); font-variant-numeric: tabular-nums; color: var(--ahead); margin: 2px 0 4px; }
+.result .rm { font-size: 12.5px; color: var(--ink-2); }
 .result .row { margin-top: 10px; }
-.result.stale { background: var(--panel2); border-color: var(--line); }
+.result.stale { background: var(--raise); }
 .result.stale .rt, .result.stale .rk { color: var(--muted); }
-.result.near { background: color-mix(in srgb, #ff9f43 12%, var(--panel2)); border-color: color-mix(in srgb, #ff9f43 35%, var(--line)); }
-.result.near .rk, .result.near .rt { color: #ff9f43; }
+.result.near { background: var(--warn-wash); }
+.result.near .rk, .result.near .rt { color: var(--warn); }
 .result.near .rt { font-size: 26px; }
-.toasts { position: fixed; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); display: grid; gap: 8px; z-index: 40; max-width: min(380px, calc(100vw - 32px)); }
-.toast { background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--good); border-radius: 10px; padding: 10px 14px; box-shadow: var(--shadow);
-	animation: tin .25s ease-out; font-size: 13px; }
-.toast.err { border-left-color: var(--bad); }
-.toast a { color: var(--accent); }
-@keyframes tin { from { transform: translateY(10px); opacity: 0; } }
-@media (max-width: 1180px) {
+/* ---------------------------------------------------------------- responsive (DESIGN.md section 12) */
+@media (max-width: 1199px) {
 	.app { height: auto; }
 	.main { grid-template-columns: 250px minmax(0, 1fr); }
 	.right { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; align-items: start; }
 	.stagewrap { height: 72vh; }
 	.col { overflow: visible; }
 }
-@media (max-width: 760px) {
+@media (max-width: 899px) {
 	.main { grid-template-columns: minmax(0, 1fr); }
 	.right { grid-template-columns: 1fr; }
 	.stagewrap { order: -1; height: 64vh; }
@@ -225,45 +192,53 @@ kbd { font: 11px var(--mono); background: var(--panel2); border: 1px solid var(-
 	.fhud .fl { display: none; }
 	.fhud input[type=range] { width: 70px; flex-basis: 70px; }
 }
+@media (max-width: 599px) {
+	.main { padding: 8px; gap: 8px; }
+	.hysheet { position: fixed; top: 10vh; bottom: 0; z-index: 40; border-radius: var(--r4) var(--r4) 0 0; }
+	.hysb { padding: 10px 12px; }
+	/* the toolbar wraps: no divider left dangling at a row's start */
+	.tools .sep { display: none; }
+}
 </style>
+<script src="/phases.js" defer></script>
 </head>
-<body>
+<body data-page="editor">
 <div class="toasts" id="toasts"></div>
 <div class="app">
-	<header>
-		<div>
-			<h1><a href="/" title="Back to your runs"><span class="coin"></span>EE Auto TAS</a><span class="sl">/</span>Level editor</h1>
-			<div class="sub">Place blocks, a start and the trophy · the GPU tries every input every tick and the CPU tries random runs to find a route to the trophy · a guide line is only a hint</div>
-		</div>
-		<div class="pills"><a class="pill" id="pJob" href="/" hidden title="Watch this job's best run"></a><span class="pill" id="pSize"></span><span class="pill" id="pGpu">GPU: …</span><a class="pill" href="/">&larr; Your runs</a></div>
-	</header>
+	<nav class="topnav" aria-label="EE Auto TAS">
+		<a class="brand" href="/"><span class="coin" aria-hidden="true"></span>EE Auto TAS</a>
+		<div class="tabs"><a class="tab" href="/" data-tab="runs">Runs</a><a class="tab" href="/editor" data-tab="editor">Editor</a><a class="tab" href="/stats" data-tab="stats">Stats</a></div>
+		<div class="navr" id="navR"><a class="pill" id="pJob" href="/" hidden title="Watch this job's best run"></a><span class="pill" id="pSize"></span><span class="pill" id="pGpu">GPU: …</span></div>
+		<button class="ghost themeb" id="themeBtn" data-ic="theme" title="Theme: follows the system"></button>
+	</nav>
+	<div id="offline" hidden></div>
 	<div class="main">
 		<div class="col left">
 			<div class="card insp"><h2>Selected block <small id="inspKey"></small></h2><div id="insp"></div></div>
 			<div class="card"><h2>Blocks <small>click to select</small></h2><div id="palette"></div></div>
 		</div>
-		<div class="stagewrap">
+		<div class="stagewrap night">
 			<div class="tools" id="tools">
-				<button data-tool="paint" title="Paint: click or drag to place the selected block (B). Alt+click picks a block.">&#9998; Paint</button>
+				<span class="tgroup"><button data-tool="paint" title="Paint: click or drag to place the selected block (B). Alt+click picks a block.">&#9998; Paint</button>
 				<button data-tool="erase" title="Erase: click or drag (E)">&#9003; Erase</button>
 				<button data-tool="rect" title="Rectangle: drag to fill with the selected block; Shift+drag erases (R)">&#9645; Rectangle</button>
 				<button data-tool="pick" title="Pick: take a block from the map, with its rotation and numbers (I, or Alt+click)">&#8853; Pick</button>
 				<button data-tool="guide" title="Guide line: drag where you think the ball should go (G); Shift+drag adds a stroke. The search uses it as a hint, not a rail.">&#12336; Guide</button>
-				<button id="bGuideClear" title="Remove the guide line" hidden>&#10005; Remove guide</button>
+				<button id="bGuideClear" title="Remove the guide line" hidden>&#10005; Remove guide</button></span>
 				<span class="sep"></span>
-				<button id="bUndo" title="Undo (Ctrl+Z)">&#8630; Undo</button>
-				<button id="bRedo" title="Redo (Ctrl+Y, Ctrl+Shift+Z)">&#8631;</button>
+				<span class="tgroup"><button id="bUndo" title="Undo (Ctrl+Z)">&#8630; Undo</button>
+				<button id="bRedo" title="Redo (Ctrl+Y, Ctrl+Shift+Z)">&#8631;</button></span>
 				<span class="sep"></span>
-				<button id="bZoomOut" title="Zoom out (-, wheel)">&minus;</button>
+				<span class="tgroup"><button id="bZoomOut" title="Zoom out (-, wheel)">&minus;</button>
 				<button id="bZoomIn" title="Zoom in (+, wheel)">+</button>
-				<button id="bFit" title="Show the whole level (0)">Fit</button>
+				<button id="bFit" title="Show the whole level (0)">Fit</button></span>
 				<span class="sep"></span>
-				<label class="ck" title="Everybody Edits' own block images, from your eeo-tas folder (off: simple colors)"><input type="checkbox" id="cGfx" checked> EE graphics</label>
+				<span class="tgroup"><label class="ck" title="Everybody Edits' own block images, from your eeo-tas folder (off: simple colors)"><input type="checkbox" id="cGfx" checked> EE graphics</label>
 				<label class="ck"><input type="checkbox" id="cGrid" checked> grid</label>
 				<label class="ck" title="Where Find a route has got: a pulsing ring at the end of its closest attempt so far, with how near it is (F goes there)"><input type="checkbox" id="cFrontier" checked> search frontier</label>
-				<label class="ck" title="Where Find a route has been: the tiles it explored light up by when it first got there (white and cyan: just found, the frontier; blue, then purple: back to the search's start; brighter: searched more often), and its latest attempts as lines in each search's colour, fading out"><input type="checkbox" id="cExplore" checked> exploration</label>
-				<button id="bFollow" title="Follow (V): a smiley plays the search's nearest attempt (the route once found) over and over and the map follows it; End jumps to where the search has got; moving, zooming or clicking the map (or Esc) stops it">&#9786; Follow</button>
-				<label class="ck" id="lJobPath" hidden title="The job's best run over the level, drawn like a found route (dashed once you change the level)"><input type="checkbox" id="cJobPath"> job's run</label>
+				<label class="ck" title="Where Find a route has been: the tiles it explored light up by when it first got there (white and cyan: just found, the frontier; blue, then purple: back to the search's start; brighter: searched more often), and its latest attempts as lines in each search's colour, fading out"><input type="checkbox" id="cExplore" checked> exploration</label></span>
+				<span class="tgroup"><button id="bFollow" title="Follow (V): a smiley plays the search's nearest attempt (the route once found) over and over and the map follows it; End jumps to where the search has got; moving, zooming or clicking the map (or Esc) stops it">&#9786; Follow</button>
+				<label class="ck" id="lJobPath" hidden title="The job's best run over the level, drawn like a found route (dashed once you change the level)"><input type="checkbox" id="cJobPath"> job's run</label></span>
 			</div>
 			<div class="stage" id="stage" tabindex="0"><canvas id="cv"></canvas><canvas id="cvFx" class="fx" aria-hidden="true"></canvas><canvas id="cvHeat" class="fx heat" aria-hidden="true"></canvas><canvas id="cvTrail" class="fx" aria-hidden="true"></canvas>
 				<div class="exleg" id="exLeg" hidden></div>
@@ -276,25 +251,35 @@ kbd { font: 11px var(--mono); background: var(--panel2); border: 1px solid var(-
 				<div class="ghint" id="gHint" hidden></div></div>
 			<div class="status"><span id="stPos">&nbsp;</span><span id="stInfo"></span>
 				<span class="keys">drag with the right mouse button (or Space) to move · wheel zooms · <kbd>Q</kbd> rotates · <kbd>V</kbd> follows (<kbd>End</kbd>: to the frontier) · <kbd>Ctrl+Z</kbd> undo</span></div>
+			<div class="hysheet" id="hySheet" hidden role="dialog" aria-label="Hybrid run: the Optimizer view">
+				<div class="hysh"><b>Hybrid run</b><span class="t-small tnum" id="hySheetTime"></span><span class="sp"></span><button class="ghost small" id="hySheetClose" title="Close (Esc)">&times; Close</button></div>
+				<div class="hysb" id="hySheetBody"></div>
+			</div>
 		</div>
 		<div class="col right">
 			<div class="card" id="routeCard">
-				<h2>Find a route <small id="rcSub">GPU</small></h2>
+				<h2>Find a route <small class="chip" id="rcSub">GPU</small></h2>
 				<ul class="checks" id="checks"></ul>
-				<div class="row" style="margin-top:12px">
-					<label class="lab">search for <select id="sSec"><option value="15">15 s</option><option value="30">30 s</option><option value="60" selected>1 min</option>
+				<div class="setg">
+					<div><label class="f" for="sSec">Search for</label><select id="sSec"><option value="15">15 s</option><option value="30">30 s</option><option value="60" selected>1 min</option>
 						<option value="120">2 min</option><option value="300">5 min</option><option value="600">10 min</option><option value="1800">30 min</option>
-						<option value="3600">1 hour</option><option value="10800">3 hours</option></select></label>
-					<label class="lab" title="How many states the search keeps per tick (more: more thorough, fewer ticks per second)">states <select id="sWidth">
+						<option value="3600">1 hour</option><option value="10800">3 hours</option></select></div>
+					<div title="How many states the search keeps per tick (more: more thorough, fewer ticks per second)"><label class="f" for="sWidth">States per tick</label><select id="sWidth">
 						<option value="4096">4 k</option><option value="8192">8 k</option><option value="16384">16 k</option><option value="32768" selected>32 k</option>
-						<option value="65536">64 k</option></select></label>
-					<label class="lab" title="Hybrid (best) has no time cap. Before its first route, when neither the compiler nor the search gets any further for this long, it starts again fresh (a new random search; the compiler goes on). It never stops by itself without a route.">hybrid restarts after <select id="sHyStall">
+						<option value="65536">64 k</option></select></div>
+					<div class="w2" title="Hybrid (best) has no time cap. Before its first route, when neither the compiler nor the search gets any further for this long (stuck), it starts again fresh (a new random search; the compiler goes on). It never stops by itself without a route."><label class="f" for="sHyStall">Hybrid restarts after (stuck)</label><select id="sHyStall">
 						<option value="600">10 min</option><option value="1200">20 min</option><option value="1800" selected>30 min</option><option value="3600">1 hour</option>
-						<option value="0">never</option></select> stuck</label>
+						<option value="0">never</option></select></div>
 				</div>
-				<div class="row" style="margin-top:10px"><button class="go" id="bSolve">Find a route</button><button class="go" id="bAuto" title="Find a route, then optimize it at once as a run (the GPU goes to the optimizer when Find a route stops finding faster routes), for the time chosen above. Its run pauses any other running run (one at a time)">Find and optimize</button><button class="stop" id="bStop" hidden>Stop</button><button class="go" id="bCompile" title="Compile the level into a TAS: no search, no GPU (the level's model, a plan of which trigger to take next, moves derived from the physics, the engine's own replay as the check), for at most the time chosen above (10 min at most). The result becomes a run, and its /loadtas line is copied for eeo-tas">Compile</button><button class="go" id="bHybrid" title="Hybrid (best): the compiler and Find a route side by side, each handing its furthest point to the other; the first verified route wins, then a few minutes of polish (the optimizer, the compiler's polish). No time cap: it runs until it has a route, or until you stop it; when it is stuck it starts again fresh (the setting above). Every route is replayed before it counts. Uses the GPU like Find a route (CPU only without one)">Hybrid (best)</button></div>
+				<div class="acts">
+					<div class="actrow"><span class="actk">Search</span><div class="row"><button id="bSolve">Find a route</button><button id="bAuto" title="Find a route, then optimize it at once as a run (the GPU goes to the optimizer when Find a route stops finding faster routes), for the time chosen above. Its run pauses any other running run (one at a time)">Find and optimize</button></div></div>
+					<div class="actrow"><span class="actk">Compile</span><div class="row"><button id="bCompile" title="Compile the level into a TAS: no search, no GPU (the level's model, a plan of which trigger to take next, moves derived from the physics, the engine's own replay as the check), for at most the time chosen above (10 min at most). The result becomes a run, and its /loadtas line is copied for eeo-tas">Compile</button><button class="go" id="bHybrid" title="Hybrid (best): the compiler and Find a route side by side, each handing its furthest point to the other; the first verified route wins, then a few minutes of polish (the optimizer, the compiler's polish). No time cap: it runs until it has a route, or until you stop it; when it is stuck it starts again fresh (the setting above). Every route is replayed before it counts. Uses the GPU like Find a route (CPU only without one)">Hybrid (best)</button></div></div>
+					<button class="stop" id="bStop" data-ic="stop" hidden>Stop</button>
+				</div>
+				<div class="hint">Find a route searches for any way to the trophy (GPU and CPU). Compile builds the inputs from the level, without a search. Hybrid runs both until a route, then polishes it.</div>
 				<div id="compileSt"></div>
 				<div id="hybridSt"></div>
+				<div id="hyTape" class="tl tl-compact"></div>
 				<div id="autoSt"></div>
 				<div class="hint" id="solveWhy"></div>
 				<div id="solveSt"></div>
@@ -309,7 +294,7 @@ kbd { font: 11px var(--mono); background: var(--panel2); border: 1px solid var(-
 				<label class="f">Size (tiles)</label>
 				<div class="row"><input type="number" id="lvW" min="3" max="400" aria-label="width"> &times; <input type="number" id="lvH" min="3" max="400" aria-label="height">
 					<button class="small" id="bResize" title="Change the size (the top-left stays; undo with Ctrl+Z)">Resize</button></div>
-				<label class="lab" style="margin-top:8px"><input type="checkbox" id="cBorder" checked> solid border around the level (like a new EE world)</label>
+				<label class="lab" style="margin-top:10px"><input type="checkbox" id="cBorder" checked> solid border around the level (like a new EE world)</label>
 				<div class="row" style="margin-top:10px">
 					<button class="small" id="bNew" title="A new empty level of this size (undo with Ctrl+Z)">New</button>
 					<button class="small" id="bClear" title="Remove every block (the border stays; undo with Ctrl+Z)">Clear</button>
@@ -1197,7 +1182,9 @@ function resizeCanvas() {
 	const st = $('stage'), cv = $('cv');
 	const w = Math.max(1, Math.round(st.clientWidth * dpr())), h = Math.max(1, Math.round(st.clientHeight * dpr()));
 	let again = false;
-	if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; VW.dirty = true; again = true; if (!VW.fitted) fit(); }
+	// (a stage that changed its size while the view is still the fitted one, nobody zoomed or panned since: fitted again, so a
+	// narrow layout that settles after the first fit (a phone) shows the whole level)
+	if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; VW.dirty = true; again = true; if (!VW.fitted || VW.fitSig === `${VW.zi},${VW.camX},${VW.camY}`) fit(); }
 	const fx = $('cvFx');
 	if (fx.width !== w || fx.height !== h) { fx.width = w; fx.height = h; again = true; }
 	// (the trails' canvas TRAIL_MARGIN larger each way: a move of the map within it only moves the canvas)
@@ -1356,6 +1343,7 @@ function frame() {
 function fit() {
 	if (FOL.on) followSet(false);
 	VW.zi = fitZi(); VW.camX = LV.W * 8; VW.camY = LV.H * 8; VW.fitted = true; VW.dirty = true; VW.glide = null;
+	VW.fitSig = `${VW.zi},${VW.camX},${VW.camY}`;   // (a resize refits while the view is still this one: resizeCanvas)
 	changedView();
 }
 function zoom(step, fx, fy) {
@@ -3160,7 +3148,7 @@ async function copyHybrid(s) {
 function renderHybrid() {
 	const s = HYB.st, el = $('hybridSt');
 	$('bHybrid').disabled = !!(s && s.running);
-	if (!s || s.stage === 'none') { el.innerHTML = ''; return; }
+	if (!s || s.stage === 'none') { el.innerHTML = ''; $('hyTape').innerHTML = ''; return; }
 	const L = s.live || {}, c = L.compiler || {}, q = L.search || {}, routes = L.routes || [];
 	const bestRT = L.best ? L.best.runTicks : s.result ? s.result.runTicks : null;
 	const what = s.running ? (s.stopping ? 'stopping…' : s.stage === 'polish' ? 'route found: polishing it' : s.stage === 'ending' ? 'ending…' : s.stage === 'starting' ? 'starting…' : 'running')
@@ -3238,6 +3226,8 @@ function renderHybrid() {
 		const inp = $('hyLine');
 		try { await navigator.clipboard.writeText(inp.value); toast('The /loadtas line is copied.'); } catch (e) { inp.focus(); inp.select(); try { document.execCommand('copy'); toast('The /loadtas line is copied.'); } catch (e2) { toast('Select the line and copy it (Ctrl+C).', true); } }
 	};
+	if (typeof TL === 'object' && TL && s.timeline) { TL.render($('hyTape'), s.timeline, { compact: true, sheet: 'hySheet' }); if (typeof hySheetRender === 'function') hySheetRender(s); }
+	else $('hyTape').innerHTML = '';   // (a run that has no timeline yet: not the last run's)
 }
 /** where the hybrid's log and the scrolled boxes around its panel are (renderHybrid draws the panel again every second):
  *  the log's scroll (at its end: it follows the new lines), the nearest scrolled ancestor's and the window's */
@@ -3362,6 +3352,19 @@ function demoLevel() {
 	jobFromHash();   // #job=<id>: "Open in level editor" (the run viewer, the job page)
 	window.addEventListener('hashchange', jobFromHash);
 })();
+// ------------------------------------------------------------ the page shell (docs/ui/DESIGN.md section 8.2): the Hybrid's full
+// Optimizer view in the sheet over the map (#hySheet). phases.js (window.TL) draws it: renderHybrid's last line calls
+// TL.render on #hyTape (the compact view) and, while the sheet is open, hySheetRender; the compact view's "Open the full view"
+// calls hySheetOpen(). Esc closes the sheet (before the map's own keys see it).
+function hySheetRender(s) {
+	if ($('hySheet').hidden || !s || typeof TL !== 'object' || !TL || !s.timeline) return;
+	$('hySheetTime').textContent = s.elapsed !== undefined ? `${mmss(s.elapsed)} in` : '';
+	TL.render($('hySheetBody'), s.timeline, { compact: false });
+}
+function hySheetOpen() { $('hySheet').hidden = false; hySheetRender(HYB.st); }
+function hySheetClose() { $('hySheet').hidden = true; }
+$('hySheetClose').onclick = hySheetClose;
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('hySheet').hidden) { hySheetClose(); e.stopPropagation(); e.preventDefault(); } }, true);
 </script>
 </body>
 </html>

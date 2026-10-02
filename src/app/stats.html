@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Stats · EE Auto TAS</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 16 16%27%3E%3Ccircle cx=%278%27 cy=%278%27 r=%277.5%27 fill=%27%23b98100%27/%3E%3Ccircle cx=%278%27 cy=%278%27 r=%275.6%27 fill=%27%23ffc928%27/%3E%3Ccircle cx=%276.2%27 cy=%275.8%27 r=%271.6%27 fill=%27%23fff2b8%27/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/ui.css">
+<script src="/ui.js"></script>
+<style>
+/* the Stats page (docs/ui/DESIGN.md section 10): its rules are ui.css's "the Stats page" section (.stats-page, .st-*) */
+</style>
+<script src="/stats.js" defer></script>
+</head>
+<body data-page="stats">
+<nav class="topnav" aria-label="EE Auto TAS">
+	<a class="brand" href="/"><span class="coin" aria-hidden="true"></span>EE Auto TAS</a>
+	<div class="tabs"><a class="tab" href="/" data-tab="runs">Runs</a><a class="tab" href="/editor" data-tab="editor">Editor</a><a class="tab" href="/stats" data-tab="stats">Stats</a></div>
+	<div class="navr" id="navR"><span class="t-small muted" id="statsUpdated"></span><button class="ghost small" id="statsRefresh" data-ic="refresh" hidden>Refresh</button></div>
+	<button class="ghost themeb" id="themeBtn" data-ic="theme" title="Theme: follows the system"></button>
+</nav>
+<div id="offline" hidden></div>
+<div class="page stats-page"><div id="statsRoot"><noscript><div class="sheet"><div class="empty"><b>The Stats page needs JavaScript</b>Turn it on for this page.</div></div></noscript></div></div>
+</body>
+</html>

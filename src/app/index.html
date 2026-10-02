@@ -4,242 +4,227 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>EE Auto TAS</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 16 16%27%3E%3Ccircle cx=%278%27 cy=%278%27 r=%277.5%27 fill=%27%23b98100%27/%3E%3Ccircle cx=%278%27 cy=%278%27 r=%275.6%27 fill=%27%23ffc928%27/%3E%3Ccircle cx=%276.2%27 cy=%275.8%27 r=%271.6%27 fill=%27%23fff2b8%27/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/ui.css">
+<script src="/ui.js"></script>
 <style>
-:root {
-	--bg: #f4f2ec; --panel: #ffffff; --panel2: #f8f6f1; --ink: #1d1b16; --muted: #6b665b; --line: #e4dfd3;
-	--gold: #c9900f; --gold-soft: #fbf0d4; --good: #1f8a4c; --good-soft: #e3f4ea; --bad: #b3362b; --bad-soft: #fbe7e4;
-	--accent: #2c5fd6; --shadow: 0 1px 2px rgba(40, 32, 10, .06), 0 6px 20px rgba(40, 32, 10, .06);
-	--mono: ui-monospace, "Cascadia Mono", "Consolas", monospace;
-	color-scheme: light;
-}
-@media (prefers-color-scheme: dark) {
-	:root {
-		--bg: #15140f; --panel: #1e1c16; --panel2: #25221b; --ink: #f1ede2; --muted: #a39d8e; --line: #343026;
-		--gold: #f0b93a; --gold-soft: #3a2f14; --good: #4fcf86; --good-soft: #173424; --bad: #ff7a6b; --bad-soft: #3b1d19;
-		--accent: #7aa2ff; --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 8px 24px rgba(0, 0, 0, .25);
-		color-scheme: dark;
-	}
-}
-* { box-sizing: border-box; }
-[hidden] { display: none !important; }
-body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 "Segoe UI", system-ui, sans-serif; }
-.wrap { max-width: 1240px; margin: 0 auto; padding: 22px 20px 60px; }
-header { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
-h1 { margin: 0; font-size: 26px; letter-spacing: -.02em; display: flex; align-items: center; gap: 10px; }
-h1 .coin { width: 22px; height: 22px; border-radius: 50%; background: radial-gradient(circle at 35% 35%, #ffe28a, var(--gold) 60%, #8a5e05);
-	box-shadow: inset 0 0 0 2px rgba(0, 0, 0, .12); }
-.sub { color: var(--muted); margin-top: 4px; }
-.pills { display: flex; gap: 8px; flex-wrap: wrap; }
-.pill { font-size: 12px; padding: 4px 10px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line); color: var(--muted); }
-.pill.ok { color: var(--good); border-color: color-mix(in srgb, var(--good) 35%, var(--line)); }
-.pill.no { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 35%, var(--line)); }
-a.pill { color: var(--ink); text-decoration: none; } a.pill:hover { border-color: var(--gold); }
-.grid { display: grid; grid-template-columns: 360px 1fr; gap: 18px; align-items: start; }
-@media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
-.card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); padding: 16px; }
-.card h2 { margin: 0 0 12px; font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
-.drop { border: 2px dashed var(--line); border-radius: 12px; padding: 18px 14px; text-align: center; cursor: pointer; transition: .15s;
-	background: var(--panel2); }
-.drop:hover, .drop.over { border-color: var(--gold); background: var(--gold-soft); }
-.drop b { display: block; font-size: 15px; margin-bottom: 4px; }
-.drop span { color: var(--muted); font-size: 12.5px; }
-.files { display: grid; gap: 6px; margin: 12px 0; }
-.file { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 9px; background: var(--panel2); border: 1px solid var(--line);
-	font-size: 13px; min-width: 0; }
-.file .tag { font: 600 11px var(--mono); padding: 2px 6px; border-radius: 5px; background: var(--gold-soft); color: var(--gold); flex: none; }
+/* the Runs page (docs/ui/DESIGN.md section 6); the shared system is /ui.css */
+.runs { display: grid; grid-template-columns: var(--rail-w) minmax(0, 1fr); gap: 24px; align-items: start; }
+.mainc { min-width: 0; max-width: var(--main-max); width: 100%; }
+/* ---------------------------------------------------------------- the rail */
+.rail { position: sticky; top: calc(var(--nav-h) + 16px); max-height: calc(100vh - var(--nav-h) - 32px); overflow: auto; min-width: 0;
+	scrollbar-width: thin; scrollbar-color: var(--line-2) transparent; padding: 0 4px 8px 0; margin-right: -4px; }
+.railtog { display: none; width: 100%; justify-content: space-between; }
+.railtog .car { transition: transform .15s; }
+.railtog[aria-expanded="true"] .car { transform: rotate(180deg); }
+.railbody { display: grid; gap: 12px; }
+.rail-top { display: flex; gap: 8px; }
+.rail-top input[type=search] { flex: 1; width: 100%; }
+#newBtn[aria-expanded="true"] { background: var(--sunken); }
+.newrun h2 { margin-bottom: 10px; }
+.newrun input[type=text], .newrun select { width: 100%; }
+.drop { border: 2px dashed var(--line-2); border-radius: var(--r3); padding: 18px 14px; text-align: center; cursor: pointer; background: var(--sunken);
+	transition: border-color .15s, background-color .15s; }
+.drop:hover, .drop.over { border-color: var(--coin-mark); background: var(--coin-wash); }
+.drop b { display: block; font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+.drop span { color: var(--ink-2); font-size: 12.5px; }
+.files { display: grid; gap: 6px; margin: 12px 0 4px; }
+.file { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: var(--r2); background: var(--raise); font-size: 13px; min-width: 0; }
+.file .tag { font: 600 11px/18px var(--f-ui); padding: 0 6px; border-radius: var(--r1); background: var(--sunken); color: var(--ink-2); flex: none; }
 .file .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.file.missing { color: var(--muted); border-style: dashed; }
-label.f { display: block; font-size: 12px; color: var(--muted); margin: 6px 0 4px; }
-.hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
-input[type=text], select { width: 100%; padding: 8px 10px; border-radius: 9px; border: 1px solid var(--line); background: var(--panel2); color: var(--ink); font: inherit; }
-button { font: 600 13.5px "Segoe UI", system-ui, sans-serif; border-radius: 9px; border: 1px solid var(--line); background: var(--panel2); color: var(--ink);
-	padding: 8px 14px; cursor: pointer; transition: .12s; }
-button:hover:not(:disabled) { border-color: var(--muted); }
-button:disabled { opacity: .45; cursor: default; }
-button.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
-button.go { background: var(--good); color: #fff; border-color: var(--good); }
-button.stop { background: var(--bad-soft); color: var(--bad); border-color: color-mix(in srgb, var(--bad) 30%, var(--line)); }
-button.ghost { background: transparent; }
-button.watch { background: var(--gold-soft); color: var(--gold); border-color: color-mix(in srgb, var(--gold) 40%, var(--line)); }
-.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-.lab { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
-.lab select { width: auto; }
-.msg { margin-top: 10px; padding: 10px 12px; border-radius: 9px; font-size: 13px; }
-.msg.err { background: var(--bad-soft); color: var(--bad); }
-.msg.info { background: var(--panel2); color: var(--muted); }
-/* the level check (src/levelcheck.js): a file that differs from EEO's own copy, effect blocks that do nothing */
-.msg.warn { background: var(--gold-soft); color: var(--ink); border: 1px solid color-mix(in srgb, var(--gold) 40%, var(--line)); overflow-wrap: anywhere; }
-.msg.warn b.w { color: var(--gold); }
+.file.missing { color: var(--muted); background: transparent; border: 1px dashed var(--line); }
 .msg.warn label { display: flex; gap: 7px; align-items: center; margin-top: 8px; font-weight: 600; cursor: pointer; }
-.lvok { font-size: 12px; color: var(--good); margin-top: 4px; }
-.md5 { font: 11.5px var(--mono); color: var(--muted); overflow-wrap: anywhere; }
-.spin { display: inline-block; width: 12px; height: 12px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
-	animation: sp .8s linear infinite; vertical-align: -2px; margin-right: 6px; }
-@keyframes sp { to { transform: rotate(360deg); } }
-.jobs { display: grid; gap: 8px; margin-top: 18px; }
-.jobwrap { position: relative; }
-.job { text-align: left; width: 100%; padding: 11px 12px; display: grid; gap: 3px; background: var(--panel); }
-.job.sel { border-color: var(--gold); box-shadow: 0 0 0 2px var(--gold-soft); }
-.job .t1 { display: flex; justify-content: space-between; gap: 8px; font-weight: 600; min-width: 0; }
-.job .t1 span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.job .t2 { font: 12.5px var(--mono); color: var(--muted); font-weight: 400; padding-right: 70px; }
-.jobwrap .jw { position: absolute; right: 9px; bottom: 8px; padding: 3px 10px; font-size: 12px; }
-/* the runs in two sections: Campaign (EEO's campaign levels, in EEO's order) and Other; a click on a heading folds it */
-.jsec { display: grid; gap: 8px; }
-.jsec + .jsec { margin-top: 6px; }
-.jsh { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 4px; background: transparent; border: 0; border-bottom: 1px solid var(--line); border-radius: 0;
-	font: 600 12px "Segoe UI", system-ui, sans-serif; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; text-align: left; cursor: pointer; }
-.jsh:hover:not(:disabled) { color: var(--ink); border-color: var(--line); }
-.jsh .car { display: inline-block; width: 10px; transition: transform .15s; }
+.verified { color: var(--ahead); font-weight: 600; cursor: help; }
+/* the runs list (renderJobs: two folding sections) */
+.jobs { display: grid; gap: 2px; }
+.jsec { display: grid; gap: 1px; }
+.jsec + .jsec { margin-top: 10px; }
+.jsh { display: flex; align-items: center; justify-content: flex-start; gap: 8px; width: 100%; height: auto; padding: 8px 6px; background: none; border: 0;
+	border-radius: var(--r1); font: 600 14px/20px var(--f-num); color: var(--ink-2); text-align: left; }
+.jsh:hover:not(:disabled) { background: none; color: var(--ink); }
+.jsh .car { display: inline-block; width: 10px; font-size: 10px; transition: transform .15s; }
 .jsec.shut .jsh .car { transform: rotate(-90deg); }
-.jsh .jn { margin-left: auto; font: 600 11.5px var(--mono); letter-spacing: 0; text-transform: none; padding: 1px 8px; border-radius: 99px; background: var(--panel2); border: 1px solid var(--line); }
-.job .ctag { font-size: 11.5px; color: var(--muted); font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 70px; }
-.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: var(--muted); flex: none; margin-top: 6px; }
-.dot.run { background: var(--good); box-shadow: 0 0 0 0 var(--good); animation: pulse 1.8s infinite; }
-@keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--good) 60%, transparent); } 100% { box-shadow: 0 0 0 8px transparent; } }
-.hero { display: grid; grid-template-columns: 1fr auto; gap: 16px; align-items: end; }
-@media (max-width: 640px) { .hero { grid-template-columns: 1fr; } }
-.hero h3 { margin: 0; font-size: 20px; }
-.hero .meta { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
-.verified { color: var(--good); font-weight: 600; cursor: help; }
-.live { margin-top: 12px; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; padding: 9px 12px; border-radius: 10px; font-size: 13px;
-	background: var(--good-soft); border: 1px solid color-mix(in srgb, var(--good) 25%, var(--line)); }
-.live .lk { font-weight: 600; }
-.live b { font: 700 17px var(--mono); color: var(--good); }
-.live .lt { margin-left: auto; color: var(--muted); font-size: 12.5px; }
-.live.idle { background: var(--panel2); border-color: var(--line); }
-.live.idle b { color: var(--muted); }
-.job .lr { color: var(--good); }
+.jsh .jn { margin-left: auto; height: 20px; padding: 0 7px; border-radius: var(--r1); background: var(--raise); font: 600 12px/20px var(--f-num);
+	font-variant-numeric: tabular-nums; color: var(--ink-2); }
+.jobwrap { position: relative; }
+.job { display: grid; grid-template-columns: minmax(0, 1fr); justify-content: stretch; justify-items: stretch; align-items: stretch; gap: 2px; width: 100%; height: auto; padding: 8px 10px; text-align: left; white-space: normal;
+	background: transparent; border: 0; border-radius: var(--r2); font: 400 14px/20px var(--f-ui); color: var(--ink); }
+.job:hover:not(:disabled) { background: var(--raise); border: 0; }
+.job.sel { background: var(--raise); box-shadow: inset 3px 0 0 var(--coin); }
+.job .t1 { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-weight: 600; min-width: 0; }
+.job .t1 span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job .ctag { font-size: 12px; line-height: 16px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 64px; }
+.job .t2 { font: 500 13px/18px var(--f-num); font-variant-numeric: tabular-nums; color: var(--ink-2); padding-right: 64px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job .t2 .sv { color: var(--ahead); }
+.job .lr { color: var(--ahead); }
 .job .lr.idle { color: var(--muted); }
-/* a run's copy on a rented machine (summary.remote: src/jobs/<id>/remote.json while fresh) */
-.dot.rem { background: var(--accent); animation: rpulse 1.8s infinite; }
-@keyframes rpulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 60%, transparent); } 100% { box-shadow: 0 0 0 8px transparent; } }
-.job .rm { color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job .rm { color: var(--remote); }
 .job .rm.idle { color: var(--muted); }
-.remote { margin-top: 12px; padding: 9px 12px 12px; border-radius: 10px; font-size: 13px; background: color-mix(in srgb, var(--accent) 7%, var(--panel));
-	border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line)); }
-.remote.idle { background: var(--panel2); border-color: var(--line); }
-.remote .rh { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
-.remote .rh .lk { font-weight: 600; }
-.remote .rh b { font: 700 17px var(--mono); color: var(--accent); }
-.remote .lt { margin-left: auto; color: var(--muted); font-size: 12.5px; }
-.remote .stats { margin-top: 10px; }
-.remote .stat { background: var(--panel); }
-.remote .stat .gnow { color: var(--accent); }
-.remote .stat .gnow.up, .remote .stat .v.up { color: var(--good); }
-.remote details { margin-top: 10px; }
-.rented { margin-bottom: 18px; }
-.rmach + .rmach { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.jobwrap .jw { position: absolute; right: 8px; bottom: 9px; opacity: 0; transition: opacity .12s; }
+.jobwrap:hover .jw, .jobwrap:focus-within .jw, .jobwrap:has(.job.sel) .jw { opacity: 1; }
+@media (pointer: coarse) { .jobwrap .jw { opacity: 1; } }
+.jfnone { padding: 10px 6px; color: var(--muted); font-size: 13px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: transparent; flex: none; }
+.dot.run { background: var(--ahead); animation: ui-pulse 1.8s infinite; color: var(--ahead); }
+.dot.rem { background: var(--remote); animation: ui-pulse 1.8s infinite; color: var(--remote); }
+/* rented machines (renderRented) */
+.rented h2 { margin-bottom: 8px; }
+.rmach + .rmach { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
 .rmh { display: flex; justify-content: space-between; align-items: baseline; gap: 4px 10px; flex-wrap: wrap; }
-.rmh b { font-size: 14px; }
-.rmh span, .rms { font: 12px var(--mono); color: var(--muted); }
+.rmh b { font: 600 14px var(--f-num); }
+.rmh span, .rms { font: 12px/16px var(--f-num); font-variant-numeric: tabular-nums; color: var(--ink-2); }
 .rms { margin-top: 2px; }
-.rms b { color: var(--good); font-weight: 600; white-space: nowrap; }
-.rjob { width: 100%; text-align: left; display: grid; gap: 1px; padding: 7px 10px; margin-top: 6px; font-weight: 400; background: var(--panel2); }
-.rjob.sel { border-color: var(--gold); }
-.rjob.x { font-size: 13.5px; border-radius: 9px; border: 1px dashed var(--line); background: transparent; }
+.rms b { color: var(--ahead); font-weight: 600; white-space: nowrap; }
+.rjob { display: grid; grid-template-columns: minmax(0, 1fr); justify-content: stretch; justify-items: stretch; gap: 1px; width: 100%; height: auto; padding: 7px 10px; margin-top: 6px; text-align: left; font-weight: 400;
+	background: var(--raise); border: 0; white-space: normal; }
+.rjob.sel { box-shadow: inset 3px 0 0 var(--coin); }
+.rjob.x { font-size: 13.5px; border-radius: var(--r2); border: 1px dashed var(--line); background: transparent; }
 .rjob .r1 { display: flex; gap: 8px; align-items: baseline; min-width: 0; font-weight: 600; }
 .rjob .r1 .n { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rjob .g { font: 600 11px var(--mono); padding: 1px 6px; border-radius: 5px; background: color-mix(in srgb, var(--accent) 14%, var(--panel)); color: var(--accent); flex: none; }
-.rjob .g.idle { color: var(--muted); background: var(--panel); }
-.rjob .bt { font: 600 13px var(--mono); flex: none; }
-.rjob .r2 { font: 12px var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rjob .up { color: var(--good); }
-.rjob .ah { color: var(--accent); }
-.procnote { margin-top: 10px; font-size: 12.5px; color: var(--muted); }
-.procnote b { color: var(--ink); font-weight: 600; }
-.why { text-decoration: underline dotted; cursor: help; }
-.times { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-top: 14px; }
-.big { font: 700 48px/1 var(--mono); letter-spacing: -.02em; }
-.was { font: 500 18px var(--mono); color: var(--muted); text-decoration: line-through; }
-.saved { font: 600 14px var(--mono); color: var(--good); background: var(--good-soft); padding: 4px 10px; border-radius: 999px; }
-.saved.zero { color: var(--muted); background: var(--panel2); }
-.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 16px; }
-@media (max-width: 640px) { .stats { grid-template-columns: repeat(2, 1fr); } }
-.stat { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; min-width: 0; }
-.stat .k { font-size: 11.5px; color: var(--muted); }
-.stat .v { font-weight: 600; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.stat .gnow { font-weight: 500; font-size: 12px; color: var(--good); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; }
-.chart { margin-top: 16px; height: 170px; border-radius: 10px; background: var(--panel2); border: 1px solid var(--line); position: relative; }
-.chart svg { width: 100%; height: 100%; display: block; }
-.feed { margin-top: 16px; display: grid; gap: 6px; max-height: 260px; overflow: auto; }
-.imp { display: grid; grid-template-columns: 74px 70px 1fr auto; gap: 10px; align-items: center; padding: 7px 10px; border-radius: 9px;
-	background: var(--panel2); font-size: 13px; }
-.imp .d { font: 600 13px var(--mono); color: var(--good); }
-.imp .w { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.imp .b { font: 13px var(--mono); }
-.imp .c { font: 12px var(--mono); color: var(--muted); }
-details { margin-top: 14px; }
-summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
-pre.log { margin: 8px 0 0; padding: 10px 12px; border-radius: 10px; background: var(--panel2); border: 1px solid var(--line); font: 12px/1.5 var(--mono);
-	max-height: 260px; overflow: auto; white-space: pre-wrap; }
-.empty { text-align: center; padding: 60px 20px; color: var(--muted); }
-.empty b { display: block; color: var(--ink); font-size: 18px; margin-bottom: 6px; }
-.how { margin-top: 18px; font-size: 13px; color: var(--muted); }
-.how li { margin: 3px 0; }
-.toasts { position: fixed; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); display: grid; gap: 8px; z-index: 40; max-width: min(360px, calc(100vw - 32px)); }
-.toast { background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--good); border-radius: 10px; padding: 10px 14px;
-	box-shadow: var(--shadow); animation: tin .25s ease-out; }
-.toast b { color: var(--good); font-family: var(--mono); }
-@keyframes tin { from { transform: translateY(10px); opacity: 0; } }
-.report { margin-top: 16px; border: 1px solid var(--line); border-radius: 12px; padding: 14px; background: var(--panel2); }
-.report h4 { margin: 0 0 8px; font-size: 15px; }
-.odds { font: 700 22px var(--mono); }
-.odds.sure { color: var(--good); } .odds.risky { color: var(--gold); }
+.rjob .g { font: 600 11px/18px var(--f-ui); padding: 0 6px; border-radius: var(--r1); background: var(--remote-wash); color: var(--remote); flex: none; }
+.rjob .g.idle { color: var(--muted); background: var(--sunken); }
+.rjob .bt { font: 600 13px var(--f-num); font-variant-numeric: tabular-nums; flex: none; }
+.rjob .r2 { font: 12px var(--f-num); color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rjob .up { color: var(--ahead); }
+.rjob .ah { color: var(--remote); }
+/* ---------------------------------------------------------------- the job sheet: #detail, #opt, #detail2, #ideas */
+.jhead { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px 16px; flex-wrap: wrap; }
+.jhead h1 { font: 600 24px/30px var(--f-num); overflow-wrap: anywhere; min-width: 0; }
+.jacts { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
+.jacts .lab select { height: 32px; }
+.facts { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; margin-top: 8px; font-size: 13px; color: var(--ink-2); }
+.facts .ft { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.facts .ft b { font-weight: 600; color: var(--ink); }
+.times { display: flex; align-items: baseline; gap: 10px 14px; flex-wrap: wrap; margin-top: 22px; }
+.big { font: 600 60px/1 var(--f-num); font-variant-numeric: tabular-nums; letter-spacing: -.01em; color: var(--ink); }
+.was { font: 500 24px/1 var(--f-num); font-variant-numeric: tabular-nums; color: var(--muted); text-decoration: line-through; text-decoration-thickness: 1.5px; }
+.tchips { display: flex; flex-wrap: wrap; gap: 6px; align-self: center; }
+.tchips .chip, .saved { height: 26px; padding: 0 9px; font: 600 13px/26px var(--f-num); font-variant-numeric: tabular-nums; }
+.saved { display: inline-flex; align-items: center; border-radius: var(--r1); background: var(--ahead-wash); color: var(--ahead); white-space: nowrap; }
+.saved.zero { background: var(--raise); color: var(--ink-2); }
+.live { margin-top: 16px; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; font-size: 13.5px; color: var(--ink-2); }
+.live::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--ahead); color: var(--ahead); align-self: center; animation: ui-pulse 1.8s infinite; }
+.live .lk { font-weight: 600; color: var(--ink); }
+.live b { font: 600 15px var(--f-num); font-variant-numeric: tabular-nums; color: var(--ink); }
+.live .lt { margin-left: auto; color: var(--muted); font-size: 12.5px; }
+.live.idle::before { background: var(--muted); animation: none; }
+.live.idle b { color: var(--muted); }
+/* a run's copy on a rented machine (remoteHtml) */
+.remote { margin-top: 14px; padding: 10px 12px 12px; border-radius: var(--r2); font-size: 13px; background: var(--remote-wash); color: var(--ink-2); }
+.remote.idle { background: var(--raise); }
+.remote .rh { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.remote .rh .lk { font-weight: 600; color: var(--ink); }
+.remote .rh b { font: 600 15px var(--f-num); font-variant-numeric: tabular-nums; color: var(--remote); }
+.remote .lt { margin-left: auto; color: var(--muted); font-size: 12.5px; }
+.stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }
+.stat { background: var(--panel); border-radius: var(--r2); padding: 8px 10px; min-width: 0; }
+.stat .k { font-size: 12px; color: var(--ink-2); }
+.stat .v { font-weight: 600; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--f-num); }
+.stat .gnow { font-size: 12px; color: var(--ink-2); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; }
+.stat .gnow.up, .stat .v.up { color: var(--ahead); }
+.remote .stat .gnow { color: var(--remote); }
+.remote details { margin-top: 10px; }
+/* the Optimizer section: phases.js's TL (window.TL) owns it; without it, the built-in summary below */
+.opt-now { font: 400 16px/24px var(--f-ui); color: var(--ink); max-width: 75ch; }
+.opt-now .n { font-family: var(--f-num); font-variant-numeric: tabular-nums; font-weight: 600; }
+.opt-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px 20px; margin-top: 18px; }
+.opt-kpis .kpi .v { font-size: 22px; line-height: 28px; }
+.opt-chart { margin-top: 18px; }
+.opt-chart .empty { padding: 34px 10px; border-radius: var(--r2); background: var(--raise); }
+.opt-foot { margin-top: 8px; font-size: 12px; color: var(--muted); }
+/* the improvements, the files, the report, the disclosures */
+.imps { max-height: 360px; overflow: auto; border-radius: var(--r2); }
+.imps .tbl td.w { max-width: 0; width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
+@media (max-width: 599px) { .imps .tbl td.w { white-space: normal; overflow-wrap: anywhere; width: auto; max-width: none; } .imps .tbl td.tnum { white-space: normal; } }
+.pickone .empty { padding: 56px 20px; }
+.imps .tbl td.d { color: var(--ahead); }
+.filesrow { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.filesrow .sp { flex: 1; }
+.report { margin-top: 14px; border-radius: var(--r2); padding: 14px; background: var(--raise); }
+.report h4 { margin: 0 0 8px; font: 600 15px/20px var(--f-num); }
+.odds { font: 600 24px var(--f-num); font-variant-numeric: tabular-nums; }
+.odds.sure { color: var(--ahead); } .odds.risky { color: var(--warn); }
 .rng { display: grid; grid-template-columns: 70px 1fr auto; gap: 10px; padding: 7px 0; border-top: 1px solid var(--line); font-size: 13px; }
 .rng:first-of-type { border-top: 0; }
-.rng .p { font: 600 13px var(--mono); }
-.ideas { margin-top: 18px; }
-.ideas p { margin: 0 0 10px; color: var(--muted); font-size: 13px; }
-.ideas .fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) auto; gap: 8px; align-items: end; }
-@media (max-width: 640px) { .ideas .fields { grid-template-columns: 1fr 1fr; } }
-.ideas input[type=text] { font-family: var(--mono); }
-.ideas .fstate { margin-top: 10px; font-size: 13px; }
-.ideas .map { margin-top: 12px; border-radius: 10px; border: 1px solid var(--line); background: #0a0b0f; overflow: auto; max-height: 70vh; }
+.rng .p { font: 600 13px var(--f-num); font-variant-numeric: tabular-nums; }
+.discl { display: grid; gap: 12px; }
+.discl details > div, .discl details > pre { margin-top: 8px; }
+.procnote { font-size: 13px; color: var(--ink-2); line-height: 20px; }
+.procnote b { color: var(--ink); font-weight: 600; }
+.why { text-decoration: underline dotted; cursor: help; }
+/* Search harder (renderIdeas) */
+.ideas p { margin: 0 0 12px; color: var(--ink-2); font-size: 13.5px; max-width: 75ch; }
+.ideas .fields { display: grid; grid-template-columns: repeat(3, minmax(0, 160px)) auto; gap: 8px 12px; align-items: end; }
+.ideas .fields label.f { margin-top: 0; }
+.ideas input[type=text], .ideas select { width: 100%; }
+.ideas input[type=text] { font-family: var(--f-num); font-variant-numeric: tabular-nums; }
+.ideas .fstate { margin-top: 12px; font-size: 13.5px; color: var(--ink-2); }
+.ideas .fstate b { color: var(--ink); font-family: var(--f-num); }
+.ideas .map { margin-top: 12px; border-radius: var(--r2); background: var(--sunken); overflow: auto; max-height: 70vh; }
 .ideas .map img { display: block; max-width: 100%; }
+/* no runs yet: the onboarding */
+.onb { max-width: 560px; margin: 24px auto 0; }
+.onb h1 { font: 600 28px/34px var(--f-num); }
+.onb .lead { margin: 10px 0 20px; font: 400 16px/24px var(--f-ui); color: var(--ink-2); }
+/* ---------------------------------------------------------------- responsive (DESIGN.md section 12) */
+@media (max-width: 1199px) { .runs { grid-template-columns: 280px minmax(0, 1fr); gap: 20px; } }
+@media (max-width: 899px) {
+	.runs { grid-template-columns: minmax(0, 1fr); }
+	.rail { position: static; max-height: none; overflow: visible; padding: 0; margin: 0; }
+	.railtog { display: inline-flex; }
+	.rail.shut .railbody { display: none; }
+	.railbody { margin-top: 8px; }
+}
+@media (max-width: 599px) {
+	.big { font-size: 44px; }
+	.was { font-size: 18px; }
+	.jacts { justify-content: flex-start; width: 100%; }
+	.stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+	.ideas .fields { grid-template-columns: 1fr 1fr; }
+	.ideas .fields .row { grid-column: 1 / -1; }
+	.live .lt { margin-left: 0; }
+}
 
-/* ---------------------------------------------------------------- viewer ("Watch") */
-.viewer { position: fixed; inset: 0; z-index: 30; background: rgba(8, 9, 12, .72); display: flex; align-items: center; justify-content: center;
+/* ---------------------------------------------------------------- viewer ("Watch"): always night (the .vwin is .night) */
+.viewer { position: fixed; inset: 0; z-index: 30; background: rgba(6, 9, 15, .74); display: flex; align-items: center; justify-content: center;
 	padding: max(12px, env(safe-area-inset-top, 0px)) 12px max(12px, env(safe-area-inset-bottom, 0px)); }
-.vwin { width: min(1500px, 100%); height: 100%; max-height: 980px; display: flex; flex-direction: column; background: #101217; color: #e9ecf2;
-	border: 1px solid #262a33; border-radius: 14px; overflow: hidden; box-shadow: 0 20px 60px rgba(0, 0, 0, .5); }
-.vtop { display: flex; align-items: center; gap: 10px; padding: 10px 12px 10px 16px; border-bottom: 1px solid #22262e; min-width: 0; }
-.vtitle { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: #a7adba; }
-.vtitle b { color: #fff; font-size: 15px; margin-right: 8px; }
-.viewer button { background: #1b1e25; color: #e9ecf2; border-color: #2f3440; padding: 6px 11px; font-size: 13px; }
-.viewer button:hover:not(:disabled) { border-color: #6b7384; }
-.viewer button.on { background: #2b3242; border-color: #56627a; }
-.vnewer { background: #3a2f10 !important; color: #ffd76a !important; border-color: #7a6220 !important; }
+.vwin { width: min(1500px, 100%); height: 100%; max-height: 980px; display: flex; flex-direction: column; background: var(--panel); color: var(--ink);
+	border: 1px solid var(--line); border-radius: var(--r4); overflow: hidden; box-shadow: var(--shadow-float); }
+.vtop { display: flex; align-items: center; gap: 8px; padding: 10px 12px 10px 16px; border-bottom: 1px solid var(--line); min-width: 0; }
+.vtitle { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--ink-2); }
+.vtitle b { color: var(--ink); font: 600 15px var(--f-num); margin-right: 8px; }
+.vwin button { height: 30px; padding: 0 11px; font-size: 13px; }
+.vwin button.on { background: var(--coin-wash); color: var(--coin-ink); border-color: var(--coin-mark); }
+.vnewer { background: var(--coin-wash) !important; color: var(--coin-ink) !important; border-color: transparent !important; }
 #vEditor { white-space: nowrap; }
 .vstage { position: relative; flex: 1; min-height: 0; background: #000; overflow: hidden; touch-action: none; }
 .vstage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; }
 .vstage canvas.drag { cursor: grabbing; }
 .vhud { position: absolute; left: 10px; top: 10px; display: grid; gap: 4px; pointer-events: none; }
-.vclock { display: flex; align-items: baseline; gap: 8px; background: rgba(10, 12, 16, .72); border: 1px solid rgba(255, 255, 255, .08);
-	border-radius: 9px; padding: 4px 10px; width: max-content; }
-.vclock .lbl { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: #9aa3b5; min-width: 58px; }
-.vclock .t { font: 700 22px/1.1 var(--mono); color: #ffd23f; }
-.vclock.gh .t { font-size: 16px; color: #b9d6ff; }
-.vclock .fin { font: 600 11px var(--mono); color: #62e39a; }
-.vdiff { font: 600 13px var(--mono); background: rgba(10, 12, 16, .72); border-radius: 9px; padding: 4px 10px; width: max-content; max-width: calc(100vw - 60px);
-	white-space: normal; }
-.vdiff.ahead { color: #62e39a; } .vdiff.behind { color: #ff9b8a; } .vdiff.even { color: #c9ced8; }
+.vclock { display: flex; align-items: baseline; gap: 8px; background: rgba(12, 16, 24, .78); border: 1px solid rgba(255, 255, 255, .08);
+	border-radius: var(--r2); padding: 4px 10px; width: max-content; }
+.vclock .lbl { font-size: 11px; font-weight: 600; color: var(--muted); min-width: 52px; }
+.vclock .t { font: 600 22px/1.1 var(--f-num); font-variant-numeric: tabular-nums; color: var(--coin); }
+.vclock.gh .t { font-size: 16px; color: var(--remote); }
+.vclock .fin { font: 600 11px var(--f-num); color: var(--ahead); }
+.vdiff { font: 600 13px var(--f-num); font-variant-numeric: tabular-nums; background: rgba(12, 16, 24, .78); border-radius: var(--r2); padding: 4px 10px;
+	width: max-content; max-width: calc(100vw - 60px); white-space: normal; }
+.vdiff.ahead { color: var(--ahead); } .vdiff.behind { color: var(--behind); } .vdiff.even { color: var(--ink-2); }
 .vdiff:empty { display: none; }
 /* the ball's effects (EE's effect display: the effect block's image in a dark box, a time bar for the timed ones) */
 .vfx { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; max-width: min(560px, calc(100vw - 170px)); }
 .vfx:empty { display: none; }
-.vfxc { display: inline-flex; align-items: center; gap: 5px; min-height: 26px; padding: 0 8px 0 3px; border-radius: 7px; background: rgba(10, 12, 16, .8);
-	border: 1px solid rgba(204, 204, 204, .3); font: 600 12px var(--mono); color: #e9ecf2; white-space: nowrap; }
+.vfxc { display: inline-flex; align-items: center; gap: 5px; min-height: 26px; padding: 0 8px 0 3px; border-radius: var(--r2); background: rgba(12, 16, 24, .82);
+	border: 1px solid rgba(204, 204, 204, .3); font: 600 12px var(--f-num); color: var(--ink); white-space: nowrap; }
 .vstage .vfxc canvas { position: static; display: block; cursor: default; }   /* (its size: vwFxHud, a whole number of the 16 px icon's pixels) */
-.vfxc .d { color: #ffd23f; font-weight: 700; }
-.vfxc .d.low { color: #ff7a6b; }
-.vfxc .m { color: #9aa3b5; font-weight: 500; }
+.vfxc .d { color: var(--coin); font-weight: 600; }
+.vfxc .d.low { color: var(--behind); }
+.vfxc .m { color: var(--ink-2); font-weight: 500; }
 .vfxc .bar { width: 4px; height: 16px; background: #cccccc; border: 1px solid #cccccc; position: relative; overflow: hidden; }
 .vfxc .bar i { position: absolute; left: 0; right: 0; bottom: 0; background: #00ff00; }
-.vfx.gh .lbl { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: #9aa3b5; background: rgba(10, 12, 16, .8); border-radius: 7px;
-	padding: 3px 7px; }
-.vfx.gh .vfxc { min-height: 22px; font-size: 11px; color: #b9d6ff; opacity: .7; padding-right: 6px; }
-.vfx.gh .vfxc .d { color: #b9d6ff; }
+.vfx.gh .lbl { font-size: 11px; font-weight: 600; color: var(--muted); background: rgba(12, 16, 24, .82); border-radius: var(--r2); padding: 3px 7px; }
+.vfx.gh .vfxc { min-height: 22px; font-size: 11px; color: var(--remote); opacity: .75; padding-right: 6px; }
+.vfx.gh .vfxc .d { color: var(--remote); }
 .vfx.gh .vfxc .bar { height: 12px; }
 /* the time slider (at least 100 px: the controls wrap to a second row first) with the effect marks under it (a row per effect, drawn by
    vwFxLine, which also makes room for them: .vbar's --fxpad) */
@@ -247,57 +232,57 @@ pre.log { margin: 8px 0 0; padding: 10px 12px; border-radius: 10px; background: 
 .vsw input[type=range] { flex: 1; min-width: 0; }
 .vfxline { position: absolute; left: 8px; top: calc(50% + 10px); width: calc(100% - 16px); height: 3px; cursor: help; }
 .vkeys { position: absolute; right: 10px; top: 10px; display: grid; grid-template-columns: repeat(3, 26px); gap: 3px; pointer-events: none; }
-.vkeys span { height: 24px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, .14); background: rgba(10, 12, 16, .7); color: #7f8898;
-	font: 700 11px/22px var(--mono); text-align: center; }
-.vkeys span.on { background: #ffd23f; color: #16130a; border-color: #ffd23f; }
+.vkeys span { height: 24px; border-radius: var(--r1); border: 1px solid rgba(255, 255, 255, .14); background: rgba(12, 16, 24, .74); color: var(--muted);
+	font: 600 11px/22px var(--f-num); text-align: center; }
+.vkeys span.on { background: var(--coin); color: var(--on-coin); border-color: var(--coin); }
 .vside { position: absolute; right: 10px; bottom: 10px; display: flex; gap: 6px; }
-.vside button { padding: 5px 10px; background: rgba(20, 23, 30, .85); }
-.vload { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #c9ced8; font-size: 14px; background: #000;
+.vside button { background: rgba(24, 32, 49, .9); }
+.vload { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--ink-2); font-size: 14px; background: #000;
 	text-align: center; padding: 20px; }
-.vlegend { position: absolute; left: 10px; bottom: 10px; margin: 0; max-width: min(430px, calc(100% - 20px)); background: rgba(10, 12, 16, .85);
-	border: 1px solid rgba(255, 255, 255, .08); border-radius: 9px; padding: 5px 10px; font-size: 12px; color: #b8bfcc; }
-.vlegend summary { color: #9aa3b5; font-size: 12px; }
+.vlegend { position: absolute; left: 10px; bottom: 10px; margin: 0; max-width: min(430px, calc(100% - 20px)); background: color-mix(in srgb, var(--panel) 96%, transparent);
+	border: 1px solid var(--line); border-radius: var(--r3); padding: 6px 10px; font-size: 12px; color: var(--ink-2); box-shadow: var(--shadow-float); }
+.vlegend summary { font-size: 12px; }
 .vlegend ul { margin: 6px 0 2px; padding-left: 16px; }
 .vlegend li { margin: 2px 0; }
-.vlegend kbd { font: 11px var(--mono); background: #232733; border-radius: 4px; padding: 0 4px; }
 .vbar { display: flex; flex-wrap: wrap; gap: calc(8px + var(--fxpad, 0px)) 10px; align-items: center; padding: 10px 12px calc(10px + var(--fxpad, 0px));
-	border-top: 1px solid #22262e; }   /* (--fxpad: the room the effect marks need below the slider's row, set by vwFxLine) */
+	border-top: 1px solid var(--line); }   /* (--fxpad: the room the effect marks need below the slider's row, set by vwFxLine) */
 .vbar .scrub { flex: 1 1 260px; display: flex; align-items: center; gap: 10px; }   /* (not narrower than the time and a 100 px slider) */
-.vbar input[type=range] { flex: 1; min-width: 0; accent-color: #ffd23f; }
-.vpos { font: 600 13px var(--mono); color: #d7dbe3; white-space: nowrap; }
-.vbar select, .vbar input[type=text] { width: auto; background: #1b1e25; color: #e9ecf2; border-color: #2f3440; padding: 6px 8px; font-size: 13px; }
-.vbar input[type=text] { width: 118px; font-family: var(--mono); }
+.vbar input[type=range] { flex: 1; min-width: 0; accent-color: var(--coin); }
+.vgrp { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-left: 10px; border-left: 1px solid var(--line); }
+.vpos { font: 600 13px var(--f-num); font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; }
+.vbar select, .vbar input[type=text] { height: 30px; width: auto; font-size: 13px; padding-left: 8px; }
+.vbar input[type=text] { width: 124px; font-family: var(--f-num); }
 .vplay { min-width: 44px; font-size: 15px !important; }
-.vck { font-size: 12.5px; color: #b8bfcc; display: inline-flex; align-items: center; gap: 5px; }
+.vck { font-size: 12.5px; color: var(--ink-2); display: inline-flex; align-items: center; gap: 5px; height: 30px; padding: 0 8px; border-radius: var(--r2); background: var(--raise); }
 .vstep { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
-.vstep button { padding: 5px 9px; font: 600 12.5px var(--mono); white-space: nowrap; touch-action: manipulation; user-select: none; }
-.vtk { font: 600 12.5px var(--mono); color: #ffd23f; background: #1b1e25; border: 1px solid #2f3440; border-radius: 9px; padding: 5px 9px; white-space: nowrap; }
-.vgear { padding: 5px 8px !important; }
-.vguide { position: absolute; left: 10px; top: 54px; width: min(360px, calc(100% - 20px)); background: rgba(14, 16, 21, .96); border: 1px solid #2f3440;
-	border-radius: 11px; padding: 11px 12px; font-size: 12.5px; color: #c9ced8; box-shadow: 0 10px 30px rgba(0, 0, 0, .45); z-index: 3; }
-.vguide h4 { margin: 0 0 6px; font-size: 13px; color: #fff; }
-.vguide .row { margin-top: 7px; flex-wrap: wrap; gap: 6px; align-items: center; }
-.vguide input[type=text] { width: 84px; background: #1b1e25; color: #e9ecf2; border-color: #2f3440; font: 12.5px var(--mono); padding: 5px 7px; }
-.vguide select { background: #1b1e25; color: #e9ecf2; border-color: #2f3440; }
-.vguide .hint { color: #8d95a5; margin-top: 7px; line-height: 1.4; }
-.vguide .st { margin-top: 8px; font: 12px var(--mono); color: #d7dbe3; white-space: pre-wrap; max-height: 170px; overflow: auto; }
-.vguide .found { color: #7ee2a8; }
-.vguide .vx { position: absolute; right: 6px; top: 6px; padding: 1px 8px; background: transparent; border-color: transparent; }
-.vside button.on { background: #3a2f14; border-color: #7a6220; color: #ffd76a; }
+.vstep button { padding: 0 9px; font: 600 12.5px var(--f-num); white-space: nowrap; touch-action: manipulation; user-select: none; }
+.vtk { font: 600 12.5px/28px var(--f-num); font-variant-numeric: tabular-nums; color: var(--coin-ink); background: var(--coin-wash); border-radius: var(--r2);
+	padding: 0 9px; white-space: nowrap; }
+.vgear { padding: 0 9px !important; }
+.vguide { position: absolute; left: 10px; top: 54px; width: min(360px, calc(100% - 20px)); background: color-mix(in srgb, var(--panel) 96%, transparent);
+	border: 1px solid var(--line); border-radius: var(--r3); padding: 12px; font-size: 12.5px; color: var(--ink-2); box-shadow: var(--shadow-float); z-index: 3; }
+.vguide h4 { margin: 0 0 6px; font: 600 14px var(--f-num); color: var(--ink); }
+.vguide .row { margin-top: 8px; gap: 6px; }
+.vguide input[type=text] { width: 84px; height: 30px; font: 12.5px var(--f-num); padding: 0 7px; }
+.vguide select { height: 30px; }
+.vguide .hint { margin-top: 8px; line-height: 1.4; }
+.vguide .st { margin-top: 8px; font: 12px var(--f-mono); color: var(--ink); white-space: pre-wrap; max-height: 170px; overflow: auto; }
+.vguide .found { color: var(--ahead); }
+.vguide .vx, .vgfxp .vx { position: absolute; right: 6px; top: 6px; height: 26px; padding: 0 8px; background: transparent; border-color: transparent; }
+.vside button.on { background: var(--coin-wash); border-color: var(--coin-mark); color: var(--coin-ink); }
 #vCanvas.draw { cursor: crosshair; }
-.vgfxp { position: absolute; right: 10px; bottom: 52px; width: min(430px, calc(100% - 20px)); background: rgba(14, 16, 21, .96); border: 1px solid #2f3440;
-	border-radius: 11px; padding: 11px 12px; font-size: 12.5px; color: #c9ced8; box-shadow: 0 10px 30px rgba(0, 0, 0, .45); }
-.vgfxp code { font: 12px var(--mono); color: #fff; word-break: break-all; }
-.vgfxp #vGfxNow { padding-right: 18px; }
+.vgfxp { position: absolute; right: 10px; bottom: 52px; width: min(430px, calc(100% - 20px)); background: color-mix(in srgb, var(--panel) 96%, transparent);
+	border: 1px solid var(--line); border-radius: var(--r3); padding: 12px; font-size: 12.5px; color: var(--ink-2); box-shadow: var(--shadow-float); }
+.vgfxp code { font: 12px var(--f-mono); color: var(--ink); word-break: break-all; }
+.vgfxp #vGfxNow { padding-right: 24px; }
 .vgfxp .row { margin-top: 8px; flex-wrap: nowrap; }
-.vgfxp input[type=text] { flex: 1; min-width: 0; background: #1b1e25; color: #e9ecf2; border-color: #2f3440; font: 12.5px var(--mono); padding: 6px 8px; }
-.vgfxp .hint { color: #8d95a5; margin-top: 8px; }
-.vgfxp .vx { position: absolute; right: 6px; top: 6px; padding: 1px 8px; background: transparent; border-color: transparent; }
-.vgfxp a { color: #9cc0ff; cursor: pointer; }
-.vgfxp .err { color: #ff9b8a; margin-top: 6px; }
-.vgfxhint { position: absolute; left: 50%; top: 10px; transform: translateX(-50%); background: rgba(58, 47, 16, .92) !important; color: #ffd76a !important;
-	border-color: #7a6220 !important; font-size: 12px !important; padding: 4px 10px !important; max-width: calc(100% - 200px); white-space: nowrap; overflow: hidden;
-	text-overflow: ellipsis; }
+.vgfxp input[type=text] { flex: 1; min-width: 0; font: 12.5px var(--f-mono); }
+.vgfxp .hint { margin-top: 8px; }
+.vgfxp a { color: var(--focus); cursor: pointer; }
+.vgfxp .err { color: var(--behind); margin-top: 6px; }
+.vgfxhint { position: absolute; left: 50%; top: 10px; transform: translateX(-50%); background: var(--coin-wash) !important; color: var(--coin-ink) !important;
+	border-color: transparent !important; font-size: 12px !important; height: 26px !important; padding: 0 10px !important; max-width: calc(100% - 200px);
+	white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
 @media (max-width: 640px) {
 	.viewer { padding: 0; }
 	.vwin { border-radius: 0; max-height: none; border: 0; }
@@ -307,35 +292,41 @@ pre.log { margin: 8px 0 0; padding: 10px 12px; border-radius: 10px; background: 
 	.vkeys { grid-template-columns: repeat(3, 20px); } .vkeys span { height: 19px; font-size: 10px; line-height: 17px; }
 	.vbar { padding: 8px 8px calc(8px + var(--fxpad, 0px)); gap: calc(6px + var(--fxpad, 0px)) 8px; }
 	.vbar .scrub { flex-basis: 100%; gap: 8px; }
-	.vbar input[type=text] { width: 96px; }
+	.vbar input[type=text] { width: 100px; }
+	.vgrp { padding-left: 0; border-left: 0; }
 	.vfx { max-width: calc(100vw - 110px); }
 	.vfxc { min-height: 22px; font-size: 11px; gap: 3px; padding-right: 5px; }
 	.vfx.gh .vfxc { padding: 0 3px; gap: 2px; }
 	.vfx.gh .vfxc > span:not(.bar) { display: none; }   /* (the original's effects: icons only) */
 	.vlegend { display: none; }
-	.vstep button { padding: 5px 7px; font-size: 11.5px; }
+	.vstep button { padding: 0 7px; font-size: 11.5px; }
 	.vgfxhint { max-width: calc(100% - 120px); }
 }
 </style>
+<script src="/phases.js" defer></script>
 </head>
-<body>
+<body data-page="runs">
+<nav class="topnav" aria-label="EE Auto TAS">
+	<a class="brand" href="/"><span class="coin" aria-hidden="true"></span>EE Auto TAS</a>
+	<div class="tabs"><a class="tab" href="/" data-tab="runs">Runs</a><a class="tab" href="/editor" data-tab="editor">Editor</a><a class="tab" href="/stats" data-tab="stats">Stats</a></div>
+	<div class="navr" id="navR"><div class="pills" id="pills"></div></div>
+	<button class="ghost themeb" id="themeBtn" data-ic="theme" title="Theme: follows the system"></button>
+</nav>
+<div id="offline" hidden></div>
 <div class="toasts" id="toasts"></div>
-<div class="wrap">
-	<header>
-		<div>
-			<h1><span class="coin"></span>EE Auto TAS</h1>
-			<div class="sub">Everybody Edits Offline · the game's exact physics · keeps improving your run until you stop it</div>
-		</div>
-		<div class="pills"><a class="pill" href="/editor" title="Build a level (blocks, a start, the trophy) and let the GPU find a route to the trophy">&#9998; Level editor</a><div class="pills" id="pills"></div></div>
-	</header>
-	<div class="grid">
-		<div>
-			<div id="rented"></div>
-			<div class="card">
+<div class="page runs" id="runsPage">
+	<aside class="rail" id="rail" aria-label="Your runs">
+		<button class="railtog" id="railToggle" aria-expanded="true" aria-controls="railBody"><span id="railTogText">Your runs</span><span class="car" aria-hidden="true">&#9662;</span></button>
+		<div class="railbody" id="railBody">
+			<div class="rail-top">
+				<input type="search" id="jobFilter" placeholder="Filter runs" aria-label="Filter runs" autocomplete="off" spellcheck="false">
+				<button id="newBtn" data-ic="plus" aria-expanded="false" aria-controls="newRun" title="Import a level and a TAS that finishes it">New run</button>
+			</div>
+			<div class="card newrun" id="newRun" hidden>
 				<h2>New run</h2>
-				<div class="drop" id="drop">
+				<div class="drop" id="drop" role="button" tabindex="0" aria-label="Choose the .eelvl and .eetas files">
 					<b>Drop your .eelvl + .eetas here</b>
-					<span>or click to choose files · the level and a TAS that finishes it</span>
+					<span>or click to choose files: the level and a TAS that finishes it</span>
 					<input type="file" id="pick" accept=".eelvl,.eetas" multiple hidden>
 				</div>
 				<div class="files" id="files"></div>
@@ -349,20 +340,35 @@ pre.log { margin: 8px 0 0; padding: 10px 12px; border-radius: 10px; background: 
 				</select>
 				<div class="hint">Only matters on levels with 2+ spawn points or time doors (/reset moves you to the next spawn point).
 					On other levels it makes no difference.</div>
-				<div class="row" style="margin-top:12px">
+				<div class="row" style="margin-top:14px">
 					<button class="primary" id="importBtn" disabled>Import &amp; check</button>
-					<span id="importHint" style="color:var(--muted);font-size:12.5px"></span>
+					<span id="importHint" class="t-small"></span>
 				</div>
 				<div id="importMsg"></div>
 			</div>
 			<div class="jobs" id="jobs"></div>
+			<div id="rented"></div>
 		</div>
-		<div><div id="detail"></div><div id="ideas"></div></div>
-	</div>
+	</aside>
+	<main class="mainc">
+		<div class="onb" id="onboard" hidden>
+			<h1>Make your first run faster</h1>
+			<p class="lead">Import a level (.eelvl) and a TAS that finishes it (.eetas). The app replays your TAS in EE's exact physics, then searches for faster
+				inputs until you stop it. Every improvement is proven by a full replay.</p>
+			<div id="onboardSlot"></div>
+		</div>
+		<div class="sheet pickone" id="pickOne" hidden><div class="empty"><span class="et">Pick a run</span>Choose one of your runs on the left, or start a new one with <strong>New run</strong>.</div></div>
+		<div class="sheet" id="sheet" hidden>
+			<div class="sec" id="detail"></div>
+			<section class="sec opt" id="opt" aria-label="Optimizer"></section>
+			<div class="sec" id="detail2"></div>
+			<div class="sec" id="ideas"></div>
+		</div>
+	</main>
 </div>
 
 <div class="viewer" id="viewer" hidden>
-	<div class="vwin" role="dialog" aria-label="Run viewer">
+	<div class="vwin night" role="dialog" aria-label="Run viewer">
 		<div class="vtop">
 			<div class="vtitle" id="vTitle"></div>
 			<button class="vnewer" id="vNewer" hidden>Newer version found · reload</button>
@@ -441,13 +447,13 @@ pre.log { margin: 8px 0 0; padding: 10px 12px; border-radius: 10px; background: 
 				<button id="vF1s" title="Forward 1 second (&rarr;); hold to repeat">1 s &#9654;|</button>
 				<span class="vtk" id="vTk" title="The best run's tick (1 tick = 0.01 s; an index into the .eetas) and its run time">tick 0</span>
 			</div>
-			<label class="vck">speed <select id="vSpeed"><option value="0.25">0.25x</option><option value="0.5">0.5x</option><option value="1" selected>1x</option>
+			<span class="vgrp"><label class="vck">speed <select id="vSpeed"><option value="0.25">0.25x</option><option value="0.5">0.5x</option><option value="1" selected>1x</option>
 				<option value="2">2x</option><option value="4">4x</option><option value="8">8x</option><option value="16">16x</option></select></label>
-			<input type="text" id="vJump" placeholder="jump to 1:10.00" title="Jump to a run time (m:ss.cc, 70.5s) or a tick number; Enter">
-			<label class="vck"><input type="checkbox" id="vGhost" checked> ghost</label>
+			<input type="text" id="vJump" placeholder="jump to 1:10.00" title="Jump to a run time (m:ss.cc, 70.5s) or a tick number; Enter"></span>
+			<span class="vgrp"><label class="vck"><input type="checkbox" id="vGhost" checked> ghost</label>
 			<label class="vck"><input type="checkbox" id="vPath" checked> path</label>
 			<label class="vck" id="vGfxLbl" title="Draw the level with Everybody Edits' own graphics (off: simple minimap colors)"><input type="checkbox" id="vGfx" checked> EE graphics</label>
-			<button class="vgear" id="vGfxSet" title="EE graphics: which eeo-tas folder they come from">&#9881;</button>
+			<button class="vgear" id="vGfxSet" title="EE graphics: which eeo-tas folder they come from">&#9881;</button></span>
 		</div>
 	</div>
 </div>
@@ -459,6 +465,11 @@ const fmt = (t) => `${Math.floor(t / 6000)}:${((t % 6000) / 100).toFixed(2).padS
 const store = { get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }, set(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* no storage */ } } };
 let state = { jobs: [], cpus: 0 };
 let selected = store.get('tasopt.sel');
+// #job=<id> picks the run (the back button walks between runs); without it the last run picked in this browser. A run that came
+// by a link is checked once the runs are known (linkRun): it is remembered as the run picked here, or, gone, the list shows
+// with a note instead of another run (noAutoPick)
+let linkRun = null, noAutoPick = false;
+{ const m = location.hash.match(/(?:^#|&)job=([a-z0-9-]+)/); if (m) { selected = m[1]; linkRun = m[1]; } }
 let files = { eelvl: null, eetas: null };
 let busy = false;
 const START_LABEL = { reset: 'after /reset', load: 'right after loading the level' };
@@ -468,6 +479,7 @@ const GPU_HOW = 'GPU mode runs a second, native copy of the exact EE physics on 
 
 // ------------------------------------------------------------ upload
 function setFiles(list) {
+	if (list && list.length) newRunOpen(true);
 	for (const f of list) {
 		if (/\.eelvl$/i.test(f.name)) files.eelvl = f;
 		else if (/\.eetas$/i.test(f.name)) files.eetas = f;
@@ -564,9 +576,9 @@ async function api(p, opts) {
 	return j;
 }
 let seenImp = null;   // job id -> number of improvements already shown
-function toast(html) {
+function toast(html, kind) {
 	const el = document.createElement('div');
-	el.className = 'toast'; el.innerHTML = html;
+	el.className = `toast${kind ? ' ' + kind : ''}`; el.innerHTML = html;
 	$('toasts').appendChild(el);
 	setTimeout(() => el.remove(), 9000);
 }
@@ -579,18 +591,76 @@ function notifyImprovements() {
 		if (first || was === undefined || n <= was) continue;
 		const fresh = j.history.slice(was), gain = fresh.reduce((a, p) => a + p.saved, 0);
 		const msg = `Saved ${(gain / 100).toFixed(2)} s — ${j.name} is now ${fmt(fresh[fresh.length - 1].runTicks)}`;
-		toast(`<b>−${(gain / 100).toFixed(2)} s</b> &nbsp;${esc(j.name)} is now <b>${fmt(fresh[fresh.length - 1].runTicks)}</b>` +
-			`<div style="color:var(--muted);font-size:12px;margin-top:2px">total saved ${(j.savedTicks / 100).toFixed(2)} s</div>`);
+		toast(`New best: <b>${fmt(fresh[fresh.length - 1].runTicks)}</b> on ${esc(j.name)} <span class="up tnum">−${(gain / 100).toFixed(2)} s</span>` +
+			`<div class="t-small" style="margin-top:2px">${j.savedTicks / 100 >= 0.005 ? `${(j.savedTicks / 100).toFixed(2)} s saved in all` : ''} · <a href="#job=${esc(j.id)}">open</a></div>`, 'best');
 		try { if (document.hidden && window.Notification && Notification.permission === 'granted') new Notification('EE Auto TAS', { body: msg }); } catch (e) { /* no notifications */ }
 	}
 	const run = state.jobs.find((j) => j.running);
 	document.title = run && run.savedTicks > 0 ? `−${(run.savedTicks / 100).toFixed(2)} s · ${run.best.time} · EE Auto TAS` : 'EE Auto TAS';
 }
 async function refresh() {
+	// (a network error is counted by /ui.js's fetch: the offline banner after 2 in a row; any answer clears it)
 	try { state = await api('/api/state'); } catch (e) { return; }
+	if (linkRun) {
+		if (state.jobs.some((j) => j.id === linkRun)) store.set('tasopt.sel', linkRun);
+		else {
+			toast(`That run is not here any more (it may have been deleted). Pick one from the list.`, 'err');
+			if (selected === linkRun) { selected = null; noAutoPick = true; }
+			try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { /* sandbox */ }
+			if (window.matchMedia && window.matchMedia('(max-width: 899px)').matches) rail(true);
+		}
+		linkRun = null;
+	}
 	notifyImprovements();
-	renderPills(); renderRented(); renderJobs(); renderDetail(); renderIdeas();
+	renderPills(); renderRented(); renderJobs(); renderShell(); renderDetail(); renderOpt(); renderIdeas();
+	syncHash();
+	selInView();
 	vwCheckNewer();
+}
+/** the rail scrolls the run on screen into view, once for each run picked (a link, a new best's toast, the page's own pick); the
+ *  rail's own scroll only (not the page), and not while the user scrolls it */
+let inViewFor = null, railScrolledAt = 0;
+function selInView() {
+	if (!selected || inViewFor === selected) return;
+	const rl = $('rail'), el = $('jobs').querySelector('.job.sel');
+	if (!rl || !el) return;
+	inViewFor = selected;
+	if (Date.now() - railScrolledAt < 1500 || rl.scrollHeight <= rl.clientHeight + 2) return;
+	const r = el.getBoundingClientRect(), rr = rl.getBoundingClientRect();
+	if (r.top < rr.top + 40 || r.bottom > rr.bottom - 8) rl.scrollTop += r.top - rr.top - Math.max(40, (rr.height - r.height) / 3);
+}
+/** the page as a whole: no runs = the onboarding (the New run card open under it), else the rail and the job sheet */
+function renderShell() {
+	const none = !state.jobs.length;
+	$('onboard').hidden = !none;
+	$('sheet').hidden = none || !selected;
+	$('pickOne').hidden = none || !!selected;
+	const card = $('newRun');
+	if (none && card.parentNode !== $('onboardSlot')) { $('onboardSlot').appendChild(card); card.hidden = false; }
+	if (!none && card.parentNode === $('onboardSlot')) { $('jobs').before(card); card.hidden = !newRunWanted; }
+	$('newBtn').hidden = none;
+	$('jobFilter').hidden = none;
+	$('railTogText').textContent = `Your runs (${state.jobs.length})`;
+}
+/** the address shows the run on screen (#job=<id>); the viewer's #watch=<id> while it is open */
+function syncHash() {
+	if (!selected || /(?:^#|&)watch=/.test(location.hash)) return;
+	const want = `#job=${selected}`;
+	if (location.hash !== want) { try { history.replaceState(null, '', want); } catch (e) { /* sandbox */ } }
+}
+// the New run card: folded behind "New run" at the top of the rail once there are runs; files dropped anywhere open it
+let newRunWanted = false;
+function newRunOpen(open) {
+	newRunWanted = !!open;
+	const card = $('newRun');
+	if (card.parentNode !== $('onboardSlot')) card.hidden = !open;
+	$('newBtn').setAttribute('aria-expanded', open ? 'true' : 'false');
+	if (open && card.parentNode !== $('onboardSlot')) { rail(true); card.scrollIntoView({ block: 'nearest' }); }
+}
+/** the rail on narrow screens: a "Your runs (N)" disclosure above the job sheet */
+function rail(open) {
+	$('rail').classList.toggle('shut', !open);
+	$('railToggle').setAttribute('aria-expanded', open ? 'true' : 'false');
 }
 // processor speed (GET /api/state bench = the engine benchmark, measured once per PC; see src/bench.js)
 const mts = (x) => (x >= 1e6 ? `${(x / 1e6).toFixed(x >= 1e7 ? 0 : 1)} M` : `${Math.round(x / 1e3)} k`);
@@ -645,9 +715,9 @@ function procOptions() {
 function renderPills() {
 	const running = state.jobs.find((j) => j.running);
 	const rented = rentedJobs().filter((x) => x.running);
-	$('pills').innerHTML = `<span class="pill" title="${esc(state.cpuModel || '')}">${esc(cpuName())} · ${state.cpus} threads${state.bench ? ` · ${mts(state.bench.single)} ticks/s each` : ''}</span>` +
-		(running ? `<span class="pill ok">optimizing: ${esc(running.name)}</span>` : (rented.length ? '' : `<span class="pill">idle</span>`)) +
-		(rented.length ? `<span class="pill ok" title="Jobs whose optimizer runs on a rented machine (the Rented machines box)">${rented.length} on rented machines · ` +
+	$('pills').innerHTML = `<span class="pill" title="${esc(state.cpuModel || '')}${state.bench ? `: ${mts(state.bench.single)} ticks/s a thread (measured)` : ''}">${esc(cpuName())} · ${state.cpus} threads</span>` +
+		(running ? `<a class="pill ok keep" href="#job=${esc(running.id)}" title="Optimizing ${esc(running.name)}"><i class="live"></i>Optimizing ${esc(running.name)}</a>` : (rented.length ? '' : `<span class="pill keep"><i></i>Idle</span>`)) +
+		(rented.length ? `<span class="pill" title="Jobs whose optimizer runs on a rented machine (the Rented machines box)" style="color:var(--remote)"><i></i>${rented.length} on rented machines · ` +
 			`${rateMG(rented.reduce((a, x) => a + x.cpuTicksPerSec + x.gpuTicksPerSec, 0))} ticks/s</span>` : '');
 }
 // the live speed of a running job (summary.live: src/jobs/<id>/live.json, written every second by grind.js)
@@ -685,17 +755,20 @@ const campOrder = (j) => { const c = j.campaign, n = parseInt(String(c.campaign)
 function jobCard(j) {
 	const c = j.campaign;
 	return `<div class="jobwrap">
-		<button class="job card ${j.id === selected ? 'sel' : ''}" data-id="${j.id}">
-			<div class="t1"><span>${esc(j.name)}</span><span class="dot ${j.running ? 'run' : (j.remote && j.remote.running ? 'rem' : '')}"></span></div>
+		<button class="job ${j.id === selected ? 'sel' : ''}" data-id="${j.id}"${j.id === selected ? ' aria-current="true"' : ''}>
+			<div class="t1"><span>${esc(j.name)}</span><span class="dot ${j.running ? 'run' : (j.remote && j.remote.running ? 'rem' : '')}"${j.running ? ' title="optimizing"' : ''}></span></div>
 			${c ? `<div class="ctag" title="${esc(c.entry)} in EEO's campaigns.zip">${esc(c.title || `campaign ${c.campaign}`)}${c.tier ? ` · level ${c.tier}${c.tiers ? ` of ${c.tiers}` : ''}` : ''}</div>` : ''}
-			<div class="t2"><span class="verified" title="TAS verified to completion">✓</span> ${j.original.time} → ${j.best.time}${j.savedTicks > 0 ? ` · −${(j.savedTicks / 100).toFixed(2)} s` : ''}</div>
+			<div class="t2">${j.original.time} → ${j.best.time}${j.savedTicks > 0 ? ` <span class="sv">−${(j.savedTicks / 100).toFixed(2)} s</span>` : ''}</div>
 			${j.running ? liveShort(j) : ''}${j.remote ? remoteShort(j) : ''}
-		</button><button class="watch jw" data-watch="${j.id}" title="Watch the current best run, with your original .eetas as a ghost">Watch</button></div>`;
+		</button><button class="watch small jw" data-watch="${j.id}" title="Watch the current best run, with your original .eetas as a ghost">Watch</button></div>`;
 }
 function renderJobs() {
-	if (!state.jobs.some((j) => j.id === selected)) selected = state.jobs[0] ? state.jobs[0].id : null;
-	const lists = { campaign: state.jobs.filter((j) => j.campaign).sort((a, b) => campOrder(a) - campOrder(b) || (b.created || 0) - (a.created || 0)), other: state.jobs.filter((j) => !j.campaign) };
-	$('jobs').innerHTML = JSECS.filter((s) => lists[s.key].length).map((s) => {
+	if (!state.jobs.some((j) => j.id === selected)) selected = typeof noAutoPick !== 'undefined' && noAutoPick ? null : (state.jobs[0] ? state.jobs[0].id : null);
+	// the rail's filter (#jobFilter): runs whose name holds the text, any case
+	const fq = String((($('jobFilter') || {}).value || '')).trim().toLowerCase();
+	const shown = fq ? state.jobs.filter((j) => String(j.name).toLowerCase().includes(fq)) : state.jobs;
+	const lists = { campaign: shown.filter((j) => j.campaign).sort((a, b) => campOrder(a) - campOrder(b) || (b.created || 0) - (a.created || 0)), other: shown.filter((j) => !j.campaign) };
+	$('jobs').innerHTML = (fq && !shown.length ? `<div class="jfnone">No run matches "${esc(fq)}".</div>` : '') + JSECS.filter((s) => lists[s.key].length).map((s) => {
 		const open = jsecOpen(s.key), n = lists[s.key].length, run = lists[s.key].some((j) => j.running);
 		return `<div class="jsec${open ? '' : ' shut'}"><button class="jsh" data-sec="${s.key}" title="${esc(s.tip)} (click: fold / unfold)" aria-expanded="${open}"><span class="car">&#9662;</span>${s.title}` +
 			`${run && !open ? ' <span class="dot run"></span>' : ''}<span class="jn">${n}</span></button>${open ? lists[s.key].map(jobCard).join('') : ''}</div>`;
@@ -704,7 +777,14 @@ function renderJobs() {
 	for (const el of document.querySelectorAll('[data-watch]')) el.onclick = () => openViewer(el.dataset.watch);
 	for (const el of document.querySelectorAll('.jsh')) el.onclick = () => { store.set(`tasopt.sec.${el.dataset.sec}`, jsecOpen(el.dataset.sec) ? '0' : '1'); renderJobs(); };
 }
-function selectJob(id) { selected = id; store.set('tasopt.sel', selected); renderRented(); renderJobs(); renderDetail(); renderIdeas(); }
+function selectJob(id, fromHash) {
+	const was = selected;
+	selected = id; store.set('tasopt.sel', selected); noAutoPick = false;
+	// a run the user picks is a step the back button returns to; the page's own pick only replaces the address
+	if (!fromHash && was !== id && !/(?:^#|&)watch=/.test(location.hash)) { try { history.pushState(null, '', `#job=${id}`); } catch (e) { /* sandbox */ } }
+	renderRented(); renderJobs(); renderShell(); renderDetail(); renderOpt(); renderIdeas(); syncHash();
+	if (window.matchMedia && window.matchMedia('(max-width: 899px)').matches && !fromHash) { rail(false); $('sheet').scrollIntoView({ block: 'start' }); }
+}
 
 // ------------------------------------------------------------ rented machines: summary.remote = src/jobs/<id>/remote.json, written every 30 s by
 // the rented GPUs' monitor (src/out/remote/farm.js) while the job's optimizer runs on a rented machine; the server leaves it out once it is
@@ -808,25 +888,36 @@ function gpuFamily(f) {
 }
 function dur(ms) {
 	if (!ms || ms < 0) return '—';
-	const m = Math.floor(ms / 60000), h = Math.floor(m / 60);
-	return h ? `${h}h ${m % 60}m` : `${m}m`;
+	const m = Math.floor(ms / 60000), h = Math.floor(m / 60), d = Math.floor(h / 24);
+	if (d >= 2) return `${d} days`;
+	return h ? `${h} h ${String(m % 60).padStart(2, '0')} min` : (m ? `${m} min` : `${Math.max(1, Math.round(ms / 1000))} s`);
 }
-function chartSvg(j) {
+/** clock-time ticks for an axis from t0 to t1 (ms since the epoch): at most n, on round minutes */
+function clockTicks(t0, t1, n) {
+	const span = Math.max(1, t1 - t0), steps = [1, 2, 5, 10, 15, 30, 60, 120, 180, 360, 720, 1440, 2880, 10080].map((m) => m * 60000);
+	const st = steps.find((s) => span / s <= n) || steps[steps.length - 1];
+	const out = [];
+	for (let t = Math.ceil(t0 / st) * st; t <= t1 && out.length < 50; t += st) out.push(t);
+	return out;
+}
+const UI_MINUS = '−';
+const UI_CLOCK = (t) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+/** the best time over wall time (the job's history as steps), its improvements as gold dots; w = the box's width */
+function chartSvg(j, w) {
 	const h = j.history || [];
-	if (!h.length) return `<div class="empty" style="padding:62px 10px">The chart fills in as improvements are found.</div>`;
-	const W = 800, H = 170, pad = 10;
-	const t0 = Math.min(h[0].t, j.optimizingSince || h[0].t) - 1, t1 = Math.max(Date.now(), h[h.length - 1].t);
+	if (!h.length) return `<div class="empty"><span class="et">No improvement yet</span>${j.running ? 'The chart fills in as the optimizer finds time. The first minutes usually find the most.' : 'Press Start: the first minutes find the most time.'}</div>`;
+	if (typeof UI !== 'object') return '';
+	const t0 = Math.min(h[0].t, j.optimizingSince || h[0].t) - 1000, t1 = Math.max(Date.now(), h[h.length - 1].t + 1000);
 	const y0 = j.original.runTicks, y1 = Math.min(...h.map((p) => p.runTicks));
-	const X = (t) => pad + (W - 2 * pad) * (t - t0) / Math.max(1, t1 - t0);
-	const Y = (v) => pad + (H - 2 * pad) * (y0 - v) / Math.max(1, y0 - y1);
-	let d = `M${X(t0)},${Y(y0)}`;
-	for (const p of h) d += ` H${X(p.t)} V${Y(p.runTicks)}`;
-	d += ` H${X(t1)}`;
-	return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
-		<path d="${d} V${H} H${X(t0)} Z" fill="var(--good-soft)" opacity=".7"/>
-		<path d="${d}" fill="none" stroke="var(--good)" stroke-width="2.5" vector-effect="non-scaling-stroke"/>
-		${h.map((p) => `<circle cx="${X(p.t)}" cy="${Y(p.runTicks)}" r="3" fill="var(--good)"/>`).join('')}
-	</svg>`;
+	const pad = Math.max(1, Math.round((y0 - y1) * 0.08));
+	const span = t1 - t0, xf = span > 36 * 3600e3 ? (t) => new Date(t).toLocaleDateString([], { month: 'short', day: 'numeric' }) : (t) => UI.clock(t);
+	const marks = h.map((p) => ({ x: p.t, y: p.runTicks, tip: `<span class="tv">${fmt(p.runTicks)}</span> <span class="up">${UI_MINUS}${p.saved} tick${p.saved === 1 ? '' : 's'}</span><br>${esc(friendlyStage(p.what))}<br><span class="muted">${esc(new Date(p.t).toLocaleString())}</span>` }));
+	return UI.steps([{ name: 'best time', color: 'var(--ink-2)', pts: [[t0, y0], ...h.map((p) => [p.t, p.runTicks])] }], {
+		w: Math.max(320, w || 760), h: 170, xmin: t0, xmax: t1, ymin: y1 - pad, ymax: y0 + pad, padL: 64, padR: 14, endLabels: false,
+		yticks: y0 === y1 ? [y0] : y0 - y1 < 3 ? [y0, y1] : [y0, Math.round((y0 + y1) / 2), y1], yfmt: fmt, xfmt: xf, xticks: clockTicks(t0, t1, 6), marks,
+		label: `The best time from ${fmt(y0)} to ${fmt(y1)}`,
+		hoverFmt: (x, rows) => `<div class="tr"><span class="tv">${rows[0].v === null ? '' : fmt(rows[0].v)}</span> the best at ${esc(new Date(x).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }))}</div>`,
+	});
 }
 function reportHtml(j) {
 	const r = j.report;
@@ -837,80 +928,81 @@ function reportHtml(j) {
 	return `<div class="report">
 		<h4>Final run: ${r.time}${r.savedTicks > 0 ? ` · saved ${(r.savedTicks / 100).toFixed(2)} s (${r.savedTicks} ticks) vs ${r.originalTime}` : ''}</h4>
 		${r.uses && r.uses.length ? `<div><span class="odds ${r.chance >= 0.9995 ? 'sure' : 'risky'}">${pct(r.chance)}</span> chance it works in EEO
-			<span style="color:var(--muted)">(the original: ${pct(r.originalChance)})</span></div>
-			<div style="color:var(--muted);font-size:12.5px;margin:6px 0">EEO picks random portal exits by chance, so replay the .eetas until the portal goes the right way.</div>${uses}`
+			<span class="muted">(the original: ${pct(r.originalChance)})</span></div>
+			<div class="t-small" style="margin:6px 0">EEO picks random portal exits by chance, so replay the .eetas until the portal goes the right way.</div>${uses}`
 			: `<div><span class="odds sure">100%</span> works every time in EEO: no random portals on this route.</div>`}
-		<div class="row" style="margin-top:10px"><button class="primary" id="dlFinal">Download final .eetas (${r.time})</button></div>
+		<div class="row" style="margin-top:10px"><button class="primary" id="dlFinal" data-ic="download">Download final .eetas (${r.time})</button></div>
 	</div>`;
 }
+let heroFor = null;   // {id, runTicks} of the hero time on screen: a drop is the new best's moment (UI.newBest)
+/** the job sheet: #detail (the header, the facts, the times, the live and remote strips) and #detail2 (Improvements, Files, the
+ *  report, the disclosures), rebuilt on every poll; the Optimizer section #opt (renderOpt) and Search harder #ideas are their own */
 function renderDetail() {
 	const j = state.jobs.find((x) => x.id === selected);
-	if (!j) {
-		$('detail').innerHTML = `<div class="card empty"><b>No runs yet</b>Drop a level (.eelvl) and a TAS for it (.eetas) on the left.
-			<ol class="how" style="text-align:left;max-width:460px;margin:18px auto 0">
-			<li>The level is read exactly like EE Offline reads it, and the TAS is replayed in the exact physics to check it finishes.</li>
-			<li>Press <b>Start</b>: it searches for faster inputs forever, around the clock, until you press Stop.</li>
-			<li>Every improvement is proven by replaying the whole run. Download the best .eetas any time (eeo-tas format).</li></ol></div>`;
-		return;
-	}
+	if (!j) { $('detail').innerHTML = ''; $('detail2').innerHTML = ''; heroFor = null; return; }
 	const sel = $('workers') ? $('workers').value : '';
-	const pct = j.savedTicks > 0 ? ` · ${(100 * j.savedTicks / j.original.runTicks).toFixed(2)}%` : '';
+	const pct = j.savedTicks > 0 ? `${(100 * j.savedTicks / j.original.runTicks).toFixed(1)}%` : '';
 	const workersDefault = sel || String(j.workers || Math.max(1, state.cpus - 2));
 	const peak = state.bench && state.bench.peakThreads;
 	const opts = Array.from({ length: state.cpus }, (_, i) => i + 1).map((n) => {
 		const e = estimate(state.bench, n);
 		return `<option value="${n}" ${String(n) === workersDefault ? 'selected' : ''}>${n}${e ? ` · ${mts(e)}/s` : ''}${n === peak && peak < state.cpus ? ' (fastest)' : ''}</option>`;
 	}).join('');
-	const hist = (j.history || []).slice().reverse();
-	// the panel is rebuilt on every poll: its scrolling boxes (the improvements, the log) keep their place; one scrolled to
-	// its end stays at the end, so new lines show
-	const scrolled = ['.feed', '#logBox pre.log', '#rlogBox pre.log'].map((sel) => { const el = $('detail').querySelector(sel); return el && { sel, top: el.scrollTop, end: el.scrollTop > 0 && el.scrollTop + el.clientHeight >= el.scrollHeight - 4 }; }).filter(Boolean);
-	const startNote = j.startMatters ? ` · TAS started ${START_LABEL[j.startMode] || j.startMode}` : '';
-	$('detail').innerHTML = `<div class="card">
-		<div class="hero">
-			<div>
-				<h3>${esc(j.name)}</h3>
-				<div class="meta"><span class="verified" title="Checked at import: your .eetas was replayed in the exact physics and finishes the level in ${esc(j.original.time)}. A run is only created for a TAS that finishes.">✓ TAS verified to completion</span> · <span title="${esc(j.level.file || '')}${j.level.md5 ? `, md5 ${esc(j.level.md5)}` : ''}">${esc(j.level.name || j.level.file)}</span>${j.level.eeoCopy ? ' (EEO\'s own copy)' : ''} · ${j.level.width}×${j.level.height} · TAS ${esc(j.tas.file)} · ${j.tas.coins} coins${j.tas.deaths ? ` · ${j.tas.deaths} deaths` : ''}${esc(startNote)}</div>
-				${jobCheckHtml(j)}
-			</div>
-			<div class="row">
+	const histAll = (j.history || []);
+	const hist = histAll.slice(Math.max(0, histAll.length - IMP_ROWS)).reverse();
+	// the sheet is rebuilt on every poll: its scrolling boxes (the improvements, the logs) keep their place; one scrolled to its
+	// end stays at the end, so new lines show
+	const scrolled = ['.feed', '#logBox pre.log', '#rlogBox pre.log'].map((sel) => { const el = $('sheet').querySelector(sel); return el && { sel, top: el.scrollTop, end: el.scrollTop > 0 && el.scrollTop + el.clientHeight >= el.scrollHeight - 4 }; }).filter(Boolean);
+	const c = j.campaign;
+	const facts = [
+		c ? `<span class="chip" title="${esc(c.entry)} in EEO's campaigns.zip">${esc(c.title || `campaign ${c.campaign}`)}${c.tier ? `, level ${c.tier}${c.tiers ? ` of ${c.tiers}` : ''}` : ''}</span>` : '',
+		`<span class="chip ahead" title="Checked at import: your .eetas was replayed in the exact physics and finishes the level in ${esc(j.original.time)}. A run is only created for a TAS that finishes."><i></i>verified</span>`,
+		j.startMatters ? `<span class="chip" title="How the TAS was started in eeo-tas: it matters on this level (spawn points or time doors)">started ${esc(START_LABEL[j.startMode] || j.startMode)}</span>` : '',
+		j.coinsOptional === undefined ? '' : `<span class="chip" title="${j.coinsOptional ? 'No coin door or gate on the route: coins are only collected on the way, so the searches may skip them.' : 'Coin doors or gates on the route: the coins the run takes count.'}">coins ${j.coinsOptional ? 'optional' : 'needed'}</span>`,
+		`<span class="ft" title="${esc(j.level.file || '')}${j.level.md5 ? `, md5 ${esc(j.level.md5)}` : ''}"><b>${esc(j.level.name || j.level.file)}</b>${j.level.eeoCopy ? ' (EEO\'s own copy)' : ''}, ${j.level.width} × ${j.level.height}</span>`,
+		`<span class="ft" title="the TAS file you imported">${esc(j.tas.file)}: ${j.tas.coins} coins${j.tas.deaths ? `, ${j.tas.deaths} deaths` : ''}</span>`,
+	].filter(Boolean).join('');
+	const chance = j.chance < 1 && !j.report ? `<span class="chip warn" title="This run goes through random portals: in EEO it finishes in ${(j.chance * 100).toFixed(0)}% of plays. The optimizer never lowers that chance. Details appear when you press Finish run."><i></i>finishes in ${(j.chance * 100).toFixed(0)}% of plays</span>` : '';
+	$('detail').innerHTML = `<div class="jhead">
+			<h1>${esc(j.name)}</h1>
+			<div class="jacts">
 				<button class="watch" id="watchBtn" title="Play the current best run in the level, with your original .eetas as a ghost (the optimizer keeps running)">Watch</button>
-				${j.running ? `<button class="stop" id="stopBtn">Pause</button><button class="primary" id="finishBtn">Finish run</button>`
+				${j.running ? `<button class="stop" id="stopBtn" data-ic="pause">Pause</button><button class="primary" id="finishBtn">Finish run</button>`
 					: `<label class="lab">processor <select id="proc" title="${esc(GPU_HOW)}">${procOptions()}</select></label>` +
-					`<label class="lab">threads <select id="workers">${opts}</select></label><button class="go" id="startBtn">${j.round || j.savedTicks > 0 ? 'Resume' : 'Start'}</button>` +
+					`<label class="lab">threads <select id="workers">${opts}</select></label><button class="go" id="startBtn" data-ic="play">${j.round || (j.history || []).some((h) => !/^(inbox \(|try: )/.test(String(h.what || ''))) ? 'Resume' : 'Start'}</button>` +
 					(j.savedTicks > 0 || j.report ? `<button class="primary" id="finishBtn">Finish run</button>` : '')}
 			</div>
 		</div>
-		${liveHtml(j)}${remoteHtml(j)}
-		<div class="procnote" id="procNote">${procText(j.running ? (j.workers || state.cpus) : +workersDefault, j.running)}</div>
+		<div class="facts">${facts}</div>
+		${jobCheckHtml(j)}
 		<div class="times">
-			<span class="big">${j.best.time}</span>
-			${j.savedTicks > 0 ? `<span class="was">${j.original.time}</span>` : ''}
-			<span class="saved ${j.savedTicks > 0 ? '' : 'zero'}">${j.savedTicks > 0 ? `−${(j.savedTicks / 100).toFixed(2)} s · ${j.savedTicks} ticks${pct}` : 'no improvement yet'}</span>
-			${deathsHtml(j)}
+			<span class="big" id="heroTime" title="the best run's time">${j.best.time}</span>
+			${j.savedTicks > 0 ? `<span class="was" title="your original .eetas">${j.original.time}</span>` : ''}
+			<span class="tchips">${j.savedTicks > 0 ? `<span class="chip ahead" title="${j.savedTicks} ticks saved (1 tick = 0.01 s)">${UI_MINUS}${(j.savedTicks / 100).toFixed(2)} s · ${j.savedTicks.toLocaleString('en-US')} ticks</span><span class="chip" title="of the original's time">${pct} faster than the original</span>`
+				: '<span class="chip">no improvement yet</span>'}${deathsHtml(j)}${chance}</span>
 		</div>
-		<div class="stats">
-			<div class="stat"><div class="k">Status</div><div class="v">${j.running ? `● optimizing · CPU ×${j.workers || '?'}${j.live && j.live.gpu ? ' + GPU' : ''}` : (j.remote && j.remote.running ? `● on ${remoteWhere(j.remote, true)}` : (j.state === 'error' ? 'error' : 'stopped'))}</div></div>
-			<div class="stat"><div class="k">Now</div><div class="v" title="${esc(j.stage)}">${j.running ? friendlyStage(j.stage) : '—'}${j.running && j.live && j.live.gpu ? `<div class="gnow">GPU: ${esc(gpuFamily(j.live.gpu.family))}</div>` : ''}</div></div>
-			<div class="stat"><div class="k">Running for</div><div class="v">${j.running && j.optimizingSince ? dur(Date.now() - j.optimizingSince) : (j.running ? 'starting' : '—')}</div></div>
-			<div class="stat"><div class="k">Rounds · coins</div><div class="v">${j.round || 0} · ${j.coinsOptional === undefined ? '—' : (j.coinsOptional ? 'optional' : 'needed')}</div></div>
-		</div>
-		<div class="chart">${chartSvg(j)}</div>
-		<div class="row" style="margin-top:14px">
-			<button class="primary" id="dlBest">Download optimized .eetas (${j.best.time})</button>
+		${typeof TL === 'object' && TL && TL.mount ? '' : liveHtml(j)}${remoteHtml(j)}`;
+	$('detail2').innerHTML = `<div class="sec-h"><h2>Improvements</h2><span class="t-small">${histAll.length ? `${histAll.length.toLocaleString('en-US')} found${histAll.length > IMP_ROWS ? ` · the newest ${IMP_ROWS} here` : ''}` : ''}</span></div>
+		${hist.length ? `<div class="imps feed"><table class="tbl"><thead><tr><th>When</th><th class="n">Saved</th><th class="n">New best</th><th>Found by</th>${impRounds() ? '<th class="n">Round</th>' : ''}</tr></thead><tbody>${hist.map(impRow).join('')}</tbody></table></div>`
+			: `<div class="msg info">Improvements show up here as the optimizer finds them. The first minutes usually find the most.</div>`}
+		<div class="sec-h" style="margin-top:24px"><h2>Files</h2></div>
+		<div class="filesrow">
+			<button class="primary" id="dlBest" data-ic="download">Download optimized .eetas (${j.best.time})</button>
 			<button class="ghost" id="dlOrig">Original</button>
 			<button class="ghost" id="edBtn" title="Open this run's level in the level editor (a new tab)">Open in level editor</button>
-			<span style="flex:1"></span>
+			<span class="sp"></span>
 			<button class="ghost" id="delBtn" title="Delete this run and its files">Delete</button>
 		</div>
 		${j.error ? `<div class="msg err">${esc(j.error)}</div>` : ''}
-		${j.report ? reportHtml(j) : (j.chance < 1 ? `<div class="msg info">⚠ This run goes through random portals: in EEO it finishes in <b>${(j.chance * 100).toFixed(0)}%</b> of plays. The optimizer never lowers that chance. Details appear when you press <b>Finish run</b>.</div>` : '')}
-		<div class="feed">${hist.map((p) => `<div class="imp"><span class="c">${new Date(p.t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-			<span class="d">−${p.saved} tick${p.saved === 1 ? '' : 's'}</span><span class="w">${esc(friendlyStage(p.what) === p.what ? p.what : friendlyStage(p.what))}</span><span class="b">${fmt(p.runTicks)}</span></div>`).join('')
-			|| `<div class="msg info">Improvements will appear here, newest first. The first minutes are usually the fastest.</div>`}</div>
-		<details ${store.get('tasopt.log') === '1' ? 'open' : ''} id="logBox"><summary>Optimizer log</summary><pre class="log">${esc((j.logTail || []).join('\n')) || '—'}</pre></details>
-	</div>`;
-	for (const k of scrolled) { const el = $('detail').querySelector(k.sel); if (el) el.scrollTop = k.end ? el.scrollHeight : k.top; }
+		${j.report ? reportHtml(j) : ''}
+		<div class="discl" style="margin-top:22px">
+			<details ${store.get('tasopt.log') === '1' ? 'open' : ''} id="logBox"><summary>Optimizer log</summary><pre class="log">${esc((j.logTail || []).join('\n')) || '—'}</pre></details>
+			<details ${store.get('tasopt.procbox') === '1' ? 'open' : ''} id="procBox"><summary>Processor</summary><div class="procnote" id="procNote">${procText(j.running ? (j.workers || state.cpus) : +workersDefault, j.running)}</div></details>
+		</div>`;
+	for (const k of scrolled) { const el = $('sheet').querySelector(k.sel); if (el) el.scrollTop = k.end ? el.scrollHeight : k.top; }
+	// the one orchestrated moment: a new best of the run on screen slides into the hero time
+	if (heroFor && heroFor.id === j.id && j.best.runTicks < heroFor.runTicks && typeof UI === 'object') UI.newBest($('heroTime'));
+	heroFor = { id: j.id, runTicks: j.best.runTicks };
 	const go = $('startBtn'), st = $('stopBtn');
 	if ($('workers')) $('workers').onchange = () => { $('procNote').innerHTML = procText(+$('workers').value, false); };
 	if ($('proc')) $('proc').onchange = () => store.set('tasopt.proc', $('proc').value);
@@ -918,7 +1010,7 @@ function renderDetail() {
 		go.disabled = true;
 		try { if (window.Notification && Notification.permission === 'default') Notification.requestPermission(); } catch (e) { /* none */ }
 		await api(`/api/jobs/${j.id}/start`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ workers: +$('workers').value, processor: $('proc') ? $('proc').value : 'cpu' }) }).catch((e) => toast(esc(e.message)));
+			body: JSON.stringify({ workers: +$('workers').value, processor: $('proc') ? $('proc').value : 'cpu' }) }).catch((e) => toast(esc(e.message), 'err'));
 		refresh();
 	};
 	if (st) st.onclick = async () => { st.disabled = true; await api(`/api/jobs/${j.id}/stop`, { method: 'POST' }).catch(() => {}); refresh(); };
@@ -927,7 +1019,7 @@ function renderDetail() {
 	const fin = $('finishBtn');
 	if (fin) fin.onclick = async () => {
 		fin.disabled = true; fin.innerHTML = '<span class="spin"></span>Finishing…';
-		try { await api(`/api/jobs/${j.id}/finish`, { method: 'POST' }); location.href = `/api/jobs/${j.id}/best.eetas`; } catch (e) { toast(esc(e.message)); }
+		try { await api(`/api/jobs/${j.id}/finish`, { method: 'POST' }); location.href = `/api/jobs/${j.id}/best.eetas`; } catch (e) { toast(esc(e.message), 'err'); }
 		refresh();
 	};
 	const df = $('dlFinal');
@@ -936,12 +1028,83 @@ function renderDetail() {
 	$('edBtn').onclick = () => openInEditor(j.id);
 	$('delBtn').onclick = async () => {
 		const b = $('delBtn');
-		if (b.dataset.armed !== '1') { b.dataset.armed = '1'; b.textContent = 'Click again to delete'; b.classList.add('stop'); return; }
+		if (b.dataset.armed !== '1') { b.dataset.armed = '1'; b.textContent = 'Click again to delete'; b.classList.remove('ghost'); b.classList.add('stop'); return; }
 		if (vw.open && vw.id === j.id) closeViewer();
 		await api(`/api/jobs/${j.id}`, { method: 'DELETE' }).catch(() => {}); selected = null; refresh();
 	};
 	$('logBox').ontoggle = (e) => store.set('tasopt.log', e.target.open ? '1' : '0');
+	$('procBox').ontoggle = (e) => store.set('tasopt.procbox', e.target.open ? '1' : '0');
 	if ($('rlogBox')) $('rlogBox').ontoggle = (e) => store.set('tasopt.rlog', e.target.open ? '1' : '0');
+}
+/** a row of the Improvements table; phases.js classifies it when it is there (TL.classify(entry) -> {label, color, round}:
+ *  the family's swatch, the plain label, the round), else the raw `what` in plain words */
+const IMP_ROWS = 400;
+/** an improvement's time: the clock today, else the day and the clock (rows from different days looked like one day) */
+function impWhen(t) {
+	const d = new Date(t), n = new Date();
+	if (d.toDateString() === n.toDateString()) return UI_CLOCK(t);
+	try { return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${UI_CLOCK(t)}`; } catch (e) { return UI_CLOCK(t); }
+}
+function impRow(p) {
+	const c = typeof TL === 'object' && TL && typeof TL.classify === 'function' ? TL.classify(p, selected) : null;
+	const label = c && c.label ? c.label : friendlyStage(p.what);
+	const sw = c && c.color ? `<i class="sw" style="background:${c.color}"></i>` : '';
+	return `<tr><td class="tnum" title="${esc(new Date(p.t).toLocaleString())}">${impWhen(p.t)}</td>` +
+		`<td class="n d" title="${p.saved.toLocaleString('en-US')} tick${p.saved === 1 ? '' : 's'} (1 tick = 0.01 s)">${UI_MINUS}${(p.saved / 100).toFixed(2)} s</td><td class="n">${fmt(p.runTicks)}</td>` +
+		`<td class="w" title="${esc(p.what)}">${sw}${esc(label)}</td>${impRounds() ? `<td class="n">${c && c.round ? c.round : ''}</td>` : ''}</tr>`;
+}
+/** the Round column only where phases.js tells each find's round (TL.classify) */
+function impRounds() { return typeof TL === 'object' && !!TL && typeof TL.classify === 'function'; }
+// ------------------------------------------------------------ the Optimizer section (#opt)
+// phases.js (window.TL, loaded with defer) owns it when it is there: TL.mount(el, {job, summary}) when a run is picked, TL.update(summary)
+// on every poll, TL.unmount(el) before another run. Without it: this built-in summary (the now sentence, the rounds, the running time,
+// the improvements, the best-time chart), rebuilt only when what it shows changed.
+let optFor = null, optSig = '';
+function renderOpt() {
+	const j = state.jobs.find((x) => x.id === selected), box = $('opt');
+	if (!j) { if (optSig === 'TL' && typeof TL === 'object' && TL && typeof TL.unmount === 'function') TL.unmount(box); optFor = null; optSig = ''; box.innerHTML = ''; return; }
+	if (typeof TL === 'object' && TL && typeof TL.mount === 'function') {
+		if (optFor !== j.id || optSig !== 'TL') {
+			if (optFor !== null && optSig === 'TL' && typeof TL.unmount === 'function') TL.unmount(box);
+			optFor = j.id; optSig = 'TL'; box.innerHTML = '';
+			TL.mount(box, { job: j.id, summary: j });
+		} else if (typeof TL.update === 'function') TL.update(j);
+		return;
+	}
+	const w = Math.round(box.clientWidth || 760);
+	const sig = [j.id, j.running, j.state, j.stage, j.round, (j.history || []).length, j.best.runTicks, j.workers, j.live && j.live.gpu ? j.live.gpu.family : '',
+		Math.floor(Date.now() / 20000), w, document.documentElement.dataset.theme || ''].join('|');
+	if (optFor === j.id && sig === optSig) return;
+	optFor = j.id; optSig = sig;
+	box.innerHTML = optSummary(j, w);
+}
+function optNow(j) {
+	const hist = j.history || [], last = hist[hist.length - 1];
+	const lastTxt = last ? ` Last find ${dur(Date.now() - last.t)} ago: <span class="n">${UI_MINUS}${last.saved}</span> tick${last.saved === 1 ? '' : 's'} (${esc(friendlyStage(last.what))}).` : '';
+	if (j.running) {
+		if (!j.stage || j.stage === 'starting') return 'Starting the optimizer…';
+		const g = j.live && j.live.gpu;
+		return `Round <span class="n">${(j.round || 0) + 1}</span>: ${esc(friendlyStage(j.stage))}.${g ? ` The GPU is ${esc(gpuFamily(g.family))}.` : ''}${lastTxt}`;
+	}
+	if (j.state === 'error') return `Stopped by an error (under Files). The best is <span class="n">${j.best.time}</span>.`;
+	if (!hist.length && !j.round) return 'Not started yet. Press Start: the first minutes find the most time.';
+	return `Paused. The best is <span class="n">${j.best.time}</span>${j.savedTicks > 0 ? `, <span class="n">${(j.savedTicks / 100).toFixed(2)} s</span> faster than your original` : ''}.${lastTxt}`;
+}
+function optSummary(j, w) {
+	const hist = j.history || [];
+	const status = j.running ? '<span class="chip ahead live"><i></i>running</span>' : (j.state === 'error' ? '<span class="chip behind"><i></i>error</span>'
+		: (j.remote && j.remote.running ? '<span class="chip remote"><i></i>on a rented machine</span>' : `<span class="chip"><i></i>${!hist.length && !j.round ? 'not started' : 'paused'}</span>`));
+	const lv = j.live && j.live.cpu ? (j.live.cpu.ticksPerSec || 0) + ((j.live.gpu && j.live.gpu.ticksPerSec) || 0) : 0;
+	const kpi = (k, v, s, tip) => `<div class="kpi"${tip ? ` title="${esc(tip)}"` : ''}><div class="k">${k}</div><div class="v">${v}</div>${s ? `<div class="s">${s}</div>` : ''}</div>`;
+	return `<div class="sec-h"><h2>Optimizer</h2><div class="tools">${status}</div></div>
+		<div class="opt-now">${optNow(j)}</div>
+		<div class="opt-kpis">
+			${kpi('Running for', j.running && j.optimizingSince ? dur(Date.now() - j.optimizingSince) : (j.running ? 'starting' : '—'), j.running && j.optimizingSince ? `since ${UI_CLOCK(j.optimizingSince)}` : '')}
+			${kpi('Rounds done', (j.round || 0).toLocaleString('en-US'), j.running ? `round ${(j.round || 0) + 1} running` : '', 'A round runs every search stage once (about 10 minutes)')}
+			${kpi('Improvements', hist.length.toLocaleString('en-US'), hist.length ? `the last at ${UI_CLOCK(hist[hist.length - 1].t)}` : '')}
+			${kpi('Processor', j.running ? `CPU × ${j.workers || '?'}${j.live && j.live.gpu ? ' + GPU' : ''}` : '—', j.running && lv ? `${rateM(lv)} ticks/s now` : '')}
+		</div>
+		<div class="opt-chart">${chartSvg(j, w)}</div>`;
 }
 
 // ------------------------------------------------------------ ideas: search one time range harder (POST /focus)
@@ -966,11 +1129,11 @@ function renderIdeas() {
 	if (ideasFor === j.id && $('fState')) { $('fState').innerHTML = focusText(j); $('fGo').disabled = !!(j.focus && j.focus.running); return; }
 	ideasFor = j.id;
 	const saved = JSON.parse(store.get('tasopt.ideas.' + j.id) || '{}');
-	box.innerHTML = `<div class="card ideas"><h2>Ideas</h2>
-		<p>Think time can be saved somewhere? Pick that part of the run and press <b>Search harder here</b>: it runs the route explorer and the shortcut
-		searches on just that range (next to the optimizer) and hands anything faster to it. <b>Show map</b> draws the level and your path there.</p>
+	box.innerHTML = `<div class="ideas"><div class="sec-h"><h2>Search harder</h2></div>
+		<p>Pick a stretch of the run where you think time can be saved. It searches just that stretch next to the optimizer and hands anything faster to it.
+		<b>Show map</b> draws the level and your path there.</p>
 		<div class="fields">
-			<div><label class="f" for="fFrom">From (m:ss.cc)</label><input type="text" id="fFrom" placeholder="1:10.00" value="${esc(saved.from || '')}"></div>
+			<div><label class="f" for="fFrom">From</label><input type="text" id="fFrom" placeholder="1:10.00" value="${esc(saved.from || '')}"></div>
 			<div><label class="f" for="fTo">To</label><input type="text" id="fTo" placeholder="1:14.00" value="${esc(saved.to || '')}"></div>
 			<div><label class="f" for="fSec">Search time</label><select id="fSec">${[60, 120, 300, 600].map((s) => `<option value="${s}" ${String(s) === String(saved.sec || 120) ? 'selected' : ''}>${s < 120 ? s + ' s' : s / 60 + ' min'} each</option>`).join('')}</select></div>
 			<div class="row"><button class="ghost" id="fMap">Show map</button><button class="go" id="fGo">Search harder here</button></div>
@@ -2591,12 +2754,34 @@ vcv.addEventListener('dblclick', () => vwFollow(true));
 // deep link to the viewer: #watch=<job id>[&t=1:10.00][&zoom=0..13 (-3..-1 even smaller) | fit][&play=1] (the page keeps #watch=<id> while it is open)
 function openFromHash() {
 	const h = location.hash.replace(/^#/, '');
+	// #job=<id>: that run (the back and forward buttons walk between runs; no new history step)
+	const jm = h.match(/(?:^|&)job=([a-z0-9-]+)/);
+	if (jm && jm[1] !== selected && state.jobs.some((j) => j.id === jm[1])) selectJob(jm[1], true);
 	const m = h.match(/(?:^|&)watch=([a-z0-9-]+)/);
-	if (!m) return;
+	if (!m) { if (vw.open && jm) closeViewer(); return; }
 	const p = (k) => { const x = h.match(new RegExp(`(?:^|&)${k}=([^&]+)`)); return x ? decodeURIComponent(x[1]) : undefined; };
 	openViewer(m[1], { t: p('t'), zoom: p('zoom'), play: p('play') === '1' });
 }
 window.addEventListener('hashchange', openFromHash);
+window.addEventListener('popstate', openFromHash);
+// the rail: the filter, the New run fold, the narrow screens' "Your runs (N)" disclosure
+$('jobFilter').addEventListener('input', () => renderJobs());
+$('jobFilter').addEventListener('keydown', (e) => { if (e.key === 'Escape') { $('jobFilter').value = ''; renderJobs(); } });
+$('newBtn').onclick = () => newRunOpen($('newRun').hidden);
+$('railToggle').onclick = () => rail($('rail').classList.contains('shut'));
+$('rail').addEventListener('wheel', () => { railScrolledAt = Date.now(); }, { passive: true });
+$('rail').addEventListener('touchmove', () => { railScrolledAt = Date.now(); }, { passive: true });
+$('drop').onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('pick').click(); } };
+if (window.matchMedia && window.matchMedia('(max-width: 899px)').matches && (store.get('tasopt.sel') || /(?:^#|&)job=/.test(location.hash))) rail(false);
+// the Optimizer section's chart follows the page's width and theme
+let optResize = 0;
+window.addEventListener('resize', () => { clearTimeout(optResize); optResize = setTimeout(renderOpt, 200); });
+window.addEventListener('eeat-theme', () => {
+	if (optSig === 'TL' && typeof TL === 'object' && TL && typeof TL.redraw === 'function' && TL.redraw($('opt'))) return;
+	optSig = ''; renderOpt();
+});
+// phases.js comes with defer: once it has defined TL the Optimizer section is its
+window.addEventListener('DOMContentLoaded', () => { if (typeof TL === 'object' && TL) { optSig = ''; renderOpt(); renderDetail(); } });
 renderFiles();
 refresh().then(openFromHash);
 // poll /api/state: every 1.5 s while a job runs (its live speed), else every 2.5 s
