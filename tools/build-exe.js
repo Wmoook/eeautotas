@@ -30,7 +30,7 @@ function appFiles() {
 	const walk = (rel) => {
 		for (const e of fs.readdirSync(path.join(ROOT, rel), { withFileTypes: true })) {
 			const r = `${rel}/${e.name}`;
-			if (e.isDirectory()) { if (!skip.has(r)) walk(r); } else if (/\.(js|json|html|md)$/.test(e.name)) files.push(r);
+			if (e.isDirectory()) { if (!skip.has(r)) walk(r); } else if (/\.(js|json|html|md|css)$/.test(e.name)) files.push(r);
 		}
 	};
 	walk('src');

@@ -24,6 +24,10 @@ const LC = require('./levelcheck.js');
 
 const APP = path.join(__dirname, 'app', 'index.html');
 const EDITOR = path.join(__dirname, 'app', 'editor.html');
+const STATS = path.join(__dirname, 'app', 'stats.html');
+// the pages' shared files (docs/ui/DESIGN.md section 4): only these names, never a path from the URL
+const APP_FILES = { 'ui.css': 'text/css; charset=utf-8', 'ui.js': 'text/javascript; charset=utf-8',
+	'phases.js': 'text/javascript; charset=utf-8', 'stats.js': 'text/javascript; charset=utf-8' };
 const args = C.parseArgs(process.argv.slice(2));
 const PORT = +(args.port || 47823);
 
@@ -137,6 +141,8 @@ const ENDPOINTS = [
 	['GET', '/api/eegfx', 'EE graphics for the viewer, read from your eeo-tas folder: {available, dir, why, sheets, blocks: {id: [sheet, frame, y, layer, shadow]}, sprites, rot, smiley, ...}'],
 	['POST', '/api/eegfx', 'set the eeo-tas folder for EE graphics: JSON {dir} (checked: media/blocks.png and src/items/ItemManager.as; "" = find it automatically)'],
 	['GET', '/api/eegfx/sheet/<name>.png', 'one sprite sheet from the eeo-tas media folder (only the sheets the map lists)'],
+	['GET', '/stats', 'the Stats page (your runs; imported benchmarks)'],
+	['GET', '/ui.css', 'the pages\' shared files: ui.css, ui.js (theme, nav, offline banner, tooltip, formats, small charts), phases.js (the Optimizer view), stats.js (the Stats page)'],
 	['GET', '/editor', 'the level editor (place blocks, a start and the trophy; the GPU and the CPU find a route); /editor#job=<id> opens a job\'s level (&path=1: with its best run\'s path)'],
 	['GET', '/api/editor/blocks?ids=9,121,...', 'block info for the editor: names, kinds ([kind, dir/sub, solid]), EE minimap colors, argument kinds'],
 	['GET', '/api/editor/levels', 'the editor\'s "Open a level", in two sections: campaign (EEO\'s campaign levels from campaigns.zip, in EEO\'s order: {entry, name, title, campaign, tier, tiers, width, height}; GET /api/levelcheck/eeo-copy opens one) and other (the levels of your runs that are no campaign level, one per file: {job, name, jobName, width, height}); why (no campaigns.zip)'],
@@ -367,6 +373,11 @@ const server = http.createServer(async (req, res) => {
 		const q = (k) => u.searchParams.get(k);
 		if (req.method === 'GET' && (u.pathname === '/' || u.pathname === '/index.html')) return send(res, 200, fs.readFileSync(APP), 'text/html; charset=utf-8');
 		if (req.method === 'GET' && (u.pathname === '/editor' || u.pathname === '/editor.html')) return send(res, 200, fs.readFileSync(EDITOR), 'text/html; charset=utf-8');
+		if (req.method === 'GET' && (u.pathname === '/stats' || u.pathname === '/stats.html')) return send(res, 200, fs.readFileSync(STATS), 'text/html; charset=utf-8');
+		if (req.method === 'GET' && parts.length === 1 && Object.prototype.hasOwnProperty.call(APP_FILES, parts[0])) {
+			res.writeHead(200, { 'Content-Type': APP_FILES[parts[0]], 'Cache-Control': 'no-cache' });
+			return res.end(fs.readFileSync(path.join(__dirname, 'app', parts[0])));
+		}
 		if (parts[0] !== 'api') return send(res, 404, { error: 'not found' });
 		if (req.method === 'GET' && parts.length === 1) return send(res, 200, { app: 'EE Auto TAS', endpoints: ENDPOINTS.map(([m, p, d]) => ({ method: m, path: p, what: d })) });
 		if (req.method === 'GET' && parts[1] === 'state') {

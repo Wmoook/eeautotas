@@ -880,7 +880,8 @@ function makeSandbox() {
 	const src = path.join(dir, 'src');
 	fs.mkdirSync(path.join(src, 'app'), { recursive: true });
 	for (const f of fs.readdirSync(SRC)) { const p = path.join(SRC, f); if (fs.statSync(p).isFile()) fs.copyFileSync(p, path.join(src, f)); }
-	for (const f of ['index.html', 'editor.html']) fs.copyFileSync(path.join(SRC, 'app', f), path.join(src, 'app', f));
+	// every file of the pages (index.html, editor.html, stats.html and their shared ui.css / ui.js / phases.js / stats.js)
+	for (const f of fs.readdirSync(path.join(SRC, 'app'))) { const p = path.join(SRC, 'app', f); if (fs.statSync(p).isFile()) fs.copyFileSync(p, path.join(src, 'app', f)); }
 	process.on('exit', () => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* ignore */ } });
 	return { dir, src, J: require(path.join(src, 'jobs.js')), C: require(path.join(src, 'common.js')), R: require(path.join(src, 'render.js')) };
 }
