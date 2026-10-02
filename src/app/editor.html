@@ -3147,7 +3147,7 @@ async function pollHybrid() {
 }
 async function copyHybrid(s) {
 	const r = s.result || {};
-	const what = `Hybrid: <b>${esc(r.time || '')}</b> (by ${esc(hyBy(r.by))})`;
+	const what = `Hybrid: <b>${esc(r.time || '')}</b>${r.by ? ` (by ${esc(hyBy(r.by))})` : ''}`;
 	try {
 		await navigator.clipboard.writeText(s.loadtas);
 		toast(`${what}, /loadtas line copied. In eeo-tas: paste it, then /reset and /playtas.`);
@@ -3199,9 +3199,10 @@ function renderHybrid() {
 	if (r && !s.running) {
 		const known = HYB.jobs[`${s.started}:${r.runTicks}`];
 		h += `<div class="result"><div class="rk">Hybrid route${s.stage === 'stopped' ? ' (stopped)' : ''}</div><div class="rt">${esc(r.time)}</div>
-			<div class="rm">${r.runTicks.toLocaleString('en-US')} run ticks · by ${esc(hyBy(r.by))} at ${mmss(r.t)}${r.first ? ` · the first route ${fmt(r.first.runTicks)} by ${esc(hyBy(r.first.by))} at ${mmss(r.first.t)}` : ''}` +
+			<div class="rm">${r.runTicks.toLocaleString('en-US')} run ticks${r.by ? ` · by ${esc(hyBy(r.by))} at ${mmss(r.t)}` : ''}${r.first ? ` · the first route ${fmt(r.first.runTicks)} by ${esc(hyBy(r.first.by))} at ${mmss(r.first.t)}` : ''}` +
 			`${r.polish && r.polish.saved > 0 ? ` · the polish saved ${(r.polish.saved / 100).toFixed(2)} s` : ''}${r.restarts ? ` · ${r.restarts} restart${r.restarts > 1 ? 's' : ''}` : ''} · verified by replay` +
-			`${r.deaths ? ` · ${r.deaths} death${r.deaths > 1 ? 's' : ''}` : ''}${r.chance < 1 ? ` · works in ${(r.chance * 100).toFixed(0)}% of EEO plays (random portals)` : ''}</div>
+			`${r.deaths ? ` · ${r.deaths} death${r.deaths > 1 ? 's' : ''}` : ''}${r.chance < 1 ? ` · works in ${(r.chance * 100).toFixed(0)}% of EEO plays (random portals)` : ''}` +
+			`${r.fromBest ? ' · its best so far (it ended without its last step)' : ''}${s.recovered ? ' · it ended while the app was closed' : ''}</div>
 			<div class="row"><button class="watch" id="hyWatch" title="Open it in the run viewer (a new run in your list)">&#9654; Watch</button>
 				<button class="${known && known.started ? 'primary' : 'go'}" id="hyOpt" title="Make it a run and start the optimizer on it (GPU if available)">${known && known.started ? 'Open the run →' : 'Optimize'}</button>
 				<button class="small" id="hyEetas">Download .eetas</button></div>
@@ -3214,7 +3215,14 @@ function renderHybrid() {
 	el.innerHTML = h;
 	if ($('hyLog')) $('hyLog').ontoggle = () => { HYB.logOpen = $('hyLog').open; };
 	if ($('bHyStop')) $('bHyStop').onclick = async () => { try { HYB.st = await postJson('/api/editor/hybrid/stop', {}); } catch (e) { /* ignore */ } pollHybrid(); };
-	if ($('hyEetas')) $('hyEetas').onclick = () => { location.href = '/api/editor/hybrid/route.eetas'; };
+	// (the files of the run this panel shows: another run since gives a 409, never its files under this one's name)
+	if ($('hyEetas')) $('hyEetas').onclick = async () => {
+		try {
+			const r = await fetch(`/api/editor/hybrid/route.eetas?started=${encodeURIComponent(s.started || '')}`);
+			if (!r.ok) { let m = ''; try { m = (await r.json()).error; } catch (e) { /* bytes */ } throw new Error(m || `HTTP ${r.status}`); }
+			download(new Uint8Array(await r.arrayBuffer()), `${String(s.name || LV.name || 'level').replace(/[^\w .()-]/g, '').trim() || 'level'} hybrid.eetas`);
+		} catch (e) { toast(`Hybrid: ${esc(e.message)}`, true); }
+	};
 	if ($('hyWatch')) $('hyWatch').onclick = () => hybridJob(false);
 	if ($('hyOpt')) $('hyOpt').onclick = () => hybridJob(true);
 	if ($('bHyCopy')) $('bHyCopy').onclick = async () => {
@@ -3243,7 +3251,10 @@ async function hybridJob(optimize) {
 			proc = GPU && GPU.available ? 'gpu' : 'cpu';
 			await postJson(`/api/jobs/${id}/start`, { processor: proc });
 		} else {
-			const [lv, rt] = await Promise.all([fetch('/api/editor/hybrid/level.eelvl'), fetch('/api/editor/hybrid/route.eetas')]);
+			// (the files of the run this card shows: another run since gives a 409, never its files under this one's name)
+			const st = encodeURIComponent(s.started || '');
+			const [lv, rt] = await Promise.all([fetch(`/api/editor/hybrid/level.eelvl?started=${st}`), fetch(`/api/editor/hybrid/route.eetas?started=${st}`)]);
+			if (lv.status === 409 || rt.status === 409) throw new Error('another hybrid has started since this one: its level and route are gone (run it again)');
 			if (!lv.ok || !rt.ok) throw new Error('the hybrid\'s level or route is gone (run it again)');
 			const j = await postJson('/api/editor/job', { eelvlB64: b64(await lv.arrayBuffer()), eetasB64: b64(await rt.arrayBuffer()), name, start: !!optimize });
 			id = j.job.id; proc = j.processor;

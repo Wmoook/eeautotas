@@ -1241,16 +1241,20 @@ async function appSection() {
 }
 
 // ---------------------------------------------------------------- Hybrid (best): the page's panel and the HTTP API
-// A stand-in for tools/hybrid.js (EEAT_HYBRID_TOOL; its scenario in EEAT_HYBRID_SC): logs its arguments; JSON lines as
-// hybrid.js --json=1 prints them (log, state, route, end); mode 'route': a route (best.eetas) after 300 ms, then its end
-// ('polish': hybrid.json with a verified final, exit 0) after endMs; mode 'wait': runs until 'stop' on its stdin (then
-// hybrid.json without a final, stop why 'stopped', exit 2), or its stdin's end.
+// A stand-in for tools/hybrid.js (EEAT_HYBRID_TOOL; its scenario in EEAT_HYBRID_SC): logs its arguments (and its
+// EEAT_GPU_CACHE in <log>.env); JSON lines as hybrid.js --json=1 prints them (log, state, route, end); mode 'route': a
+// route (best.eetas) after 300 ms, then its end ('polish': hybrid.json with a verified final, exit 0) after endMs; mode
+// 'wait': runs until 'stop' on its stdin (then hybrid.json without a final, stop why 'stopped', exit 2), or its stdin's
+// end; mode 'crash': a route (best.eetas, hybrid.json's best) after 300 ms, then exit 1 with no final step (an EPIPE, a
+// heap overflow); mode 'stubborn': its home (os.tmpdir()/eeat-hy-<pid>-*, a job's gpu folder in it) in its start line, a
+// DETACHED child (an eegpu stand-in: its pid in kid.pid), and 'stop' / the end of stdin ignored (an event loop held).
 const FAKE_HYBRID = `'use strict';
 const fs = require('fs'), path = require('path');
 const args = process.argv.slice(2);
 const opt = (k) => { const a = args.find((x) => x.startsWith('--' + k + '=')); return a === undefined ? undefined : a.slice(k.length + 3); };
 const SC = JSON.parse(fs.readFileSync(process.env.EEAT_HYBRID_SC, 'utf8'));
 fs.appendFileSync(SC.log, JSON.stringify(args) + '\\n');
+fs.appendFileSync(SC.log + '.env', JSON.stringify({ cache: process.env.EEAT_GPU_CACHE || null }) + '\\n');
 const out = opt('out');
 const say = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
 const t0 = Date.now(), t = () => Math.round((Date.now() - t0) / 100) / 10;
@@ -1283,8 +1287,25 @@ if (SC.mode === 'route') {
 	}, 300);
 	setTimeout(() => finish('polish'), SC.endMs || 1500);
 }
-process.stdin.on('data', (d) => { if (/stop/.test(String(d))) finish('stopped'); });
-process.stdin.on('end', () => finish('stopped'));
+if (SC.mode === 'crash') {
+	setTimeout(() => {
+		fs.writeFileSync(path.join(out, 'best.eetas'), Buffer.from(SC.route, 'latin1'));
+		routed = true;
+		say(Object.assign({ ev: 'route', best: true }, routeRec));
+		fs.writeFileSync(path.join(out, 'hybrid.json'), JSON.stringify(Object.assign({}, R, { best: { by: 'compiler', runTicks: SC.runTicks, t: 0.3 } })));
+		setTimeout(() => process.exit(1), 100);
+	}, 300);
+}
+if (SC.mode === 'stubborn') {
+	const home = fs.mkdtempSync(path.join(require('os').tmpdir(), 'eeat-hy-' + process.pid + '-'));
+	fs.mkdirSync(path.join(home, 'jobs', 'j1', 'gpu'), { recursive: true });
+	const kid = require('child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore', windowsHide: true });
+	fs.writeFileSync(path.join(out, 'kid.pid'), String(kid.pid));
+	fs.writeFileSync(path.join(out, 'home.txt'), home);
+	say({ ev: 'start', t: 0, pid: process.pid, home });
+}
+process.stdin.on('data', (d) => { if (SC.mode !== 'stubborn' && /stop/.test(String(d))) finish('stopped'); });
+process.stdin.on('end', () => { if (SC.mode !== 'stubborn') finish('stopped'); });
 `;
 /** POST / GET /api/editor/hybrid with the stand-in: the arguments (no time cap, the restart setting, CPU only without a
  *  GPU, the workers split), one at a time, the live state, the best so far, the route at its end (replayed here, kept, its
@@ -1325,6 +1346,10 @@ async function hybridApiChecks(port, b64) {
 		check('POST /api/editor/hybrid: tools/hybrid.js (here its stand-in) with no time cap, the restart setting, the default polish, CPU only (no GPU here), the workers split 3 + 5 (prefix 2), its JSON lines and stdin',
 			r.status === 200 && r.json.running && r.json.cpu === true && has('--noCap=1') && has('--restartOnStallS=900') && has(`--polishS=${ED.HYBRID_POLISH_S}`) && has('--cpu=1') && has('--json=1') && has('--stdin=1') &&
 			has('--cworkers=3') && has('--sworkers=5') && has('--pworkers=2') && has('--name=Hy API') && /level\.eelvl$/.test(args[0]) && r.json.workers.total === 8, `${r.status} ${JSON.stringify(args)}`);
+		const started1 = r.json.started;
+		const env1 = (() => { try { return JSON.parse(fs.readFileSync(argLog + '.env', 'utf8').trim().split('\n')[0]); } catch (e) { return {}; } })();
+		check('... with --parent=<the app> (it ends itself when the app is gone) and the app\'s GPU kernel cache (EEAT_GPU_CACHE = gpu.js cacheDir: no kernel compile a run)',
+			has(`--parent=${process.pid}`) && env1.cache === require('../src/gpu.js').cacheDir(), `${JSON.stringify(env1)} ${require('../src/gpu.js').cacheDir()}`);
 		r = await request(port, 'POST', '/api/editor/hybrid', { eelvlB64: b64 });
 		check('a second hybrid while one runs: 400 (one at a time)', r.status === 400 && /already running/.test(r.json.error), `${r.status} ${r.json && r.json.error}`);
 		let s = await waitFor((x) => x.live && x.live.best, 3000);
@@ -1347,8 +1372,15 @@ async function hybridApiChecks(port, b64) {
 		// Stop: its 'stop' line, then its end; restartS 0: no restarts
 		scen('wait');
 		r = await request(port, 'POST', '/api/editor/hybrid', { eelvlB64: b64, name: 'Hy stop', restartS: 0 });
+		const started2 = r.json.started;
 		const args2 = await argsOf(2);
 		await waitFor((x) => x.live, 3000);
+		// (a page that still shows the earlier run: its files by its `started` are gone, never this run's under its name)
+		const [st1, sl1, sl2] = await Promise.all([request(port, 'GET', `/api/editor/hybrid/route.eetas?started=${started1}`), request(port, 'GET', `/api/editor/hybrid/level.eelvl?started=${started1}`),
+			request(port, 'GET', `/api/editor/hybrid/level.eelvl?started=${started2}`)]);
+		check('the files of an earlier run (?started= of the run before): 409, never this run\'s; this run\'s by its own started: 200',
+			started1 && started2 && started1 !== started2 && st1.status === 409 && sl1.status === 409 && /another hybrid has started/.test(st1.json && st1.json.error) && sl2.status === 200,
+			`${st1.status} ${sl1.status} ${sl2.status}`);
 		r = await request(port, 'POST', '/api/editor/hybrid/stop', {});
 		check('POST /api/editor/hybrid/stop: stopping (its stop line); restartS 0: --restartOnStallS=0', r.status === 200 && r.json.stopping && args2.includes('--restartOnStallS=0'), JSON.stringify(r.json).slice(0, 200));
 		s = await waitFor((x) => !x.running, 8000);
@@ -1364,6 +1396,83 @@ async function hybridApiChecks(port, b64) {
 		s = await waitFor((x) => !x.running, 8000);
 		check('with a GPU: no --cpu=1, the editor\'s busy marker fresh while it runs (a job\'s GPU searcher waits), gone at its end', s.cpu === false && args3.length && !args3.includes('--cpu=1') && fresh &&
 			!fs.existsSync(busyF) && s.stage === 'done', `${JSON.stringify(args3)} fresh ${fresh} after ${fs.existsSync(busyF)} ${s.stage}`);
+		// a hybrid that ends without its final step (a crash: an EPIPE, a heap overflow): its best so far (best.eetas,
+		// verified there) replayed here and offered
+		scen('crash');
+		r = await request(port, 'POST', '/api/editor/hybrid', { eelvlB64: b64, name: 'Hy crash' });
+		s = await waitFor((x) => !x.running, 8000);
+		const rt3 = await request(port, 'GET', `/api/editor/hybrid/route.eetas?started=${s.started}`);
+		check('a hybrid that ends without its final step (exit 1, no final): its best so far replayed here and offered (the route card, its file, the /loadtas line)',
+			s.stage === 'done' && s.result && s.result.fromBest === true && s.result.runTicks === ev.runTicks && s.result.by === 'compiler' && /best so far/.test(s.message) &&
+			s.loadtas && fs.existsSync(s.loadtas.replace(/^\/loadtas /, '')) && rt3.status === 200 && rt3.buf.toString('latin1') === route.slice(0, ev.complete), `${s.stage} ${s.message} ${JSON.stringify(s.result)} ${rt3.status}`);
+		// the forced stop of a hybrid whose event loop does not answer 'stop' (EEAT_HY_KILL_MS): its jobs' GPU stop files,
+		// then its node process alone: its DETACHED child (as eegpu: it ends at its next launch once its parent is gone)
+		// is not killed; its home removed after
+		scen('stubborn');
+		const wasKill = process.env.EEAT_HY_KILL_MS;
+		process.env.EEAT_HY_KILL_MS = '1200';
+		let kidPid = 0, home = '';
+		try {
+			r = await request(port, 'POST', '/api/editor/hybrid', { eelvlB64: b64, name: 'Hy stubborn' });
+			const runD = path.join(C.DATA, 'editor', 'hybrid', 'run');
+			for (let i = 0; i < 100 && !(fs.existsSync(path.join(runD, 'home.txt')) && fs.existsSync(path.join(runD, 'kid.pid'))); i++) await new Promise((res) => setTimeout(res, 50));
+			kidPid = +fs.readFileSync(path.join(runD, 'kid.pid'), 'utf8');
+			home = fs.readFileSync(path.join(runD, 'home.txt'), 'utf8');
+			await waitFor((x) => x.live, 3000);
+			const t0 = Date.now();
+			await request(port, 'POST', '/api/editor/hybrid/stop', {});
+			s = await waitFor((x) => !x.running, 10000);
+			const took = Date.now() - t0, stopF = fs.existsSync(path.join(home, 'jobs', 'j1', 'gpu', 'stop'));
+			await new Promise((res) => setTimeout(res, 1000));
+			const kidAlive = (() => { try { process.kill(kidPid, 0); return true; } catch (e) { return e.code === 'EPERM'; } })();
+			check('the forced stop (EEAT_HY_KILL_MS after Stop, the hybrid not answering): its jobs\' GPU stop files written, its node process killed alone (its detached child, an eegpu stand-in, alive: no tree kill), stopped',
+				!s.running && s.stage === 'stopped' && took >= 1000 && took < 9000 && stopF && kidAlive, `${s.stage} took ${took} stop file ${stopF} kid ${kidPid} alive ${kidAlive}`);
+			for (let i = 0; i < 40 && fs.existsSync(home); i++) await new Promise((res) => setTimeout(res, 250));
+			check('... and its home (os.tmpdir()/eeat-hy-<pid>-*) removed after it', !fs.existsSync(home), home);
+		} finally {
+			if (wasKill === undefined) delete process.env.EEAT_HY_KILL_MS; else process.env.EEAT_HY_KILL_MS = wasKill;
+			if (kidPid) { try { process.kill(kidPid); } catch (e) { /* gone */ } }
+			if (home) { try { fs.rmSync(home, { recursive: true, force: true }); } catch (e) { /* gone */ } }
+		}
+		// a hybrid that ended while the app was gone (the app's record: its end not seen): after the app's restart (the
+		// hybrid in memory forgotten) its route is offered once; while it still runs (its process alive, its report fresh, no
+		// end) a new start is refused and nothing is taken up yet
+		const hd = path.join(C.DATA, 'editor', 'hybrid'), runD = path.join(hd, 'run'), recF = path.join(hd, 'hybrid_app.json');
+		const deadPid = await new Promise((res) => { const k = require('child_process').spawn(process.execPath, ['-e', '0'], { stdio: 'ignore' }); k.on('exit', () => res(k.pid)); });
+		const startedR = Date.now() - 60e3;
+		fs.rmSync(runD, { recursive: true, force: true });
+		fs.mkdirSync(runD, { recursive: true });
+		fs.writeFileSync(path.join(hd, 'level.eelvl'), Buffer.from(b64, 'base64'));
+		fs.writeFileSync(path.join(runD, 'best.eetas'), Buffer.from(route, 'latin1'));
+		const RR = { level: 'Hy gone', stop: { why: 'stopped', t: 50 }, first: { by: 'search', t: 10, runTicks: ev.runTicks }, routes: [{ t: 10, by: 'search', runTicks: ev.runTicks, verified: true }],
+			best: { by: 'search', runTicks: ev.runTicks, t: 10 }, final: null, restarts: [] };
+		fs.writeFileSync(path.join(runD, 'hybrid.json'), JSON.stringify(RR));
+		fs.writeFileSync(recF, JSON.stringify({ pid: process.pid, started: startedR, name: 'Hy gone', cpu: true, workers: { compiler: 1, search: 1, prefix: 1, total: 2 }, restartS: 0, polishS: 60, seen: false }));
+		ED.hybridForget();
+		r = await request(port, 'POST', '/api/editor/hybrid', { eelvlB64: b64, name: 'Hy too soon' });
+		const g0 = await request(port, 'GET', '/api/editor/hybrid');
+		check('after the app\'s restart, the last hybrid still running (its process alive, its report fresh, no end): a new start refused (400, still ending), nothing taken up yet',
+			r.status === 400 && /still ending/.test(r.json.error) && g0.json.stage === 'none', `${r.status} ${r.json && r.json.error} ${g0.json.stage}`);
+		RR.final = { runTicks: ev.runTicks, by: 'search', t: 10, verified: true }; RR.ended = new Date().toISOString();
+		fs.writeFileSync(path.join(runD, 'hybrid.json'), JSON.stringify(RR));
+		fs.writeFileSync(recF, JSON.stringify(Object.assign(JSON.parse(fs.readFileSync(recF, 'utf8')), { pid: deadPid })));
+		const g1 = (await request(port, 'GET', '/api/editor/hybrid')).json;
+		const rt4 = await request(port, 'GET', `/api/editor/hybrid/route.eetas?started=${startedR}`);
+		const seen = JSON.parse(fs.readFileSync(recF, 'utf8')).seen;
+		ED.hybridForget();
+		const g2 = (await request(port, 'GET', '/api/editor/hybrid')).json;
+		check('... once it has ended: its route offered (stopped, by the search, replayed here, its /loadtas file, recovered), once (the record says seen; the next restart: none)',
+			!g1.running && g1.stage === 'stopped' && g1.recovered === true && g1.started === startedR && g1.result && g1.result.runTicks === ev.runTicks && g1.result.by === 'search' &&
+			g1.loadtas && fs.existsSync(g1.loadtas.replace(/^\/loadtas /, '')) && rt4.status === 200 && seen === true && g2.stage === 'none', `${JSON.stringify(g1).slice(0, 300)} ${rt4.status} ${seen} ${g2.stage}`);
+		// the temp homes of hybrids that have ended (eeat-hy-<pid>-*): removed; a live one's, a fresh one's, an older
+		// hybrid's (no pid in its name) and anything else kept
+		const tmpD = fs.mkdtempSync(path.join(HOME, 'sweep-'));
+		const mk = (n, old) => { const f = path.join(tmpD, n); fs.mkdirSync(path.join(f, 'data'), { recursive: true }); fs.writeFileSync(path.join(f, 'data', 'x'), 'x'); if (old) { const t = (Date.now() - 600e3) / 1000; fs.utimesSync(f, t, t); } return f; };
+		const dOld = mk(`eeat-hy-${deadPid}-AbC123`, true), dLive = mk(`eeat-hy-${process.pid}-Xy9z8w`, true), dFresh = mk(`eeat-hy-${deadPid}-Fresh1`, false), dFmt = mk('eeat-hy-QwErTy', true), dOther = mk(`eeat-hyx-${deadPid}-AbC123`, true);
+		const swept = ED.hybridSweep({ tmp: tmpD });
+		check('the homes of ended hybrids removed (eeat-hy-<a dead pid>-*, untouched for a minute); a live hybrid\'s, a fresh one\'s, an older hybrid\'s (no pid) and other folders kept',
+			swept.length === 1 && swept[0] === path.basename(dOld) && !fs.existsSync(dOld) && fs.existsSync(dLive) && fs.existsSync(dFresh) && fs.existsSync(dFmt) && fs.existsSync(dOther), JSON.stringify(swept));
+		fs.rmSync(tmpD, { recursive: true, force: true });
 	} finally {
 		if (was[0] === undefined) delete process.env.EEAT_HYBRID_TOOL; else process.env.EEAT_HYBRID_TOOL = was[0];
 		if (was[1] === undefined) delete process.env.EEAT_HYBRID_SC; else process.env.EEAT_HYBRID_SC = was[1];

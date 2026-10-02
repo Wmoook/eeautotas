@@ -158,7 +158,7 @@ const ENDPOINTS = [
 	['POST', '/api/editor/hybrid', 'Hybrid (best) (tools/hybrid.js: the compiler and the search side by side, every route replayed; no time cap: until a route and its polish, or stop; before any route a fresh restart after restartS (1800) s with no progress; the workers and the GPU as Find a route takes them; one at a time, in the background): JSON {eelvlB64 (or level), name, source, workers, restartS (0: none), polishS (180)}'],
 	['GET', '/api/editor/hybrid', 'the hybrid: running, stage (none / starting / running / polish / ending / done / stopped / no route / error), elapsed, workers, cpu, restartS, polishS, live (the compiler: anchors, gain, furthest, round; the search: nearest, rooms, run; restarts; routes [{t, by, runTicks, time}]; best), log, result {runTicks, time, by, first, polish}, loadtas (/loadtas <its route file>), message'],
 	['POST', '/api/editor/hybrid/stop', 'stop the hybrid (its best route so far is its result)'],
-	['GET', '/api/editor/hybrid/route.eetas', 'download the hybrid\'s route (the final, else the best so far; also level.eelvl: the level it ran on)'],
+	['GET', '/api/editor/hybrid/route.eetas', 'download the hybrid\'s route (the final, else the best so far; also level.eelvl: the level it ran on); ?started=<its started>: the run the page shows (another run since: 409)'],
 ];
 
 // ---------------------------------------------------------------- http helpers
@@ -332,7 +332,9 @@ async function editorRoute(req, res, parts, q) {
 			try { return send(res, 200, ED.hybridStart(b, systemInfo().processors[1])); } catch (e) { return send(res, 400, { error: e.message, problems: e.problems }); }
 		}
 		if (req.method === 'GET' && (sub === 'route.eetas' || sub === 'level.eelvl')) {
-			const f = ED.hybridFile(sub);
+			// (?started=: the run the page shows; another run since: 409, never that run's files under this one's name)
+			const f = ED.hybridFile(sub, q('started'));
+			if (f && f.stale) return send(res, 409, { error: 'another hybrid has started since this one: its files are gone (run it again)' });
 			if (!f) return send(res, 404, { error: sub === 'route.eetas' ? 'the hybrid has no route yet' : 'no hybrid yet' });
 			res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': `attachment; filename="${f.name}"`, 'Cache-Control': 'no-store' });
 			return res.end(fs.readFileSync(f.file));
@@ -553,6 +555,8 @@ function main() {
 		console.log('[app] Keep this window open while optimizing. Closing it stops the optimizer (it resumes next time).');
 		if (process.env.EEAT_HOME) console.log(`[app] Your runs are saved in ${C.JOBS}`);
 		if (args.open) openBrowser(url);
+		// (the temp homes of hybrids that ended without removing theirs: editor.js hybridSweep)
+		try { const sw = ED.hybridSweep(); if (sw.length) console.log(`[app] removed ${sw.length} temp folder${sw.length > 1 ? 's' : ''} of ended hybrids`); } catch (e) { /* next time */ }
 		// resume the job that was optimizing when the app last closed (after the one-time processor benchmark, which
 		// needs an idle CPU: a few seconds, then cached in src/data/_system.json)
 		const resume = () => {

@@ -36,6 +36,19 @@
 //   'end', why, t, final, first, polish} (the human lines stay in hybrid.log).
 //   --stdin=1: control lines on stdin: 'stop' ends the run as a signal does (its stop why 'stopped'); the end of stdin
 //   (the app went away) too.
+//   --parent=<pid> (the app's): that process gone (checked every PARENT_MS) ends the run as 'stop' does: the app starts
+//   this script detached (it outlives the app's end, so it always writes its final and removes its home) and this is its
+//   second guard beside the end of stdin.
+//   THE APP'S SAFETY (n5-hy-edfix): a stdout or stderr pipe that has no reader any more (the app went away) is no error:
+//   the JSON lines stop, the end runs as before (an EPIPE on the closed pipe killed the run before its final and its
+//   cleanup); an uncaught error ends the run through finishAll too (the final from the best route so far, the home
+//   removed); the home is os.tmpdir()/eeat-hy-<pid>-XXXXXX and every home whose hybrid process has ended is removed at the
+//   start (src/editor.js hybridSweep: a hybrid killed outright, a heap overflow, a crash left its home, up to 600 MB of
+//   steer field); the GPU kernel cache is EEAT_GPU_CACHE when given (the app passes its own), else this checkout's
+//   src/data/gpu-cache, for every GPU tool of the run through EEAT_GPU_CACHE (before: a 'dir' symlink from the home, which
+//   Windows refuses without admin rights: every run then compiled the kernels again, 1-3 min, Cave Exploration's 25 min);
+//   a route from outside during a restart's window (the old search stopped, the new one not started) waits for the new
+//   search (before: a job of our own, with the GPU even under --cpu=1); the own job takes the GPU only without --cpu=1.
 // - The compiler: its own child process (--json --stdin=1 --sourceDist=1), its budget fitted so that its stages after the
 //   moves (joins, loops, endgame: compile.js) end before the hybrid's (--cseconds). Every route it announces ('result') is
 //   replayed here (common.js evaluate on the level file, the loader of tools/cmp/verify.js) before it counts.
@@ -90,6 +103,7 @@ const LEG = on('leg', true);
 const POLISH_S = Math.max(0, +(opt.polishS !== undefined ? opt.polishS : NOCAP ? NOCAP_POLISH_S : 0) || 0), STALL_STOP_S = Math.max(0, +(opt.stallStopS || 0));
 const RESTART_S = +opt.restartOnStallS > 0 ? Math.max(5, +opt.restartOnStallS) : 0;
 const CPU_ONLY = on('cpu', false), JSON_OUT = on('json', false), STDIN = on('stdin', false);
+const PARENT = +opt.parent > 0 ? +opt.parent : 0, PARENT_MS = 5000;
 // the compiler's budget: its moves' seconds S, its stages after them (compile.js: joins min(60, S/2), loops min(10, S/6),
 // endgame min(60, S/5)) ending 15 s before the hybrid's end (--noCap: a round of NOCAP_CSECONDS)
 const tailOf = (s) => Math.min(60, 0.5 * s) + Math.min(10, s / 6) + Math.min(60, 0.2 * s);
@@ -97,18 +111,28 @@ let CSECONDS = +opt.cseconds > 0 ? +opt.cseconds : NOCAP ? NOCAP_CSECONDS : SECO
 if (!NOCAP && !(+opt.cseconds > 0)) while (CSECONDS > 10 && CSECONDS + tailOf(CSECONDS) > SECONDS - 15) CSECONDS--;
 if (opt.gpu !== undefined && opt.gpu !== '') process.env.CUDA_VISIBLE_DEVICES = String(opt.gpu);
 fs.mkdirSync(OUT, { recursive: true });
-// (a home of its own for the job and the editor's files, as atrun.js: its data/gpu-cache linked to this checkout's)
-const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'eeat-hy-'));
+// (a home of its own for the job and the editor's files, as atrun.js; its name holds this process's id, so a later start
+// removes it once this process has ended (editor.js hybridSweep); the GPU kernel cache shared: the app's, else this
+// checkout's, through EEAT_GPU_CACHE (gpu.js cacheDir) for every GPU tool of the run)
+const HOME = fs.mkdtempSync(path.join(os.tmpdir(), `eeat-hy-${process.pid}-`));
 process.env.EEAT_HOME = HOME;
 fs.mkdirSync(path.join(HOME, 'data'), { recursive: true });
-const CACHE = path.join(SRC, 'data', 'gpu-cache');
-try { fs.mkdirSync(CACHE, { recursive: true }); fs.symlinkSync(CACHE, path.join(HOME, 'data', 'gpu-cache'), 'dir'); } catch (e) { /* own */ }
+const CACHE = process.env.EEAT_GPU_CACHE ? path.resolve(process.env.EEAT_GPU_CACHE) : path.join(SRC, 'data', 'gpu-cache');
+try { fs.mkdirSync(CACHE, { recursive: true }); } catch (e) { /* read-only: the tools say so */ }
+process.env.EEAT_GPU_CACHE = CACHE;
 if (!process.env.CUDA_CACHE_PATH) process.env.CUDA_CACHE_PATH = CACHE;
+// (a pipe with no reader (the app went away) is no error: the JSON lines stop, the run ends as 'stop' ends it)
+let outDead = false;
+process.stdout.on('error', () => { outDead = true; });
+process.stderr.on('error', () => { /* no reader */ });
 const C = require(path.join(SRC, 'common.js'));
 const T = require(path.join(SRC, 'plan', 'types.js'));
 const ED = require(path.join(SRC, 'editor.js'));
 const J = require(path.join(SRC, 'jobs.js'));
 const AT = require(path.join(SRC, 'autotas.js'));
+// (the homes of hybrids that have ended without removing theirs: killed outright, a crash, a heap overflow)
+let SWEPT = [];
+try { SWEPT = ED.hybridSweep(); } catch (e) { SWEPT = []; }
 
 const T0 = Date.now(), END0 = NOCAP ? Infinity : T0 + SECONDS * 1000;
 let END = END0;   // (--polishS: the first route's time + polishS, when sooner)
@@ -117,10 +141,10 @@ const progress = (why) => { progAt = Date.now(); progWhy = why; };
 const sec = () => Math.round((Date.now() - T0) / 100) / 10;
 const logF = path.join(OUT, 'hybrid.log');
 /** --json=1: a JSON line on stdout (the app's child: src/editor.js hybridStart reads them) */
-const jsonOut = (o) => { if (!JSON_OUT) return; try { process.stdout.write(JSON.stringify(o) + '\n'); } catch (e) { /* closed */ } };
+const jsonOut = (o) => { if (!JSON_OUT || outDead) return; try { process.stdout.write(JSON.stringify(o) + '\n'); } catch (e) { outDead = true; } };
 const log = (s) => {
 	const l = `[hy ${sec().toFixed(1).padStart(6)}s] ${s}`;
-	if (JSON_OUT) jsonOut({ ev: 'log', t: sec(), text: String(s) }); else if (!QUIET) console.log(l);
+	if (JSON_OUT) jsonOut({ ev: 'log', t: sec(), text: String(s) }); else if (!QUIET && !outDead) { try { console.log(l); } catch (e) { outDead = true; } }
 	try { fs.appendFileSync(logF, l + '\n'); } catch (e) { /* read-only */ }
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -131,7 +155,7 @@ const buf = fs.readFileSync(LEVEL);
 const R = { level: NAME, file: LEVEL, seconds: NOCAP ? null : SECONDS, cseconds: CSECONDS, gpu: opt.gpu !== undefined ? String(opt.gpu) : null, host: os.hostname(),
 	workers: { compiler: CW, search: SW, prefix: PW }, stallS: STALL_S, flags: { hint: HINT, feed: FEED, bound: BOUND, joins: JOINS, leg: LEG }, polishS: POLISH_S, stallStopS: STALL_STOP_S,
 	...(NOCAP || RESTART_S || CPU_ONLY ? { noCap: NOCAP, restartOnStallS: RESTART_S, cpu: CPU_ONLY, restarts: [] } : {}),
-	started: new Date(T0).toISOString(), stop: null, lastProgress: null,
+	pid: process.pid, home: HOME, started: new Date(T0).toISOString(), stop: null, lastProgress: null,
 	first: null, routes: [], best: null, final: null, polish: null,
 	compiler: { firstRoute: null, routes: 0, anchors: 0, maxGain: 0, furthest: null, stalls: 0, imports: 0, stages: [], end: null, exit: null, report: null },
 	search: { firstRoute: null, job: null, jobFrom: null, handoff: null, bests: [], end: null, nearest: null },
@@ -174,7 +198,11 @@ function route(by, masks, how) {
 }
 let ownJob = null;   // (the AutoTASer ended without a job (Find a route ended): a job of our own for a later route)
 let ownJobFailed = false;   // (its import refused the route (jobs.importJob: e.g. random portals no exit combination of which finishes): not again)
+const pendingOut = [];      // (routes from outside during a restart's window: the new search's, once it runs)
 function toJob(ms, source) {
+	// (a restart's window: the old search is stopped and the new one not started: its AutoTASer takes them once it runs
+	// (restart below); a job of our own here would run beside the new search's, which stops it at its first route)
+	if (restarting) { pendingOut.push({ ms, source }); return; }
 	try {
 		const r = ctl && !atEnded ? ctl.outside(ms, source) : null;
 		if (r) { if (!R.search.job) { R.search.job = r.job; R.search.jobFrom = source; } return; }
@@ -188,7 +216,7 @@ function toJob(ms, source) {
 			const meta = J.importJob({ eelvl: buf, eetas: Buffer.from(C.eetasBytes(ms)), name: NAME, eelvlName: `${NAME}.eelvl`, eetasName: 'route.eetas', startMode: 'reset' });
 			ownJob = meta.id;
 			const G = require(path.join(SRC, 'gpu.js'));
-			const ch = J.startJob(ownJob, SW, { gpu: !!G.nativeTool() && !G.unsupported(J.loadJobLevel(ownJob)) });
+			const ch = J.startJob(ownJob, SW, { gpu: !CPU_ONLY && !!G.nativeTool() && !G.unsupported(J.loadJobLevel(ownJob)) });
 			guardGrind(ch && ch.pid);
 			R.search.job = ownJob; R.search.jobFrom = `${source} (the hybrid's own job: the AutoTASer had ended)`;
 			log(`a job of our own from ${source}: ${ownJob}`);
@@ -223,7 +251,9 @@ function compStart() {
 	const env = Object.assign({}, process.env);
 	if (LEG) env.EEAT_HYBRID = '1'; else delete env.EEAT_HYBRID;
 	if (CPU_ONLY) env.EEAT_HY_GPU = '0';
-	const me = comp = spawn(process.execPath, args, { cwd: ROOT, env, stdio: ['pipe', 'pipe', fs.openSync(fErr, 'w')] });
+	const fdErr = fs.openSync(fErr, 'w');
+	const me = comp = spawn(process.execPath, args, { cwd: ROOT, env, stdio: ['pipe', 'pipe', fdErr], windowsHide: true });
+	try { fs.closeSync(fdErr); } catch (e) { /* (the child has its own) */ }
 	compAlive = true; compStartAt = Date.now(); lastBoundTicks = Infinity;
 	R.compiler.round = k;
 	comp.stdin.on('error', () => { /* ended */ });
@@ -293,7 +323,7 @@ function prefixStart(a, workers, why) {
 	C.writeEetas(file, T.masksOf(a.inputs));
 	const args = [path.join(SRC, 'goexplore.js'), LEVEL, `--prefix=${file}`, `--seconds=${left}`, `--workers=${w}`, `--seed=${1000 + k}`, '--first=1',
 		'--opts=1', '--frontier=1', '--fBrake=1', '--fPhys=1'];
-	const ch = spawn(process.execPath, args, { cwd: ROOT, stdio: ['ignore', 'pipe', 'ignore'] });
+	const ch = spawn(process.execPath, args, { cwd: ROOT, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
 	const rec = { k, t: sec(), why: why || 'the compiler stalled', workers: w, anchor: a.id, gain: a.gain, ticks: a.inputs.length, desc: a.desc, nearest: null, routed: null, end: null };
 	R.prefix.push(rec);
 	pre = { ch, rec };
@@ -332,7 +362,7 @@ function joinsStart() {
 	try { fs.unlinkSync(outF); } catch (e) { /* none */ }
 	const ms = Math.min(60e3, leftMs);
 	R.joins = { t: sec(), from: best.by, before: best.runTicks, ms, after: null, saved: null };
-	joinsCh = spawn(process.execPath, [path.join(ROOT, 'tools', 'perfect', 'joins.js'), LEVEL, inF, `--ms=${ms}`, `--out=${outF}`], { cwd: ROOT, stdio: ['ignore', 'ignore', 'ignore'] });
+	joinsCh = spawn(process.execPath, [path.join(ROOT, 'tools', 'perfect', 'joins.js'), LEVEL, inF, `--ms=${ms}`, `--out=${outF}`], { cwd: ROOT, stdio: ['ignore', 'ignore', 'ignore'], windowsHide: true });
 	log(`the joins on the best route (${best.runTicks}, ${best.by}) for ${Math.round(ms / 1000)} s`);
 	joinsCh.on('exit', () => {
 		joinsCh = null;
@@ -412,17 +442,25 @@ async function restart(why) {
 		if (!st || !st.running) break;
 		await sleep(500);
 	}
-	if (ending) { restarting = false; return; }
+	if (ending) { restarting = false; pendingOut.length = 0; return; }
 	searchRun = n;
 	tick.progTiles = Infinity; tick.rooms = new Set(); tick.front = 0;
 	R.search.nearest = null; R.search.end = null; R.search.handoff = null; R.search.escapes = 0;
 	hintedKey = null; lastHintAt = 0; lastFeedAt = 0; lastFedTiles = Infinity;
 	let started = false, err = '';
 	for (let i = 0; i < 30 && !ending && !started; i++) {
-		try { atStart(); started = true; } catch (e) { err = String(e && e.message || e); await sleep(2000); }
+		try { atStart(); started = true; } catch (e) {
+			err = String(e && e.message || e);
+			// (Find a route still running: stopped again, then the next try)
+			try { ED.stop(); } catch (x) { /* none */ }
+			await sleep(2000);
+		}
 	}
+	// (the routes from outside that came meanwhile: to the new search's AutoTASer (its job's base, else its inbox), as
+	// toJob hands any route; without a new search, a job of our own)
+	const flush = () => { restarting = false; const q = pendingOut.splice(0); if (!ending) for (const p of q) toJob(p.ms, p.source); };
 	if (!started) {
-		restarting = false;
+		flush();
 		R.errors.push(`restart: ${err}`);
 		if (!ending) finishAll(`the search could not start again (${err.slice(0, 200)})`);
 		return;
@@ -431,7 +469,7 @@ async function restart(why) {
 	if (!compAlive && !R.first) { compRound++; compStart(); }
 	(R.restarts || (R.restarts = [])).push({ n, t: sec(), why, seed: SEED0 + 1000 * n, compiler, nearest: prevNearest ? prevNearest.tiles : null });
 	progress(`restart ${n}`);
-	restarting = false;
+	flush();
 	writeReport();
 }
 
@@ -550,10 +588,32 @@ async function finishAll(why) {
 	if (JSON_OUT) { jsonOut(liveOf()); jsonOut({ ev: 'end', why, t: sec(), first: R.first, final: R.final, polish: R.polish, restarts: (R.restarts || []).length }); }
 	finished = true;
 	setTimeout(() => {
-		if (!on('keep', false)) { try { fs.unlinkSync(path.join(HOME, 'data', 'gpu-cache')); } catch (e) { /* */ } try { fs.rmSync(HOME, { recursive: true, force: true }); } catch (e) { /* */ } }
+		cleanupHome();
 		process.exit(best && R.final && R.final.verified ? 0 : best ? 1 : 2);
 	}, 4000);
 }
+/** the home removed (unless --keep=1): the job's and the editor's files, the steer field's copy (up to 600 MB) */
+function cleanupHome() {
+	if (on('keep', false)) return;
+	try { fs.unlinkSync(path.join(HOME, 'data', 'gpu-cache')); } catch (e) { /* (a link of an older run) */ }
+	try { fs.rmSync(HOME, { recursive: true, force: true, maxRetries: 2, retryDelay: 300 }); } catch (e) { /* in use: the next start's sweep */ }
+}
+/** an error nothing caught (in an event handler, the end's own steps): the run ends through finishAll (its final from the
+ *  best route so far, the home removed); an error in the end itself: the home removed, then out */
+let fatal = 0, fatalExit = false;
+function onFatal(e) {
+	const msg = String((e && e.stack) || e).slice(0, 800);
+	if (++fatal <= 20) { try { R.errors.push(`uncaught: ${msg}`); log(`ERROR: ${msg.split('\n')[0]}`); } catch (x) { /* */ } }
+	if (finished) return;   // (its exit is set)
+	if (!ending) { finishAll(`error: ${String((e && e.message) || e).slice(0, 200)}`).catch(onFatal); return; }
+	// (in the end's steps: it goes on; should it not get to its exit (an error in the end itself), this one, after the
+	// longest end (the compiler's 8.5 s, then 4 s))
+	if (fatalExit) return;
+	fatalExit = true;
+	setTimeout(() => { if (finished) return; try { writeReport(); } catch (x) { /* */ } cleanupHome(); process.exit(best ? 1 : 2); }, 20e3);
+}
+process.on('uncaughtException', onFatal);
+process.on('unhandledRejection', onFatal);
 /** --json=1: the live state (the app's page: src/app/editor.html renderHybrid) */
 function liveOf() {
 	const now = Date.now();
@@ -584,6 +644,16 @@ if (STDIN) {
 	rlIn.on('line', (l) => { if (String(l).trim() === 'stop' && !ending) { log('stop (the app)'); finishAll('stopped'); } });
 	rlIn.on('close', () => { if (!ending) { log('the end of stdin (the app went away)'); finishAll('stopped'); } });
 }
+// (--parent: the app's process gone ends the run as its 'stop' does: the second guard beside the end of stdin)
+if (PARENT) {
+	const gone = () => { try { process.kill(PARENT, 0); return false; } catch (e) { return e.code !== 'EPERM'; } };
+	const iv = setInterval(() => { if (ending) { clearInterval(iv); return; } if (gone()) { clearInterval(iv); log(`the app (pid ${PARENT}) went away`); finishAll('stopped'); } }, PARENT_MS);
+	iv.unref();
+}
+// (the app's first line: where this run lives (its home: the app's forced stop writes the GPU stop files of its jobs
+// there and removes it), and the homes of ended runs removed)
+jsonOut({ ev: 'start', t: sec(), pid: process.pid, home: HOME, out: OUT, cache: CACHE, swept: SWEPT.length });
+if (SWEPT.length) log(`removed ${SWEPT.length} home${SWEPT.length > 1 ? 's' : ''} of ended hybrids (${SWEPT.slice(0, 4).join(', ')}${SWEPT.length > 4 ? ', ...' : ''})`);
 
 log(`${NAME}: the hybrid ${NOCAP ? `with no time cap (the compiler in rounds of ${CSECONDS} s; a route, then ${POLISH_S} s of polish)` : `for ${SECONDS} s (the compiler ${CSECONDS} s + its stages after the moves)`}` +
 	`${RESTART_S ? `, restarts after ${RESTART_S} s with no progress` : ''}${CPU_ONLY ? ', CPU only' : ''}, out ${OUT}, home ${HOME}`);
