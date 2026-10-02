@@ -4495,7 +4495,15 @@ function hybridStart(b, gpu) {
 	const ch = spawn(process.execPath, args, { cwd: path.resolve(__dirname, '..'), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: C.workerHeapEnv(),
 		detached: process.platform !== 'win32' });
 	const me = HY = { running: true, started: Date.now(), name, buf, workers, cpu, restartS, polishS, stage: 'starting', live: null, log: [], result: null, routeFile: null,
-		loadtas: null, message: '', kid: ch, err: '', stopping: false, stopped: false, end: null, killT: null };
+		loadtas: null, message: '', kid: ch, err: '', stopping: false, stopped: false, end: null, killT: null, busyT: null };
+	// (the GPU as Find a route has it: a job's GPU searcher waits while the editor's busy marker is fresh, markBusy; the
+	// hybrid's own search runs in a home of its own, so this app's marker is kept fresh here while it runs)
+	if (!cpu) {
+		const touch = () => { try { fs.writeFileSync(path.join(dir(), 'busy'), String(Date.now())); } catch (e) { /* none */ } };
+		touch();
+		me.busyT = setInterval(touch, 5000);
+		if (me.busyT.unref) me.busyT.unref();
+	}
 	ch.stdin.on('error', () => { /* ended */ });
 	let out = '';
 	const onEvent = (ev) => {
@@ -4516,6 +4524,7 @@ function hybridStart(b, gpu) {
 	ch.on('close', (code) => {
 		me.running = false; me.kid = null; me.code = code; me.ended = Date.now();
 		if (me.killT) { clearTimeout(me.killT); me.killT = null; }
+		if (me.busyT) { clearInterval(me.busyT); me.busyT = null; markBusy(); }   // (the marker as Find a route's state says)
 		let R = null;
 		try { R = JSON.parse(fs.readFileSync(path.join(run, 'hybrid.json'), 'utf8')); } catch (e) { R = null; }
 		me.report = R ? { stop: R.stop, first: R.first, final: R.final, polish: R.polish, restarts: R.restarts || [], routes: (R.routes || []).filter((r) => r.verified).length } : null;

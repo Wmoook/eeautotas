@@ -1354,6 +1354,16 @@ async function hybridApiChecks(port, b64) {
 		s = await waitFor((x) => !x.running, 8000);
 		const rt2 = await request(port, 'GET', '/api/editor/hybrid/route.eetas');
 		check('... it ends: stopped before a route, no route file (404)', s.stage === 'stopped' && !s.result && /stopped before a route/.test(s.message) && rt2.status === 404, `${s.stage} ${s.message} ${rt2.status}`);
+		// with a GPU (as the server's record says when the GPU benchmark found one): no --cpu=1, and the editor's busy marker
+		// kept fresh while it runs (a job's GPU searcher waits, as for Find a route), gone again at its end
+		scen('route', 800);
+		const busyF = path.join(C.DATA, 'editor', 'busy');
+		s = ED.hybridStart({ eelvlB64: b64, name: 'Hy GPU' }, { id: 'gpu', available: true, model: 'test' });
+		const args3 = await argsOf(3);
+		const fresh = fs.existsSync(busyF) && Date.now() - fs.statSync(busyF).mtimeMs < 6000;
+		s = await waitFor((x) => !x.running, 8000);
+		check('with a GPU: no --cpu=1, the editor\'s busy marker fresh while it runs (a job\'s GPU searcher waits), gone at its end', s.cpu === false && args3.length && !args3.includes('--cpu=1') && fresh &&
+			!fs.existsSync(busyF) && s.stage === 'done', `${JSON.stringify(args3)} fresh ${fresh} after ${fs.existsSync(busyF)} ${s.stage}`);
 	} finally {
 		if (was[0] === undefined) delete process.env.EEAT_HYBRID_TOOL; else process.env.EEAT_HYBRID_TOOL = was[0];
 		if (was[1] === undefined) delete process.env.EEAT_HYBRID_SC; else process.env.EEAT_HYBRID_SC = was[1];

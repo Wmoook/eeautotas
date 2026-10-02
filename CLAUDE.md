@@ -663,7 +663,8 @@ ways in.
   start in a row, or the editor's proof that no route exists, end the run); `hybrid.json` `restarts` [{n, t, why, seed,
   compiler: continues / restarted, nearest}]. The workers as Find a route takes them (`cpuWorkers`), split by
   `hybridWorkers` (the compiler 3/8, the search the rest, the prefix searches half the search's); the GPU as Find a route
-  uses it (the app's GPU benchmark found one), else `--cpu=1` (the AutoTASer's cpu, `EEAT_HY_GPU=0`: CPU only). Its JSON
+  uses it (the app's GPU benchmark found one: the editor's busy marker kept fresh while it runs, so a job's GPU searcher
+  waits as for Find a route), else `--cpu=1` (the AutoTASer's cpu, `EEAT_HY_GPU=0`: CPU only). Its JSON
   lines (`--json=1`: log, state = `liveOf`, route, end) are the page's live state (polled every second): the time since it
   started, the compiler's anchors / gain / furthest / round, the search's nearest attempt / rooms / run, the restarts and the
   last progress, every verified route as it came (when, its run time, by which part; the best green), the best so far (its
