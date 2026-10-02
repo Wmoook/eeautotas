@@ -155,8 +155,8 @@ function run(o) {
 	async function feedRoutes() {
 		while (S.job && pending.length) {
 			const r = pending.shift();
-			const res = await J.tryCandidate(S.job, C.eetasBytes(r.ms), { source: `Find a route (${r.strategy || 'route'})`, wait: 0 });
-			emit({ ev: 'fed', runTicks: r.runTicks, handed: res.handed, bestThen: res.best ? res.best.runTicks : null });
+			const res = await J.tryCandidate(S.job, C.eetasBytes(r.ms), { source: r.outside ? r.strategy : `Find a route (${r.strategy || 'route'})`, wait: 0 });
+			emit(Object.assign({ ev: 'fed', runTicks: r.runTicks, handed: res.handed, bestThen: res.best ? res.best.runTicks : null }, r.outside ? { source: r.strategy } : {}));
 		}
 	}
 	function onRoute(r) {
@@ -176,19 +176,38 @@ function run(o) {
 			r.cpuAfter > 0 ? { cpuS: r.cpuAfter } : {},
 			r.foundAfter > 0 ? { foundAfter: r.foundAfter } : {}, r.cleaned ? { cleanedFrom: r.cleaned.fromRunTicks, presses: r.cleaned.presses, cleanS: r.cleaned.sec } : {}));
 		if (out) C.writeEetas(path.join(out, `route_${S.routes}_${ev.runTicks}.eetas`), ev.ms);
-		if (!S.job) {
-			let meta;
-			try {
-				meta = J.importJob({ eelvl: o.eelvl, eetas: Buffer.from(C.eetasBytes(ev.ms)), name: o.name || 'AutoTAS', eelvlName: `${o.name || 'level'}.eelvl`, eetasName: 'route.eetas', startMode: 'reset' });
-			} catch (e) { finish(`the first route could not be made a job: ${e && e.message || e}`); return; }
-			S.job = meta.id;
-			S.state = 'optimizing';
-			jobAt = frAt = Date.now();
-			if (!frDone) holdShare(true);   // (before the grind starts: its first stage reads it)
-			const ch = startJob(S.job, W, { gpu: gpuOk && !G.unsupported(J.loadJobLevel(S.job)) });
-			jobPid = (ch && ch.pid) || J.runningPid(S.job) || 0;
-			emit({ ev: 'job', job: S.job, runTicks: ev.runTicks, pid: jobPid });
-		} else pending.push({ ms: ev.ms, runTicks: ev.runTicks, strategy: r.strategy });
+		if (!S.job) makeJob(ev, null);
+		else pending.push({ ms: ev.ms, runTicks: ev.runTicks, strategy: r.strategy });
+	}
+	/** the job from the first route (ev: its C.evaluate) and its optimizer, started at once; from: an outside route's source */
+	function makeJob(ev, from) {
+		let meta;
+		try {
+			meta = J.importJob({ eelvl: o.eelvl, eetas: Buffer.from(C.eetasBytes(ev.ms)), name: o.name || 'AutoTAS', eelvlName: `${o.name || 'level'}.eelvl`, eetasName: 'route.eetas', startMode: 'reset' });
+		} catch (e) { finish(`the first route could not be made a job: ${e && e.message || e}`); return false; }
+		S.job = meta.id;
+		S.state = 'optimizing';
+		jobAt = frAt = Date.now();
+		if (!frDone) holdShare(true);   // (before the grind starts: its first stage reads it)
+		const ch = startJob(S.job, W, { gpu: gpuOk && !G.unsupported(J.loadJobLevel(S.job)) });
+		jobPid = (ch && ch.pid) || J.runningPid(S.job) || 0;
+		emit(Object.assign({ ev: 'job', job: S.job, runTicks: ev.runTicks, pid: jobPid }, from ? { from } : {}));
+		return true;
+	}
+	/** THE HYBRID (tools/hybrid.js): a route found outside Find a route (the compiler's, a prefix search's, the joins'):
+	 *  with no job yet the job's base, its optimizer started at once as from Find a route's first route (Find a route goes
+	 *  on until the handoff; its routes then go to the job); with a job, a candidate for its inbox (the grind judges it by
+	 *  its own rule; a slower one is spliced with the best). Its source is not FR_WHAT: no handoff measure counts it as Find
+	 *  a route's. -> {runTicks, job} | null (it does not replay, or the AutoTASer has ended) */
+	function outside(masks, source) {
+		if (ended) return null;
+		const ev = C.evaluate(level, masks);
+		if (!ev) return null;
+		const src = String(source || 'outside');
+		emit({ ev: 'outside', runTicks: ev.runTicks, source: src, verified: true });
+		if (!S.job) { better(ev.runTicks); if (!makeJob(ev, src)) return null; }
+		else pending.push({ ms: ev.ms, runTicks: ev.runTicks, strategy: src, outside: true });
+		return { runTicks: ev.runTicks, job: S.job };
 	}
 	function pollJob() {
 		if (!S.job) return;
@@ -284,7 +303,7 @@ function run(o) {
 		emit({ ev: 'end', why, job: S.job, best: S.best, verified: final ? final.runTicks : null });
 		if (o.onEnd) o.onEnd(S);
 	}
-	return { stop: () => finish('stopped'), state: () => S };
+	return { stop: () => finish('stopped'), state: () => S, outside };
 }
 
 /** the stall rotation's escapes (editor.js state().escape.hist) not yet in the timeline: one event each {ev: 'escape', n,

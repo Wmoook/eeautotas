@@ -13,8 +13,11 @@
 //              view (the heat merged from the server's answers, its pixels by the first visit, the blocks cut out of it,
 //              the trails and their palette) and Follow (its replay, camera lead and bounds, no restart on a new nearest
 //              attempt, the route switch, the seek bar and End / Home, what stops it, a stopping click paints nothing):
-//              the page's code cut out and run on fake canvases
-//   explore    the exploration view's data: src/heat.js (the first visits too); goexplore.js --heat=1 (one worker: its heat's tiles = the tiles its
+//              the page's code cut out and run on fake canvases; Hybrid (best): its panel (renderHybrid cut out: running,
+//              done with its route card, stopped), the workers' split, the API with a stand-in for tools/hybrid.js (its
+//              arguments: no time cap, the restart setting, CPU only; one at a time; the live state; the best so far; the
+//              route at its end replayed and kept with its /loadtas line; a job from it; Stop)
+//   explore   the exploration view's data: src/heat.js (the first visits too); goexplore.js --heat=1 (one worker: its heat's tiles = the tiles its
 //              archive made cells in; off: the same search, no event); the GPU random runs' heat with a stand-in for eegpu
 //              roll (on or off: the same search); the editor's merge of a stand-in search's heat and attempts, its trails,
 //              GET /api/editor/solve/heat (deltas since a version, another search starting over)
@@ -54,8 +57,14 @@
 //              their command line): the configurations in order on each escape's command line (reach skipped without a
 //              steer field, deaths taken where something kills), the starts in rotation (a room's first arrival, the least
 //              explored room, the nearest attempt), the first escape after escFirst, the next one at once
+//   levelcheck src/levelcheck.js in the editor on a fake eeo-tas (no-op effects, a damaged copy, the verdicts naming the
+//              file, "Use EEO's copy"); the campaign section and the other section: GET /api/editor/levels (the editor's
+//              "Open a level"), summary().campaign, the main page's runs list in its Campaign and Other sections
+//   hybrid     Hybrid (best) through the HTTP API: the real tools/hybrid.js on a small room, CPU only, 2 workers, a 20-s
+//              polish (~30 s): its live state (both sides, the routes as they came), its end, its route replayed (the
+//              app section has the page's panel and the API with a stand-in for tools/hybrid.js)
 //   gpu        (--gpu) short route searches on the GPU (at most 60 s each), verified in the JS engine
-// usage: node test/editor.js [--gpu] [--seed=N] [--only=app,explore,passes,cpu,prove,lane,escape,gpu]      Exit code 1 if any check
+// usage: node test/editor.js [--gpu] [--seed=N] [--only=app,explore,passes,cpu,prove,lane,escape,hybrid,gpu]      Exit code 1 if any check
 //        fails. Writes nothing inside the repo.
 const fs = require('fs');
 const path = require('path');
@@ -67,7 +76,7 @@ const GPU = argv.includes('--gpu');
 // --gpuOnly=a,b: only the GPU cases whose names contain one of these (short GPU runs, one at a time)
 const GPU_ONLY = ((argv.find((a) => a.startsWith('--gpuOnly=')) || '').slice(10)).split(',').filter(Boolean);
 const SEED = +((argv.find((a) => a.startsWith('--seed=')) || '--seed=1').slice(7));
-// --only=a,b: only the sections whose names are given (app, explore, passes, cpu, prove, lane, escape, gpu); the fast ones always run
+// --only=a,b: only the sections whose names are given (app, explore, passes, cpu, prove, lane, escape, hybrid, gpu); the fast ones always run
 const ONLY = ((argv.find((a) => a.startsWith('--only=')) || '').slice(7)).split(',').filter(Boolean);
 const want = (k) => !ONLY.length || ONLY.includes(k);
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'eeautotas-editor-'));
@@ -1167,6 +1176,7 @@ async function appSection() {
 	check('the editor page\'s script parses', scripts.length === 1 && !errOf(() => new Function(scripts[0])), scripts.map((s) => { const x = errOf(() => new Function(s)); return x ? x.message : 'ok'; }).join('; '));
 	frontierChecks();
 	await exploreViewChecks();
+	hybridPageChecks();
 	const SV = require('../src/server.js');
 	await new Promise((res) => SV.server.listen(0, '127.0.0.1', res));
 	const port = SV.server.address().port;
@@ -1221,11 +1231,303 @@ async function appSection() {
 			check('a route that does not finish: 400, no job', r.status === 400 && /does not finish/.test(r.json.error), `${r.status} ${r.json && r.json.error}`);
 			await request(port, 'DELETE', `/api/jobs/${job.id}`);
 		}
+		await hybridApiChecks(port, b64);
 		r = await request(port, 'GET', '/api');
-		check('GET /api lists the editor endpoints', r.json.endpoints.filter((e) => /editor/.test(e.path)).length >= 9);
+		check('GET /api lists the editor endpoints', r.json.endpoints.filter((e) => /editor/.test(e.path)).length >= 9 &&
+			['/api/editor/hybrid', '/api/editor/hybrid/stop', '/api/editor/hybrid/route.eetas'].every((p) => r.json.endpoints.some((e) => e.path === p)));
 	} finally {
 		await new Promise((res) => SV.server.close(res));
 	}
+}
+
+// ---------------------------------------------------------------- Hybrid (best): the page's panel and the HTTP API
+// A stand-in for tools/hybrid.js (EEAT_HYBRID_TOOL; its scenario in EEAT_HYBRID_SC): logs its arguments (and its
+// EEAT_GPU_CACHE in <log>.env); JSON lines as hybrid.js --json=1 prints them (log, state, route, end); mode 'route': a
+// route (best.eetas) after 300 ms, then its end ('polish': hybrid.json with a verified final, exit 0) after endMs; mode
+// 'wait': runs until 'stop' on its stdin (then hybrid.json without a final, stop why 'stopped', exit 2), or its stdin's
+// end; mode 'crash': a route (best.eetas, hybrid.json's best) after 300 ms, then exit 1 with no final step (an EPIPE, a
+// heap overflow); mode 'stubborn': its home (os.tmpdir()/eeat-hy-<pid>-*, a job's gpu folder in it) in its start line, a
+// DETACHED child (an eegpu stand-in: its pid in kid.pid), and 'stop' / the end of stdin ignored (an event loop held).
+const FAKE_HYBRID = `'use strict';
+const fs = require('fs'), path = require('path');
+const args = process.argv.slice(2);
+const opt = (k) => { const a = args.find((x) => x.startsWith('--' + k + '=')); return a === undefined ? undefined : a.slice(k.length + 3); };
+const SC = JSON.parse(fs.readFileSync(process.env.EEAT_HYBRID_SC, 'utf8'));
+fs.appendFileSync(SC.log, JSON.stringify(args) + '\\n');
+fs.appendFileSync(SC.log + '.env', JSON.stringify({ cache: process.env.EEAT_GPU_CACHE || null }) + '\\n');
+const out = opt('out');
+const say = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+const t0 = Date.now(), t = () => Math.round((Date.now() - t0) / 100) / 10;
+const R = { level: opt('name'), noCap: true, stop: null, first: null, routes: [], best: null, final: null, polish: null, restarts: [{ n: 1, t: 0.2, why: 'stand-in', seed: 1001, compiler: 'continues' }] };
+const routeRec = { t: 0.3, by: 'compiler', runTicks: SC.runTicks, time: SC.time, how: 'trophy' };
+let routed = false, done = false;
+const state = () => ({ ev: 'state', t: t(), noCap: true, cpu: args.includes('--cpu=1'), restartOnStallS: +opt('restartOnStallS'), polishS: +opt('polishS'), ending: done,
+	compiler: { alive: !done, round: 0, anchors: 12, maxGain: 3, furthest: { gain: 3, dist: 7.5, desc: 'coins=2', t: 0.1 }, routes: routed ? 1 : 0, stage: 'moves' },
+	search: { run: 1, seed: 1001, state: 'finding', nearest: { tiles: 4.5, ticks: 120, strategy: 'random runs (CPU)' }, rooms: 3 },
+	restarts: R.restarts, routes: routed ? [routeRec] : [], first: routed ? { by: 'compiler', t: 0.3, runTicks: SC.runTicks } : null,
+	best: routed ? { by: 'compiler', runTicks: SC.runTicks, t: 0.3, time: SC.time } : null, sinceProgress: 0.1 });
+say({ ev: 'log', t: 0, text: 'the stand-in hybrid' });
+say(state());
+const iv = setInterval(() => say(state()), 150);
+const finish = (why) => {
+	if (done) return;
+	done = true; clearInterval(iv);
+	R.stop = { why, t: t() };
+	if (routed) { R.first = { by: 'compiler', t: 0.3, runTicks: SC.runTicks }; R.routes = [Object.assign({ verified: true }, routeRec)]; R.final = { runTicks: SC.runTicks, by: 'compiler', t: 0.3, verified: true }; }
+	fs.writeFileSync(path.join(out, 'hybrid.json'), JSON.stringify(R));
+	say(state());
+	say({ ev: 'end', why, t: t(), final: R.final });
+	setTimeout(() => process.exit(routed ? 0 : 2), 50);
+};
+if (SC.mode === 'route') {
+	setTimeout(() => {
+		fs.writeFileSync(path.join(out, 'best.eetas'), Buffer.from(SC.route, 'latin1'));
+		routed = true;
+		say(Object.assign({ ev: 'route', best: true }, routeRec));
+	}, 300);
+	setTimeout(() => finish('polish'), SC.endMs || 1500);
+}
+if (SC.mode === 'crash') {
+	setTimeout(() => {
+		fs.writeFileSync(path.join(out, 'best.eetas'), Buffer.from(SC.route, 'latin1'));
+		routed = true;
+		say(Object.assign({ ev: 'route', best: true }, routeRec));
+		fs.writeFileSync(path.join(out, 'hybrid.json'), JSON.stringify(Object.assign({}, R, { best: { by: 'compiler', runTicks: SC.runTicks, t: 0.3 } })));
+		setTimeout(() => process.exit(1), 100);
+	}, 300);
+}
+if (SC.mode === 'stubborn') {
+	const home = fs.mkdtempSync(path.join(require('os').tmpdir(), 'eeat-hy-' + process.pid + '-'));
+	fs.mkdirSync(path.join(home, 'jobs', 'j1', 'gpu'), { recursive: true });
+	const kid = require('child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore', windowsHide: true });
+	fs.writeFileSync(path.join(out, 'kid.pid'), String(kid.pid));
+	fs.writeFileSync(path.join(out, 'home.txt'), home);
+	say({ ev: 'start', t: 0, pid: process.pid, home });
+}
+process.stdin.on('data', (d) => { if (SC.mode !== 'stubborn' && /stop/.test(String(d))) finish('stopped'); });
+process.stdin.on('end', () => { if (SC.mode !== 'stubborn') finish('stopped'); });
+`;
+/** POST / GET /api/editor/hybrid with the stand-in: the arguments (no time cap, the restart setting, CPU only without a
+ *  GPU, the workers split), one at a time, the live state, the best so far, the route at its end (replayed here, kept, its
+ *  /loadtas line), a job from it (the page's Optimize: POST /api/editor/job), Stop */
+async function hybridApiChecks(port, b64) {
+	const fd = path.join(HOME, 'hybrid-test');
+	fs.mkdirSync(fd, { recursive: true });
+	const tool = path.join(fd, 'fake_hybrid.js'), sc = path.join(fd, 'sc.json'), argLog = path.join(fd, 'args.jsonl');
+	fs.writeFileSync(tool, FAKE_HYBRID);
+	const route = '4'.repeat(250);
+	const L = require('../src/cleanroute.js').editorLevel(Buffer.from(b64, 'base64'));
+	const ev = C.evaluate(L, Uint8Array.from(route, (ch) => (ch.charCodeAt(0) - 48) & 31));
+	const scen = (mode, endMs) => fs.writeFileSync(sc, JSON.stringify({ log: argLog, mode, endMs, route, runTicks: ev.runTicks, time: C.fmt(ev.runTicks) }));
+	const was = [process.env.EEAT_HYBRID_TOOL, process.env.EEAT_HYBRID_SC];
+	process.env.EEAT_HYBRID_TOOL = tool; process.env.EEAT_HYBRID_SC = sc;
+	// (the stand-in's arguments of its n-th start, once it has written them)
+	const argsOf = async (n) => {
+		for (let i = 0; i < 100; i++) {
+			const ls = fs.existsSync(argLog) ? fs.readFileSync(argLog, 'utf8').trim().split('\n').filter(Boolean) : [];
+			if (ls.length >= n) return JSON.parse(ls[n - 1]);
+			await new Promise((res) => setTimeout(res, 50));
+		}
+		return [];
+	};
+	const waitFor = async (pred, ms) => { let s = null; const t0 = Date.now(); do { s = (await request(port, 'GET', '/api/editor/hybrid')).json; if (pred(s)) return s; await new Promise((res) => setTimeout(res, 100)); } while (Date.now() - t0 < ms); return s; };
+	try {
+		let r = await request(port, 'GET', '/api/editor/hybrid');
+		check('GET /api/editor/hybrid before any: none', r.status === 200 && r.json.stage === 'none' && !r.json.running, JSON.stringify(r.json));
+		r = await request(port, 'GET', '/api/editor/hybrid/route.eetas');
+		check('GET /api/editor/hybrid/route.eetas without a hybrid: 404', r.status === 404);
+		r = await request(port, 'POST', '/api/editor/hybrid', { level: { name: 'x', width: 10, height: 6, cells: room(10, 6) } });
+		check('POST /api/editor/hybrid without a trophy: 400 with the problem (nothing started)', r.status === 400 && r.json.problems.length === 1 && r.json.problems[0].code === 'trophy' && !fs.existsSync(argLog),
+			`${r.status} ${r.json && r.json.error}`);
+		scen('route', 1500);
+		r = await request(port, 'POST', '/api/editor/hybrid', { eelvlB64: b64, name: 'Hy API', restartS: 900, workers: 8 });
+		const args = await argsOf(1);
+		const has = (a) => args.includes(a);
+		check('POST /api/editor/hybrid: tools/hybrid.js (here its stand-in) with no time cap, the restart setting, the default polish, CPU only (no GPU here), the workers split 3 + 5 (prefix 2), its JSON lines and stdin',
+			r.status === 200 && r.json.running && r.json.cpu === true && has('--noCap=1') && has('--restartOnStallS=900') && has(`--polishS=${ED.HYBRID_POLISH_S}`) && has('--cpu=1') && has('--json=1') && has('--stdin=1') &&
+			has('--cworkers=3') && has('--sworkers=5') && has('--pworkers=2') && has('--name=Hy API') && /level\.eelvl$/.test(args[0]) && r.json.workers.total === 8, `${r.status} ${JSON.stringify(args)}`);
+		const started1 = r.json.started;
+		const env1 = (() => { try { return JSON.parse(fs.readFileSync(argLog + '.env', 'utf8').trim().split('\n')[0]); } catch (e) { return {}; } })();
+		check('... with --parent=<the app> (it ends itself when the app is gone) and the app\'s GPU kernel cache (EEAT_GPU_CACHE = gpu.js cacheDir: no kernel compile a run)',
+			has(`--parent=${process.pid}`) && env1.cache === require('../src/gpu.js').cacheDir(), `${JSON.stringify(env1)} ${require('../src/gpu.js').cacheDir()}`);
+		r = await request(port, 'POST', '/api/editor/hybrid', { eelvlB64: b64 });
+		check('a second hybrid while one runs: 400 (one at a time)', r.status === 400 && /already running/.test(r.json.error), `${r.status} ${r.json && r.json.error}`);
+		let s = await waitFor((x) => x.live && x.live.best, 3000);
+		const best = await request(port, 'GET', '/api/editor/hybrid/route.eetas');
+		check('GET /api/editor/hybrid while it runs: its live state (the compiler, the search, the restarts, the routes, the best so far, the log), and route.eetas the best so far',
+			s && s.running && s.live.compiler.anchors === 12 && s.live.search.nearest.tiles === 4.5 && s.live.restarts.length === 1 && s.live.routes.length === 1 && s.live.best.runTicks === ev.runTicks &&
+			s.log.some((l) => /stand-in/.test(l.text)) && ['running', 'polish'].includes(s.stage) && best.status === 200 && best.buf.toString('latin1') === route, JSON.stringify(s).slice(0, 300));
+		s = await waitFor((x) => !x.running, 8000);
+		const rt = await request(port, 'GET', '/api/editor/hybrid/route.eetas'), lv = await request(port, 'GET', '/api/editor/hybrid/level.eelvl');
+		const lf = s.loadtas ? s.loadtas.replace(/^\/loadtas /, '') : '';
+		check('the hybrid\'s end with a route: done, its result (run time, by whom, the first route), replayed and kept (the /loadtas line\'s file holds it), route.eetas and level.eelvl',
+			s.stage === 'done' && s.result && s.result.runTicks === ev.runTicks && s.result.by === 'compiler' && s.result.first && /^\/loadtas /.test(s.loadtas) && fs.existsSync(lf) &&
+			fs.readFileSync(lf).toString('latin1') === route.slice(0, ev.complete) && rt.status === 200 && rt.buf.toString('latin1') === route.slice(0, ev.complete) &&
+			lv.status === 200 && lv.buf.toString('base64') === b64 && /Hy API hybrid\.eetas/.test(rt.disp), `${s.stage} ${JSON.stringify(s.result)} ${s.loadtas} ${s.message}`);
+		// (the page's Optimize / Watch: a job from the level and the route it downloads)
+		r = await request(port, 'POST', '/api/editor/job', { eelvlB64: lv.buf.toString('base64'), eetasB64: rt.buf.toString('base64'), name: 'Hy API (hybrid)', start: false });
+		check('a job from the hybrid\'s route (the page\'s Optimize / Watch: POST /api/editor/job)', r.status === 200 && r.json.job && r.json.job.tas.runTicks === ev.runTicks && r.json.job.name === 'Hy API (hybrid)',
+			`${r.status} ${r.json && (r.json.error || r.json.job.tas.time)}`);
+		if (r.json && r.json.job) await request(port, 'DELETE', `/api/jobs/${r.json.job.id}`);
+		// Stop: its 'stop' line, then its end; restartS 0: no restarts
+		scen('wait');
+		r = await request(port, 'POST', '/api/editor/hybrid', { eelvlB64: b64, name: 'Hy stop', restartS: 0 });
+		const started2 = r.json.started;
+		const args2 = await argsOf(2);
+		await waitFor((x) => x.live, 3000);
+		// (a page that still shows the earlier run: its files by its `started` are gone, never this run's under its name)
+		const [st1, sl1, sl2] = await Promise.all([request(port, 'GET', `/api/editor/hybrid/route.eetas?started=${started1}`), request(port, 'GET', `/api/editor/hybrid/level.eelvl?started=${started1}`),
+			request(port, 'GET', `/api/editor/hybrid/level.eelvl?started=${started2}`)]);
+		check('the files of an earlier run (?started= of the run before): 409, never this run\'s; this run\'s by its own started: 200',
+			started1 && started2 && started1 !== started2 && st1.status === 409 && sl1.status === 409 && /another hybrid has started/.test(st1.json && st1.json.error) && sl2.status === 200,
+			`${st1.status} ${sl1.status} ${sl2.status}`);
+		r = await request(port, 'POST', '/api/editor/hybrid/stop', {});
+		check('POST /api/editor/hybrid/stop: stopping (its stop line); restartS 0: --restartOnStallS=0', r.status === 200 && r.json.stopping && args2.includes('--restartOnStallS=0'), JSON.stringify(r.json).slice(0, 200));
+		s = await waitFor((x) => !x.running, 8000);
+		const rt2 = await request(port, 'GET', '/api/editor/hybrid/route.eetas');
+		check('... it ends: stopped before a route, no route file (404)', s.stage === 'stopped' && !s.result && /stopped before a route/.test(s.message) && rt2.status === 404, `${s.stage} ${s.message} ${rt2.status}`);
+		// with a GPU (as the server's record says when the GPU benchmark found one): no --cpu=1, and the editor's busy marker
+		// kept fresh while it runs (a job's GPU searcher waits, as for Find a route), gone again at its end
+		scen('route', 800);
+		const busyF = path.join(C.DATA, 'editor', 'busy');
+		s = ED.hybridStart({ eelvlB64: b64, name: 'Hy GPU' }, { id: 'gpu', available: true, model: 'test' });
+		const args3 = await argsOf(3);
+		const fresh = fs.existsSync(busyF) && Date.now() - fs.statSync(busyF).mtimeMs < 6000;
+		s = await waitFor((x) => !x.running, 8000);
+		check('with a GPU: no --cpu=1, the editor\'s busy marker fresh while it runs (a job\'s GPU searcher waits), gone at its end', s.cpu === false && args3.length && !args3.includes('--cpu=1') && fresh &&
+			!fs.existsSync(busyF) && s.stage === 'done', `${JSON.stringify(args3)} fresh ${fresh} after ${fs.existsSync(busyF)} ${s.stage}`);
+		// a hybrid that ends without its final step (a crash: an EPIPE, a heap overflow): its best so far (best.eetas,
+		// verified there) replayed here and offered
+		scen('crash');
+		r = await request(port, 'POST', '/api/editor/hybrid', { eelvlB64: b64, name: 'Hy crash' });
+		s = await waitFor((x) => !x.running, 8000);
+		const rt3 = await request(port, 'GET', `/api/editor/hybrid/route.eetas?started=${s.started}`);
+		check('a hybrid that ends without its final step (exit 1, no final): its best so far replayed here and offered (the route card, its file, the /loadtas line)',
+			s.stage === 'done' && s.result && s.result.fromBest === true && s.result.runTicks === ev.runTicks && s.result.by === 'compiler' && /best so far/.test(s.message) &&
+			s.loadtas && fs.existsSync(s.loadtas.replace(/^\/loadtas /, '')) && rt3.status === 200 && rt3.buf.toString('latin1') === route.slice(0, ev.complete), `${s.stage} ${s.message} ${JSON.stringify(s.result)} ${rt3.status}`);
+		// the forced stop of a hybrid whose event loop does not answer 'stop' (EEAT_HY_KILL_MS): its jobs' GPU stop files,
+		// then its node process alone: its DETACHED child (as eegpu: it ends at its next launch once its parent is gone)
+		// is not killed; its home removed after
+		scen('stubborn');
+		const wasKill = process.env.EEAT_HY_KILL_MS;
+		process.env.EEAT_HY_KILL_MS = '1200';
+		let kidPid = 0, home = '';
+		try {
+			r = await request(port, 'POST', '/api/editor/hybrid', { eelvlB64: b64, name: 'Hy stubborn' });
+			const runD = path.join(C.DATA, 'editor', 'hybrid', 'run');
+			for (let i = 0; i < 100 && !(fs.existsSync(path.join(runD, 'home.txt')) && fs.existsSync(path.join(runD, 'kid.pid'))); i++) await new Promise((res) => setTimeout(res, 50));
+			kidPid = +fs.readFileSync(path.join(runD, 'kid.pid'), 'utf8');
+			home = fs.readFileSync(path.join(runD, 'home.txt'), 'utf8');
+			await waitFor((x) => x.live, 3000);
+			const t0 = Date.now();
+			await request(port, 'POST', '/api/editor/hybrid/stop', {});
+			s = await waitFor((x) => !x.running, 10000);
+			const took = Date.now() - t0, stopF = fs.existsSync(path.join(home, 'jobs', 'j1', 'gpu', 'stop'));
+			await new Promise((res) => setTimeout(res, 1000));
+			const kidAlive = (() => { try { process.kill(kidPid, 0); return true; } catch (e) { return e.code === 'EPERM'; } })();
+			check('the forced stop (EEAT_HY_KILL_MS after Stop, the hybrid not answering): its jobs\' GPU stop files written, its node process killed alone (its detached child, an eegpu stand-in, alive: no tree kill), stopped',
+				!s.running && s.stage === 'stopped' && took >= 1000 && took < 9000 && stopF && kidAlive, `${s.stage} took ${took} stop file ${stopF} kid ${kidPid} alive ${kidAlive}`);
+			for (let i = 0; i < 40 && fs.existsSync(home); i++) await new Promise((res) => setTimeout(res, 250));
+			check('... and its home (os.tmpdir()/eeat-hy-<pid>-*) removed after it', !fs.existsSync(home), home);
+		} finally {
+			if (wasKill === undefined) delete process.env.EEAT_HY_KILL_MS; else process.env.EEAT_HY_KILL_MS = wasKill;
+			if (kidPid) { try { process.kill(kidPid); } catch (e) { /* gone */ } }
+			if (home) { try { fs.rmSync(home, { recursive: true, force: true }); } catch (e) { /* gone */ } }
+		}
+		// a hybrid that ended while the app was gone (the app's record: its end not seen): after the app's restart (the
+		// hybrid in memory forgotten) its route is offered once; while it still runs (its process alive, its report fresh, no
+		// end) a new start is refused and nothing is taken up yet
+		const hd = path.join(C.DATA, 'editor', 'hybrid'), runD = path.join(hd, 'run'), recF = path.join(hd, 'hybrid_app.json');
+		const deadPid = await new Promise((res) => { const k = require('child_process').spawn(process.execPath, ['-e', '0'], { stdio: 'ignore' }); k.on('exit', () => res(k.pid)); });
+		const startedR = Date.now() - 60e3;
+		fs.rmSync(runD, { recursive: true, force: true });
+		fs.mkdirSync(runD, { recursive: true });
+		fs.writeFileSync(path.join(hd, 'level.eelvl'), Buffer.from(b64, 'base64'));
+		fs.writeFileSync(path.join(runD, 'best.eetas'), Buffer.from(route, 'latin1'));
+		const RR = { level: 'Hy gone', stop: { why: 'stopped', t: 50 }, first: { by: 'search', t: 10, runTicks: ev.runTicks }, routes: [{ t: 10, by: 'search', runTicks: ev.runTicks, verified: true }],
+			best: { by: 'search', runTicks: ev.runTicks, t: 10 }, final: null, restarts: [] };
+		fs.writeFileSync(path.join(runD, 'hybrid.json'), JSON.stringify(RR));
+		fs.writeFileSync(recF, JSON.stringify({ pid: process.pid, started: startedR, name: 'Hy gone', cpu: true, workers: { compiler: 1, search: 1, prefix: 1, total: 2 }, restartS: 0, polishS: 60, seen: false }));
+		ED.hybridForget();
+		r = await request(port, 'POST', '/api/editor/hybrid', { eelvlB64: b64, name: 'Hy too soon' });
+		const g0 = await request(port, 'GET', '/api/editor/hybrid');
+		check('after the app\'s restart, the last hybrid still running (its process alive, its report fresh, no end): a new start refused (400, still ending), nothing taken up yet',
+			r.status === 400 && /still ending/.test(r.json.error) && g0.json.stage === 'none', `${r.status} ${r.json && r.json.error} ${g0.json.stage}`);
+		RR.final = { runTicks: ev.runTicks, by: 'search', t: 10, verified: true }; RR.ended = new Date().toISOString();
+		fs.writeFileSync(path.join(runD, 'hybrid.json'), JSON.stringify(RR));
+		fs.writeFileSync(recF, JSON.stringify(Object.assign(JSON.parse(fs.readFileSync(recF, 'utf8')), { pid: deadPid })));
+		const g1 = (await request(port, 'GET', '/api/editor/hybrid')).json;
+		const rt4 = await request(port, 'GET', `/api/editor/hybrid/route.eetas?started=${startedR}`);
+		const seen = JSON.parse(fs.readFileSync(recF, 'utf8')).seen;
+		ED.hybridForget();
+		const g2 = (await request(port, 'GET', '/api/editor/hybrid')).json;
+		check('... once it has ended: its route offered (stopped, by the search, replayed here, its /loadtas file, recovered), once (the record says seen; the next restart: none)',
+			!g1.running && g1.stage === 'stopped' && g1.recovered === true && g1.started === startedR && g1.result && g1.result.runTicks === ev.runTicks && g1.result.by === 'search' &&
+			g1.loadtas && fs.existsSync(g1.loadtas.replace(/^\/loadtas /, '')) && rt4.status === 200 && seen === true && g2.stage === 'none', `${JSON.stringify(g1).slice(0, 300)} ${rt4.status} ${seen} ${g2.stage}`);
+		// the temp homes of hybrids that have ended (eeat-hy-<pid>-*): removed; a live one's, a fresh one's, an older
+		// hybrid's (no pid in its name) and anything else kept
+		const tmpD = fs.mkdtempSync(path.join(HOME, 'sweep-'));
+		const mk = (n, old) => { const f = path.join(tmpD, n); fs.mkdirSync(path.join(f, 'data'), { recursive: true }); fs.writeFileSync(path.join(f, 'data', 'x'), 'x'); if (old) { const t = (Date.now() - 600e3) / 1000; fs.utimesSync(f, t, t); } return f; };
+		const dOld = mk(`eeat-hy-${deadPid}-AbC123`, true), dLive = mk(`eeat-hy-${process.pid}-Xy9z8w`, true), dFresh = mk(`eeat-hy-${deadPid}-Fresh1`, false), dFmt = mk('eeat-hy-QwErTy', true), dOther = mk(`eeat-hyx-${deadPid}-AbC123`, true);
+		const swept = ED.hybridSweep({ tmp: tmpD });
+		check('the homes of ended hybrids removed (eeat-hy-<a dead pid>-*, untouched for a minute); a live hybrid\'s, a fresh one\'s, an older hybrid\'s (no pid) and other folders kept',
+			swept.length === 1 && swept[0] === path.basename(dOld) && !fs.existsSync(dOld) && fs.existsSync(dLive) && fs.existsSync(dFresh) && fs.existsSync(dFmt) && fs.existsSync(dOther), JSON.stringify(swept));
+		fs.rmSync(tmpD, { recursive: true, force: true });
+	} finally {
+		if (was[0] === undefined) delete process.env.EEAT_HYBRID_TOOL; else process.env.EEAT_HYBRID_TOOL = was[0];
+		if (was[1] === undefined) delete process.env.EEAT_HYBRID_SC; else process.env.EEAT_HYBRID_SC = was[1];
+	}
+}
+/** the page's Hybrid (best) panel (renderHybrid, cut out of editor.html, on stand-in elements): running (the time, the two
+ *  sides, the restarts, the routes as they came with the best in green, the best so far, the escaped log, Stop), done (the
+ *  route card: Watch, Optimize, Download, the /loadtas line), stopped without a route (the message); mmss; the workers'
+ *  split */
+function hybridPageChecks() {
+	const a = PAGE.indexOf('const HYB = {'), b = PAGE.indexOf("$('bHybrid').onclick = hybridLevel;");
+	const els = {};
+	const $ = (id) => els[id] || (els[id] = { id, innerHTML: '', disabled: false, value: '', open: false });
+	const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+	const fmt = (t) => `${Math.floor(t / 6000)}:${((t % 6000) / 100).toFixed(2).padStart(5, '0')}`;
+	let P = null;
+	const err = errOf(() => {
+		P = new Function('$', 'store', 'esc', 'fmt', 'toast', 'LV', 'GPU', `${PAGE.slice(a, b)}; return { HYB, renderHybrid, mmss, hyBy };`)($, { get: () => null, set: () => {} }, esc, fmt, () => {}, { name: 'lvl' }, null);
+	});
+	check('the page\'s Hybrid (best) code cuts out and runs (a button, the restart setting, its panel)', !err && a > 0 && b > a && /id="bHybrid"/.test(PAGE) && /id="sHyStall"/.test(PAGE) && /id="hybridSt"/.test(PAGE),
+		err ? err.message : '');
+	if (!P) return;
+	const live = { compiler: { alive: true, round: 1, anchors: 1234, maxGain: 7, furthest: { gain: 7, dist: 12.4, desc: 'coins=3', t: 50 }, routes: 1, stage: 'moves' },
+		search: { run: 1, seed: 1001, state: 'finding', nearest: { tiles: 13.4, ticks: 900, strategy: 'one search' }, rooms: 22 },
+		restarts: [{ n: 1, t: 1805, why: 'no progress of either side for 1800 s', seed: 1001, compiler: 'continues' }], sinceProgress: 75,
+		routes: [{ t: 2000, by: 'search', runTicks: 4218, time: '0:42.18', how: 'Find a route (one search)' }, { t: 2050, by: 'compiler', runTicks: 4100, time: '0:41.00', how: 'trophy' }],
+		best: { by: 'compiler', runTicks: 4100, time: '0:41.00', t: 2050 }, first: { by: 'search', t: 2000, runTicks: 4218 } };
+	P.HYB.st = { running: true, stage: 'polish', started: 5, elapsed: 2105, name: 'L', workers: { compiler: 3, search: 5, prefix: 2, total: 8 }, cpu: true, restartS: 1800, polishS: 180, live,
+		log: [{ t: 2, text: 'the compiler <stalled>' }] };
+	P.renderHybrid();
+	let h = els.hybridSt.innerHTML;
+	const rows = (h.match(/<tr class="[^"]*">/g) || []);
+	check('the panel while it runs: the time (35:05), CPU only, the restart setting, the compiler (anchors, gain, furthest, round 2), the search (nearest, rooms), the restarts, the routes newest first (the best green), the best so far, the log escaped, Stop; the button off',
+		/35:05/.test(h) && /CPU only/.test(h) && /restarts fresh after 30:00 stuck/.test(h) && /1,234 anchors · gain 7 \(furthest: coins=3, 12\.4 tiles to go\)/.test(h) && /round 2/.test(h) &&
+		/nearest <b>13\.4<\/b> tiles from the trophy \(one search\) · 22 rooms · run 2/.test(h) && /1 \(the last at 30:05: no progress of either side for 1800 s\)/.test(h) &&
+		rows.length === 2 && /class="best"><td>34:10<\/td><td class="rt">0:41\.00<\/td><td title="trophy">the compiler/.test(h) && /best so far<\/span><b>0:41\.00<\/b>/.test(h) &&
+		/the compiler &lt;stalled&gt;/.test(h) && /Stop the hybrid/.test(h) && /route found: polishing it/.test(h) && els.bHybrid.disabled === true, h.slice(0, 400));
+	P.HYB.st = { running: false, stage: 'done', started: 5, elapsed: 2300, name: 'L', workers: { compiler: 3, search: 5, prefix: 2, total: 8 }, cpu: false, restartS: 1800, polishS: 180, live, log: [],
+		result: { runTicks: 4100, time: '0:41.00', ticks: 4150, deaths: 0, chance: 1, by: 'compiler', t: 2050, first: { by: 'search', t: 2000, runTicks: 4218 }, polish: { saved: 118 }, restarts: 1 },
+		loadtas: '/loadtas C:\\data\\editor\\hybrid\\routes\\L_4100.eetas', message: 'Hybrid: 0:41.00' };
+	P.renderHybrid();
+	h = els.hybridSt.innerHTML;
+	check('the panel at its end with a route: the route card (its time, by whom, the first route, the polish, verified), Watch, Optimize, Download .eetas, the /loadtas line; no Stop; the button on',
+		/Hybrid route<\/div><div class="rt">0:41\.00/.test(h) && /by the compiler at 34:10 · the first route 0:42\.18 by Find a route at 33:20 · the polish saved 1\.18 s · 1 restart · verified by replay/.test(h) &&
+		/id="hyWatch"/.test(h) && /id="hyOpt"[^>]*>Optimize</.test(h) && /id="hyEetas">Download \.eetas/.test(h) && /value="\/loadtas C:\\data\\editor\\hybrid\\routes\\L_4100\.eetas"/.test(h) &&
+		!/Stop the hybrid/.test(h) && /GPU \+ CPU/.test(h) && els.bHybrid.disabled === false, h.slice(-600));
+	P.HYB.st = { running: false, stage: 'stopped', started: 6, elapsed: 30, workers: {}, restartS: 0, polishS: 180, live: null, log: [], result: null, message: 'stopped before a route' };
+	P.renderHybrid();
+	h = els.hybridSt.innerHTML;
+	check('the panel stopped before a route: its message (info), never restarts', /class="msg info">Hybrid: stopped before a route/.test(h) && /never restarts/.test(h) && !/Hybrid route/.test(h), h.slice(-300));
+	check('mmss: m:ss, h:mm:ss from an hour; hyBy names the parts', P.mmss(59) === '0:59' && P.mmss(3725) === '1:02:05' && P.mmss(-3) === '0:00' && P.hyBy('optimizer') === 'the optimizer' && P.hyBy('x') === 'x');
+	const w = (n) => JSON.stringify(ED.hybridWorkers(n));
+	check('the hybrid\'s workers: the compiler 3/8, the search the rest, the prefix searches half the search\'s, at least 1 each',
+		w(8) === '{"compiler":3,"search":5,"prefix":2,"total":8}' && w(1) === '{"compiler":1,"search":1,"prefix":1,"total":1}' && w(2) === '{"compiler":1,"search":1,"prefix":1,"total":2}' &&
+		w(15) === '{"compiler":6,"search":9,"prefix":4,"total":15}', `${w(8)} ${w(1)} ${w(2)} ${w(15)}`);
 }
 
 // ---------------------------------------------------------------- the "every move" pass ladder (no GPU)
@@ -3589,9 +3891,134 @@ async function levelCheckSection() {
 			h.includes(`this file: md5 ${md5(F.damaged)} · EEO's copy: md5 ${md5(F.copy)}`) && (PAGE.match(/data-eeo="\$\{esc\(k\.entry\)\}"/g) || []).length === 3 &&
 			/postJson\('\/api\/editor\/check', \{ level: levelJson\(\), source: fileSource\(\) \}\)/.test(PAGE) && /name: LV\.name, source: fileSource\(\) \};/.test(PAGE) &&
 			/postJson\('\/api\/editor\/autotas', \{[^\n]*source: fileSource\(\) \}\)/.test(PAGE) && /closest\('\[data-eeo\]'\)/.test(PAGE), h.slice(0, 300));
+		await campaignSectionChecks(port, F);
 	} finally {
 		if (listening) await new Promise((res) => SV.server.close(res));
 		if (envBefore === undefined) delete process.env.EEO_TAS; else process.env.EEO_TAS = envBefore;
+	}
+}
+
+/**
+ * The campaign section and the other section (the fake campaigns.zip of levelCheckSection: 00/0 Tiny Tutorial, 41/0 Be
+ * Here, 41/1 Mini Helix): GET /api/editor/levels (the editor's "Open a level": campaign in EEO's order, other = the runs'
+ * levels that are no campaign level, one per file), summary().campaign (by the level check at import, else by the name and
+ * size: a job imported before the level check), the main page's runs list in its Campaign and Other sections (renderJobs
+ * cut out of index.html: EEO's order, the campaign's tag, a folded section shows its count only)
+ */
+async function campaignSectionChecks(port, F) {
+	const J = require('../src/jobs.js');
+	const made = [];
+	try {
+		const tinyJob = J.importJob({ eelvl: F.tiny, eetas: Buffer.from('4'.repeat(120)), name: 'Tiny run', eelvlName: 'tiny.eelvl', eetasName: 'tiny.eetas', startMode: 'reset' });
+		made.push(tinyJob.id);
+		const helixJob = J.importJob({ eelvl: F.copy, eetas: F.tas, name: 'Helix run', eelvlName: 'helix.eelvl', eetasName: 'helix.eetas', startMode: 'reset' });
+		made.push(helixJob.id);
+		const otherBuf = ED.eelvlOf({ name: 'My own level', width: 20, height: 6, cells: [...room(20, 6), [2, 4, 255], [15, 4, 121]] });
+		const otherJob = J.importJob({ eelvl: otherBuf, eetas: Buffer.from('4'.repeat(200)), name: 'Own run', eelvlName: 'own.eelvl', eetasName: 'own.eetas', startMode: 'reset' });
+		made.push(otherJob.id);
+		const other2 = J.importJob({ eelvl: otherBuf, eetas: Buffer.from('4'.repeat(220)), name: 'Own run again', eelvlName: 'own.eelvl', eetasName: 'own.eetas', startMode: 'reset' });
+		made.push(other2.id);
+		// (a job imported before the level check: no meta.level.check; found by the level's name and size)
+		const mf = path.join(J.jobDir(helixJob.id), 'meta.json'), meta = JSON.parse(fs.readFileSync(mf, 'utf8'));
+		delete meta.level.check;
+		fs.writeFileSync(mf, JSON.stringify(meta));
+		const s1 = J.summary(tinyJob.id), s2 = J.summary(helixJob.id), s3 = J.summary(otherJob.id);
+		check('summary().campaign: by the level check at import (Tiny Tutorial: 00/0, "Tests", level 1), by the name and size without one (Mini Helix: 41/1, "Worst", level 2 of 3), none for another level',
+			s1.campaign && s1.campaign.entry === '00/0.eelvl' && s1.campaign.campaign === '00' && s1.campaign.title === 'Tests' && s1.campaign.tier === 1 &&
+			s2.campaign && s2.campaign.entry === '41/1.eelvl' && s2.campaign.title === 'Worst' && s2.campaign.tier === 2 && s2.campaign.tiers === 3 && s3.campaign === null,
+			JSON.stringify([s1.campaign, s2.campaign, s3.campaign]));
+		const r = await request(port, 'GET', '/api/editor/levels');
+		const L = r.json || {};
+		check('GET /api/editor/levels: the campaign section in EEO\'s order (00/0, 41/0, 41/1 with their titles and tiers) and the other section (the runs\' levels that are no campaign level, one per file)',
+			r.status === 200 && (L.campaign || []).map((l) => `${l.entry}:${l.title}:${l.tier}/${l.tiers}:${l.name}`).join(',') === '00/0.eelvl:Tests:1/1:Tiny Tutorial,41/0.eelvl:Worst:1/3:Be Here,41/1.eelvl:Worst:2/3:Mini Helix' &&
+			(L.other || []).length === 1 && L.other[0].name === 'My own level' && [otherJob.id, other2.id].includes(L.other[0].job) && !L.why, JSON.stringify(L).slice(0, 400));
+		// the main page's runs list (renderJobs and its helpers cut out of index.html, on stand-ins)
+		const IDX = fs.readFileSync(path.join(SRC, 'app', 'index.html'), 'utf8');
+		const code = IDX.slice(IDX.indexOf('const JSECS = ['), IDX.indexOf('function selectJob('));
+		const els = {}, stored = {};
+		const $ = (k) => (els[k] = els[k] || { innerHTML: '' });
+		const store = { get: (k) => (k in stored ? stored[k] : null), set: (k, v) => { stored[k] = v; } };
+		const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+		const job = (s, created) => Object.assign({}, s, { created });
+		const st = { jobs: [job(s3, 4), job(s2, 3), job(s1, 2)] };
+		let P = null;
+		const pe = errOf(() => {
+			P = new Function('$', 'store', 'esc', 'state', 'liveShort', 'remoteShort', 'selectJob', 'openViewer', 'document', `let selected = null;\n${code}\nreturn { renderJobs, campOrder };`)(
+				$, store, esc, st, () => '', () => '', () => {}, () => {}, { querySelectorAll: () => [] });
+		});
+		if (P) P.renderJobs();
+		const h = $('jobs').innerHTML;
+		const order = [...h.matchAll(/data-id="([^"]+)"/g)].map((m) => m[1]);
+		check('the runs list: a Campaign section (EEO\'s order: Tiny run (00/0), then Helix run (41/1), each with its campaign tag) and an Other section with their counts',
+			!pe && /class="jsh" data-sec="campaign"[^>]*>.*Campaign<span class="jn">2<\/span>/.test(h) && /class="jsh" data-sec="other"[^>]*>.*Other<span class="jn">1<\/span>/.test(h) &&
+			order.join() === [tinyJob.id, helixJob.id, otherJob.id].join() && /class="ctag"[^>]*>Tests · level 1 of 1</.test(h) && /class="ctag"[^>]*>Worst · level 2 of 3</.test(h) &&
+			h.indexOf('data-sec="campaign"') < h.indexOf('data-sec="other"'), pe ? pe.message : h.slice(0, 400));
+		// the editor's "Open a level" (loadLevelList and its change handler cut out of editor.html, on stand-ins): a Campaign
+		// and an Other section; a campaign level opens as EEO's copy, another through its run
+		const pcode = PAGE.slice(PAGE.indexOf('const PICK = {'), PAGE.indexOf('/** the level as .eelvl bytes'));
+		const pel = {}, opened = [];
+		const p$ = (k) => (pel[k] = pel[k] || { innerHTML: '', value: '' });
+		let Q = null;
+		const qe = errOf(() => {
+			Q = new Function('$', 'api', 'esc', 'useEeoCopy', 'openJob', `${pcode}\nreturn { loadLevelList };`)(p$, async () => L, esc, (e, n) => opened.push(['eeo', e, n]), (id, wp) => opened.push(['job', id, wp]));
+		});
+		if (Q) await Q.loadLevelList();
+		const ph = p$('lvPick').innerHTML;
+		if (Q) {
+			Object.assign(p$('lvPick'), { value: 'c:41/1.eelvl', selectedOptions: [{ dataset: { name: 'Mini Helix' } }] }); p$('lvPick').onchange();
+			Object.assign(p$('lvPick'), { value: `j:${L.other[0].job}`, selectedOptions: [{ dataset: {} }] }); p$('lvPick').onchange();
+		}
+		check('the editor\'s "Open a level": a Campaign section (3, "Worst 2/3 · Mini Helix") and an Other section (1); a campaign level opens as EEO\'s copy, another through its run',
+			!qe && /<optgroup label="Campaign \(3\)">/.test(ph) && /<option value="c:41\/1\.eelvl" data-name="Mini Helix">Worst 2\/3 · Mini Helix<\/option>/.test(ph) &&
+			/<optgroup label="Other \(1\)"><option value="j:[^"]+">My own level \(Own run( again)?\)<\/option>/.test(ph) &&
+			JSON.stringify(opened) === JSON.stringify([['eeo', '41/1.eelvl', 'Mini Helix'], ['job', L.other[0].job, false]]) && p$('lvPick').value === '', qe ? qe.message : `${ph.slice(0, 300)} ${JSON.stringify(opened)}`);
+		stored['tasopt.sec.campaign'] = '0';
+		P.renderJobs();
+		const h2 = $('jobs').innerHTML;
+		check('... the Campaign section folded (remembered): its heading and count only, the Other section as it was', /class="jsec shut"><button class="jsh" data-sec="campaign"/.test(h2) &&
+			/Campaign<span class="jn">2<\/span><\/button><\/div>/.test(h2) && !h2.includes(`data-id="${tinyJob.id}"`) && h2.includes(`data-id="${otherJob.id}"`), h2.slice(0, 400));
+	} finally {
+		for (const id of made) { try { J.deleteJob(id); } catch (e) { /* gone */ } }
+	}
+}
+
+// ---------------------------------------------------------------- the real Hybrid (best) through the API (CPU only)
+/** POST / GET /api/editor/hybrid with the real tools/hybrid.js (the compiler and Find a route) on a small room, CPU only
+ *  (no GPU here), 2 workers, a 20-s polish: its live state as it runs (both sides, the routes as they came), its end
+ *  ('done' after the polish), its route replayed here to its run ticks, the /loadtas file (~30 s) */
+async function hybridSection() {
+	section('hybrid: Hybrid (best) through the HTTP API: the real tools/hybrid.js on a small room, CPU only');
+	const SV = require('../src/server.js');
+	await new Promise((res) => SV.server.listen(0, '127.0.0.1', res));
+	const port = SV.server.address().port;
+	try {
+		const W = 30, H = 8;
+		const level = { name: 'Hybrid room', width: W, height: H, cells: [...room(W, H), [2, 6, 255], [11, 6, 9], [12, 5, 9], [12, 6, 9], [20, 6, 121]] };
+		const buf = ED.eelvlOf(level);
+		const t0 = Date.now();
+		let r = await request(port, 'POST', '/api/editor/hybrid', { eelvlB64: buf.toString('base64'), name: 'Hybrid room', restartS: 600, polishS: 20, workers: 2 });
+		check('POST /api/editor/hybrid: running, CPU only, 2 workers (the compiler 1, the search 1)', r.status === 200 && r.json.running && r.json.cpu === true && r.json.workers.compiler === 1 &&
+			r.json.workers.search === 1 && r.json.restartS === 600 && r.json.polishS === 20, `${r.status} ${JSON.stringify(r.json).slice(0, 200)}`);
+		let s = r.json, sawBoth = false, sawRoute = false;
+		while (s && s.running && Date.now() - t0 < 150e3) {
+			await new Promise((res) => setTimeout(res, 500));
+			s = (await request(port, 'GET', '/api/editor/hybrid')).json;
+			const L = s && s.live;
+			if (L && L.compiler && typeof L.compiler.alive === 'boolean' && L.search && L.search.state) sawBoth = true;
+			if (L && L.routes && L.routes.length && L.best) sawRoute = true;
+		}
+		const rt = await request(port, 'GET', '/api/editor/hybrid/route.eetas');
+		const ms = rt.status === 200 ? C.parseEetasBuffer(rt.buf) : null;
+		const ev = ms ? C.evaluate(require('../src/cleanroute.js').editorLevel(buf), ms) : null;
+		const lf = s && s.loadtas ? s.loadtas.replace(/^\/loadtas /, '') : '';
+		check('the live state as it ran: both sides (the compiler, the search), the routes as they came and the best so far', sawBoth && sawRoute, JSON.stringify(s && s.live).slice(0, 300));
+		check('its end: done after its polish, a route (by the compiler, the search or the optimizer), route.eetas replays here to its run ticks, the /loadtas file holds it',
+			s && s.stage === 'done' && s.result && ['compiler', 'search', 'optimizer', 'joins', 'prefix'].includes(s.result.by) && ev && ev.runTicks === s.result.runTicks && fs.existsSync(lf) &&
+			s.log.some((l) => /the compiler/.test(l.text)), s ? `${s.stage} ${JSON.stringify(s.result)} ${s.message} ${((Date.now() - t0) / 1000).toFixed(1)} s` : 'no state');
+	} finally {
+		const st = ED.hybridState();
+		if (st.running) { ED.hybridStop(); const t1 = Date.now(); while (ED.hybridState().running && Date.now() - t1 < 30e3) await new Promise((res) => setTimeout(res, 300)); }
+		await new Promise((res) => SV.server.close(res));
 	}
 }
 
@@ -3608,6 +4035,7 @@ async function levelCheckSection() {
 	if (want('prove')) await proveSection();
 	if (want('lane')) await laneSection();
 	if (want('escape')) await escapeSection();
+	if (want('hybrid')) await hybridSection();
 	if (GPU && want('gpu')) await gpuSection();
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);

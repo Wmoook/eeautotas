@@ -1,0 +1,445 @@
+| arm | all 230 | campaign 203 | hard 25 | d4 2 | on the 213 S ran |
+|---|---|---|---|---|---|
+| H (the hybrid, early stops) | 128 | 113 | 15 | 0 | 119 |
+| C (compile 300 s, AB B) | 47 | 39 | 8 | 0 | 40 |
+| C900 (C + the 900-s scoreboard) | 61 | 53 | 8 | 0 | 54 |
+| S (search alone 600 s) | 137 | 130 | 7 | 0 | 137 |
+| C u S | 144 | 130 | 14 | 0 | 137 |
+| C900 u S | 146 | 132 | 14 | 0 | 139 |
+
+| H vs | gained (H routes, it does not) | lost (it routes, H does not) | net |
+|---|---|---|---|
+| C (compile 300 s, AB B) | 81 | 0 | +81 |
+| C900 (C + the 900-s scoreboard) | 70 | 3 | +67 |
+| S (search alone 600 s) | 11 | 20 | -9 |
+| C u S | 4 | 20 | -16 |
+| C900 u S | 3 | 21 | -18 |
+
+| arm | routed with a best known | median ratio | geo mean | at / under the best known | within 5% |
+|---|---|---|---|---|---|
+| H (the hybrid, early stops) | 85 | 1.043 | 1.081 | 33 | 46 |
+| C (compile 300 s, AB B) | 43 | 1.110 | 1.117 | 11 | 18 |
+| C900 (C + the 900-s scoreboard) | 48 | 1.111 | 1.122 | 13 | 20 |
+| S (search alone 600 s) | 76 | 1.060 | 1.140 | 25 | 35 |
+| C u S | 83 | 1.040 | 1.098 | 29 | 43 |
+| C900 u S | 83 | 1.039 | 1.080 | 30 | 44 |
+
+| head to head (both routed) | levels | geo H / ref | H faster | ref faster | tie |
+|---|---|---|---|---|---|
+| C (compile 300 s, AB B) | 47 | 0.948 | 29 | 18 | 0 |
+| C900 (C + the 900-s scoreboard) | 58 | 0.955 | 35 | 23 | 0 |
+| S (search alone 600 s) | 117 | 0.949 | 78 | 38 | 1 |
+| C u S | 124 | 0.981 | 75 | 49 | 0 |
+| C900 u S | 125 | 0.994 | 72 | 53 | 0 |
+
+| first route | levels | median s | p90 s |
+|---|---|---|---|
+| H | 128 | 122.5 | 413.4 |
+| S | 137 | 72.3 | 322.0 |
+| H on the 117 both routed | 117 | 128.6 | 404.7 |
+| S on the 117 both routed | 117 | 53.4 | 219.6 |
+
+```json
+{
+ "counts": {
+  "H": 128,
+  "C": 47,
+  "C900": 61,
+  "S": 137,
+  "CS": 144,
+  "C900S": 146
+ },
+ "gl": {
+  "C": {
+   "gained": [
+    "Tutorial #3",
+    "Buuwuu's Stronghold",
+    "Midnight Meadows",
+    "Unforgiving Climb",
+    "Longing To The Sky",
+    "Egg Quest II",
+    "Gifts of Gaia",
+    "Need for Steed",
+    "Delusion Valley",
+    "Katwalk",
+    "Cave Exploration",
+    "Perilous Endeavor",
+    "Aperture Science Lab",
+    "The Glitch",
+    "Treasure Trove Cove",
+    "Super Mario Bros. 3",
+    "Christmas Tree Quest",
+    "the cake is a lie",
+    "Terminal",
+    "Lab of Insanity",
+    "One Minute Descent",
+    "Sand Castles",
+    "The Burj",
+    "Beaches in Space!",
+    "Sandcastle Safari",
+    "Bayou Boogie",
+    "Hold Jump Challenge",
+    "The Flighty Slighty",
+    "Operation Planet X",
+    "Your Decision",
+    "Flight Path",
+    "MMBA Skull Citadel",
+    "Chain Link Clamber",
+    "Purple Depths",
+    "EX Crew The Occult",
+    "EZ - Spooky Shack",
+    "OCTOS ROLLERCOASTER",
+    "Trail Blazer",
+    "The Memory Game",
+    "Water Levels",
+    "First Person Maze",
+    "Planets",
+    "Vargon Tragedy",
+    "Gravitational Tower",
+    "The way of the north",
+    "Terror In The North",
+    "Christmas Eve",
+    "Snow Jumping",
+    "Snowblind",
+    "Snow Is Falling",
+    "Weird Perfection",
+    "EXCrew Trolled Minis",
+    "YMCK Puzzle Parade",
+    "Two",
+    "EX Crew Odyssey",
+    "Pancake Quest",
+    "Endless Pain",
+    "Helix Reborn",
+    "EX Crew Fall of Zeal",
+    "The Mansion",
+    "Relics Of Athena",
+    "Ice Slide Ride",
+    "Inferno",
+    "The 7 Depths of Hell",
+    "Escape the Lava",
+    "Aedan Garden",
+    "Machu Picchu",
+    "Sentinel Ravines",
+    "Don't Stop Jumping",
+    "Eurus",
+    "Palmia Ville",
+    "Ice Cream Expedition",
+    "UT - Eternal Galaxy",
+    "Forgotten Helix",
+    "AutoTAS base route Egg Quest II (Find a route + path skips)",
+    "EXCrew Are You A God",
+    "EX Crew Odyssey",
+    "EX Crew RR",
+    "Egg Quest II",
+    "My level",
+    "NC Naos Antediluvian"
+   ],
+   "lost": []
+  },
+  "C900": {
+   "gained": [
+    "Tutorial #3",
+    "Buuwuu's Stronghold",
+    "Midnight Meadows",
+    "Unforgiving Climb",
+    "Longing To The Sky",
+    "Egg Quest II",
+    "Gifts of Gaia",
+    "Need for Steed",
+    "Delusion Valley",
+    "Katwalk",
+    "Cave Exploration",
+    "Perilous Endeavor",
+    "The Glitch",
+    "Treasure Trove Cove",
+    "Super Mario Bros. 3",
+    "Christmas Tree Quest",
+    "the cake is a lie",
+    "Terminal",
+    "Sand Castles",
+    "Beaches in Space!",
+    "Sandcastle Safari",
+    "Bayou Boogie",
+    "Hold Jump Challenge",
+    "The Flighty Slighty",
+    "Operation Planet X",
+    "Your Decision",
+    "Flight Path",
+    "MMBA Skull Citadel",
+    "Purple Depths",
+    "EX Crew The Occult",
+    "EZ - Spooky Shack",
+    "OCTOS ROLLERCOASTER",
+    "Trail Blazer",
+    "The Memory Game",
+    "Water Levels",
+    "First Person Maze",
+    "Planets",
+    "Vargon Tragedy",
+    "Gravitational Tower",
+    "The way of the north",
+    "Terror In The North",
+    "Christmas Eve",
+    "Snow Jumping",
+    "Snowblind",
+    "Snow Is Falling",
+    "Weird Perfection",
+    "EX Crew Odyssey",
+    "Pancake Quest",
+    "Endless Pain",
+    "Helix Reborn",
+    "EX Crew Fall of Zeal",
+    "The Mansion",
+    "Ice Slide Ride",
+    "The 7 Depths of Hell",
+    "Aedan Garden",
+    "Machu Picchu",
+    "Sentinel Ravines",
+    "Don't Stop Jumping",
+    "Eurus",
+    "Palmia Ville",
+    "Ice Cream Expedition",
+    "UT - Eternal Galaxy",
+    "Forgotten Helix",
+    "AutoTAS base route Egg Quest II (Find a route + path skips)",
+    "EXCrew Are You A God",
+    "EX Crew Odyssey",
+    "EX Crew RR",
+    "Egg Quest II",
+    "My level",
+    "NC Naos Antediluvian"
+   ],
+   "lost": [
+    "Pretty How Town",
+    "The Tunnels",
+    "Ring Of Chaos"
+   ]
+  },
+  "S": {
+   "gained": [
+    "Planets",
+    "Escape the Lava",
+    "My level",
+    "My level",
+    "My level",
+    "NC Naos Antediluvian",
+    "NC Naos Antediluvian",
+    "Rosa dei Venti",
+    "celestehashardphysix",
+    "celestehashardphysix",
+    "test (precision puzzle)"
+   ],
+   "lost": [
+    "Mount Uonegatscil",
+    "Spring Rose",
+    "Evolution Revolution",
+    "Good Egg Galaxy",
+    "MYSTERY MANSION",
+    "Ethereal Ground",
+    "The Tunnels",
+    "hakashouseoffun",
+    "Not Enough Skeletons",
+    "Ring Of Chaos",
+    "Imps Paradise",
+    "This is not snow",
+    "Desolate Helix",
+    "NC Naos Antediluvian",
+    "I Crew Persian Peril",
+    "Spidey's Abode",
+    "NSFW - Skypolis",
+    "Be gone.",
+    "Bad EE Level 8",
+    "EXPro Forgotten Veil"
+   ]
+  },
+  "CS": {
+   "gained": [
+    "Planets",
+    "Escape the Lava",
+    "My level",
+    "NC Naos Antediluvian"
+   ],
+   "lost": [
+    "Mount Uonegatscil",
+    "Spring Rose",
+    "Evolution Revolution",
+    "Good Egg Galaxy",
+    "MYSTERY MANSION",
+    "Ethereal Ground",
+    "The Tunnels",
+    "hakashouseoffun",
+    "Not Enough Skeletons",
+    "Ring Of Chaos",
+    "Imps Paradise",
+    "This is not snow",
+    "Desolate Helix",
+    "NC Naos Antediluvian",
+    "I Crew Persian Peril",
+    "Spidey's Abode",
+    "NSFW - Skypolis",
+    "Be gone.",
+    "Bad EE Level 8",
+    "EXPro Forgotten Veil"
+   ]
+  },
+  "C900S": {
+   "gained": [
+    "Planets",
+    "My level",
+    "NC Naos Antediluvian"
+   ],
+   "lost": [
+    "Mount Uonegatscil",
+    "Spring Rose",
+    "Evolution Revolution",
+    "Good Egg Galaxy",
+    "Pretty How Town",
+    "MYSTERY MANSION",
+    "Ethereal Ground",
+    "The Tunnels",
+    "hakashouseoffun",
+    "Not Enough Skeletons",
+    "Ring Of Chaos",
+    "Imps Paradise",
+    "This is not snow",
+    "Desolate Helix",
+    "NC Naos Antediluvian",
+    "I Crew Persian Peril",
+    "Spidey's Abode",
+    "NSFW - Skypolis",
+    "Be gone.",
+    "Bad EE Level 8",
+    "EXPro Forgotten Veil"
+   ]
+  }
+ },
+ "firstBy": {
+  "compiler": 34,
+  "search": 91,
+  "prefix": 3
+ },
+ "finalBy": {
+  "optimizer": 58,
+  "search": 50,
+  "joins": 18,
+  "compiler": 2
+ },
+ "stops": {
+  "polish": 119,
+  "cap": 77,
+  "stall": 34
+ },
+ "legLevels": 216,
+ "legOk": 788,
+ "legRoutes": 313,
+ "wallSum": 96352.09999999999,
+ "wallMed": 413.9,
+ "stalled": [
+  "Phina and the Rose",
+  "Springopolis",
+  "NSFW: Spring Relics",
+  "Toad Town Tunnels",
+  "The Square",
+  "Snake? Snake! SNAAKE",
+  "Weird World",
+  "LOEE Demonic Citadel",
+  "Imps Paradise",
+  "This is not snow",
+  "Rotcil Illusions",
+  "The Torava Disaster",
+  "NSFW: City of Avalon",
+  "Nirthophia",
+  "Desolate Relics",
+  "Tropical Trials",
+  "Beat the Spikes 2",
+  "Cold World",
+  "Spidey's Abode",
+  "~Dreamland~",
+  "MegaMan Dash",
+  "Into Magma Panic",
+  "- Floating Temples -",
+  "The Tower Domination",
+  "MoonBase",
+  "Starlight",
+  "Be gone.",
+  "Bad EE Level 8",
+  "cold_world",
+  "EXPro Forgotten Veil",
+  "Good Egg Galaxy",
+  "Infinity Pain",
+  "Stupid Fox",
+  "Wine Quest I"
+ ],
+ "capped": [
+  "Mount Uonegatscil",
+  "Spring Rose",
+  "CDB Inc.",
+  "Hildren's Farm",
+  "Evolution Revolution",
+  "Mr Nuttys Wild World",
+  "Hunt",
+  "The 5 Realms Of Afar",
+  "Good Egg Galaxy",
+  "Barrel Cannon Canyon",
+  "Kerred Megaman",
+  "ML's First Samurai",
+  "LoZ Skyward Sword",
+  "Station_02.bat",
+  "Pretty How Town",
+  "MYSTERY MANSION",
+  "MKco - Mushroom Cup",
+  "TEZ",
+  "Ethereal Ground",
+  "Daybreak",
+  "Butane-Doing Forest",
+  "The Tunnels",
+  "hakashouseoffun",
+  "Soul Quest",
+  "Happy Spookaween!",
+  "Not Enough Skeletons",
+  "Ring Of Chaos",
+  "KOcrew Creepy Cavern",
+  "Revenge of Syssba",
+  "Switcher Puzzle",
+  "Bridge Builder",
+  "SPOT THE DIDFERNECE",
+  "Moving Ice Puzzle",
+  "E.T. Ecosystems",
+  "VVVVVV",
+  "Ice-O-Slide",
+  "Frolic",
+  "Booty Return",
+  "Fizio1 Fun Land",
+  "Endeavor",
+  "Polar Eclipse",
+  "I Wanna be the Guy",
+  "TTL: Spike Edition",
+  "Desolate Helix",
+  "Nightmare Relics",
+  "TEIN: SMC",
+  "CTM 2",
+  "NC Naos Antediluvian",
+  "I Crew Persian Peril",
+  "Technological Terror",
+  "EXPro Forgotten Veil",
+  "LOEEAquaticSanctuary",
+  "SIG?S",
+  "Diamond underground",
+  "Archery range",
+  "Golden Nightingale",
+  "DEEPER",
+  "EE Crew   *  Get Wet",
+  "Arris Dome",
+  "NSFW - Skypolis",
+  "Infinity Pain",
+  "OCTO'S FUN CASTLE",
+  "bad_ee_level_9",
+  "EXPro Forgotten Veil",
+  "Endeavor",
+  "Forgotten Helix",
+  "NC Naos Antediluvian",
+  "Octorage"
+ ],
+ "hRun": 230
+}
+```

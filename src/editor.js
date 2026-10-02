@@ -2051,6 +2051,8 @@ function escStarts() {
 /** the next escape's start: the kind of start next in the rotation (esc.nextFrom first: 'near' after a retarget or a
  *  chain), else the next kind in the rotation that has one; null: none left */
 function escPick() {
+	// (THE HYBRID's hint, hint(): an outside start first, once)
+	if (esc.hint) { const h = esc.hint; esc.hint = null; return h; }
 	const all = escStarts(), F = esc.from, want = esc.nextFrom || F[esc.fromTurn % F.length];
 	// (progStart: a start at a new most progress first, before the rotation's kinds; escLaunch keeps the rotation where it is)
 	if (cur.opts.progStart && all.progress.length) return all.progress[0];
@@ -2120,6 +2122,7 @@ function escLaunch(n, st) {
 	// (the kinds of start in rotation: a start put first once (nextFrom, or a progress start: escPick) does not move the
 	// rotation on; a progress start leaves nextFrom for the escape after it)
 	if (st.kind === 'progress') esc.progMax = st.prog;
+	else if (st.kind === 'hint') { /* (an outside start: the rotation stays where it is) */ }
 	else if (esc.nextFrom) esc.nextFrom = null;
 	else esc.fromTurn++;
 	const cfg = escCfgNext();
@@ -2147,11 +2150,31 @@ function escLaunch(n, st) {
 		S.escape = Object.assign(S.escape, { runs: esc.runs, run });
 		S.escape.hist = (S.escape.hist || []).concat([run]).slice(-32);
 	}
-	note(`${V.label} ${esc.runs}: ${esc.runs === 1 ? `no attempt nearer by ${BREAK_TILES} tiles and no new room for ${esc.first} s` : 'the next'}: from tick ${st.inputs.length} of ${st.what}, ${cfgText}, ${E} of the ${W} CPU workers`);
+	note(`${V.label} ${esc.runs}: ${st.kind === 'hint' ? st.what : esc.runs === 1 ?`no attempt nearer by ${BREAK_TILES} tiles and no new room for ${esc.first} s` : 'the next'}: from tick ${st.inputs.length} of ${st.what}, ${cfgText}, ${E} of the ${W} CPU workers`);
 	Object.assign(V, { layer: 0, states: 0, ticksPerSec: 0, state: 'starting', best: undefined, bestAt: 0, bestTry: null, found: V.found || null, passes: esc.runs,
 		detail: `escape ${esc.runs}: from tick ${st.inputs.length} of ${st.what}, ${cfg.label}, ${E} thread${E > 1 ? 's' : ''}` });
 	kids[n] = launch(n);
 	save();
+}
+/** THE HYBRID's HINT (tools/hybrid.js): an outside start, another solver's furthest point (the compiler's deepest anchor:
+ *  the inputs that reach it, .eetas characters) for the running search: into the CPU search's archive (feedOne: the one
+ *  search's 'import', else 'seed' cells along it) and, where the stall escape runs (coarse cells), the next escape's start
+ *  at once (escPick takes it first; a live escape gives way: halt 'escstall', escAfter starts the next one). Before a
+ *  route only. -> {fed, escape} (escape false: no escape strategy here; the caller searches from it itself) */
+function hint(inputs, what) {
+	const s = String(inputs || '');
+	if (!S || !S.running || S.result || !cur || !/^[0-O]+$/.test(s)) return { fed: false, escape: false };
+	feedOne(s, undefined, true);
+	const n = S.strategies.findIndex((q) => q.key === 'escape');
+	if (n < 0 || !esc) return { fed: true, escape: false };
+	const key = crypto.createHash('sha1').update(s).digest('hex');
+	if (esc.tried.has(key)) return { fed: true, escape: true, again: true };
+	esc.hint = { inputs: s, what: String(what || 'an outside start'), dist: Infinity, key, room: undefined, sig: '', kind: 'hint' };
+	esc.next = true;
+	note(`hint: ${esc.hint.what} (${s.length} ticks): the next escape starts there`);
+	if (alive(kids[n])) { if (!kids[n].stopWhy) halt(kids[n], 'escstall'); }
+	else { const S0 = S, t = setTimeout(() => { if (S === S0) escKick(); }, 100); if (t.unref) t.unref(); }
+	return { fed: true, escape: true };
 }
 /** THE GPU RANDOM RUNS IN THE ROTATION (ESC_ROLLS): the portfolio sweep's long random runs routed through the GPU random
  *  runs, so an escape whose configuration differs from the one the GPU random runs run with (their search's own at first)
@@ -4418,6 +4441,312 @@ function compileStop() {
 	return compileState();
 }
 
+// ---------------------------------------------------------------- the HYBRID action (tools/hybrid.js, "Hybrid (best)")
+// The page's "Hybrid (best)" button (POST /api/editor/hybrid): the level -> tools/hybrid.js in its own process, as the
+// compile action runs src/compile.js, one at a time: the compiler (src/compile.js with its leg searches, EEAT_HYBRID=1)
+// and the search product (Find a route, a job from its first route and the optimizer) side by side, hand-overs both ways,
+// every route replayed before it counts. With NO TIME CAP (--noCap=1): it runs until a verified route and its polish
+// (polishS, HYBRID_POLISH_S 180 s: the optimizer, the compiler's polish, the joins), or Stop. THE RESTART
+// (--restartOnStallS=restartS, the page's setting, HYBRID_RESTART_S 1800 s; 0 = none): before any route, no progress of
+// either side for that long starts the run again FRESH (the search with a new seed; the compiler goes on in its rounds),
+// it never stops it. The workers: the app's count as Find a route takes it (cpuWorkers: the request's, else N - 1, at
+// most the benchmark's fastest, half while a job runs), split by hybridWorkers (the compiler 3/8, the search the rest,
+// the prefix searches half the search's); the GPU as Find a route uses it (the app's GPU benchmark found one), else
+// --cpu=1: CPU only; the app's GPU kernel cache (gpu.js cacheDir, EEAT_GPU_CACHE: the kernels compiled once for this card).
+// Its JSON lines (--json=1) are the live state (GET: `live`); the page's Stop is its 'stop' line (--stdin=1: its end is
+// written as a signal's). It runs DETACHED (every system: it outlives the app's end, Ctrl+C, a closed console, the app
+// killed outright, and then ends by itself: the end of its stdin and --parent=<this process> end it as 'stop' does, so it
+// always writes its final and removes its home); a hybrid that has not ended HY_KILL_MS after Stop (its event loop held,
+// e.g. a job import's random-portal analysis) is killed (hybridKill: its jobs' GPU stop files first, then its node process
+// alone, never a tree kill that reaches eegpu). At its end the best verified route (its final, read back and replayed
+// there; a run that ended without its final step: its best so far, run/best.eetas) is replayed once more here and kept in
+// <data>/editor/hybrid/routes/ (route.eetas; the eeo-tas line /loadtas <that file>, which the page copies); the page's
+// Optimize makes a job of it (POST /api/editor/job); its files are asked for with the run's `started` (a page that shows
+// an earlier run gets a 409, not this run's files). A run that ended while the app was gone (its end not seen here:
+// hybrid_app.json) is taken up at the next GET (hybridRecover: its route offered as if seen). (tests:
+// EEAT_HYBRID_TOOL=<a stand-in for tools/hybrid.js>, EEAT_HY_KILL_MS)
+const HYBRID_RESTART_S = 1800, HYBRID_POLISH_S = 180, HY_LOG_KEEP = 60;
+const hyKillMs = () => Math.max(100, +process.env.EEAT_HY_KILL_MS || 120000);
+let HY = null;
+const hybridDir = () => path.join(dir(), 'hybrid');
+const hybridRec = () => path.join(hybridDir(), 'hybrid_app.json');
+const hybridTool = () => (process.env.EEAT_HYBRID_TOOL ? path.resolve(process.env.EEAT_HYBRID_TOOL) : path.join(__dirname, '..', 'tools', 'hybrid.js'));
+const pidAlive = (pid) => { if (!(+pid > 0)) return false; try { process.kill(+pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
+/** W workers -> {compiler, search, prefix, total}: the compiler 3/8 (at least 1), the search the rest (at least 1), its
+ *  prefix searches half the search's (at least 1) */
+function hybridWorkers(W) {
+	const total = Math.max(1, Math.round(+W) || 1);
+	const compiler = Math.max(1, Math.round(total * 3 / 8)), search = Math.max(1, total - compiler);
+	return { compiler, search, prefix: Math.max(1, Math.floor(search / 2)), total };
+}
+/** a hybrid's home (tools/hybrid.js: os.tmpdir()/eeat-hy-<pid>-XXXXXX) or null (anything else is never touched) */
+function hyHomeOf(p, tmp) {
+	if (typeof p !== 'string' || !p) return null;
+	const f = path.resolve(p), t = path.resolve(tmp || os.tmpdir());
+	return path.dirname(f).toLowerCase() === t.toLowerCase() && /^eeat-hy-\d+-[A-Za-z0-9]+$/.test(path.basename(f)) ? f : null;
+}
+/** The homes of hybrids that have ended (os.tmpdir()/eeat-hy-<pid>-XXXXXX whose process is gone, untouched for a minute):
+ *  removed. A hybrid removes its own at its end; one killed outright (the forced stop, a crash, a heap overflow, the app's
+ *  process tree ended) leaves it: its job, the editor's files, a steer field of up to 600 MB. tools/hybrid.js calls it at
+ *  its start, the app at its start (server.js). Homes of older hybrids (eeat-hy-XXXXXX, no process id) are left. o: {tmp,
+ *  minAgeMs (60 s)} -> the names removed */
+function hybridSweep(o) {
+	const tmp = (o && o.tmp) || os.tmpdir(), minAge = o && o.minAgeMs !== undefined ? +o.minAgeMs : 60e3;
+	const out = [];
+	let names = [];
+	try { names = fs.readdirSync(tmp); } catch (e) { return out; }
+	for (const n of names) {
+		const m = /^eeat-hy-(\d+)-[A-Za-z0-9]+$/.exec(n);
+		if (!m) continue;
+		const pid = +m[1];
+		if (pid === process.pid || pidAlive(pid)) continue;
+		const f = path.join(tmp, n);
+		try { if (!fs.lstatSync(f).isDirectory() || Date.now() - fs.statSync(f).mtimeMs < minAge) continue; } catch (e) { continue; }
+		try { fs.unlinkSync(path.join(f, 'data', 'gpu-cache')); } catch (e) { /* (a link of an older run, never its target) */ }
+		try { fs.rmSync(f, { recursive: true, force: true, maxRetries: 2, retryDelay: 200 }); out.push(n); } catch (e) { /* in use: next time */ }
+	}
+	return out;
+}
+/** the app's record of its last hybrid (<data>/editor/hybrid/hybrid_app.json: {pid, started, name, cpu, workers, restartS,
+ *  polishS, seen (its end handled here), routeFile}) */
+const hybridRecord = () => C.readJSON(hybridRec(), null);
+function hybridRecordSet(patch) {
+	try { fs.writeFileSync(hybridRec(), JSON.stringify(Object.assign(hybridRecord() || {}, patch))); } catch (e) { /* read-only */ }
+}
+/** the last hybrid this app started before it went away, while it still runs (detached: it ends by itself in seconds,
+ *  once it sees the app gone) -> {pid} | null */
+function hybridStillEnding() {
+	if (HY) return null;
+	const rec = hybridRecord();
+	if (!rec || rec.seen || !pidAlive(rec.pid)) return null;
+	let R = null, mt = 0;
+	const f = path.join(hybridDir(), 'run', 'hybrid.json');
+	try { R = JSON.parse(fs.readFileSync(f, 'utf8')); mt = fs.statSync(f).mtimeMs; } catch (e) { R = null; }
+	if (R && R.ended) return null;
+	// (a live hybrid writes its report every 15 s; an older one with the same process id is another process)
+	return Date.now() - Math.max(mt, +rec.started || 0) < 90e3 ? { pid: rec.pid } : null;
+}
+/** The route of a hybrid's run (run: its out dir; R its hybrid.json or null): its final (verified there) when there is
+ *  one, else its best so far (run/best.eetas: every faster verified route as it came; a run that ended without its final
+ *  step: a crash, the forced stop, a heap overflow), replayed once more here (buf: the level's bytes) and kept in
+ *  <hybrid>/routes/ -> {file, ev, by, t, fromBest} | null (none, or it does not finish here) */
+function hybridKeep(buf, name, started, run, R) {
+	const best = path.join(run, 'best.eetas');
+	if (!fs.existsSync(best)) return null;
+	const fin = !!(R && R.final && R.final.verified);
+	const L = require('./cleanroute.js').editorLevel(buf), ev = C.evaluate(L, C.readEetas(best));
+	if (!ev) return null;
+	const rd = path.join(hybridDir(), 'routes');
+	fs.mkdirSync(rd, { recursive: true });
+	const f = path.join(rd, `${safeName(name).replace(/[^\w.-]+/g, '_')}_${ev.runTicks}_${new Date(started).toISOString().replace(/[-:]/g, '').slice(0, 15)}.eetas`);
+	C.writeEetas(f, ev.ms);
+	const src = fin ? R.final : R && R.best && R.best.runTicks === ev.runTicks ? R.best : null;
+	return { file: f, ev, by: src ? src.by : null, t: src ? src.t : null, fromBest: !fin };
+}
+/** me (HY) at its end: its route kept (hybridKeep), its result, stage and message */
+function hybridEnd(me, run, code) {
+	let R = null;
+	try { R = JSON.parse(fs.readFileSync(path.join(run, 'hybrid.json'), 'utf8')); } catch (e) { R = null; }
+	me.report = R ? { stop: R.stop, first: R.first, final: R.final, polish: R.polish, restarts: R.restarts || [], routes: (R.routes || []).filter((r) => r.verified).length } : null;
+	const why = (R && R.stop && R.stop.why) || (me.end && me.end.why) || '';
+	let kept = null;
+	try { kept = hybridKeep(me.buf, me.name, me.started, run, R); } catch (e) { me.stage = 'error'; me.message = `the hybrid's route could not be kept: ${e.message}`; return; }
+	if (kept) {
+		const ev = kept.ev;
+		me.routeFile = kept.file;
+		me.loadtas = `/loadtas ${kept.file}`;
+		me.result = { runTicks: ev.runTicks, time: C.fmt(ev.runTicks), ticks: ev.complete, deaths: ev.deaths, chance: ev.chance, by: kept.by, t: kept.t,
+			first: (R && R.first) || null, polish: kept.fromBest ? null : (R && R.polish) || null, routes: me.report ? me.report.routes : 1, restarts: me.report ? me.report.restarts.length : 0,
+			...(kept.fromBest ? { fromBest: true } : {}) };
+		me.stage = me.stopped || /^stopped$|^SIG/.test(why) ? 'stopped' : 'done';
+		const note = kept.fromBest ? ` (its best so far: the hybrid ended without its last step${code !== null && code !== undefined && code !== 0 ? `, exit ${code}` : ''})` : '';
+		me.message = `Hybrid: ${C.fmt(ev.runTicks)} (${ev.runTicks} run ticks${kept.by ? `, by the ${kept.by}` : ''})${me.stage === 'stopped' ? ', stopped' : ''}${note}`;
+	} else {
+		me.stage = me.stopped ? 'stopped' : code === 2 ? 'no route' : 'error';
+		me.message = me.stopped ? 'stopped before a route' : why ? `no route (${why})` : me.message || `the hybrid ended with exit code ${code}${me.err.trim() ? `: ${me.err.trim().split('\n').pop().slice(0, 300)}` : ''}`;
+	}
+}
+/** POST /api/editor/hybrid: b {eelvlB64 (or level), name, source, workers, restartS (1800; 0: no restart), polishS (180)},
+ *  gpu: the server's GPU record (systemInfo().processors[1]) -> hybridState() */
+function hybridStart(b, gpu) {
+	if (HY && HY.running) throw new Error('the hybrid is already running (one at a time): wait for it, or stop it');
+	const ending = hybridStillEnding();
+	if (ending) throw new Error(`the last hybrid (process ${ending.pid}) is still ending after the app's restart: try again in a few seconds`);
+	const buf = b.eelvlB64 ? Buffer.from(String(b.eelvlB64), 'base64') : b.level ? eelvlOf(b.level) : null;
+	if (!buf || !buf.length) throw new Error('missing eelvlB64 (the level as .eelvl bytes, base64)');
+	const ins = inspect(buf, { source: b.source });
+	if (ins.problems.length) { const e = new Error(ins.problems.map((q) => q.text).join(' ')); e.problems = ins.problems; throw e; }
+	const tool = hybridTool();
+	if (!fs.existsSync(tool)) throw new Error(`the hybrid is not part of this app (${tool} is missing)`);
+	const d = hybridDir(), run = path.join(d, 'run');
+	fs.mkdirSync(d, { recursive: true });
+	try { fs.rmSync(run, { recursive: true, force: true }); } catch (e) { /* in use: hybrid.js writes over it */ }
+	fs.mkdirSync(run, { recursive: true });
+	const lf = path.join(d, 'level.eelvl');
+	fs.writeFileSync(lf, buf);
+	const name = String(b.name || ins.json.world_name || 'level').slice(0, 80);
+	const workers = hybridWorkers(cpuWorkers(b.workers));
+	const cpu = !(gpu && gpu.available);
+	const restartS = b.restartS !== undefined && b.restartS !== null && +b.restartS === 0 ? 0 : Math.max(60, Math.min(86400, Math.round(+b.restartS || HYBRID_RESTART_S)));
+	const polishS = Math.max(20, Math.min(3600, Math.round(+b.polishS || HYBRID_POLISH_S)));
+	const args = [tool, lf, '--noCap=1', `--restartOnStallS=${restartS}`, `--polishS=${polishS}`, `--cworkers=${workers.compiler}`, `--sworkers=${workers.search}`,
+		`--pworkers=${workers.prefix}`, `--out=${run}`, `--name=${name}`, '--json=1', '--stdin=1', `--parent=${process.pid}`, ...(cpu ? ['--cpu=1'] : [])];
+	// (detached everywhere: it ends by itself when the app goes away (its stdin, --parent), its final written and its home
+	// removed; POSIX: its own process group, which the forced stop ends (eegpu has its own); Windows: out of the app's job
+	// object, its own children in its own; the app's GPU kernel cache: the kernels compiled once for this card)
+	const env = Object.assign(C.workerHeapEnv(), { EEAT_GPU_CACHE: G.cacheDir() });
+	const ch = spawn(process.execPath, args, { cwd: path.resolve(__dirname, '..'), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env, detached: true });
+	const me = HY = { running: true, started: Date.now(), name, buf, workers, cpu, restartS, polishS, stage: 'starting', live: null, log: [], result: null, routeFile: null,
+		loadtas: null, message: '', kid: ch, err: '', stopping: false, stopped: false, end: null, killT: null, busyT: null, home: null, forced: false };
+	try { fs.writeFileSync(hybridRec(), JSON.stringify({ pid: ch.pid || 0, started: me.started, name, cpu, workers, restartS, polishS, seen: false })); } catch (e) { /* read-only */ }
+	// (the GPU as Find a route has it: a job's GPU searcher waits while the editor's busy marker is fresh, markBusy; the
+	// hybrid's own search runs in a home of its own, so this app's marker is kept fresh here while it runs)
+	if (!cpu) {
+		const touch = () => { try { fs.writeFileSync(path.join(dir(), 'busy'), String(Date.now())); } catch (e) { /* none */ } };
+		touch();
+		me.busyT = setInterval(touch, 5000);
+		if (me.busyT.unref) me.busyT.unref();
+	}
+	ch.stdin.on('error', () => { /* ended */ });
+	let out = '';
+	const onEvent = (ev) => {
+		if (ev.ev === 'state') { me.live = ev; if (me.running) me.stage = ev.ending ? 'ending' : ev.first ? 'polish' : 'running'; }
+		else if (ev.ev === 'log') { me.log.push({ t: +ev.t || 0, text: String(ev.text || '').slice(0, 400) }); if (me.log.length > HY_LOG_KEEP) me.log.shift(); }
+		else if (ev.ev === 'start') me.home = hyHomeOf(ev.home);
+		else if (ev.ev === 'end') me.end = ev;
+	};
+	ch.stdout.on('data', (chunk) => {
+		out += chunk;
+		const k = out.lastIndexOf('\n');
+		if (k < 0) return;
+		const lines = out.slice(0, k).split('\n');
+		out = out.slice(k + 1);
+		for (const l of lines) { const s = l.trim(); if (!s.startsWith('{')) continue; try { onEvent(JSON.parse(s)); } catch (e) { /* a partial line */ } }
+	});
+	ch.stderr.on('data', (c) => { me.err = (me.err + c).slice(-4000); });
+	ch.on('error', (e) => { me.message = `the hybrid could not start: ${e.message}`; });
+	ch.on('close', (code) => {
+		me.running = false; me.kid = null; me.code = code; me.ended = Date.now();
+		if (me.killT) { clearTimeout(me.killT); me.killT = null; }
+		if (me.busyT) { clearInterval(me.busyT); me.busyT = null; markBusy(); }   // (the marker as Find a route's state says)
+		hybridEnd(me, run, code);
+		hybridRecordSet({ seen: true, routeFile: me.routeFile });
+		// (killed outright: its home is left; removed once its GPU tools have seen their stop files and their parent gone)
+		if (me.forced && me.home) {
+			const h = me.home;
+			const t = setTimeout(() => { try { fs.rmSync(h, { recursive: true, force: true, maxRetries: 2, retryDelay: 500 }); } catch (e) { /* the next sweep */ } }, 3000);
+			if (t.unref) t.unref();
+		}
+	});
+	return hybridState();
+}
+/** A hybrid this app started whose end it did not see (it ended while the app was gone: closed, killed, restarted):
+ *  taken up from its record and its run dir, its route kept and offered as if its end were seen here; once (the record
+ *  says seen). -> HY | null */
+function hybridRecover() {
+	if (HY) return HY;
+	const rec = hybridRecord();
+	if (!rec || rec.seen || !rec.started) return null;
+	if (hybridStillEnding()) return null;   // (not yet: the next GET)
+	const d = hybridDir(), run = path.join(d, 'run'), lf = path.join(d, 'level.eelvl');
+	let buf = null;
+	try { buf = fs.readFileSync(lf); } catch (e) { buf = null; }
+	hybridRecordSet({ seen: true });
+	if (!buf || !fs.existsSync(path.join(run, 'hybrid.json'))) return null;
+	const me = { running: false, started: +rec.started, name: String(rec.name || 'level'), buf, workers: rec.workers || {}, cpu: rec.cpu !== false, restartS: rec.restartS || 0,
+		polishS: rec.polishS || HYBRID_POLISH_S, stage: 'none', live: null, log: [], result: null, routeFile: null, loadtas: null, message: '', kid: null, err: '', stopping: false,
+		stopped: false, end: null, recovered: true };
+	let R = null;
+	try { R = JSON.parse(fs.readFileSync(path.join(run, 'hybrid.json'), 'utf8')); } catch (e) { R = null; }
+	me.ended = R && R.ended ? Date.parse(R.ended) : Date.now();
+	hybridEnd(me, run, null);
+	if (me.message) me.message += ' (it ended while the app was closed)';
+	hybridRecordSet({ routeFile: me.routeFile });
+	HY = me;
+	return me;
+}
+/** GET /api/editor/hybrid: {running, stage (none / starting / running / polish / ending / done / stopped / no route /
+ *  error), started, elapsed (s), name, workers, cpu, restartS, polishS, live (hybrid.js's last state line: liveOf), log
+ *  [{t, text}] (the last lines), result {runTicks, time, ticks, deaths, chance, by, t, first, polish, routes, restarts,
+ *  fromBest}, loadtas, message, stopping, recovered} */
+function hybridState() {
+	if (!HY) { try { hybridRecover(); } catch (e) { /* none */ } }
+	if (!HY) return { running: false, stage: 'none', live: null, log: [], result: null, loadtas: null, message: '' };
+	return { running: HY.running, stage: HY.stage, started: HY.started, elapsed: Math.round(((HY.ended || Date.now()) - HY.started) / 100) / 10, name: HY.name,
+		workers: HY.workers, cpu: HY.cpu, restartS: HY.restartS, polishS: HY.polishS, live: HY.live, log: HY.log.slice(-14), result: HY.result, loadtas: HY.loadtas,
+		message: HY.message, stopping: HY.stopping, ...(HY.recovered ? { recovered: true } : {}) };
+}
+/** the forced stop (HY_KILL_MS after Stop, the hybrid still running): the GPU stop files of its jobs first (as jobs.js
+ *  stopGpuSearcher: their eegpu ends between two launches), then its node process alone, never a tree kill (Windows:
+ *  taskkill /F without /T; its job object ends its other node children with it; POSIX: its process group, which no eegpu
+ *  is in): eegpu runs detached with --parent and ends at its next launch once its parent is gone (killing it while a
+ *  kernel runs resets the display driver) */
+function hybridKill(me) {
+	if (!me || !me.running || !me.kid) return;
+	me.forced = true;
+	if (me.home) {
+		let ids = [];
+		try { ids = fs.readdirSync(path.join(me.home, 'jobs')); } catch (e) { ids = []; }
+		for (const id of ids) { const g = path.join(me.home, 'jobs', id, 'gpu'); try { if (fs.existsSync(g)) fs.writeFileSync(path.join(g, 'stop'), 'stop'); } catch (e) { /* gone */ } }
+	}
+	const pid = me.kid.pid;
+	if (!pid) return;
+	if (process.platform === 'win32') require('child_process').spawnSync('taskkill', ['/PID', String(pid), '/F'], { stdio: 'ignore', windowsHide: true });
+	else { try { process.kill(-pid, 'SIGKILL'); } catch (e) { try { process.kill(pid, 'SIGKILL'); } catch (e2) { /* gone */ } } }
+}
+/** POST /api/editor/hybrid/stop: its 'stop' line (it ends as a signal ends it: the best route so far is its final), the
+ *  forced stop (hybridKill) HY_KILL_MS later if it is still running */
+function hybridStop() {
+	const me = HY;
+	if (me && me.running && me.kid && !me.stopping) {
+		me.stopping = true; me.stopped = true;
+		try { me.kid.stdin.write('stop\n'); } catch (e) { /* gone */ }
+		me.killT = setTimeout(() => hybridKill(me), hyKillMs());
+		if (me.killT.unref) me.killT.unref();
+	}
+	return hybridState();
+}
+/** GET /api/editor/hybrid/route.eetas (its route: the final, else the best so far) | level.eelvl, started: the run the
+ *  page shows (its `started`; none: the current one) -> {file, name} | {stale: true} (another run since) | null */
+function hybridFile(sub, started) {
+	if (!HY) { try { hybridRecover(); } catch (e) { /* none */ } }
+	if (!HY) return null;
+	if (started !== undefined && started !== null && started !== '' && +started !== HY.started) return { stale: true };
+	if (sub === 'level.eelvl') { const f = path.join(hybridDir(), 'level.eelvl'); return fs.existsSync(f) ? { file: f, name: `${safeName(HY.name)}.eelvl` } : null; }
+	if (sub !== 'route.eetas') return null;
+	const f = HY.routeFile || (HY.running ? path.join(hybridDir(), 'run', 'best.eetas') : null);
+	return f && fs.existsSync(f) ? { file: f, name: `${safeName(HY.name)} hybrid.eetas` } : null;
+}
+/** tests: as after the app's restart (the hybrid in memory forgotten) */
+function hybridForget() { HY = null; }
+
+// ---------------------------------------------------------------- the page's "Open a level": a campaign section and another
+/** GET /api/editor/levels: the levels the page offers in two sections: campaign (EEO's campaign levels from its
+ *  campaigns.zip, src/levelcheck.js campaignIndex, in EEO's order: the campaign's number, then the tier; the page opens one
+ *  through GET /api/levelcheck/eeo-copy) and other (the levels of your runs that are none of them (jobs.js
+ *  campaignOfMeta), one per level file (its md5), by name; the page opens one through the job: GET
+ *  /api/jobs/<id>/original.eelvl) -> {campaign: [{entry, name, title, campaign, tier, tiers, width, height}], other: [{job,
+ *  name, jobName, width, height}], why (no campaigns.zip: why)} */
+function levelList() {
+	let idx;
+	try { idx = LC.campaignIndex(); } catch (e) { idx = { levels: [], why: e.message }; }
+	const num = (l) => { const n = parseInt(String(l.campaign), 10); return (Number.isFinite(n) ? n : 9999) * 100 + (+l.tier || 0); };
+	const campaign = idx.levels.slice().sort((a, b) => num(a) - num(b) || String(a.entry).localeCompare(String(b.entry)))
+		.map((l) => ({ entry: l.entry, name: l.name, title: l.title, campaign: l.campaign, tier: l.tier, tiers: l.tiers, width: l.width, height: l.height }));
+	const J = require('./jobs.js');
+	const seen = new Set(), other = [];
+	for (const id of C.jobIds()) {
+		const m = C.readJSON(path.join(J.jobDir(id), 'meta.json'), null);
+		if (!m || !m.level || J.campaignOfMeta(m) || !fs.existsSync(path.join(J.jobDir(id), 'original.eelvl'))) continue;
+		const key = m.level.md5 || `${m.level.name}|${m.level.width}|${m.level.height}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		other.push({ job: id, name: String(m.level.name || m.name || id), jobName: String(m.name || ''), width: m.level.width, height: m.level.height });
+	}
+	other.sort((a, b) => a.name.localeCompare(b.name) || a.jobName.localeCompare(b.jobName));
+	return { campaign, other, why: idx.why || null };
+}
+
 // ---------------------------------------------------------------- a job from a found route (Watch / Optimize)
 /** b: { eelvlB64, eetasB64 } (else the last search's level and route), name. Returns the job's meta (jobs.importJob). */
 function makeJob(b) {
@@ -4435,13 +4764,17 @@ function makeJob(b) {
 /** stops a running search (the server is shutting down) */
 function shutdown() {
 	if (CMP && CMP.running) compileStop();
+	// (its 'stop' line; the end of its stdin and --parent, as this process ends, too: it runs detached and ends by itself,
+	// its final written and its home removed; the next start offers its route: hybridRecover)
+	if (HY && HY.running) hybridStop();
 	if (S) { S.halted = true; saveNow(); }
 	for (const ch of kids) halt(ch, 'stopped');
 	if (alive(proofKid)) { try { proofKid.kill(); } catch (e) { /* gone */ } }
 }
 
-module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown, heatState,
+module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown, heatState, hint,
 	compileStart, compileState, compileStop, PLAN_STRATEGY, stratOf, planOn,
+	hybridStart, hybridState, hybridStop, hybridFile, hybridWorkers, hybridSweep, hybridRecover, hybridForget, HYBRID_RESTART_S, HYBRID_POLISH_S, levelList,
 	EXP_REPLAY_MS, EXP_TIP, IMPROVE_KEEP,
 	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, burstSizeArgs, breakShareOpen, breakDryAfter, rollsDryAfter, sourcesOf, classRoutes, coinsOfDesc, progOfDesc, progGt, progressCands, breakCmp, evictVictim, gateEnter, reachInfo, reachBase,
 	escRotOf, escFromOf, escTurnOf, rollsOf, rollsNext, rollsFresh, STRATEGIES, GX_DEFAULTS, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S,
