@@ -18,9 +18,15 @@ const HOME = process.env.EEAT_HOME ? path.resolve(process.env.EEAT_HOME) : SRC;
 const DATA = path.join(HOME, 'data');
 const JOBS = path.join(HOME, 'jobs');
 /** The environment for a child tool with a bigger heap. The flag goes through NODE_OPTIONS, not the command line:
- *  EEAutoTAS.exe (a Node single executable application) passes command-line flags to the app, not to Node. */
-function heapEnv(mb) {
-	return { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --max-old-space-size=${mb}`.trim() };
+ *  EEAutoTAS.exe (a Node single executable application) passes command-line flags to the app, not to Node (a flag before
+ *  the script, `node --max-old-space-size=N script.js`, made the exe start the app again: a browser tab, and the child
+ *  never ran). `base`: the environment to add it to (default process.env); a --max-old-space-size already in its
+ *  NODE_OPTIONS is replaced (the flag on the command line took precedence over NODE_OPTIONS: the same heap). */
+function heapEnv(mb, base) {
+	const env = { ...(base || process.env) };
+	const o = (env.NODE_OPTIONS || '').replace(/--max[-_]old[-_]space[-_]size[= ]\d+/g, ' ').replace(/\s+/g, ' ').trim();
+	env.NODE_OPTIONS = `${o} --max-old-space-size=${Math.round(mb)}`.trim();
+	return env;
 }
 /** The environment for a child that sizes its worker threads' heaps itself (src/goexplore.js: a V8 heap limit per worker
  *  from its memory budget): without --max-old-space-size, which V8 applies to every isolate of the process, the workers

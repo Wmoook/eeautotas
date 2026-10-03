@@ -74,11 +74,20 @@ const OS_PROC = process.env.EEAT_OS_PROC !== '0';
 // solver of 2-3 GB in the one shot's own process; one far leg out at a time; its answer replayed there and again in the
 // one shot (an injected node, chased). Off: the far legs in the one shot's process as before)
 const OS_BW_ST = process.env.EEAT_OS_BW_ST === '1' && process.env.EEAT_OS_BW === '1';
+/** the environment of a Node child of this compile (the one shot's process, the stretch child, the whole-level / chain
+ *  child) with its V8 old space at mb MB: the flag in NODE_OPTIONS (common.js heapEnv), the child's script its command
+ *  line's FIRST argument. EEAutoTAS.exe (a Node single executable application, tools/exe/launcher.js) reads its first
+ *  argument as the script to run, or else starts the app: `exe --max-old-space-size=N child.js` started the web app
+ *  again (the port taken: a browser tab on the main page, then it exited), so in the exe every Compile and Hybrid (best)
+ *  opened two tabs and ran without these children (v1.8.0) */
+function childEnv(mb, base) { return require('../common.js').heapEnv(mb, base); }
 /** osworker.js as a child process with a Worker's face (on / once 'message' 'error' 'exit', postMessage, unref, terminate) */
 function osProc(file, data, heapMB) {
 	const cp = require('child_process'), EventEmitter = require('events');
-	const env = Object.assign({}, process.env, { EEAT_OS_WORKERDATA: JSON.stringify(data) });
-	const child = cp.fork(file, [], { env, stdio: ['ignore', 'ignore', 'pipe', 'ipc'], execArgv: heapMB > 0 ? [`--max-old-space-size=${Math.round(heapMB + 512)}`] : [] });
+	const env0 = Object.assign({}, process.env, { EEAT_OS_WORKERDATA: JSON.stringify(data) });
+	// (its heap through NODE_OPTIONS, the script the first argument: childEnv)
+	const env = heapMB > 0 ? childEnv(heapMB + 512, env0) : env0;
+	const child = cp.fork(file, [], { env, stdio: ['ignore', 'ignore', 'pipe', 'ipc'], execArgv: [] });
 	const ee = new EventEmitter();
 	let err = '';
 	if (child.stderr) child.stderr.on('data', (d) => { err = (err + String(d)).slice(-2000); });
@@ -912,7 +921,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 			let found = null, done = null, buf = '';
 			// (the chain with the stretch solver on: only a GATED level, --gatedOnly=1; the stretch child takes a one-leg level's
 			// whole-level solve)
-			const ch = cp.spawn(process.execPath, [`--max-old-space-size=${BWC_HEAP_MB}`, path.join(__dirname, 'lab', BW_CHAIN ? 'bwchain_child.js' : 'bwlevel_child.js'), String(opts.file), `--ms=${secs * 1000}`, ...(wpFile ? [`--wps=${wpFile}`] : []), ...(BW_CUTS && !BW_CHAIN ? ['--cuts=1'] : []), ...(BW_CHAIN && ST_ON ? ['--gatedOnly=1'] : [])], { stdio: ['ignore', 'pipe', 'ignore'] });
+			const ch = cp.spawn(process.execPath, [path.join(__dirname, 'lab', BW_CHAIN ? 'bwchain_child.js' : 'bwlevel_child.js'), String(opts.file), `--ms=${secs * 1000}`, ...(wpFile ? [`--wps=${wpFile}`] : []), ...(BW_CUTS && !BW_CHAIN ? ['--cuts=1'] : []), ...(BW_CHAIN && ST_ON ? ['--gatedOnly=1'] : [])], { stdio: ['ignore', 'pipe', 'ignore'], env: childEnv(BWC_HEAP_MB) });
 			bwlChild = ch;
 			const onExit = () => { try { ch.kill('SIGKILL'); } catch (e) { /* gone */ } };
 			process.once('exit', onExit);
@@ -1005,7 +1014,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		if (slot.ch) return;
 		const cp = require('child_process');
 		let ch;
-		try { ch = cp.spawn(process.execPath, [`--max-old-space-size=${ST_HEAP_MB}`, path.join(__dirname, 'lab', 'stretch_child.js'), String(opts.file)], { stdio: ['pipe', 'pipe', 'ignore'] }); } catch (e) { say({ ev: 'warning', text: `the stretch solver: ${e.message}` }); return; }
+		try { ch = cp.spawn(process.execPath, [path.join(__dirname, 'lab', 'stretch_child.js'), String(opts.file)], { stdio: ['pipe', 'pipe', 'ignore'], env: childEnv(ST_HEAP_MB) }); } catch (e) { say({ ev: 'warning', text: `the stretch solver: ${e.message}` }); return; }
 		slot.ch = ch; stStats.children++;
 		// (below the compile's own priority: on a busy machine the executor's workers keep their CPU, the child takes what is
 		// idle; EEAT_ST_NICE=0: the same priority)
