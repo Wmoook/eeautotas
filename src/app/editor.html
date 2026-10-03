@@ -161,6 +161,8 @@ button.watch::before { display: none; }   /* (the page's Watch buttons carry the
 .actrow .row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 .actrow .row button { width: 100%; min-height: 34px; height: auto; padding: 6px 10px; white-space: normal; line-height: 1.2; }
 .actrow .row.one { grid-template-columns: 1fr; }
+.actrow .row.qrow { grid-template-columns: 1fr auto; align-items: stretch; }
+.actrow .row.qrow select { height: auto; }
 .acts #bHybrid, .acts #bSolve, .acts #bCompile { flex-direction: column; gap: 1px; }
 .acts button.big { width: 100%; min-height: 48px; height: auto; padding: 8px 12px; font-size: 15px; font-weight: 650; white-space: normal; line-height: 1.2; }
 .acts .bstat { font: 500 11px/14px var(--f-ui); opacity: .8; }
@@ -264,26 +266,25 @@ button.watch::before { display: none; }   /* (the page's Watch buttons carry the
 		</div>
 		<div class="col right">
 			<div class="card" id="routeCard">
-				<h2>Find a route <small class="chip" id="rcSub">GPU</small></h2>
+				<h2>Make a TAS <small class="chip" id="rcSub">GPU</small></h2>
 				<ul class="checks" id="checks"></ul>
-				<div class="setg">
-					<div><label class="f" for="sSec">Search for</label><select id="sSec"><option value="15">15 s</option><option value="30">30 s</option><option value="60" selected>1 min</option>
-						<option value="120">2 min</option><option value="300">5 min</option><option value="600">10 min</option><option value="1800">30 min</option>
-						<option value="3600">1 hour</option><option value="10800">3 hours</option></select></div>
-					<div title="How many states the search keeps per tick (more: more thorough, fewer ticks per second)"><label class="f" for="sWidth">States per tick</label><select id="sWidth">
-						<option value="4096">4 k</option><option value="8192">8 k</option><option value="16384">16 k</option><option value="32768" selected>32 k</option>
-						<option value="65536">64 k</option></select></div>
-					<div class="w2" title="Hybrid (best) has no time cap. Before its first route, when neither the compiler nor the search gets any further for this long (stuck), it starts again fresh (a new random search; the compiler goes on). It never stops by itself without a route."><label class="f" for="sHyStall">Hybrid restarts after (stuck)</label><select id="sHyStall">
-						<option value="600">10 min</option><option value="1200">20 min</option><option value="1800" selected>30 min</option><option value="3600">1 hour</option>
-						<option value="0">never</option></select></div>
-				</div>
 				<div class="acts">
 					<button class="go big" id="bHybrid" title="Hybrid (best): the compiler and Find a route side by side, each handing its furthest point to the other; the first verified route wins, then a few minutes of polish (the optimizer, the compiler's polish). No time cap: it runs until it has a route, or until you stop it; when it is stuck it starts again fresh (the setting above). Every route is replayed before it counts. Uses the GPU like Find a route (CPU only without one) Campaign: 175 of EEO's 203 campaign levels, measured on rented GPU boxes (no time cap).">Hybrid (best)<span class="bstat">175 / 203 campaign levels</span></button>
-					<div class="actrow"><span class="actk">Quick check</span><div class="row one"><button id="bSolve" title="Find a route: searches for a way to the trophy (GPU and CPU) for the time chosen above, then stops. Faster to a first answer than the hybrid, and its exploration view and Follow show the search on the map. Campaign: 131 of EEO's 203 campaign levels, measured on rented GPU boxes, 10 min each.">Find a route<span class="bstat">131 / 203 campaign levels in 10 min</span></button></div></div>
-					<details class="adv" id="advActs"><summary>Advanced</summary><div class="actrow"><div class="row one"><button id="bCompile" title="Compile the level into a TAS: no search, no GPU (the level's model, a plan of which trigger to take next, moves derived from the physics, the engine's own replay as the check), for at most the time chosen above (10 min at most). The result becomes a run, and its /loadtas line is copied for eeo-tas Campaign: 39 of EEO's 203 campaign levels, measured on rented GPU boxes, 5 min each.">Compile<span class="bstat">39 / 203 campaign levels in 5 min</span></button></div></div></details>
+					<div class="actrow"><span class="actk">Quick check</span><div class="row qrow"><button id="bSolve" title="Find a route: searches for a way to the trophy (GPU and CPU) for the time chosen above, then stops. Faster to a first answer than the hybrid, and its exploration view and Follow show the search on the map. Campaign: 131 of EEO's 203 campaign levels, measured on rented GPU boxes, 10 min each.">Find a route<span class="bstat">131 / 203 campaign levels in 10 min</span></button><select id="sSec" title="How long Find a route searches (Compile too: at most 10 min)" aria-label="Find a route searches for"><option value="15">15 s</option><option value="30">30 s</option><option value="60" selected>1 min</option>
+						<option value="120">2 min</option><option value="300">5 min</option><option value="600">10 min</option><option value="1800">30 min</option>
+						<option value="3600">1 hour</option><option value="10800">3 hours</option></select></div></div>
+					<details class="adv" id="advActs"><summary>Advanced</summary>
+						<div class="setg">
+							<div title="How many states the search keeps per tick (more: more thorough, fewer ticks per second)"><label class="f" for="sWidth">States per tick</label><select id="sWidth">
+						<option value="4096">4 k</option><option value="8192">8 k</option><option value="16384">16 k</option><option value="32768" selected>32 k</option>
+						<option value="65536">64 k</option></select></div>
+							<div class="w2" title="Hybrid (best) has no time cap. Before its first route, when neither the compiler nor the search gets any further for this long (stuck), it starts again fresh (a new random search; the compiler goes on). It never stops by itself without a route."><label class="f" for="sHyStall">Hybrid restarts after (stuck)</label><select id="sHyStall">
+						<option value="600">10 min</option><option value="1200">20 min</option><option value="1800" selected>30 min</option><option value="3600">1 hour</option>
+						<option value="0">never</option></select></div>
+						</div>
+						<div class="actrow"><div class="row one"><button id="bCompile" title="Compile the level into a TAS: no search, no GPU (the level's model, a plan of which trigger to take next, moves derived from the physics, the engine's own replay as the check), for at most the time chosen above (10 min at most). The result becomes a run, and its /loadtas line is copied for eeo-tas Campaign: 39 of EEO's 203 campaign levels, measured on rented GPU boxes, 5 min each.">Compile<span class="bstat">39 / 203 campaign levels in 5 min</span></button></div></div></details>
 					<button class="stop" id="bStop" data-ic="stop" hidden>Stop</button>
 				</div>
-				<div class="hint">Hybrid (best) runs the compiler and Find a route together until it has a route (no time limit), then polishes it: the best results. Find a route is the quick check: it stops after the time above. Compile (Advanced) builds the inputs from the level alone, without a search. The scores: EEO's 203 campaign levels on rented GPU boxes.</div>
 				<div id="compileSt"></div>
 				<div id="hybridSt"></div>
 				<div id="hyTape" class="tl tl-compact"></div>
@@ -2788,7 +2789,7 @@ async function loadGpu() {
 	p.className = `pill ${GPU && GPU.available ? 'ok' : 'no'}`;
 	p.textContent = GPU && GPU.available ? `GPU: ${GPU.model}` : GPU && (GPU.state === 'pending' || GPU.state === 'measuring') ? 'GPU: measuring…' : 'GPU: not available';
 	p.title = GPU && GPU.available ? GPU.text || '' : (GPU && GPU.why) || '';
-	$('rcSub').textContent = GPU && GPU.available ? `${GPU.model} + CPU` : 'CPU only (no NVIDIA GPU)';
+	$('rcSub').textContent = GPU && GPU.available ? `${GPU.model} + CPU` : GPU && (GPU.state === 'pending' || GPU.state === 'measuring') ? 'GPU: measuring…' : 'CPU only (no NVIDIA GPU)';
 	if (GPU && !GPU.available && (GPU.state === 'pending' || GPU.state === 'measuring')) setTimeout(loadGpu, 3000);
 	renderChecks();
 }
@@ -2809,7 +2810,7 @@ function blockers() {
 	return out;
 }
 function renderChecks() {
-	const li = (cls, sym, html) => `<li><span class="ic ${cls}">${sym}</span><span>${html}</span></li>`;
+	const li = (cls, sym, html) => ({ cls, html: `<li><span class="ic ${cls}">${sym}</span><span>${html}</span></li>`, text: html.replace(/<[^>]*>/g, '').replace(/&amp;/g, '&') });
 	const rows = [];
 	if (!CHECK) rows.push(li('opt', '…', 'checking the level…'));
 	else if (CHECK.error) rows.push(li('no', '!', esc(CHECK.error)));
@@ -2831,12 +2832,14 @@ function renderChecks() {
 		for (const x of (lc && lc.noops) || []) rows.push(li('warn', '!', esc(x.text)));
 	}
 	const n = guidePoints().length;
-	rows.push(n >= 2 ? li('ok', '✓', `Guide line: ${GUIDE.strokes.length} stroke${GUIDE.strokes.length === 1 ? '' : 's'} (a hint, not a rail) · <a href="#" id="gClear">clear</a>`)
-		: li('opt', '–', 'Guide line: none (optional; the <b>Guide</b> tool, G)'));
-	if (!GPU) rows.push(li('opt', '…', 'GPU…'));
-	else if (GPU.available) rows.push(li('ok', '✓', `GPU: ${esc(GPU.model)} (and random runs on the CPU)`));
-	else if (GPU.state === 'pending' || GPU.state === 'measuring') rows.push(li('opt', '…', `GPU: ${esc(GPU.why || 'preparing')} Until then the CPU searches alone.`));
-	else rows.push(li('warn', '!', `No NVIDIA GPU (${esc(GPU.why || 'none found')}): the CPU searches alone with random runs. It finds routes, but not always the fastest.`));
+	if (n >= 2) rows.push(li('guide', '✓', `Guide line: ${GUIDE.strokes.length} stroke${GUIDE.strokes.length === 1 ? '' : 's'} (a hint, not a rail) · <a href="#" id="gClear">clear</a>`));
+	// (the GPU: the card's chip says it, its title the details)
+	$('rcSub').title = !GPU ? '' : GPU.available ? `${GPU.model}, and random runs on the CPU` : GPU.state === 'pending' || GPU.state === 'measuring' ? `GPU: ${GPU.why || 'preparing'} Until then the CPU searches alone.`
+		: `No NVIDIA GPU (${GPU.why || 'none found'}): the CPU searches alone with random runs. It finds routes, but not always the fastest.`;
+	const bad = rows.filter((r) => r.cls === 'no'), good = rows.filter((r) => r.cls === 'ok');
+	const out = rows.filter((r) => r.cls === 'no' || r.cls === 'warn' || r.cls === 'opt' || r.cls === 'guide').map((r) => r.cls === 'guide' ? r.html.replace('ic guide', 'ic ok') : r.html);
+	if (!bad.length && good.length) out.unshift(`<li title="${esc(good.map((r) => r.text).join('\n'))}"><span class="ic ok">✓</span><span>Ready: start, trophy and a way to it</span></li>`);
+	rows.length = 0; rows.push(...out);
 	$('checks').innerHTML = rows.join('');
 	if ($('gClear')) $('gClear').onclick = (e) => { e.preventDefault(); clearGuide(); };
 	$('bGuideClear').hidden = !GUIDE.strokes.length;
