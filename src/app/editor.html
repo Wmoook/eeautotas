@@ -46,6 +46,9 @@ button.watch::before { display: none; }   /* (the page's Watch buttons carry the
 /* the Hybrid's Optimizer view (phases.js TL.render): compact under its panel (#hyTape), the full view in the sheet over the map */
 .tl:empty { display: none; }
 #hyTape { margin-top: 10px; }
+details.det { margin-top: 8px; }
+details.det > summary { cursor: pointer; font: 600 11.5px/16px var(--f-ui); color: var(--muted); }
+.hySum { margin-top: 6px; font: 12.5px/1.5 var(--f-ui); color: var(--ink-2); }
 
 /* palette */
 .pgroup + .pgroup { margin-top: 10px; }
@@ -2879,7 +2882,7 @@ function renderSolve() {
 	impUpdate(performance.now());
 	if (!st || st.stage === 'idle') { el.innerHTML = ''; mapPathCheck(); return; }
 	const stale = SOLVE.sig && SOLVE.sig !== currentSig();
-	let h = '';
+	let h = '', det = '';   // (det: the details, folded)
 	if (st.running) {
 		// (the search's clock: from the GPU engine's start; the first search after an update waits for it to be prepared)
 		const el2 = st.searchElapsed !== undefined ? st.searchElapsed : st.elapsed || 0, pct = clamp(el2 / st.seconds * 100, 0, 100);
@@ -2891,7 +2894,7 @@ function renderSolve() {
 		if (st.proof && st.proof.state === 'running') h += `<div class="sst">Proof: checking whether any route can exist…</div>`;
 		else if (st.proof && st.proof.verdict === 'impossible' && !st.result) h += `<div class="sst"><b>Proven: no route exists</b> on this level (${esc(st.file || 'this file')}). The search ends once it has searched ${st.proof.checkS || 10} s (a check).</div>`;
 		h += `<div class="prog"><i style="width:${pct.toFixed(1)}%"></i></div>`;
-		h += `<div class="sst">tick <b>${(st.tick || 0).toLocaleString('en-US')}</b> (${fmt(st.tick || 0)} of play) · ${((st.ticksPerSec || 0) / 1e6).toFixed((st.ticksPerSec || 0) < 1e7 ? 1 : 0)} M moves/s</div>`;
+		det += `<div class="sst">tick <b>${(st.tick || 0).toLocaleString('en-US')}</b> (${fmt(st.tick || 0)} of play) · ${((st.ticksPerSec || 0) / 1e6).toFixed((st.ticksPerSec || 0) < 1e7 ? 1 : 0)} M moves/s</div>`;
 		if (st.strategies && st.strategies.length) {
 			// (every move with a route known: another pass looks for a faster one, up to one tick less than the route)
 			const refining = (q) => q.key === 'explore' && q.depthCap > 0 && (q.state === 'running' || q.state === 'starting');
@@ -2906,9 +2909,9 @@ function renderSolve() {
 			// (the CPU search and the GPU random runs: threads or GPU, situations, how near; they go on after a route, looking
 			// for a faster one)
 			const more = (q) => (q.key === 'explore' || q.key === 'relay' || q.cpu || q.rolls ? ((q.state === 'running' || q.live) && q.detail ? ` · ${esc(q.detail)}` : '') : q.state === 'running' ? ` · ${(st.width || 0).toLocaleString('en-US')} states per tick` : '');
-			h += `<div class="sst">${st.strategies.map((q) => `${esc(q.label)}: <b>${what(q)}</b>${more(q)}`).join('<br>')}</div>`;
+			det += `<div class="sst">${st.strategies.map((q) => `${esc(q.label)}: <b>${what(q)}</b>${more(q)}`).join('<br>')}</div>`;
 		}
-		if (st.cpuOnly) h += `<div class="sst">${esc(st.cpuOnly)}</div>`;
+		if (st.cpuOnly) det += `<div class="sst">${esc(st.cpuOnly)}</div>`;
 	}
 	const r = st.result;
 	if (r) {
@@ -2929,14 +2932,16 @@ function renderSolve() {
 	}
 	const c = !r && st.closest;
 	if (c) {
-		h += `<div class="result near${stale ? ' stale' : ''}"><div class="rk">Closest attempt${st.running ? ' so far' : ''}</div>
+		det += `<div class="result near${stale ? ' stale' : ''}"><div class="rk">Closest attempt${st.running ? ' so far' : ''}</div>
 			<div class="rt">${c.tiles <= 0.05 ? 'at' : `${c.tiles.toFixed(1)} tiles from`} the trophy</div>
 			<div class="rm">${c.cut ? 'nearest by walking distance (the physics check rules out every attempt so far)' : c.viaDeath ? 'along a way that needs a death (a respawn at a checkpoint or another spawn point)' : 'along a way the ball can really go (jumps, dots, arrows; around walls and spikes)'} · tick ${c.ticks.toLocaleString('en-US')} (${fmt(c.ticks)} of play) · ${esc(c.strategy)}${c.deaths ? ` · ${c.deaths} death${c.deaths > 1 ? 's' : ''} on the way` : ''}</div>
 			<div class="row"><button class="small" id="cPlay" title="Play the attempt on this map">${VW.play ? 'Stop preview' : 'Preview here'}</button>
 				<button class="small" id="cGoto" title="Take the map to where this attempt ends: the search frontier (F)">&#9678; Go to</button>
 				<button class="small" id="cEetas" title="The attempt's inputs (it does not finish)">Download .eetas</button></div></div>`;
 	}
+	if (det) h += `<details class="det" id="solveDet"${store.get('eeat.editor.solveDet') === '1' ? ' open' : ''}><summary title="every search, the closest attempt">Details</summary>${det}</details>`;
 	el.innerHTML = h;
+	if ($('solveDet')) $('solveDet').ontoggle = () => store.set('eeat.editor.solveDet', $('solveDet').open ? '1' : '0');
 	if (c) {
 		$('cGoto').onclick = () => gotoFrontier();
 		$('cPlay').onclick = () => { followSet(false); VW.play = VW.play ? null : { t0: performance.now() }; if (!VW.play) toolInfo(); renderSolve(); VW.dirty = true; };
@@ -3092,7 +3097,7 @@ $('advActs').addEventListener('toggle', () => store.set('eeat.editor.adv', $('ad
 // (when, its run time, which part found it) and the best so far. Done (or stopped) with a route: its time, Download
 // .eetas, its eeo-tas line copied to the clipboard with a toast (as Compile), Watch and Optimize (a job from it: POST
 // /api/editor/job, as "Optimize this route" does for Find a route's).
-const HYB = { st: null, poll: 0, mine: 0, told: 0, jobs: {}, noClip: false, logOpen: false };
+const HYB = { st: null, poll: 0, mine: 0, told: 0, jobs: {}, noClip: false, logOpen: false, detOpen: store.get('eeat.editor.hyDet') === '1' };
 try { HYB.jobs = JSON.parse(store.get('eeat.editor.hyJobs') || '{}') || {}; } catch (e) { HYB.jobs = {}; }
 const HY_BY = { compiler: 'the compiler', search: 'Find a route', optimizer: 'the optimizer', prefix: 'a prefix search', joins: 'the joins' };
 const hyBy = (b) => HY_BY[b] || String(b || '?');
@@ -3150,7 +3155,7 @@ function renderHybrid() {
 		: s.stage === 'done' ? 'done' : s.stage;
 	let h = `<div class="hyBox"><div class="hyH"><span>${s.running ? '<span class="spin"></span>' : ''}<b>Hybrid (best)</b> · ${esc(what)}</span><span class="hyT" title="time since it started">${mmss(s.elapsed)}</span></div>`;
 	const w = s.workers || {};
-	h += `<div class="hint">${s.cpu ? 'CPU only' : 'GPU + CPU'} · threads: compiler ${w.compiler || '?'}, search ${w.search || '?'} · no time cap · ${s.restartS ? `restarts fresh after ${mmss(s.restartS)} stuck` : 'never restarts'} · ${mmss(s.polishS)} of polish after its first route</div>`;
+	let det = `<div class="hint">${s.cpu ? 'CPU only' : 'GPU + CPU'} · threads: compiler ${w.compiler || '?'}, search ${w.search || '?'} · no time cap · ${s.restartS ? `restarts fresh after ${mmss(s.restartS)} stuck` : 'never restarts'} · ${mmss(s.polishS)} of polish after its first route</div>`;
 	const rows = [];
 	const f = c.furthest;
 	rows.push(['Compiler', c.alive === undefined ? 'starting…' : `${(c.anchors || 0).toLocaleString('en-US')} anchors · gain ${c.maxGain || 0}` +
@@ -3168,15 +3173,20 @@ function renderHybrid() {
 		rows.push(['Restarts', `${rs.length ? `${rs.length} (the last at ${mmss(last.t)}: ${esc(last.why)})` : 'none yet'}` +
 			`${!L.first && L.sinceProgress !== undefined && L.sinceProgress !== null ? ` · last progress ${mmss(L.sinceProgress)} ago` : ''}`]);
 	}
-	h += `<div class="hyS">${rows.map(([k, v]) => `<span>${k}</span><span>${v}</span>`).join('')}</div>`;
+	det += `<div class="hyS">${rows.map(([k, v]) => `<span>${k}</span><span>${v}</span>`).join('')}</div>`;
 	// (every verified route as it came, the newest first; the best one in green)
 	if (routes.length) {
-		h += `<div class="hyWrap"><table class="hyRoutes"><tr><th>found at</th><th>run time</th><th>by</th></tr>` +
+		det += `<div class="hyWrap"><table class="hyRoutes"><tr><th>found at</th><th>run time</th><th>by</th></tr>` +
 			routes.slice().reverse().map((r) => `<tr class="${r.runTicks === bestRT ? 'best' : ''}"><td>${mmss(r.t)}</td><td class="rt">${esc(r.time)}</td><td title="${esc(r.how || '')}">${esc(hyBy(r.by))}</td></tr>`).join('') +
 			`</table></div>`;
 	}
 	if (L.best && s.running) h += `<div class="hyBest"><span>best so far</span><b>${esc(L.best.time)}</b><span>${esc(hyBy(L.best.by))}, verified by replay</span></div>`;
-	if (s.log && s.log.length) h += `<details id="hyLog"${HYB.logOpen ? ' open' : ''}><summary class="hint">its log</summary><div class="cmpOut">${s.log.map((l) => `<span class="dim">${esc(mmss(l.t))}</span> ${esc(l.text)}`).join('\n')}</div></details>`;
+	if (s.log && s.log.length) det += `<details id="hyLog"${HYB.logOpen ? ' open' : ''}><summary class="hint">its log</summary><div class="cmpOut">${s.log.map((l) => `<span class="dim">${esc(mmss(l.t))}</span> ${esc(l.text)}`).join('\n')}</div></details>`;
+	if (s.running && !L.best) {
+		const nr2 = q.nearest, ls = L.sinceProgress;
+		h += `<div class="hySum">Looking for a route${nr2 ? ` · nearest <b>${(+nr2.tiles).toFixed(1)}</b> tiles from the trophy` : ''}${ls !== undefined && ls !== null ? ` · last progress ${mmss(ls)} ago` : ''}${rs.length ? ` · ${rs.length} restart${rs.length > 1 ? 's' : ''}` : ''}</div>`;
+	}
+	h += `<details class="det" id="hyDet"${HYB.detOpen ? ' open' : ''}><summary title="both sides, every route, the log, the timeline">Details</summary>${det}</details>`;
 	h += '</div>';
 	const r = s.result;
 	if (r && !s.running) {
@@ -3206,6 +3216,8 @@ function renderHybrid() {
 	if (msgKeep && $('hyMsg')) $('hyMsg').innerHTML = msgKeep;
 	if ($('hyWatchBest')) $('hyWatchBest').onclick = () => hybridJob(false, true);
 	if ($('hyLog')) $('hyLog').ontoggle = () => { HYB.logOpen = $('hyLog').open; };
+	if ($('hyDet')) $('hyDet').ontoggle = () => { HYB.detOpen = $('hyDet').open; store.set('eeat.editor.hyDet', HYB.detOpen ? '1' : '0'); $('hyTape').hidden = !HYB.detOpen; };
+	$('hyTape').hidden = !HYB.detOpen;
 	if ($('bHyStop')) $('bHyStop').onclick = async () => { try { HYB.st = await postJson('/api/editor/hybrid/stop', {}); } catch (e) { /* ignore */ } pollHybrid(); };
 	// (the files of the run this panel shows: another run since gives a 409, never its files under this one's name)
 	if ($('hyEetas')) $('hyEetas').onclick = async () => {
