@@ -160,6 +160,12 @@ button.watch::before { display: none; }   /* (the page's Watch buttons carry the
 .actrow .actk { font: 600 11px/14px var(--f-ui); color: var(--muted); letter-spacing: .02em; }
 .actrow .row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 .actrow .row button { width: 100%; min-height: 34px; height: auto; padding: 6px 10px; white-space: normal; line-height: 1.2; }
+.actrow .row.one { grid-template-columns: 1fr; }
+.acts #bHybrid, .acts #bSolve, .acts #bCompile { flex-direction: column; gap: 1px; }
+.acts button.big { width: 100%; min-height: 48px; height: auto; padding: 8px 12px; font-size: 15px; font-weight: 650; white-space: normal; line-height: 1.2; }
+.acts .bstat { font: 500 11px/14px var(--f-ui); opacity: .8; }
+.acts details.adv > summary { cursor: pointer; font: 600 11px/14px var(--f-ui); color: var(--muted); letter-spacing: .02em; }
+.acts details.adv > .actrow { margin-top: 6px; }
 #bStop { width: 100%; }
 .prog { height: 6px; border-radius: 3px; background: var(--sunken); overflow: hidden; margin-top: 10px; }
 .prog i { display: block; height: 100%; background: var(--ahead); width: 0; transition: width .5s linear; border-radius: 3px; }
@@ -272,11 +278,12 @@ button.watch::before { display: none; }   /* (the page's Watch buttons carry the
 						<option value="0">never</option></select></div>
 				</div>
 				<div class="acts">
-					<div class="actrow"><span class="actk">Search</span><div class="row"><button id="bSolve">Find a route</button><button id="bAuto" title="Find a route, then optimize it at once as a run (the GPU goes to the optimizer when Find a route stops finding faster routes), for the time chosen above. Its run pauses any other running run (one at a time)">Find and optimize</button></div></div>
-					<div class="actrow"><span class="actk">Compile</span><div class="row"><button id="bCompile" title="Compile the level into a TAS: no search, no GPU (the level's model, a plan of which trigger to take next, moves derived from the physics, the engine's own replay as the check), for at most the time chosen above (10 min at most). The result becomes a run, and its /loadtas line is copied for eeo-tas">Compile</button><button class="go" id="bHybrid" title="Hybrid (best): the compiler and Find a route side by side, each handing its furthest point to the other; the first verified route wins, then a few minutes of polish (the optimizer, the compiler's polish). No time cap: it runs until it has a route, or until you stop it; when it is stuck it starts again fresh (the setting above). Every route is replayed before it counts. Uses the GPU like Find a route (CPU only without one)">Hybrid (best)</button></div></div>
+					<button class="go big" id="bHybrid" title="Hybrid (best): the compiler and Find a route side by side, each handing its furthest point to the other; the first verified route wins, then a few minutes of polish (the optimizer, the compiler's polish). No time cap: it runs until it has a route, or until you stop it; when it is stuck it starts again fresh (the setting above). Every route is replayed before it counts. Uses the GPU like Find a route (CPU only without one) Campaign: 175 of EEO's 203 campaign levels, measured on rented GPU boxes (no time cap).">Hybrid (best)<span class="bstat">175 / 203 campaign levels</span></button>
+					<div class="actrow"><span class="actk">Quick check</span><div class="row one"><button id="bSolve" title="Find a route: searches for a way to the trophy (GPU and CPU) for the time chosen above, then stops. Faster to a first answer than the hybrid, and its exploration view and Follow show the search on the map. Campaign: 131 of EEO's 203 campaign levels, measured on rented GPU boxes, 10 min each.">Find a route<span class="bstat">131 / 203 campaign levels in 10 min</span></button></div></div>
+					<details class="adv" id="advActs"><summary>Advanced</summary><div class="actrow"><div class="row one"><button id="bCompile" title="Compile the level into a TAS: no search, no GPU (the level's model, a plan of which trigger to take next, moves derived from the physics, the engine's own replay as the check), for at most the time chosen above (10 min at most). The result becomes a run, and its /loadtas line is copied for eeo-tas Campaign: 42 of EEO's 203 campaign levels, measured on rented GPU boxes, 5 min each.">Compile<span class="bstat">42 / 203 campaign levels in 5 min</span></button></div></div></details>
 					<button class="stop" id="bStop" data-ic="stop" hidden>Stop</button>
 				</div>
-				<div class="hint">Find a route searches for any way to the trophy (GPU and CPU). Compile builds the inputs from the level, without a search. Hybrid runs both until a route, then polishes it.</div>
+				<div class="hint">Hybrid (best) runs the compiler and Find a route together until it has a route (no time limit), then polishes it: the best results. Find a route is the quick check: it stops after the time above. Compile (Advanced) builds the inputs from the level alone, without a search. The scores: EEO's 203 campaign levels on rented GPU boxes.</div>
 				<div id="compileSt"></div>
 				<div id="hybridSt"></div>
 				<div id="hyTape" class="tl tl-compact"></div>
@@ -2836,7 +2843,6 @@ function renderChecks() {
 	const running = SOLVE.st && SOLVE.st.running;
 	const why = blockers();
 	$('bSolve').disabled = !!running || why.length > 0;
-	$('bAuto').disabled = !!running || why.length > 0 || !!(AUTO.st && AUTO.st.running);
 	$('solveWhy').textContent = !running && why.length ? why[0] : '';
 }
 async function solve() {
@@ -2984,23 +2990,8 @@ async function routeJob(optimize) {
 		msg(esc(e.message), true);
 	}
 }
-/** Find and optimize: the AutoTASer (POST /api/editor/autotas): Find a route, then at once the optimizer on its first
- *  route, fed with its newer routes, for the time chosen in "search for"; then the run pauses with its best */
-async function autotas() {
-	$('bAuto').disabled = true;
-	$('solveWhy').textContent = '';
-	try {
-		const bytes = await eelvlBytes();
-		SOLVE.sig = currentSig(); store.set('eeat.editor.solveSig', SOLVE.sig);
-		AUTO.st = await postJson('/api/editor/autotas', { eelvlB64: b64(bytes), minutes: Math.max(0.5, (+$('sSec').value || 60) / 60), name: LV.name, source: fileSource() });
-		VW.play = null;
-		pollSolve();
-		pollAuto();
-	} catch (e) {
-		$('autoSt').innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
-		renderChecks();
-	}
-}
+/** Find and optimize (the AutoTASer, /api/editor/autotas) has no button any more: Hybrid (best) runs the search and the
+ *  optimizer itself. An AutoTASer started before (another tab, an older page) still shows its state here and stops with Stop */
 async function pollAuto() {
 	clearTimeout(AUTO.poll);
 	try { AUTO.st = await api('/api/editor/autotas'); } catch (e) { /* keep the last */ }
@@ -3019,7 +3010,6 @@ async function pollAuto() {
 	renderChecks();
 	if (s && s.running) AUTO.poll = setTimeout(pollAuto, 2000);
 }
-$('bAuto').onclick = autotas;
 $('bSolve').onclick = solve;
 // ------------------------------------------------------------ Compile (POST / GET /api/editor/compile: src/compile.js)
 // The level -> a verified .eetas, like a compiler: no search, no GPU. Its stage lines (parse, model, bounds, plan, moves,
@@ -3089,6 +3079,8 @@ function renderCompile() {
 	if ($('cmpOpen')) $('cmpOpen').onclick = () => store.set('tasopt.sel', s.job);
 }
 $('bCompile').onclick = compileLevel;
+$('advActs').open = store.get('eeat.editor.adv') === '1';
+$('advActs').addEventListener('toggle', () => store.set('eeat.editor.adv', $('advActs').open ? '1' : '0'));
 // ------------------------------------------------------------ Hybrid (best) (POST / GET /api/editor/hybrid: tools/hybrid.js)
 // The compiler and Find a route side by side (each hands its furthest point to the other; the first verified route wins,
 // then a few minutes of polish), with NO time cap: before its first route, when neither side gets further for the time

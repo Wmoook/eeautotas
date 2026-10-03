@@ -3887,10 +3887,10 @@ async function levelCheckSection() {
 			pe ? pe.message : JSON.stringify({ g, ga, name: LV.name, msg: $('lvMsg').innerHTML.slice(0, 200), file: P && P.FILE, src0, src1 }));
 		const h = P ? P.checkHtml(ED.levelOf(F.damaged).check) : '';
 		check('the page\'s checkHtml: the warnings, the "Use EEO\'s copy" button (data-eeo = the entry), both md5s; the checks list and "not found" have the button too; the solve, ' +
-			'the AutoTASer and the checks send the source', /class="msg warn"/.test(h) && /<button class="small" data-eeo="41\/1\.eelvl" data-name="Mini Helix"[^>]*>Use EEO's copy<\/button>/.test(h) &&
+			'the hybrid and the checks send the source', /class="msg warn"/.test(h) && /<button class="small" data-eeo="41\/1\.eelvl" data-name="Mini Helix"[^>]*>Use EEO's copy<\/button>/.test(h) &&
 			h.includes(`this file: md5 ${md5(F.damaged)} · EEO's copy: md5 ${md5(F.copy)}`) && (PAGE.match(/data-eeo="\$\{esc\(k\.entry\)\}"/g) || []).length === 3 &&
 			/postJson\('\/api\/editor\/check', \{ level: levelJson\(\), source: fileSource\(\) \}\)/.test(PAGE) && /name: LV\.name, source: fileSource\(\) \};/.test(PAGE) &&
-			/postJson\('\/api\/editor\/autotas', \{[^\n]*source: fileSource\(\) \}\)/.test(PAGE) && /closest\('\[data-eeo\]'\)/.test(PAGE), h.slice(0, 300));
+			/postJson\('\/api\/editor\/hybrid', \{[^\n]*source: fileSource\(\)[^\n]*\}\)/.test(PAGE) && /closest\('\[data-eeo\]'\)/.test(PAGE), h.slice(0, 300));
 		await campaignSectionChecks(port, F);
 	} finally {
 		if (listening) await new Promise((res) => SV.server.close(res));
